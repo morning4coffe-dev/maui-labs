@@ -97,6 +97,14 @@ Source-generated AI tool discovery — annotate methods or property accessors wi
 |---------|-------------|
 | `Microsoft.Maui.AI.Attributes` | Source-generated AI tool contexts for `Microsoft.Extensions.AI` |
 
+#### AI Navigation
+
+Runtime Shell route discovery and template-aware navigation for AI agents. Clean URIs like `//main/products/product/seed-tomato/review` are automatically parsed into multi-step `GoToAsync` calls with extracted parameters.
+
+| Package | Description |
+|---------|-------------|
+| `Microsoft.Maui.AI.Navigation` | Runtime Shell route discovery and AI-friendly navigation |
+
 ### macOS AppKit Backend
 
 A native macOS AppKit backend for .NET MAUI — run MAUI apps as true AppKit apps with NSWindow, NSButton, NSScrollView, native menu bar, sidebar flyout, and more. An alternative to Mac Catalyst.

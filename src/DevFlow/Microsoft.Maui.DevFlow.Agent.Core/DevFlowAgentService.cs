@@ -30,6 +30,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     private readonly AgentOptions _options;
     private readonly AgentHttpServer _server;
     private readonly VisualTreeWalker _treeWalker;
+    private readonly MutationLeaseCoordinator _mutationLease;
+    private readonly MutationRecordingTracker _mutationRecording = new();
     private FileLogProvider? _logProvider;
     private BrokerRegistration? _brokerRegistration;
     private string? _sessionId;
@@ -133,19 +135,26 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     /// </summary>
     public Func<string, Task<string>>? CdpCommandHandler
     {
-        get => _cdpWebViews.Count > 0 ? _cdpWebViews[0].CommandHandler : null;
+        get
+        {
+            lock (_cdpWebViewsGate)
+                return _cdpWebViews.Count > 0 ? _cdpWebViews[0].CommandHandler : null;
+        }
         set
         {
-            if (value == null)
+            lock (_cdpWebViewsGate)
             {
+                if (value == null)
+                {
+                    if (_cdpWebViews.Count > 0)
+                        _cdpWebViews.RemoveAt(0);
+                    return;
+                }
                 if (_cdpWebViews.Count > 0)
-                    _cdpWebViews.RemoveAt(0);
-                return;
+                    _cdpWebViews[0].CommandHandler = value;
+                else
+                    _cdpWebViews.Add(new CdpWebViewInfo { Index = 0, CommandHandler = value, ReadyCheck = () => true });
             }
-            if (_cdpWebViews.Count > 0)
-                _cdpWebViews[0].CommandHandler = value;
-            else
-                _cdpWebViews.Add(new CdpWebViewInfo { Index = 0, CommandHandler = value, ReadyCheck = () => true });
         }
     }
 
@@ -153,98 +162,224 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     /// Deprecated: use RegisterCdpWebView() for multi-WebView support.</summary>
     public Func<bool>? CdpReadyCheck
     {
-        get => _cdpWebViews.Count > 0 ? _cdpWebViews[0].ReadyCheck : null;
+        get
+        {
+            lock (_cdpWebViewsGate)
+                return _cdpWebViews.Count > 0 ? _cdpWebViews[0].ReadyCheck : null;
+        }
         set
         {
-            if (_cdpWebViews.Count > 0 && value != null)
-                _cdpWebViews[0].ReadyCheck = value;
+            lock (_cdpWebViewsGate)
+            {
+                if (_cdpWebViews.Count > 0 && value != null)
+                    _cdpWebViews[0].ReadyCheck = value;
+            }
         }
     }
 
     private readonly List<CdpWebViewInfo> _cdpWebViews = new();
+    private readonly object _cdpWebViewsGate = new();
     private int _nextWebViewIndex = 0;
 
     /// <summary>Register a CDP-capable WebView with the agent.</summary>
     public int RegisterCdpWebView(Func<string, Task<string>> commandHandler, Func<bool> readyCheck,
         string? automationId = null, string? elementId = null, string? url = null)
     {
-        // Shell route changes can recreate the same logical BlazorWebView multiple times.
-        // Reuse the existing slot for the same AutomationId/ElementId so callers don't get
-        // stranded on a stale index 0 bridge after navigating away and back.
-        var existing = _cdpWebViews.LastOrDefault(w =>
-            (!string.IsNullOrWhiteSpace(elementId) &&
-             string.Equals(w.ElementId, elementId, StringComparison.OrdinalIgnoreCase)) ||
-            (!string.IsNullOrWhiteSpace(automationId) &&
-             string.Equals(w.AutomationId, automationId, StringComparison.OrdinalIgnoreCase)));
-
-        if (existing != null)
+        lock (_cdpWebViewsGate)
         {
-            existing.CommandHandler = commandHandler;
-            existing.ReadyCheck = readyCheck;
-            existing.AutomationId = automationId ?? existing.AutomationId;
-            existing.ElementId = elementId ?? existing.ElementId;
-            existing.Url = url ?? existing.Url;
-            return existing.Index;
+            // Shell route changes can recreate the same logical BlazorWebView multiple times.
+            // Reuse the existing slot for the same AutomationId/ElementId so callers don't get
+            // stranded on a stale index 0 bridge after navigating away and back.
+            var existing = _cdpWebViews.LastOrDefault(w =>
+                (!string.IsNullOrWhiteSpace(elementId) &&
+                 string.Equals(w.ElementId, elementId, StringComparison.OrdinalIgnoreCase)) ||
+                (!string.IsNullOrWhiteSpace(automationId) &&
+                 string.Equals(w.AutomationId, automationId, StringComparison.OrdinalIgnoreCase)));
+
+            if (existing != null)
+            {
+                existing.CommandHandler = commandHandler;
+                existing.ReadyCheck = readyCheck;
+                existing.AutomationId = automationId ?? existing.AutomationId;
+                existing.ElementId = elementId ?? existing.ElementId;
+                existing.Url = url ?? existing.Url;
+                return existing.Index;
+            }
+
+            var index = _nextWebViewIndex++;
+            _cdpWebViews.Add(new CdpWebViewInfo
+            {
+                Index = index,
+                AutomationId = automationId,
+                ElementId = elementId,
+                Url = url,
+                CommandHandler = commandHandler,
+                ReadyCheck = readyCheck,
+            });
+            return index;
         }
-
-        var index = _nextWebViewIndex++;
-        _cdpWebViews.Add(new CdpWebViewInfo
-        {
-            Index = index,
-            AutomationId = automationId,
-            ElementId = elementId,
-            Url = url,
-            CommandHandler = commandHandler,
-            ReadyCheck = readyCheck,
-        });
-        return index;
     }
 
     /// <summary>Unregister a CDP WebView by index.</summary>
     public void UnregisterCdpWebView(int index)
     {
-        _cdpWebViews.RemoveAll(w => w.Index == index);
+        lock (_cdpWebViewsGate)
+            _cdpWebViews.RemoveAll(w => w.Index == index);
     }
 
     /// <summary>Update metadata for a registered WebView.</summary>
     public void UpdateCdpWebView(int index, string? automationId = null, string? elementId = null, string? url = null)
     {
-        var wv = _cdpWebViews.FirstOrDefault(w => w.Index == index);
-        if (wv == null) return;
-        if (automationId != null) wv.AutomationId = automationId;
-        if (elementId != null) wv.ElementId = elementId;
-        if (url != null) wv.Url = url;
+        lock (_cdpWebViewsGate)
+        {
+            var wv = _cdpWebViews.FirstOrDefault(w => w.Index == index);
+            if (wv == null) return;
+            if (automationId != null) wv.AutomationId = automationId;
+            if (elementId != null) wv.ElementId = elementId;
+            if (url != null) wv.Url = url;
+        }
     }
 
-    private CdpWebViewInfo? ResolveCdpWebView(string? webviewId)
+    private CdpWebViewInfo? ResolveCdpWebView(
+        string? webviewId,
+        IReadOnlySet<string>? activeAutomationIds = null)
     {
-        if (_cdpWebViews.Count == 0) return null;
+        CdpWebViewInfo[] webViews;
+        lock (_cdpWebViewsGate)
+            webViews = _cdpWebViews.ToArray();
+
+        if (webViews.Length == 0) return null;
         if (string.IsNullOrEmpty(webviewId))
         {
+            if (activeAutomationIds is { Count: > 0 })
+            {
+                var activeReady = webViews.LastOrDefault(w =>
+                    w.IsReady &&
+                    !string.IsNullOrWhiteSpace(w.AutomationId) &&
+                    activeAutomationIds.Contains(w.AutomationId));
+                if (activeReady is not null)
+                    return activeReady;
+
+                var active = webViews.LastOrDefault(w =>
+                    !string.IsNullOrWhiteSpace(w.AutomationId) &&
+                    activeAutomationIds.Contains(w.AutomationId));
+                if (active is not null)
+                    return active;
+            }
+
             // Prefer the most recently registered ready bridge, falling back to the newest
             // bridge overall. This avoids defaulting to a stale, no-longer-visible WebView
             // after Shell recreates a page.
-            return _cdpWebViews.LastOrDefault(w => w.IsReady) ?? _cdpWebViews.Last();
+            return webViews.LastOrDefault(w => w.IsReady) ?? webViews[^1];
         }
 
         // Try index
         if (int.TryParse(webviewId, out var idx))
         {
-            var byIndex = _cdpWebViews.FirstOrDefault(w => w.Index == idx);
+            var byIndex = webViews.FirstOrDefault(w => w.Index == idx);
             if (byIndex != null) return byIndex;
         }
 
         // Try AutomationId
-        var byAutomationId = _cdpWebViews.LastOrDefault(w =>
+        var byAutomationId = webViews.LastOrDefault(w =>
             !string.IsNullOrEmpty(w.AutomationId) && w.AutomationId.Equals(webviewId, StringComparison.OrdinalIgnoreCase));
         if (byAutomationId != null) return byAutomationId;
 
         // Try ElementId
-        var byElementId = _cdpWebViews.LastOrDefault(w =>
+        var byElementId = webViews.LastOrDefault(w =>
             !string.IsNullOrEmpty(w.ElementId) && w.ElementId.Equals(webviewId, StringComparison.OrdinalIgnoreCase));
         if (byElementId != null) return byElementId;
 
         return null;
+    }
+
+    private CdpWebViewInfo[] GetCdpWebViewsSnapshot()
+    {
+        lock (_cdpWebViewsGate)
+            return _cdpWebViews.ToArray();
+    }
+
+    private async Task<HashSet<string>> GetActiveWebViewAutomationIdsAsync()
+    {
+        if (_app is null)
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        try
+        {
+            return await DispatchAsync(() =>
+            {
+                var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var window = _app.Windows.FirstOrDefault();
+
+                static Page? ActivePage(Page? page)
+                {
+                    while (page is not null)
+                    {
+                        page = page switch
+                        {
+                            Shell => Shell.Current?.CurrentPage,
+                            NavigationPage navigationPage => navigationPage.CurrentPage,
+                            TabbedPage tabbedPage => tabbedPage.CurrentPage,
+                            FlyoutPage flyoutPage => flyoutPage.Detail,
+                            _ => page
+                        };
+
+                        if (page is not Shell and
+                            not NavigationPage and
+                            not TabbedPage and
+                            not FlyoutPage)
+                        {
+                            return page;
+                        }
+                    }
+
+                    return null;
+                }
+
+                var root = window?.Navigation?.ModalStack.LastOrDefault()
+                    ?? ActivePage(window?.Page);
+                if (root is not IVisualTreeElement rootElement)
+                    return ids;
+
+                static bool IsBlazorWebView(IVisualTreeElement element)
+                {
+                    for (var type = element.GetType(); type is not null; type = type.BaseType)
+                    {
+                        if (string.Equals(
+                            type.FullName,
+                            "Microsoft.AspNetCore.Components.WebView.Maui.BlazorWebView",
+                            StringComparison.Ordinal))
+                        {
+                            return true;
+                        }
+                    }
+
+                    return false;
+                }
+
+                void Visit(IVisualTreeElement element)
+                {
+                    if (element is VisualElement visualElement &&
+                        IsBlazorWebView(element) &&
+                        !string.IsNullOrWhiteSpace(visualElement.AutomationId))
+                    {
+                        ids.Add(visualElement.AutomationId);
+                    }
+
+                    foreach (var child in element.GetVisualChildren())
+                        Visit(child);
+                }
+
+                Visit(rootElement);
+                return ids;
+            });
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine(
+                $"[Microsoft.Maui.DevFlow] Failed to resolve active WebView: {ex.Message}");
+            return new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        }
     }
 
     public bool IsRunning => _server.IsRunning;
@@ -254,8 +389,16 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     public DevFlowAgentService(AgentOptions? options = null)
     {
         _options = options ?? new AgentOptions();
+        _mutationLease = new MutationLeaseCoordinator(
+            () => _brokerRegistration,
+            _options.MutationLeaseTimeoutMs);
         _server = new AgentHttpServer(_options.Port);
+        _server.MutationLeaseValidator = ValidateMutationLeaseAsync;
+        _server.MutationObserver = ObserveMutationAsync;
         _treeWalker = CreateTreeWalker();
+        // Attach the process-wide XAML source-map registry (populated by the build-time generator's
+        // module initializers). No-op when nothing is registered — GetMap returns null.
+        _treeWalker.SourceMapProvider = SourceMapping.XamlSourceMapRegistry.Instance;
         NetworkStore = new NetworkRequestStore(_options.MaxNetworkBufferSize);
         Sensors = new SensorManager();
         _profilerCollector = CreateProfilerCollector();
@@ -459,6 +602,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         // Canonical DevFlow v1 routes aligned with the formal spec.
         _server.MapGet("/api/v1/agent/status", HandleStatus);
         _server.MapGet("/api/v1/agent/capabilities", HandleCapabilities);
+        _server.MapPost("/api/v1/agent/lease", HandleMutationLeaseControl, requiresMutationLease: false);
+        _server.MapPost("/api/v1/agent/recording", HandleMutationRecordingControl);
 
         _server.MapGet("/api/v1/ui/tree", HandleTree);
         _server.MapGet("/api/v1/ui/elements", HandleQuery);
@@ -486,7 +631,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         _server.MapGet("/api/v1/webview/contexts", HandleCdpWebViews);
         _server.MapGet("/api/v1/webview/source", HandleCdpSource);
         _server.MapGet("/api/v1/webview/dom", HandleWebViewDom);
-        _server.MapPost("/api/v1/webview/dom/query", HandleWebViewDomQuery);
+        _server.MapPost("/api/v1/webview/dom/query", HandleWebViewDomQuery, requiresMutationLease: false);
         _server.MapPost("/api/v1/webview/navigate", HandleWebViewNavigate);
         _server.MapPost("/api/v1/webview/input/click", HandleWebViewInputClick);
         _server.MapPost("/api/v1/webview/input/fill", HandleWebViewInputFill);
@@ -574,13 +719,13 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                         _server.MapGet(route.Path, route.Handler);
                         break;
                     case "POST":
-                        _server.MapPost(route.Path, route.Handler);
+                        _server.MapPost(route.Path, route.Handler, route.RequiresMutationLease);
                         break;
                     case "PUT":
-                        _server.MapPut(route.Path, route.Handler);
+                        _server.MapPut(route.Path, route.Handler, route.RequiresMutationLease);
                         break;
                     case "DELETE":
-                        _server.MapDelete(route.Path, route.Handler);
+                        _server.MapDelete(route.Path, route.Handler, route.RequiresMutationLease);
                         break;
                     default:
                         throw new InvalidOperationException($"Unsupported extension route method: {route.Method}");
@@ -600,6 +745,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var appBuild = TryGetAppInfoString(() => AppInfo.Current.BuildString) ?? "unknown";
         var result = await DispatchAsync(() =>
         {
+            var cdpWebViews = GetCdpWebViewsSnapshot();
             var window = GetWindow(windowIndex);
             var w = window?.Width ?? 0;
             var h = window?.Height ?? 0;
@@ -645,7 +791,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                 {
                     ui = true,
                     screenshots = true,
-                    webview = _cdpWebViews.Any(v => v.IsReady),
+                    webview = cdpWebViews.Any(v => v.IsReady),
                     network = true,
                     logs = true,
                     sensors = true,
@@ -653,10 +799,14 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     profiler = IsProfilerFeatureAvailable,
                     jobs = IsJobsSupported,
                     theme = true,
+                    mutationLease = _options.RequireMutationLease,
                 },
                 running = _app != null,
-                cdpReady = _cdpWebViews.Any(v => v.IsReady),
-                cdpWebViewCount = _cdpWebViews.Count,
+                // Current Shell route (null for non-Shell apps). Powers the inspector's
+                // "Return to start route" checkpoint restore. Read here on the UI thread.
+                route = Shell.Current?.CurrentState?.Location?.ToString(),
+                cdpReady = cdpWebViews.Any(v => v.IsReady),
+                cdpWebViewCount = cdpWebViews.Length,
                 profiler = BuildProfilerCapabilitiesPayload(),
                 profilerSession = _profilerSessions.CurrentSession,
                 extensions = BuildExtensionsMarker()
@@ -693,7 +843,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         capabilities["ui.actions"] = new { version = 1, features = new[] { "tap", "fill", "clear", "focus", "scroll", "navigate", "resize", "back", "key", "gesture", "batch", "properties" } };
         capabilities["ui.screenshot"] = new { version = 1, features = new[] { "element", "fullscreen", "selector" } };
 
-        if (_cdpWebViews.Count > 0)
+        if (GetCdpWebViewsSnapshot().Length > 0)
             capabilities["webview"] = new { version = 1, features = new[] { "evaluate", "contexts", "source", "dom", "dom-query", "network", "console", "screenshot" } };
 
         capabilities["profiler"] = new { version = 1, features = BuildProfilerFeatureList() };
@@ -716,6 +866,12 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var themeCapability = new { version = 1, supported = true, features = new[] { "get", "set" } };
         capabilities["theme"] = themeCapability;
         capabilities["app.theme"] = themeCapability;
+        capabilities["agent.mutationLease"] = new
+        {
+            version = 1,
+            enforced = _options.RequireMutationLease,
+            features = new[] { "claim", "status", "heartbeat", "release", "force-takeover", "broker-authority", "local-fallback" }
+        };
 
         var result = new Dictionary<string, object?>
         {
@@ -749,6 +905,206 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
         return Task.FromResult(HttpResponse.Json(result));
     }
+
+    private async Task<MutationLeaseStatus> ValidateMutationLeaseAsync(HttpRequest request)
+    {
+        if (!_options.RequireMutationLease)
+            return MutationLeaseStatus.Unrestricted();
+
+        request.Headers.TryGetValue("X-DevFlow-Lease", out var leaseId);
+        if (string.IsNullOrWhiteSpace(leaseId))
+            request.Headers.TryGetValue("X-DevFlow-Writer", out leaseId);
+        return await _mutationLease.ValidateAsync(leaseId).ConfigureAwait(false);
+    }
+
+    private async Task<HttpResponse> HandleMutationLeaseControl(HttpRequest request)
+    {
+        var body = request.BodyAs<MutationLeaseRequest>() ?? new MutationLeaseRequest();
+        if (string.IsNullOrWhiteSpace(body.LeaseId))
+        {
+            request.Headers.TryGetValue("X-DevFlow-Lease", out var leaseId);
+            if (string.IsNullOrWhiteSpace(leaseId))
+                request.Headers.TryGetValue("X-DevFlow-Writer", out leaseId);
+            body.LeaseId = leaseId;
+        }
+
+        body.Action = string.IsNullOrWhiteSpace(body.Action)
+            ? "status"
+            : body.Action.Trim().ToLowerInvariant();
+        var result = await _mutationLease.ControlAsync(body).ConfigureAwait(false);
+        return HttpResponse.Json(result);
+    }
+
+    private async Task<HttpResponse> HandleMutationRecordingControl(HttpRequest request)
+    {
+        var leaseId = request.MutationLease?.LeaseId;
+        if (string.IsNullOrWhiteSpace(leaseId))
+            return HttpResponse.Error("A mutation lease is required to control recording.", 409, "lease");
+
+        var body = request.BodyAs<MutationRecordingRequest>() ?? new MutationRecordingRequest();
+        body.Action = string.IsNullOrWhiteSpace(body.Action)
+            ? "status"
+            : body.Action.Trim().ToLowerInvariant();
+        body.LeaseId = leaseId;
+        var broker = _brokerRegistration;
+        if (broker?.IsConnected != true)
+            return HttpResponse.Error("Workflow recording requires the DevFlow broker.", 503, "broker");
+
+        var result = await broker.ControlMutationRecordingAsync(body).ConfigureAwait(false);
+        UpdateMutationRecordingState(result);
+        return result is null
+            ? HttpResponse.Error("The DevFlow broker did not respond.", 503, "broker")
+            : HttpResponse.Json(result);
+    }
+
+    private async Task ObserveMutationAsync(HttpRequest request, HttpResponse response)
+    {
+        var leaseId = request.MutationLease?.LeaseId;
+        var broker = _brokerRegistration;
+        if (string.IsNullOrWhiteSpace(leaseId) || broker?.IsConnected != true ||
+            !_mutationRecording.IsActive)
+            return;
+
+        var observation = await CreateMutationObservationAsync(request).ConfigureAwait(false);
+        if (observation is null)
+            return;
+
+        var result = await broker.ControlMutationRecordingAsync(new MutationRecordingRequest
+        {
+            Action = "observe",
+            LeaseId = leaseId,
+            Observation = observation
+        }).ConfigureAwait(false);
+        UpdateMutationRecordingState(result);
+    }
+
+    private void UpdateMutationRecordingState(MutationRecordingStatus? status)
+        => _mutationRecording.Update(status);
+
+    private async Task<MutationObservation?> CreateMutationObservationAsync(HttpRequest request)
+    {
+        string? action = null;
+        string? targetId = null;
+        string? value = null;
+        string? name = null;
+        double? dx = null;
+        double? dy = null;
+        int? itemIndex = null;
+        string? position = null;
+
+        JsonElement body = default;
+        if (!string.IsNullOrWhiteSpace(request.Body))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(request.Body);
+                body = document.RootElement.Clone();
+            }
+            catch { }
+        }
+
+        switch (request.Path)
+        {
+            case "/api/v1/ui/actions/tap":
+                action = "tap";
+                targetId = ReadJsonString(body, "elementId");
+                break;
+            case "/api/v1/ui/actions/fill":
+                action = "fill";
+                targetId = ReadJsonString(body, "elementId");
+                value = ReadJsonString(body, "text") ?? "";
+                break;
+            case "/api/v1/ui/actions/scroll":
+                action = "scroll";
+                targetId = ReadJsonString(body, "elementId");
+                dx = ReadJsonDouble(body, "deltaX");
+                dy = ReadJsonDouble(body, "deltaY");
+                itemIndex = ReadJsonInt(body, "itemIndex");
+                position = ReadJsonString(body, "scrollToPosition");
+                break;
+            case "/api/v1/ui/actions/navigate":
+                action = "navigate";
+                value = ReadJsonString(body, "route");
+                break;
+            case "/api/v1/ui/actions/back":
+                action = "back";
+                break;
+            case "/api/v1/device/app/theme":
+                action = "setTheme";
+                value = ReadJsonString(body, "theme");
+                break;
+            default:
+                if (request.Method.Equals("PUT", StringComparison.OrdinalIgnoreCase) &&
+                    request.Path.StartsWith("/api/v1/ui/elements/", StringComparison.OrdinalIgnoreCase) &&
+                    request.Path.Contains("/properties/", StringComparison.OrdinalIgnoreCase))
+                {
+                    action = "setProperty";
+                    request.RouteParams.TryGetValue("id", out targetId);
+                    request.RouteParams.TryGetValue("name", out name);
+                    value = ReadJsonString(body, "value") ?? "";
+                }
+                break;
+        }
+
+        if (action is null)
+            return null;
+
+        ElementInfo? target = null;
+        if (!string.IsNullOrWhiteSpace(targetId) && _app is not null)
+        {
+            target = await DispatchAsync(() =>
+            {
+                var tree = _treeWalker.WalkTree(_app, _options.MaxTreeDepth);
+                return VisualTreeWalker.FlattenElementInfos(tree)
+                    .FirstOrDefault(element => string.Equals(element.Id, targetId, StringComparison.Ordinal));
+            });
+        }
+
+        var avoidText = action == "fill" ||
+            (action == "setProperty" && string.Equals(name, "Text", StringComparison.OrdinalIgnoreCase));
+        var automationId = request.MutationTargetAutomationId ?? target?.AutomationId;
+        var route = await DispatchAsync(() => Shell.Current?.CurrentState?.Location?.ToString());
+        return new MutationObservation
+        {
+            Action = action,
+            AutomationId = automationId,
+            Text = !avoidText && string.IsNullOrWhiteSpace(automationId) ? target?.Text : null,
+            Type = null,
+            Id = string.IsNullOrWhiteSpace(automationId) && (avoidText || string.IsNullOrWhiteSpace(target?.Text))
+                ? targetId
+                : null,
+            Value = value,
+            Name = name,
+            Dx = dx,
+            Dy = dy,
+            ItemIndex = itemIndex,
+            Position = position,
+            Page = route
+        };
+    }
+
+    private static string? ReadJsonString(JsonElement body, string name)
+        => body.ValueKind == JsonValueKind.Object &&
+            body.TryGetProperty(name, out var value) &&
+            value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static double? ReadJsonDouble(JsonElement body, string name)
+        => body.ValueKind == JsonValueKind.Object &&
+            body.TryGetProperty(name, out var value) &&
+            value.ValueKind == JsonValueKind.Number &&
+            value.TryGetDouble(out var number)
+            ? number
+            : null;
+
+    private static int? ReadJsonInt(JsonElement body, string name)
+        => body.ValueKind == JsonValueKind.Object &&
+            body.TryGetProperty(name, out var value) &&
+            value.ValueKind == JsonValueKind.Number &&
+            value.TryGetInt32(out var number)
+            ? number
+            : null;
 
     private object BuildExtensionsMarker()
     {
@@ -857,7 +1213,22 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         {
             var el = _treeWalker.GetElementById(id, _app);
             if (el is IVisualTreeElement vte)
-                return (object?)_treeWalker.WalkElement(vte, null, 1, 2);
+            {
+                var info = _treeWalker.WalkElement(vte, null, 1, 2);
+
+                // The depth-limited detail subtree has no parent-path context to map source
+                // directly, so transfer source from a full source-mapped walk, matching by id.
+                // Skipped entirely when no maps are registered (the common case).
+                if (info != null && _treeWalker.HasActiveSourceMaps)
+                {
+                    var fullTree = _treeWalker.WalkTree(_app, 0, null);
+                    var sources = VisualTreeWalker.CollectSourceById(fullTree);
+                    if (sources.Count > 0)
+                        VisualTreeWalker.ApplySourceById(info, sources);
+                }
+
+                return (object?)info;
+            }
 
             // Synthetic elements: build detail from marker
             if (el != null)
@@ -1748,14 +2119,18 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
     private static object? ConvertPropertyValue(Type targetType, string value)
     {
+        // Property values arrive as invariant strings (e.g. "0.5" from the inspector's number
+        // inputs); parse them invariantly so a non-en culture doesn't read "0.5" as 5.
+        static double D(string s) => double.Parse(s, System.Globalization.CultureInfo.InvariantCulture);
+
         // Handle nullable types
         var underlying = Nullable.GetUnderlyingType(targetType) ?? targetType;
 
         if (underlying == typeof(string)) return value;
         if (underlying == typeof(bool)) return bool.Parse(value);
-        if (underlying == typeof(int)) return int.Parse(value);
-        if (underlying == typeof(double)) return double.Parse(value);
-        if (underlying == typeof(float)) return float.Parse(value);
+        if (underlying == typeof(int)) return int.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
+        if (underlying == typeof(double)) return D(value);
+        if (underlying == typeof(float)) return float.Parse(value, System.Globalization.CultureInfo.InvariantCulture);
 
         // MAUI Color - supports named colors and hex
         if (underlying == typeof(Microsoft.Maui.Graphics.Color))
@@ -1789,10 +2164,10 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             var parts = value.Split(',');
             return parts.Length switch
             {
-                1 => new Microsoft.Maui.Thickness(double.Parse(parts[0])),
-                2 => new Microsoft.Maui.Thickness(double.Parse(parts[0]), double.Parse(parts[1])),
-                4 => new Microsoft.Maui.Thickness(double.Parse(parts[0]), double.Parse(parts[1]),
-                    double.Parse(parts[2]), double.Parse(parts[3])),
+                1 => new Microsoft.Maui.Thickness(D(parts[0])),
+                2 => new Microsoft.Maui.Thickness(D(parts[0]), D(parts[1])),
+                4 => new Microsoft.Maui.Thickness(D(parts[0]), D(parts[1]),
+                    D(parts[2]), D(parts[3])),
                 _ => throw new ArgumentException($"Invalid Thickness format: {value}")
             };
         }
@@ -1835,6 +2210,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         {
             var el = _treeWalker.GetElementById(body.ElementId, _app);
             if (el == null) return "Element not found";
+            CaptureMutationTarget(request, el);
 
             switch (el)
             {
@@ -1963,6 +2339,16 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             body.ElementId);
 
         return result == "ok" ? HttpResponse.Ok("Tapped") : HttpResponse.Error(result);
+    }
+
+    internal static void CaptureMutationTarget(HttpRequest request, object target)
+    {
+        request.MutationTargetAutomationId = target switch
+        {
+            VisualElement element => element.AutomationId,
+            IView view => view.AutomationId,
+            _ => null
+        };
     }
 
     /// <summary>
@@ -5085,31 +5471,32 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             ?? request.QueryParams.GetValueOrDefault("contextId")
             ?? contextId;
 
-    private bool TryResolveReadyCdpWebView(
-        string? webviewId,
-        [NotNullWhen(true)] out CdpWebViewInfo? webView,
-        [NotNullWhen(false)] out HttpResponse? error)
+    private async Task<(CdpWebViewInfo? WebView, HttpResponse? Error)> ResolveReadyCdpWebViewAsync(
+        string? webviewId)
     {
-        if (_cdpWebViews.Count == 0)
+        var webViews = GetCdpWebViewsSnapshot();
+        if (webViews.Length == 0)
         {
-            webView = null;
-            error = HttpResponse.Error("CDP not available (no Blazor WebViews registered)");
-            return false;
+            return (null, HttpResponse.Error("CDP not available (no Blazor WebViews registered)"));
         }
 
-        webView = ResolveCdpWebView(webviewId);
+        var activeAutomationIds = string.IsNullOrWhiteSpace(webviewId) && webViews.Length > 1
+            ? await GetActiveWebViewAutomationIdsAsync()
+            : null;
+        var webView = ResolveCdpWebView(webviewId, activeAutomationIds);
         if (webView == null)
         {
-            error = HttpResponse.Error($"WebView '{webviewId}' not found. Use GET /api/v1/webview/contexts to list available WebViews.");
-            return false;
+            return (
+                null,
+                HttpResponse.Error(
+                    $"WebView '{webviewId}' not found. Use GET /api/v1/webview/contexts to list available WebViews."));
         }
 
         // Do not hard-block transient "not ready" states here. The underlying
         // WebView bridge can re-inject chobitsu on demand inside CommandHandler,
         // so rejecting the request at resolution time prevents the self-heal path
         // from ever running and leaves callers stuck in a 400 loop.
-        error = null;
-        return true;
+        return (webView, null);
     }
 
     private static string BuildCdpCommand(int id, string method, object? parameters = null)
@@ -5194,7 +5581,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     private async Task<HttpResponse> HandleCdp(HttpRequest request)
     {
         request.QueryParams.TryGetValue("webview", out var webviewId);
-        if (!TryResolveReadyCdpWebView(webviewId, out var webView, out var error))
+        var (webView, error) = await ResolveReadyCdpWebViewAsync(webviewId);
+        if (webView is null)
             return error!;
 
         if (string.IsNullOrEmpty(request.Body))
@@ -5228,7 +5616,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             return HttpResponse.Error("url is required");
 
         var webviewId = GetRequestedWebViewId(request, body.ContextId);
-        if (!TryResolveReadyCdpWebView(webviewId, out var webView, out var error))
+        var (webView, error) = await ResolveReadyCdpWebViewAsync(webviewId);
+        if (webView is null)
             return error!;
 
         try
@@ -5268,7 +5657,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             return HttpResponse.Error("selector is required");
 
         var webviewId = GetRequestedWebViewId(request, body.ContextId);
-        if (!TryResolveReadyCdpWebView(webviewId, out var webView, out var error))
+        var (webView, error) = await ResolveReadyCdpWebViewAsync(webviewId);
+        if (webView is null)
             return error!;
 
         try
@@ -5317,7 +5707,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             return HttpResponse.Error("text is required");
 
         var webviewId = GetRequestedWebViewId(request, body.ContextId);
-        if (!TryResolveReadyCdpWebView(webviewId, out var webView, out var error))
+        var (webView, error) = await ResolveReadyCdpWebViewAsync(webviewId);
+        if (webView is null)
             return error!;
 
         try
@@ -5384,7 +5775,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             return HttpResponse.Error("text is required");
 
         var webviewId = GetRequestedWebViewId(request, body.ContextId);
-        if (!TryResolveReadyCdpWebView(webviewId, out var webView, out var error))
+        var (webView, error) = await ResolveReadyCdpWebViewAsync(webviewId);
+        if (webView is null)
             return error!;
 
         try
@@ -5426,7 +5818,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             return HttpResponse.Error("selector is required");
 
         var webviewId = GetRequestedWebViewId(request, body.ContextId);
-        if (!TryResolveReadyCdpWebView(webviewId, out var webView, out var error))
+        var (webView, error) = await ResolveReadyCdpWebViewAsync(webviewId);
+        if (webView is null)
             return error!;
 
         try
@@ -5474,7 +5867,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     private async Task<HttpResponse> HandleWebViewScreenshot(HttpRequest request)
     {
         var webviewId = GetRequestedWebViewId(request);
-        if (!TryResolveReadyCdpWebView(webviewId, out var webView, out var error))
+        var (webView, error) = await ResolveReadyCdpWebViewAsync(webviewId);
+        if (webView is null)
             return error!;
 
         try
@@ -5551,9 +5945,10 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         }
     }
 
-    private Task<HttpResponse> HandleCdpWebViews(HttpRequest request)
+    private async Task<HttpResponse> HandleCdpWebViews(HttpRequest request)
     {
-        var webviews = _cdpWebViews.Select(w => new
+        var activeAutomationIds = await GetActiveWebViewAutomationIdsAsync();
+        var webviews = GetCdpWebViewsSnapshot().Select(w => new
         {
             id = !string.IsNullOrWhiteSpace(w.AutomationId)
                 ? w.AutomationId
@@ -5567,15 +5962,18 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             title = (string?)null,
             ready = w.IsReady,
             isReady = w.IsReady,
+            active = !string.IsNullOrWhiteSpace(w.AutomationId) &&
+                activeAutomationIds.Contains(w.AutomationId),
         }).ToList();
 
-        return Task.FromResult(HttpResponse.Json(new { webviews }));
+        return HttpResponse.Json(new { webviews });
     }
 
     private async Task<HttpResponse> HandleCdpSource(HttpRequest request)
     {
         var webviewId = GetRequestedWebViewId(request);
-        if (!TryResolveReadyCdpWebView(webviewId, out var webView, out var error))
+        var (webView, error) = await ResolveReadyCdpWebViewAsync(webviewId);
+        if (webView is null)
             return error!;
 
         try

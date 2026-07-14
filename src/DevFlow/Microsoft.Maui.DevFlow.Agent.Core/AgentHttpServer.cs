@@ -18,14 +18,16 @@ public class AgentHttpServer : IDisposable
     private Task? _listenTask;
     private bool _disposed;
     private readonly int _port;
-    private readonly Dictionary<string, Func<HttpRequest, Task<HttpResponse>>> _getRoutes = new();
-    private readonly Dictionary<string, Func<HttpRequest, Task<HttpResponse>>> _postRoutes = new();
-    private readonly Dictionary<string, Func<HttpRequest, Task<HttpResponse>>> _putRoutes = new();
-    private readonly Dictionary<string, Func<HttpRequest, Task<HttpResponse>>> _deleteRoutes = new();
+    private readonly Dictionary<string, RouteHandler> _getRoutes = new();
+    private readonly Dictionary<string, RouteHandler> _postRoutes = new();
+    private readonly Dictionary<string, RouteHandler> _putRoutes = new();
+    private readonly Dictionary<string, RouteHandler> _deleteRoutes = new();
     private readonly Dictionary<string, Func<TcpClient, NetworkStream, HttpRequest, CancellationToken, Task>> _wsRoutes = new();
 
     public int Port => _port;
     public bool IsRunning => _listenTask != null && !_listenTask.IsCompleted;
+    internal Func<HttpRequest, Task<MutationLeaseStatus>>? MutationLeaseValidator { get; set; }
+    internal Func<HttpRequest, HttpResponse, Task>? MutationObserver { get; set; }
 
     public AgentHttpServer(int port = 9223)
     {
@@ -33,16 +35,16 @@ public class AgentHttpServer : IDisposable
     }
 
     public void MapGet(string path, Func<HttpRequest, Task<HttpResponse>> handler)
-        => _getRoutes[path.TrimEnd('/')] = handler;
+        => _getRoutes[path.TrimEnd('/')] = new RouteHandler(handler, RequiresMutationLease: false);
 
-    public void MapPost(string path, Func<HttpRequest, Task<HttpResponse>> handler)
-        => _postRoutes[path.TrimEnd('/')] = handler;
+    public void MapPost(string path, Func<HttpRequest, Task<HttpResponse>> handler, bool requiresMutationLease = true)
+        => _postRoutes[path.TrimEnd('/')] = new RouteHandler(handler, requiresMutationLease);
 
-    public void MapPut(string path, Func<HttpRequest, Task<HttpResponse>> handler)
-        => _putRoutes[path.TrimEnd('/')] = handler;
+    public void MapPut(string path, Func<HttpRequest, Task<HttpResponse>> handler, bool requiresMutationLease = true)
+        => _putRoutes[path.TrimEnd('/')] = new RouteHandler(handler, requiresMutationLease);
 
-    public void MapDelete(string path, Func<HttpRequest, Task<HttpResponse>> handler)
-        => _deleteRoutes[path.TrimEnd('/')] = handler;
+    public void MapDelete(string path, Func<HttpRequest, Task<HttpResponse>> handler, bool requiresMutationLease = true)
+        => _deleteRoutes[path.TrimEnd('/')] = new RouteHandler(handler, requiresMutationLease);
 
     public void MapWebSocket(string path, Func<TcpClient, NetworkStream, HttpRequest, CancellationToken, Task> handler)
         => _wsRoutes[path.TrimEnd('/')] = handler;
@@ -192,32 +194,43 @@ public class AgentHttpServer : IDisposable
                 headers[lines[i][..colonIdx].Trim()] = lines[i][(colonIdx + 1)..].Trim();
         }
 
-        // Find body (after blank line)
+        // Find body (after blank line).
+        //
+        // IMPORTANT: HTTP Content-Length counts BYTES, but the decoded `raw` string counts CHARS.
+        // For any body containing multi-byte UTF-8 (e.g. "✓", emoji, accented text) char-count is
+        // LESS than byte-count, so measuring the body in chars under-counts what we already have and
+        // makes us block on ReadAsync waiting for "missing" bytes that never arrive (the client has
+        // already sent everything and is awaiting our response) — a multi-second hang until timeout.
+        // So we must locate and measure the body in BYTES, and decode it exactly once at the end.
         string? body = null;
-        var blankLineIdx = raw.IndexOf("\r\n\r\n");
+        var blankLineIdx = raw.IndexOf("\r\n\r\n", StringComparison.Ordinal);
         if (blankLineIdx >= 0)
         {
-            body = raw[(blankLineIdx + 4)..];
+            // The request line and headers are ASCII, so the char index of the "\r\n\r\n" separator
+            // equals its byte offset — giving us the byte position where the body starts.
+            var bodyStart = blankLineIdx + 4;
+            var bodyBytesInBuffer = totalRead - bodyStart;
 
-            // Check Content-Length for more body data
-            var contentLengthLine = lines.FirstOrDefault(l => l.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase));
-            if (contentLengthLine != null)
+            // Default to exactly what's already buffered; extend to the declared length if larger.
+            var contentLength = bodyBytesInBuffer;
+            if (headers.TryGetValue("Content-Length", out var clValue) &&
+                int.TryParse(clValue, out var declared) && declared > contentLength)
             {
-                var clValue = contentLengthLine.Split(':', 2)[1].Trim();
-                if (int.TryParse(clValue, out var contentLength) && body.Length < contentLength)
-                {
-                    var remaining = contentLength - body.Length;
-                    var bodyBuffer = new byte[remaining];
-                    var bodyRead = 0;
-                    while (bodyRead < remaining)
-                    {
-                        var r = await stream.ReadAsync(bodyBuffer.AsMemory(bodyRead, remaining - bodyRead), ct).ConfigureAwait(false);
-                        if (r == 0) break;
-                        bodyRead += r;
-                    }
-                    body += Encoding.UTF8.GetString(bodyBuffer, 0, bodyRead);
-                }
+                contentLength = declared;
             }
+
+            // Assemble the whole body as bytes (already-read prefix + any remainder), then decode once.
+            var bodyBytes = new byte[contentLength];
+            var have = Math.Min(bodyBytesInBuffer, contentLength);
+            Array.Copy(buffer, bodyStart, bodyBytes, 0, have);
+            var bodyRead = have;
+            while (bodyRead < contentLength)
+            {
+                var r = await stream.ReadAsync(bodyBytes.AsMemory(bodyRead, contentLength - bodyRead), ct).ConfigureAwait(false);
+                if (r == 0) break;
+                bodyRead += r;
+            }
+            body = Encoding.UTF8.GetString(bodyBytes, 0, bodyRead);
         }
 
         return new HttpRequest
@@ -239,7 +252,7 @@ public class AgentHttpServer : IDisposable
 
         // Try exact match first
         if (routes.TryGetValue(request.Path, out var handler))
-            return await handler(request).ConfigureAwait(false);
+            return await InvokeRouteAsync(handler, request).ConfigureAwait(false);
 
         // Try pattern match (e.g., /api/element/{id})
         foreach (var kvp in routes)
@@ -264,12 +277,45 @@ public class AgentHttpServer : IDisposable
                 }
             }
             if (match)
-                return await kvp.Value(request).ConfigureAwait(false);
+                return await InvokeRouteAsync(kvp.Value, request).ConfigureAwait(false);
 
             request.RouteParams.Clear();
         }
 
         return HttpResponse.NotFound("Route not found");
+    }
+
+    private async Task<HttpResponse> InvokeRouteAsync(RouteHandler route, HttpRequest request)
+    {
+        if (route.RequiresMutationLease && MutationLeaseValidator is not null)
+        {
+            var status = await MutationLeaseValidator(request).ConfigureAwait(false);
+            request.MutationLease = status;
+            if (!status.Allowed)
+            {
+                return HttpResponse.Error(
+                    "Another DevFlow session is driving this app. Take control before mutating it.",
+                    statusCode: 409,
+                    reason: "lease",
+                    details: new
+                    {
+                        status.HolderKind,
+                        status.Label,
+                        status.ExpiresInMs,
+                        status.Authority
+                    });
+            }
+        }
+
+        var response = await route.Handler(request).ConfigureAwait(false);
+        if (route.RequiresMutationLease &&
+            response.StatusCode is >= 200 and < 300 &&
+            MutationObserver is not null)
+        {
+            try { await MutationObserver(request, response).ConfigureAwait(false); }
+            catch { }
+        }
+        return response;
     }
 
     private static async Task WriteResponseAsync(NetworkStream stream, HttpResponse response, CancellationToken ct)
@@ -297,6 +343,10 @@ public class AgentHttpServer : IDisposable
         _listener?.Stop();
         _cts?.Dispose();
     }
+
+    private sealed record RouteHandler(
+        Func<HttpRequest, Task<HttpResponse>> Handler,
+        bool RequiresMutationLease);
 
     // ── WebSocket helpers (RFC 6455) ──
 
@@ -442,6 +492,8 @@ public class HttpRequest
     public Dictionary<string, string> RouteParams { get; set; } = new();
     public Dictionary<string, string> Headers { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public string? Body { get; set; }
+    internal MutationLeaseStatus? MutationLease { get; set; }
+    internal string? MutationTargetAutomationId { get; set; }
 
     private static readonly JsonSerializerOptions _readOptions = new() { PropertyNameCaseInsensitive = true };
 
@@ -496,6 +548,7 @@ public class HttpResponse
                 404 => "Not Found",
                 408 => "Request Timeout",
                 409 => "Conflict",
+                503 => "Service Unavailable",
                 501 => "Not Implemented",
                 500 => "Internal Server Error",
                 _ => "Bad Request"

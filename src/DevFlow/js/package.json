@@ -1,0 +1,18 @@
+{
+  "name": "@maui-devflow/js",
+  "version": "0.1.0-preview.12",
+  "private": true,
+  "description": "JavaScript/TypeScript packages for the MAUI DevFlow multi-host inspector (shared client today; UI bundle + Copilot Canvas + VS Code host shells to follow). See docs/DevFlow and the multi-host inspector plan.",
+  "workspaces": [
+    "devflow-client",
+    "vscode-inspector"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "package:vsix": "npm run package:vsix -w maui-devflow-inspector"
+  }
+}

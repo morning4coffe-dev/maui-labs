@@ -11,6 +11,8 @@
     <ToolCommandName>maui</ToolCommandName>
     <PackageId>Microsoft.Maui.Cli</PackageId>
     <Description>CLI for .NET MAUI development environment setup and device management</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackRepoRootReadme>false</PackRepoRootReadme>
     <IsPackable>true</IsPackable>
     <IsShipping>true</IsShipping>
     <IsAotCompatible>true</IsAotCompatible>
@@ -60,6 +62,7 @@
   </Target>
 
   <ItemGroup>
+    <None Include="..\README.md" Pack="true" PackagePath="/" Link="README.md" />
     <ProjectReference Include="..\Microsoft.Maui.ProfilingHelper\Microsoft.Maui.ProfilingHelper.csproj" />
     <ProjectReference Include="..\..\DevFlow\Microsoft.Maui.DevFlow.Driver\Microsoft.Maui.DevFlow.Driver.csproj" />
     <ProjectReference Include="..\..\Go\Server\Microsoft.Maui.Go.Server.csproj" Condition="'$(TargetFramework)' == 'net10.0'" />

@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Reflection;
 using System.Security.Cryptography;
@@ -25,10 +27,23 @@ public class BrokerRegistration : IDisposable
     private readonly string _platform;
     private readonly string _appName;
     private readonly string? _sessionId;
+    private readonly string _agentId;
     private int _brokerPort;
     private int? _assignedPort;
     private ILogger? _logger;
     private static ILogger? _staticLogger;
+    private static readonly HttpClient _brokerHttp = new(new SocketsHttpHandler
+    {
+        ConnectCallback = ConnectBrokerLoopbackAsync
+    })
+    {
+        Timeout = TimeSpan.FromSeconds(2)
+    };
+    private static readonly JsonSerializerOptions _leaseJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+    };
 
     /// <summary>
     /// The port assigned by the broker, or null if not registered.
@@ -45,6 +60,8 @@ public class BrokerRegistration : IDisposable
     /// Whether the agent is currently connected to the broker.
     /// </summary>
     public bool IsConnected => _ws?.State == WebSocketState.Open;
+    internal string AgentId => _agentId;
+    internal int BrokerPort => _brokerPort;
 
     /// <summary>
     /// Sets the static logger to be used by all BrokerRegistration instances that don't have an instance logger.
@@ -68,6 +85,7 @@ public class BrokerRegistration : IDisposable
         _sessionId = sessionId;
         _brokerPort = brokerPort;
         _logger = logger;
+        _agentId = ComputeId(project, tfm);
     }
 
     /// <summary>
@@ -212,6 +230,86 @@ public class BrokerRegistration : IDisposable
         var input = $"{project}|{tfm}";
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(input));
         return Convert.ToHexString(hash)[..12].ToLowerInvariant();
+    }
+
+    internal async Task<MutationLeaseStatus?> ControlMutationLeaseAsync(MutationLeaseRequest request)
+    {
+        if (!IsConnected)
+            return null;
+
+        try
+        {
+            var json = JsonSerializer.Serialize(request, _leaseJsonOptions);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using var response = await _brokerHttp.PostAsync(
+                $"http://localhost:{_brokerPort}/api/leases/{Uri.EscapeDataString(_agentId)}",
+                content).ConfigureAwait(false);
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+                return null;
+            var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(body))
+                return null;
+
+            var result = JsonSerializer.Deserialize<MutationLeaseStatus>(body, _leaseJsonOptions);
+            if (result is not null && !response.IsSuccessStatusCode)
+                result.Ok = false;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            (_logger ?? _staticLogger)?.LogDebug(
+                "DevFlow broker lease request failed: {Message}", ex.Message);
+            return null;
+        }
+    }
+
+    internal async Task<MutationRecordingStatus?> ControlMutationRecordingAsync(MutationRecordingRequest request)
+    {
+        if (!IsConnected)
+            return null;
+
+        try
+        {
+            var json = JsonSerializer.Serialize(request, _leaseJsonOptions);
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using var response = await _brokerHttp.PostAsync(
+                $"http://localhost:{_brokerPort}/api/recordings/{Uri.EscapeDataString(_agentId)}",
+                content).ConfigureAwait(false);
+            var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
+            if (string.IsNullOrWhiteSpace(body))
+                return null;
+            var result = JsonSerializer.Deserialize<MutationRecordingStatus>(body, _leaseJsonOptions);
+            if (result is not null && !response.IsSuccessStatusCode)
+                result.Ok = false;
+            return result;
+        }
+        catch (Exception ex)
+        {
+            (_logger ?? _staticLogger)?.LogDebug(
+                "DevFlow broker recording request failed: {Message}", ex.Message);
+            return null;
+        }
+    }
+
+    private static async ValueTask<Stream> ConnectBrokerLoopbackAsync(
+        SocketsHttpConnectionContext context,
+        CancellationToken cancellationToken)
+    {
+        var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
+        {
+            NoDelay = true
+        };
+        try
+        {
+            await socket.ConnectAsync(IPAddress.Loopback, context.DnsEndPoint.Port, cancellationToken)
+                .ConfigureAwait(false);
+            return new NetworkStream(socket, ownsSocket: true);
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
     }
 
     public void Dispose()

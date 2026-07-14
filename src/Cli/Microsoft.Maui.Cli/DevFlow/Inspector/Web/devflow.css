@@ -1,27 +1,324 @@
-* {
-  margin: 0;
-  padding: 0;
-  box-sizing: border-box;
+/* ============================================================================
+   DevFlow Inspector — shared stylesheet (browser + VS Code webview + Copilot Canvas)
+   Theming: a single set of semantic CSS custom properties resolved with light-dark(),
+   so the inspector adapts to the host's color scheme automatically (prefers-color-scheme)
+   and can be pinned by the host via <html data-theme="light|dark"> or a palette override
+   sent over the bridge (devflow:theme). A plain dark value precedes each light-dark() as a
+   graceful fallback for any engine without light-dark() support.
+   ============================================================================ */
+
+:root {
+  color-scheme: light dark;
+
+  /* Surfaces + text */
+  --df-bg: #1e1e1e;            --df-bg: light-dark(#ffffff, #1e1e1e);
+  --df-surface: #252526;       --df-surface: light-dark(#f3f3f3, #252526);
+  --df-surface-2: #2d2d2d;     --df-surface-2: light-dark(#eaeaea, #2d2d2d);
+  --df-fg: #d4d4d4;            --df-fg: light-dark(#1f1f1f, #d4d4d4);
+  --df-muted: #9a9a9a;         --df-muted: light-dark(#6a6a6a, #9a9a9a);
+  --df-border: #3c3c3c;        --df-border: light-dark(#cccccc, #3c3c3c);
+  --df-border-subtle: #333;    --df-border-subtle: light-dark(#e5e5e5, #333333);
+
+  /* Interaction */
+  --df-hover: #3a3d41;         --df-hover: light-dark(#e2e2e2, #3a3d41);
+  --df-hover-row: #2a2d2e;     --df-hover-row: light-dark(#eaeaea, #2a2d2e);
+  --df-accent: #094771;        --df-accent: light-dark(#005fb8, #0e639c);
+  --df-accent-fg: #ffffff;
+  --df-selected: #094771;      --df-selected: light-dark(#005fb8, #094771);
+  --df-selected-fg: #ffffff;
+  --df-danger: #a1260d;        --df-danger: light-dark(#c42b1c, #a1260d);
+  --df-focus: #6cb6ff;         --df-focus: light-dark(#005fb8, #6cb6ff);
+
+  /* Semantic accents (tree/props/logs) */
+  --df-type: #4ec9b0;          --df-type: light-dark(#267f99, #4ec9b0);
+  --df-name: #9cdcfe;          --df-name: light-dark(#0451a5, #9cdcfe);
+  --df-source: #e2c08d;        --df-source: light-dark(#9a6700, #e2c08d);
+  --df-success: #89d185;       --df-success: light-dark(#1a7f37, #89d185);
+  --df-warn: #d7ba7d;          --df-warn: light-dark(#9a6700, #d7ba7d);
+  --df-error: #f48771;         --df-error: light-dark(#cd3131, #f48771);
+
+  /* Overlay tints on the screenshot */
+  --df-tint-hover: rgba(108,182,255,0.14);   --df-tint-hover: light-dark(rgba(0,95,184,0.10), rgba(108,182,255,0.14));
+  --df-tint-select: rgba(78,201,176,0.18);   --df-tint-select: light-dark(rgba(38,127,153,0.14), rgba(78,201,176,0.18));
+  --df-outline-hover: #6cb6ff;               --df-outline-hover: light-dark(#3b82f6, #6cb6ff);
+  --df-outline-select: #4ec9b0;              --df-outline-select: light-dark(#267f99, #4ec9b0);
+  --df-outline-all: rgba(108,182,255,0.28);  --df-outline-all: light-dark(rgba(0,95,184,0.22), rgba(108,182,255,0.28));
+
+  /* Shape + rhythm */
+  --df-radius: 5px;
+  --df-radius-sm: 3px;
+  --df-gap: 6px;
+  --df-shadow: 0 2px 12px rgba(0,0,0,0.5);   --df-shadow: light-dark(0 2px 10px rgba(0,0,0,0.16), 0 2px 12px rgba(0,0,0,0.5));
+  --df-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --df-mono: ui-monospace, 'Cascadia Code', Consolas, monospace;
 }
+
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"]  { color-scheme: dark; }
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+html, body { height: 100%; }
 
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-  background: #1e1e1e;
-  color: #fff;
-  overflow: auto;
+  font-family: var(--df-font);
+  background: var(--df-bg);
+  color: var(--df-fg);
+  overflow: hidden;
+  font-size: 12px;
+  -webkit-font-smoothing: antialiased;
 }
 
-#app-viewport {
-  position: relative;
-}
+/* Themed thin scrollbars */
+* { scrollbar-width: thin; scrollbar-color: var(--df-border) transparent; }
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--df-border); border-radius: 6px; border: 2px solid transparent; background-clip: content-box; }
+::-webkit-scrollbar-thumb:hover { background: var(--df-muted); background-clip: content-box; }
+::-webkit-scrollbar-corner { background: transparent; }
 
-#screenshot {
-  display: block;
-  pointer-events: none;
+:focus-visible { outline: 2px solid var(--df-focus); outline-offset: 1px; }
+
+/* ── Layout: toolbar on top, [tree | viewport] middle, dock bottom ── */
+#df-app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+
+#df-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--df-gap);
+  padding: 6px 8px;
+  background: var(--df-surface);
+  border-bottom: 1px solid var(--df-border-subtle);
+  flex: 0 0 auto;
   user-select: none;
 }
 
-.devflow-element {
-  position: absolute;
-  box-sizing: border-box;
+.df-modes { display: inline-flex; border: 1px solid var(--df-border); border-radius: var(--df-radius); overflow: hidden; }
+
+.df-mode-btn, .df-tool-btn, .df-dock-btn, .df-dock-tab {
+  background: var(--df-surface-2);
+  color: var(--df-fg);
+  border: none;
+  padding: 4px 10px;
+  font: inherit;
+  cursor: pointer;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+  white-space: nowrap;
+}
+
+.df-mode-btn + .df-mode-btn { border-left: 1px solid var(--df-border); }
+.df-tool-btn { border: 1px solid var(--df-border); border-radius: var(--df-radius); display: inline-flex; align-items: center; gap: 5px; }
+.df-mode-btn:hover, .df-tool-btn:hover { background: var(--df-hover); }
+.df-mode-btn.df-active, .df-tool-btn.df-active { background: var(--df-accent); color: var(--df-accent-fg); border-color: var(--df-accent); }
+.df-tool-btn.df-recording { background: var(--df-danger); color: #fff; border-color: var(--df-danger); }
+.df-mode-btn:disabled, .df-tool-btn:disabled { opacity: 0.4; cursor: default; }
+.df-mode-btn:disabled:hover, .df-tool-btn:disabled:hover { background: var(--df-surface-2); }
+
+/* Icons — inline SVG sprite, themed via currentColor. fill/stroke are set here (on the referencing
+   <svg>) so the <use> clones inherit them; filled glyphs (record/replay) carry their own fill attr. */
+.df-sprite { position: absolute; width: 0; height: 0; overflow: hidden; }
+.df-ic, .df-ic-xs { flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.df-ic { width: 15px; height: 15px; }
+.df-ic-xs { width: 11px; height: 11px; }
+.df-ic-rec { color: var(--df-error); }
+.df-tool-btn.df-recording .df-ic-rec { color: #fff; }
+.df-icon-btn { background: transparent; color: var(--df-fg); border: 1px solid transparent; border-radius: var(--df-radius); padding: 4px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; transition: background 0.12s ease; }
+.df-icon-btn:hover { background: var(--df-hover); }
+.df-sep { width: 1px; align-self: stretch; min-height: 18px; background: var(--df-border-subtle); margin: 2px 2px; }
+
+/* Block + label the viewport while a replay drives the app. */
+body.df-replaying #df-viewport-wrap::after {
+  content: 'Replaying\2026'; position: absolute; inset: 0; z-index: 5000;
+  background: rgba(0,0,0,0.35); color: #fff; font-size: 18px;
+  display: flex; align-items: center; justify-content: center;
+}
+
+.df-spacer { flex: 1 1 auto; }
+.df-status { color: var(--df-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
+
+#df-body { display: flex; flex: 1 1 auto; min-height: 0; position: relative; }
+
+/* ── Panes (tree | screenshot | properties) each with an uppercase section header ── */
+.df-pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
+.df-pane-grow { flex: 1 1 auto; }
+.df-pane-header { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 4px 10px;
+  font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--df-muted);
+  background: var(--df-surface); border-bottom: 1px solid var(--df-border-subtle); user-select: none; white-space: nowrap; }
+.df-pane-title { font-weight: 600; }
+.df-pane-count { color: var(--df-muted); font-weight: 400; }
+.df-pane-el { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--df-type); text-transform: none; letter-spacing: 0; font-weight: 600; }
+.df-pane-close { margin-left: auto; padding: 2px; }
+
+/* ── Tree sidebar ── */
+#df-tree-pane { flex: 0 0 clamp(190px, 24vw, 300px); border-right: 1px solid var(--df-border-subtle); background: var(--df-bg); }
+#df-tree { flex: 1 1 auto; overflow: auto; padding: 4px 0; white-space: nowrap; }
+body.df-tree-hidden #df-tree-pane { display: none; }
+
+/* ── Properties pane (docked, themed; populated by JS) ── */
+#df-props-pane { flex: 0 0 clamp(230px, 27vw, 340px); border-left: 1px solid var(--df-border-subtle); background: var(--df-bg); }
+#df-props { flex: 1 1 auto; overflow: auto; padding: 6px 0; }
+.df-prop-row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; }
+.df-prop-row:hover { background: var(--df-hover-row); }
+.df-prop-name { flex: 0 0 42%; color: var(--df-name); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.df-prop-field { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; }
+.df-prop-empty { color: var(--df-muted); padding: 14px 12px; font-size: 12px; }
+.df-field { width: 100%; box-sizing: border-box; background: var(--df-surface-2); color: var(--df-fg);
+  border: 1px solid var(--df-border); border-radius: var(--df-radius-sm); padding: 3px 6px; font: inherit; }
+.df-field:focus { outline: none; border-color: var(--df-focus); }
+input.df-field[type="color"] { padding: 0; height: 24px; width: 44px; flex: 0 0 auto; background: transparent; cursor: pointer; }
+input.df-field[type="checkbox"] { width: auto; flex: 0 0 auto; }
+
+.df-tree-node { display: flex; align-items: center; gap: 3px; padding: 2px 8px 2px 2px; cursor: pointer; line-height: 1.5; border-radius: 0 var(--df-radius-sm) var(--df-radius-sm) 0; }
+.df-tree-node:hover { background: var(--df-hover-row); }
+.df-tree-node.df-selected { background: var(--df-selected); color: var(--df-selected-fg); }
+.df-tree-node.df-selected .df-tree-type, .df-tree-node.df-selected .df-tree-name, .df-tree-node.df-selected .df-tree-icon { color: inherit; }
+.df-tree-icon { display: inline-flex; align-items: center; margin-right: 4px; color: var(--df-muted); vertical-align: -2px; }
+.df-tree-twisty { flex: 0 0 14px; width: 14px; display: inline-flex; align-items: center; justify-content: center; opacity: 0.6; }
+.df-tree-twisty .df-ic-xs { transition: transform 0.12s ease; }
+.df-tree-twisty.df-open .df-ic-xs { transform: rotate(90deg); }
+.df-tree-twisty.df-leaf { visibility: hidden; }
+.df-tree-label { overflow: hidden; text-overflow: ellipsis; }
+.df-tree-type { color: var(--df-type); }
+.df-tree-name { color: var(--df-name); opacity: 0.95; }
+.df-tree-src { color: var(--df-source); margin-left: 5px; display: inline-flex; align-items: center; }
+.df-tree-node.df-hidden-el .df-tree-label { opacity: 0.45; font-style: italic; }
+.df-tree-children.df-collapsed { display: none; }
+
+/* ── Screenshot viewport (fit-to-container scaling via #df-stage) ── */
+#df-viewport-wrap { flex: 1 1 auto; min-width: 0; overflow: auto; position: relative; display: flex; align-items: safe center; justify-content: safe center; }
+#df-stage { position: relative; flex: none; }
+#app-viewport { position: absolute; top: 0; left: 0; transform-origin: top left; }
+#screenshot { display: block; pointer-events: none; user-select: none; }
+body.df-mode-inspect #app-viewport { cursor: crosshair; }
+
+/* ── Element overlays ── */
+.devflow-element { position: absolute; box-sizing: border-box; }
+.devflow-element[data-isvisible="false"] { pointer-events: none; }
+.devflow-element.df-hover { outline: 1px solid var(--df-outline-hover); background: var(--df-tint-hover); }
+.devflow-element.df-selected { outline: 2px solid var(--df-outline-select); background: var(--df-tint-select); }
+body.df-show-all .devflow-element { outline: 1px solid var(--df-outline-all); }
+
+/* ── Hover badge ── */
+#df-badge {
+  position: absolute; z-index: 9999; pointer-events: none;
+  background: var(--df-surface); color: var(--df-fg);
+  border: 1px solid var(--df-outline-select); border-radius: var(--df-radius-sm);
+  padding: 1px 6px; font-size: 11px; white-space: nowrap; display: none;
+  box-shadow: var(--df-shadow);
+}
+
+/* ── N2 data dock ── */
+.df-hidden { display: none !important; }
+#df-dock { display: flex; flex-direction: column; height: clamp(180px, 34vh, 320px); flex: 0 0 auto;
+  border-top: 1px solid var(--df-border); background: var(--df-bg); color: var(--df-fg); min-height: 0; }
+#df-dock-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px 8px;
+  border-bottom: 1px solid var(--df-border-subtle); background: var(--df-surface); }
+.df-dock-tab { background: transparent; border-radius: var(--df-radius) var(--df-radius) 0 0; padding: 4px 10px; }
+.df-dock-tab:hover { background: var(--df-surface-2); }
+.df-dock-tab.df-active { background: var(--df-accent); color: var(--df-accent-fg); }
+.df-dock-meta { color: var(--df-muted); font-size: 11px; white-space: nowrap; margin-right: 4px; }
+#df-dock-body { flex: 1 1 auto; overflow: auto; padding: 8px 10px; font: 12px var(--df-mono); }
+#df-dock-body .df-empty { color: var(--df-muted); padding: 12px; font-family: var(--df-font); }
+#df-dock-body table { border-collapse: collapse; width: 100%; font-size: 12px; }
+#df-dock-body th { text-align: left; position: sticky; top: 0; background: var(--df-surface);
+  padding: 4px 8px; border-bottom: 1px solid var(--df-border); font-weight: 600; }
+#df-dock-body td { padding: 3px 8px; border-bottom: 1px solid var(--df-border-subtle); vertical-align: top; word-break: break-word; }
+#df-dock-body tr.df-row-click { cursor: pointer; }
+#df-dock-body tr.df-row-click:hover { background: var(--df-hover-row); }
+.df-log-row { padding: 1px 0; white-space: pre-wrap; word-break: break-word; }
+.df-log-INFO, .df-log-Information { color: var(--df-fg); }
+.df-log-DEBUG, .df-log-Debug, .df-log-Trace { color: var(--df-muted); }
+.df-log-WARN, .df-log-Warning { color: var(--df-warn); }
+.df-log-ERROR, .df-log-Error, .df-log-Critical { color: var(--df-error); }
+.df-log-time { color: var(--df-muted); }
+.df-log-cat { color: var(--df-type); }
+.df-kv-key { color: var(--df-name); padding-right: 10px; white-space: nowrap; }
+.df-section-title { color: var(--df-type); font-weight: 600; margin: 8px 0 3px; font-family: var(--df-font); }
+.df-masked { color: var(--df-muted); font-style: italic; cursor: pointer; }
+.df-masked:hover { color: var(--df-warn); }
+.df-status-ok { color: var(--df-success); }
+.df-status-err { color: var(--df-error); }
+.df-crumb, .df-dir { color: var(--df-name); cursor: pointer; }
+.df-crumb:hover, .df-dir:hover { text-decoration: underline; }
+.df-dock-btn { border: 1px solid var(--df-border); border-radius: var(--df-radius); padding: 3px 9px; font: 12px var(--df-font); margin: 4px 0; }
+.df-dock-btn:hover { background: var(--df-hover); }
+
+/* ── N4 presence chip ── */
+.df-presence { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 3px 9px; border-radius: 20px; white-space: nowrap; background: var(--df-surface-2); }
+.df-presence:empty { display: none; }
+.df-presence.df-writer { color: var(--df-success); }
+.df-presence.df-readonly { color: var(--df-warn); }
+
+/* ── Recording timeline (a strip of step chips shown while recording) ── */
+#df-timeline { display: flex; align-items: center; gap: 10px; flex: 0 0 auto; padding: 5px 10px;
+  border-top: 1px solid var(--df-border); background: var(--df-surface); }
+.df-tl-title { display: inline-flex; align-items: center; gap: 5px; font-weight: 600; white-space: nowrap; flex: 0 0 auto; color: var(--df-error); }
+#df-timeline.df-tl-done .df-tl-title { color: var(--df-success); }
+.df-tl-title .df-ic { color: inherit; }
+.df-tl-steps { display: flex; align-items: center; gap: 6px; overflow-x: auto; flex: 1 1 auto; min-width: 0; padding: 1px 0; }
+.df-tl-steps:empty::before { content: 'Interact with the app — steps appear here.'; color: var(--df-muted); font-size: 11px; }
+.df-tl-step { display: inline-flex; align-items: center; gap: 5px; background: var(--df-surface-2); border: 1px solid var(--df-border);
+  border-radius: 14px; padding: 2px 8px 2px 3px; font-size: 11px; white-space: nowrap; cursor: pointer; color: var(--df-fg); flex: 0 0 auto; }
+.df-tl-step:hover { background: var(--df-hover); }
+.df-tl-seq { display: inline-flex; align-items: center; justify-content: center; min-width: 16px; height: 16px; border-radius: 8px;
+  background: var(--df-accent); color: var(--df-accent-fg); font-size: 10px; padding: 0 4px; }
+.df-tl-act { color: var(--df-type); }
+.df-tl-label { color: var(--df-muted); max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.df-tl-meta { color: var(--df-muted); font-size: 11px; white-space: nowrap; flex: 0 0 auto; }
+
+/* ── Property grid (built inline by JS; keep it themeable) ── */
+.df-props-panel { background: var(--df-surface); color: var(--df-fg); border: 1px solid var(--df-outline-select);
+  border-radius: var(--df-radius); box-shadow: var(--df-shadow); }
+
+/* ── Responsive: narrow hosts (Copilot canvas side panel, narrow VS Code) ── */
+/* Collapse tool-button text to just the icon; the leading glyph + title tooltip remain. */
+@media (max-width: 720px) {
+  .df-tool-btn .df-btn-label { display: none; }
+  .df-tool-btn { padding: 4px 8px; }
+}
+
+/* ── Smart layout: match the pane arrangement to the app's orientation when width is tight.
+   <body data-app-orient> is published from the app's reported window size (see applyScale in
+   devflow.js). A PORTRAIT app is narrow → keep the panels BESIDE it (stay a horizontal row).
+   A LANDSCAPE app is wide → stack the screenshot on top and put the panels BELOW it (a column),
+   so the wide screenshot keeps the full width. Above the breakpoint the familiar 3-pane row is
+   used for both orientations. */
+@media (max-width: 880px) {
+  /* Portrait: stay a row; let the side panels give up a little width so the app still shows. */
+  body[data-app-orient="portrait"] #df-tree-pane { flex-basis: clamp(140px, 30vw, 240px); }
+  body[data-app-orient="portrait"] #df-props-pane { flex-basis: clamp(160px, 34vw, 260px); }
+
+  /* Landscape: stack vertically — screenshot on top, tree + properties as strips beneath it. */
+  body[data-app-orient="landscape"] #df-body { flex-direction: column; }
+  body[data-app-orient="landscape"] #df-view-pane { order: -1; flex: 1 1 auto; min-height: 42%; }
+  body[data-app-orient="landscape"] #df-tree-pane {
+    flex: 0 1 auto; flex-basis: auto; max-height: 30%;
+    border-right: 0; border-top: 1px solid var(--df-border);
+  }
+  body[data-app-orient="landscape"] #df-props-pane:not(.df-hidden) {
+    flex: 0 1 auto; flex-basis: auto; max-height: 34%;
+    border-left: 0; border-top: 1px solid var(--df-border);
+  }
+}
+
+/* Very narrow (portrait row): float the properties panel from the right so it can't crush the
+   tree + screenshot; below that the tree floats as a left drawer too. Landscape stays a column,
+   which already gives every pane the full width, so it needs no overlays. */
+@media (max-width: 560px) {
+  body[data-app-orient="portrait"] #df-props-pane:not(.df-hidden) {
+    position: absolute; z-index: 46; top: 0; bottom: 0; right: 0;
+    width: min(85vw, 320px); flex-basis: auto; box-shadow: var(--df-shadow);
+  }
+}
+@media (max-width: 440px) {
+  body[data-app-orient="portrait"]:not(.df-tree-hidden) #df-tree-pane {
+    position: absolute; z-index: 40; top: 0; bottom: 0; left: 0;
+    width: min(78vw, 280px); flex-basis: auto; box-shadow: var(--df-shadow);
+  }
+  #df-toolbar { gap: 4px; padding: 5px 6px; }
+  .df-status { max-width: 100%; flex-basis: 100%; }
+}
+/* Short hosts (wide-but-short VS Code panels): give the app view more of the vertical budget. */
+@media (max-height: 520px) {
+  #df-dock { height: clamp(120px, 40vh, 220px); }
 }

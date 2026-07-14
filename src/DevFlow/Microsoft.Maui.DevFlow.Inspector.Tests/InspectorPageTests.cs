@@ -185,8 +185,8 @@ public class InspectorPageTests : IAsyncLifetime
         var text = await response.TextAsync();
         Assert.Contains("#app-viewport", text);
         Assert.Contains(".devflow-element", text);
-        // No hover highlighting — the host inspector adds its own
-        Assert.DoesNotContain(":hover", text);
+        // The shared inspector is a full interactive tool (toolbar, tree, docked properties,
+        // timeline), so it ships its own hover/selection chrome — hover styles are expected here.
     }
 
     [LiveInspectorFact]
@@ -205,9 +205,9 @@ public class InspectorPageTests : IAsyncLifetime
         // Wait for AJAX refresh (devflow.js refreshes after tap via /api/state)
         await _page.WaitForTimeoutAsync(1000);
 
-        // The screenshot src should have a cache-busting timestamp
+        // The screenshot src should identify the immutable frame captured after the action.
         var screenshotAfter = await _page.Locator("#screenshot").GetAttributeAsync("src");
-        Assert.Contains("?t=", screenshotAfter);
+        Assert.Contains("?frame=", screenshotAfter);
     }
 
     [LiveInspectorFact]

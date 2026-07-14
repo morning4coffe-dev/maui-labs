@@ -8,6 +8,7 @@
     <PackageId>Microsoft.Maui.DevFlow.Agent.Gtk</PackageId>
     <Description>GTK/Linux agent for Microsoft.Maui.DevFlow. Provides visual tree inspection, element interactions, and screenshots for Maui.Gtk apps.</Description>
     <PackageTags>maui;automation;testing;agent;gtk;linux</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>

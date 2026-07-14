@@ -61,6 +61,15 @@ public record BrokerState
 
     [JsonPropertyName("startedAt")]
     public DateTime StartedAt { get; init; }
+
+    /// <summary>
+    /// Unguessable token that lets a LOCAL host shell (canvas, VS Code) embed the broker inspector
+    /// in an iframe: requests carrying <c>?embed={token}</c> get relaxed anti-framing headers. Only
+    /// local processes can read this file, so a remote clickjacking page cannot obtain the token and
+    /// is still served <c>X-Frame-Options: DENY</c>.
+    /// </summary>
+    [JsonPropertyName("embedToken")]
+    public string? EmbedToken { get; init; }
 }
 
 internal record RegistrationMessage

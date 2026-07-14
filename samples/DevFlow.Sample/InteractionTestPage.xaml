@@ -69,6 +69,7 @@
                          HeightRequest="60" WidthRequest="60"
                          HorizontalOptions="Center"
                          AutomationId="TestImageButton"
+                         SemanticProperties.Description="Test image button"
                          Clicked="OnImageButtonClicked" />
 
             <!-- Picker -->

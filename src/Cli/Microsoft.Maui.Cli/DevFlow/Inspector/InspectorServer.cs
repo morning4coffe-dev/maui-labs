@@ -21,6 +21,22 @@ public sealed class InspectorServer : IDisposable
     private readonly string _agentHost;
     private readonly int _agentPort;
     private readonly AgentClient _client;
+    private readonly string? _embedToken;
+    // Per-inspector read token gating the N2 data tabs (Logs/Network/Preferences/Device/Sensors/
+    // Files) — the app data these expose (tokens in network, secrets in prefs/logs) exceeds the
+    // visible tree. Injected into the served page as a <meta>; devflow.js echoes it back in the
+    // X-DevFlow-Inspector-Token header. Same-origin only (a cross-origin fetch can't set a custom
+    // header without a preflight the broker never answers), and a no-Origin local client (curl) can't
+    // read it from the page. Redaction (below) is the primary defense; this is defense-in-depth.
+    private readonly string _readToken = Guid.NewGuid().ToString("N");
+
+    // Browser tabs supply their own lease identity. Requests without one (standalone tests and local
+    // non-browser callers) share this inspector-instance identity.
+    private readonly string _fallbackMutationLeaseId = Guid.NewGuid().ToString("N");
+    // 0 = idle, 1 = a flow replay is driving the app. Guards against interleaving a replay with
+    // user mutations / recording (a replay can be triggered from any embedding host or tab).
+    private int _replayInProgress;
+    private readonly SemaphoreSlim _flowAdmissionGate = new(1, 1);
     private readonly object _cacheLock = new();
     // Lifetime cancellation source; cancelled in Dispose() so broker-mode WS proxies
     // (which never call Start() to create _cts) still see shutdown.
@@ -28,13 +44,10 @@ public sealed class InspectorServer : IDisposable
     private byte[]? _cachedScreenshot;
     private string? _cachedScreenshotElementId;
     private DateTime _screenshotCacheTime;
-    private string? _rootPageId;
-    // The window-absolute offset of the screenshotted root page element.
-    // Used to translate between viewport coordinates (relative to the screenshot)
-    // and window coordinates (used by the agent's hit-test/tap/scroll APIs).
-    private double _rootOffsetX;
-    private double _rootOffsetY;
+    private readonly Dictionary<string, InspectorFrame> _frames = new(StringComparer.Ordinal);
     private static readonly TimeSpan ScreenshotCacheDuration = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan FrameCacheDuration = TimeSpan.FromSeconds(10);
+    private const int MaxCachedFrames = 32;
 
     // Cap request bodies to avoid local DoS via huge POST payloads.
     private const long MaxRequestBodyBytes = 1_048_576; // 1 MB
@@ -48,12 +61,17 @@ public sealed class InspectorServer : IDisposable
     /// </summary>
     public int AgentPort => _agentPort;
 
-    public InspectorServer(int port, string agentHost, int agentPort)
+    public InspectorServer(int port, string agentHost, int agentPort, string? embedToken = null)
     {
         _port = port;
         _agentHost = agentHost;
         _agentPort = agentPort;
-        _client = new AgentClient(agentHost, agentPort);
+        _embedToken = embedToken;
+        _client = new AgentClient(agentHost, agentPort)
+        {
+            MutationLeaseHolderKind = "web-inspector",
+            MutationLeaseLabel = "DevFlow Web Inspector"
+        };
     }
 
     private void InvalidateScreenshotCache()
@@ -164,7 +182,28 @@ public sealed class InspectorServer : IDisposable
                 }
             }
 
-            var request = new HttpRequestInfo { Method = method, Path = path, Body = body };
+            var request = new HttpRequestInfo
+            {
+                Method = method,
+                Path = path,
+                Body = body,
+                // Carry the read-token header through to RouteAsync so the N2 data-tab gate works in
+                // broker mode too (the standalone path already parses all headers).
+                Headers = new Dictionary<string, string>
+                {
+                    ["x-devflow-inspector-token"] = context.Request.Headers["X-DevFlow-Inspector-Token"] ?? "",
+                    ["x-devflow-writer"] = context.Request.Headers["X-DevFlow-Writer"] ?? "",
+                    ["x-devflow-lease"] = context.Request.Headers["X-DevFlow-Lease"] ?? "",
+                    ["x-devflow-holder"] = context.Request.Headers["X-DevFlow-Holder"] ?? "",
+                    ["x-devflow-label"] = context.Request.Headers["X-DevFlow-Label"] ?? "",
+                },
+                Query = context.Request.QueryString.AllKeys
+                    .Where(static key => key is not null)
+                    .ToDictionary(
+                        static key => key!,
+                        key => context.Request.QueryString[key!] ?? "",
+                        StringComparer.OrdinalIgnoreCase),
+            };
             var (statusCode, contentType, responseBody) = await RouteAsync(request);
 
             context.Response.StatusCode = statusCode;
@@ -174,8 +213,37 @@ public sealed class InspectorServer : IDisposable
             // Anti-framing headers (defense-in-depth against clickjacking): even though
             // the Origin validator already blocks cross-origin API calls, these headers
             // prevent a malicious page from rendering the inspector in an iframe.
-            context.Response.Headers.Set("X-Frame-Options", "DENY");
-            context.Response.Headers.Set("Content-Security-Policy", "frame-ancestors 'none'");
+            // EXCEPTION (m7): a request that proves knowledge of the broker's unguessable embed token
+            // (readable only from the local broker.json) is a trusted local host shell — relax the
+            // anti-framing headers so the canvas / VS Code webview can embed the inspector. A remote
+            // clickjacking page cannot read the token, so it still gets DENY.
+            if (IsTrustedEmbed(_embedToken, context.Request.QueryString["embed"]))
+            {
+                // A request bearing the secret embed token is a trusted LOCAL host shell (the
+                // canvas or the VS Code webview). Such hosts frame the inspector from origins we
+                // cannot enumerate reliably — notably VS Code desktop webviews, whose ancestor is
+                // an opaque `vscode-webview://<guid>` origin that CSP host/scheme sources do not
+                // dependably match in Chromium. The unguessable token (readable only from the local
+                // broker.json) is itself the anti-clickjacking gate: a remote page cannot obtain it,
+                // and a request WITHOUT it still falls through to the DENY branch below. So for
+                // token-bearing requests we drop the framing restrictions entirely rather than
+                // maintain a brittle allow-list — this matches how a plain localhost dev server
+                // (no framing headers) embeds cleanly in a webview.
+                context.Response.Headers.Remove("X-Frame-Options");
+                // Safe to strip the whole CSP: the broker path only ever sets `frame-ancestors`
+                // (see the else branch). If a future change adds other CSP directives upstream,
+                // strip only the `frame-ancestors` directive here instead of the whole header.
+                context.Response.Headers.Remove("Content-Security-Policy");
+                // The token is a bearer secret carried in the query string: keep it out of any
+                // Referer, and out of shared history / proxy caches.
+                context.Response.Headers.Set("Referrer-Policy", "no-referrer");
+                context.Response.Headers.Set("Cache-Control", "no-store");
+            }
+            else
+            {
+                context.Response.Headers.Set("X-Frame-Options", "DENY");
+                context.Response.Headers.Set("Content-Security-Policy", "frame-ancestors 'none'");
+            }
             context.Response.ContentLength64 = responseBody.Length;
             await context.Response.OutputStream.WriteAsync(responseBody);
             context.Response.Close();
@@ -332,6 +400,7 @@ public sealed class InspectorServer : IDisposable
         try { _listener?.Stop(); } catch { }
         try { _cts?.Dispose(); } catch { }
         try { _lifetimeCts.Dispose(); } catch { }
+        try { _flowAdmissionGate.Dispose(); } catch { }
         try { _client.Dispose(); } catch { }
     }
 
@@ -402,13 +471,70 @@ public sealed class InspectorServer : IDisposable
     {
         try
         {
+            var leaseId = request.Headers.TryGetValue("x-devflow-lease", out var lt) &&
+                !string.IsNullOrWhiteSpace(lt)
+                ? lt
+                : request.Headers.TryGetValue("x-devflow-writer", out var wt) &&
+                    !string.IsNullOrWhiteSpace(wt)
+                    ? wt
+                    : _fallbackMutationLeaseId;
+            var holderKind = request.Headers.TryGetValue("x-devflow-holder", out var hk) &&
+                !string.IsNullOrWhiteSpace(hk)
+                ? hk
+                : "web-inspector";
+            var holderLabel = request.Headers.TryGetValue("x-devflow-label", out var hl) &&
+                !string.IsNullOrWhiteSpace(hl)
+                ? hl
+                : "DevFlow Web Inspector";
+            using var leaseScope = _client.UseMutationLease(leaseId, holderKind, holderLabel);
+
+            // While a replay is driving the app, reject concurrent user mutations + record steps so
+            // the replay isn't interleaved (a replay may be triggered from any embedding host/tab).
+            // Read-only endpoints and the replay itself are unaffected.
+            if (request.Method == "POST" && Volatile.Read(ref _replayInProgress) == 1 && IsBlockedDuringReplay(request.Path))
+                return (409, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"A replay is in progress — try again when it finishes.\"}"));
+
+            // N2 data tabs expose more than the visible tree (network/preferences/logs/files) — gate
+            // them on the per-inspector read token that only same-origin devflow.js can echo back.
+            if (IsTokenGatedPath(request.Path))
+            {
+                var token = request.Headers.TryGetValue("x-devflow-inspector-token", out var t) ? t : null;
+                if (string.IsNullOrEmpty(token) || !string.Equals(token, _readToken, StringComparison.Ordinal))
+                    return (403, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"forbidden\"}"));
+            }
+
+            // Mutations share the agent-enforced global lease with Canvas, MCP, CLI, and other hosts.
+            if (request.Method == "POST" && IsMutation(request.Path))
+            {
+                var status = await _client.ControlMutationLeaseAsync(
+                    "claim",
+                    force: false,
+                    leaseId,
+                    holderKind,
+                    holderLabel);
+                if (!status.YouHold)
+                {
+                    var payload = JsonSerializer.Serialize(new
+                    {
+                        ok = false,
+                        reason = "writer",
+                        error = "Another session is driving this app.",
+                        holderKind = status.HolderKind,
+                        label = status.Label,
+                        expiresInMs = status.ExpiresInMs,
+                        authority = status.Authority
+                    }, CamelCase);
+                    return (409, "application/json", Encoding.UTF8.GetBytes(payload));
+                }
+            }
+
             return request.Method switch
             {
                 "GET" => request.Path switch
                 {
                     "/" or "" => await HandleRootAsync(),
                     "/api/state" => await HandleStateAsync(),
-                    "/screenshot.png" => await HandleScreenshotAsync(),
+                    "/screenshot.png" => await HandleScreenshotAsync(request.Query.GetValueOrDefault("frame")),
                     "/devflow.js" => HandleEmbeddedFile("devflow.js", "application/javascript"),
                     "/devflow.css" => HandleEmbeddedFile("devflow.css", "text/css"),
                     _ => (404, "text/plain", Encoding.UTF8.GetBytes("Not Found"))
@@ -421,6 +547,29 @@ public sealed class InspectorServer : IDisposable
                     "/api/back" => await HandleProxyBackAsync(),
                     "/api/fill" => await HandleProxyFillAsync(request.Body),
                     "/api/key" => await HandleProxyKeyAsync(request.Body),
+                    "/api/getProperty" => await HandleProxyGetPropertyAsync(request.Body),
+                    "/api/setProperty" => await HandleProxySetPropertyAsync(request.Body),
+                    "/api/navigate" => await HandleProxyNavigateAsync(request.Body),
+                    "/api/checkpoint" => await HandleCheckpointAsync(request.Body),
+                    "/api/source" => await HandleSourceAsync(request.Body),
+                    "/api/flows/record/start" => await HandleFlowRecordStartAsync(request.Body),
+                    "/api/flows/record/step" => await HandleFlowRecordStepAsync(request.Body),
+                    "/api/flows/record/stop" => await HandleFlowRecordStopAsync(request.Body),
+                    "/api/flows/record/status" => await HandleFlowRecordStatusAsync(request.Body),
+                    "/api/flows/replay" => await HandleFlowReplayAsync(request.Body),
+                    "/api/logs" => await HandleLogsAsync(request.Body),
+                    "/api/network" => await HandleNetworkAsync(request.Body),
+                    "/api/network/detail" => await HandleNetworkDetailAsync(request.Body),
+                    "/api/preferences" => await HandlePreferencesAsync(request.Body),
+                    "/api/device" => await HandleDeviceAsync(request.Body),
+                    "/api/sensors" => await HandleSensorsAsync(request.Body),
+                    "/api/geolocation" => await HandleGeolocationAsync(request.Body),
+                    "/api/files/roots" => await HandleFilesRootsAsync(request.Body),
+                    "/api/files/list" => await HandleFilesListAsync(request.Body),
+                    "/api/cdp/webviews" => await HandleCdpWebViewsAsync(request.Body),
+                    "/api/cdp/source" => await HandleCdpSourceAsync(request.Body),
+                    "/api/cdp/eval" => await HandleCdpEvalAsync(request.Body),
+                    "/api/control" => await HandleControlAsync(request.Body, leaseId, holderKind, holderLabel),
                     _ => (404, "text/plain", Encoding.UTF8.GetBytes("Not Found"))
                 },
                 _ => (405, "text/plain", Encoding.UTF8.GetBytes("Method Not Allowed"))
@@ -439,32 +588,22 @@ public sealed class InspectorServer : IDisposable
 
     private async Task<(int, string, byte[])> HandleRootAsync()
     {
-        var tree = await _client.GetTreeAsync();
-
-        // Find the root page element (first child of Window with content).
-        // On Mac Catalyst, the default screenshot captures the full screen but element
-        // bounds are relative to the page content. By screenshotting the page element
-        // directly we get a 1:1 match between pixel coordinates and element bounds.
-        var rootPageId = FindRootPageId(tree);
-        var (rootOffsetX, rootOffsetY) = GetRootPageOffset(tree, rootPageId);
-        lock (_cacheLock)
-        {
-            _rootPageId = rootPageId;
-            _rootOffsetX = rootOffsetX;
-            _rootOffsetY = rootOffsetY;
-        }
-        var screenshot = await GetCachedScreenshotAsync(rootPageId);
-        var hasScreenshot = screenshot?.Length > 0;
-
-        double viewportWidth = 800, viewportHeight = 600;
-        if (hasScreenshot)
-        {
-            var (pw, ph) = GetPngDimensions(screenshot!);
-            viewportWidth = pw;
-            viewportHeight = ph;
-        }
-
-        var html = HtmlRenderer.Render(tree, hasScreenshot, (int)viewportWidth, (int)viewportHeight, 1, 1, rootOffsetX, rootOffsetY);
+        var frame = await CreateFrameAsync();
+        var html = HtmlRenderer.Render(
+            frame.Tree,
+            frame.Png.Length > 0,
+            frame.Width,
+            frame.Height,
+            density: 1,
+            elementScale: 1,
+            frame.RootOffsetX,
+            frame.RootOffsetY,
+            screenshotUrl: $"screenshot.png?frame={Uri.EscapeDataString(frame.Id)}");
+        // Inject the per-inspector read token so same-origin devflow.js can gate the N2 data tabs.
+        var tokenMeta = $"<meta name=\"devflow-inspector-token\" content=\"{_readToken}\">";
+        html = html.Contains("</head>", StringComparison.Ordinal)
+            ? html.Replace("</head>", tokenMeta + "</head>")
+            : tokenMeta + html;
         return (200, "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html));
     }
 
@@ -474,43 +613,17 @@ public sealed class InspectorServer : IDisposable
     /// </summary>
     private async Task<(int, string, byte[])> HandleStateAsync()
     {
-        var tree = await _client.GetTreeAsync();
-
-        var rootPageId = FindRootPageId(tree);
-        var (rootOffsetX, rootOffsetY) = GetRootPageOffset(tree, rootPageId);
-        lock (_cacheLock)
-        {
-            _rootPageId = rootPageId;
-            _rootOffsetX = rootOffsetX;
-            _rootOffsetY = rootOffsetY;
-            // Do NOT invalidate the screenshot cache here. The 200ms TTL on
-            // GetCachedScreenshotAsync exists precisely so that the
-            // 500ms AJAX poll plus any concurrent root-page request can
-            // share one capture. Forcing a refresh on every state call
-            // defeats that and triples per-second screenshot load. The
-            // cache key already includes elementId, so root/state requests
-            // with different rootPageIds don't poison each other.
-        }
-        var screenshot = await GetCachedScreenshotAsync(rootPageId);
-        var hasScreenshot = screenshot?.Length > 0;
-
-        double viewportWidth = 800, viewportHeight = 600;
-        if (hasScreenshot)
-        {
-            var (pw, ph) = GetPngDimensions(screenshot!);
-            viewportWidth = pw;
-            viewportHeight = ph;
-        }
-
-        var elementsHtml = HtmlRenderer.RenderElements(tree, 1, rootOffsetX, rootOffsetY);
-        var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+        var frame = await CreateFrameAsync();
 
         var json = JsonSerializer.Serialize(new
         {
-            screenshotUrl = $"screenshot.png?t={timestamp}",
-            elements = elementsHtml,
-            viewportWidth,
-            viewportHeight
+            frameId = frame.Id,
+            screenshotUrl = $"screenshot.png?frame={Uri.EscapeDataString(frame.Id)}",
+            elements = frame.ElementsHtml,
+            viewportWidth = frame.Width,
+            viewportHeight = frame.Height,
+            rootOffsetX = frame.RootOffsetX,
+            rootOffsetY = frame.RootOffsetY
         });
 
         return (200, "application/json", Encoding.UTF8.GetBytes(json));
@@ -528,6 +641,14 @@ public sealed class InspectorServer : IDisposable
         if (window.Children is not { Count: > 0 }) return null;
         // Last child is the topmost (modal pages are added after the shell)
         return window.Children[^1].Id;
+    }
+
+    internal static List<ElementInfo> SelectFrameTree(List<ElementInfo> tree, string? rootPageId)
+    {
+        if (rootPageId is null || tree.Count == 0)
+            return tree;
+        var rootPage = tree[0].Children?.FirstOrDefault(child => child.Id == rootPageId);
+        return rootPage is null ? tree : [rootPage];
     }
 
     /// <summary>
@@ -567,14 +688,71 @@ public sealed class InspectorServer : IDisposable
         return (w, h);
     }
 
-    private async Task<(int, string, byte[])> HandleScreenshotAsync()
+    private async Task<(int, string, byte[])> HandleScreenshotAsync(string? frameId)
     {
-        string? rootPageId;
-        lock (_cacheLock) { rootPageId = _rootPageId; }
-        var png = await GetCachedScreenshotAsync(rootPageId);
+        byte[]? png = null;
+        if (!string.IsNullOrWhiteSpace(frameId))
+        {
+            lock (_cacheLock)
+            {
+                PruneFramesLocked();
+                if (_frames.TryGetValue(frameId, out var frame))
+                    png = frame.Png;
+            }
+        }
+
+        if (png is null && !string.IsNullOrWhiteSpace(frameId))
+            return (404, "text/plain", Encoding.UTF8.GetBytes("Inspector frame expired"));
+        if (png is null)
+            png = (await CreateFrameAsync()).Png;
         if (png == null || png.Length == 0)
             return (404, "text/plain", Encoding.UTF8.GetBytes("No screenshot available"));
         return (200, "image/png", png);
+    }
+
+    private async Task<InspectorFrame> CreateFrameAsync()
+    {
+        var tree = await _client.GetTreeAsync();
+        var rootPageId = FindRootPageId(tree);
+        var (rootOffsetX, rootOffsetY) = GetRootPageOffset(tree, rootPageId);
+        var frameTree = SelectFrameTree(tree, rootPageId);
+        var screenshot = await GetCachedScreenshotAsync(rootPageId) ?? Array.Empty<byte>();
+        var (width, height) = screenshot.Length > 0 ? GetPngDimensions(screenshot) : (0, 0);
+        if (width <= 0 || height <= 0)
+        {
+            width = 800;
+            height = 600;
+        }
+
+        var frame = new InspectorFrame(
+            Guid.NewGuid().ToString("N"),
+            DateTime.UtcNow,
+            frameTree,
+            screenshot,
+            width,
+            height,
+            rootOffsetX,
+            rootOffsetY,
+            HtmlRenderer.RenderElements(frameTree, 1, rootOffsetX, rootOffsetY));
+        lock (_cacheLock)
+        {
+            PruneFramesLocked();
+            _frames[frame.Id] = frame;
+            while (_frames.Count > MaxCachedFrames)
+            {
+                var oldest = _frames.MinBy(static pair => pair.Value.CreatedUtc);
+                if (oldest.Key is null) break;
+                _frames.Remove(oldest.Key);
+            }
+        }
+        return frame;
+    }
+
+    private void PruneFramesLocked()
+    {
+        var cutoff = DateTime.UtcNow - FrameCacheDuration;
+        foreach (var id in _frames.Where(pair => pair.Value.CreatedUtc < cutoff).Select(static pair => pair.Key).ToArray())
+            _frames.Remove(id);
     }
 
     private (int, string, byte[]) HandleEmbeddedFile(string fileName, string contentType)
@@ -624,14 +802,12 @@ public sealed class InspectorServer : IDisposable
         using var doc = JsonDocument.Parse(body);
         var root = doc.RootElement;
 
-        // Support coordinate-based tap: translate viewport coords to window coords
-        // (add root offset back) then hit-test and tap the element
+        // Coordinates are already translated into window space by devflow.js using the frame's
+        // root offsets, so every browser tab acts against the exact frame it rendered.
         if (root.TryGetProperty("x", out var xProp) && root.TryGetProperty("y", out var yProp))
         {
-            double offsetX, offsetY;
-            lock (_cacheLock) { offsetX = _rootOffsetX; offsetY = _rootOffsetY; }
-            var x = xProp.GetDouble() + offsetX;
-            var y = yProp.GetDouble() + offsetY;
+            var x = xProp.GetDouble();
+            var y = yProp.GetDouble();
 
             var hitResult = await _client.HitTestAsync(x, y);
 
@@ -694,13 +870,10 @@ public sealed class InspectorServer : IDisposable
         var deltaX = root.TryGetProperty("deltaX", out var dxProp) ? dxProp.GetDouble() : 0;
         var deltaY = root.TryGetProperty("deltaY", out var dyProp) ? dyProp.GetDouble() : 0;
 
-        // If coordinates provided, translate viewport coords to window coords
-        // (add root offset back) then hit-test and try each element for scroll
+        // Coordinates are already in window space (translated client-side from the rendered frame).
         if (root.TryGetProperty("x", out var xProp) && root.TryGetProperty("y", out var yProp))
         {
-            double offsetX, offsetY;
-            lock (_cacheLock) { offsetX = _rootOffsetX; offsetY = _rootOffsetY; }
-            var hitResult = await _client.HitTestAsync(xProp.GetDouble() + offsetX, yProp.GetDouble() + offsetY);
+            var hitResult = await _client.HitTestAsync(xProp.GetDouble(), yProp.GetDouble());
             if (TryParseHitTestElements(hitResult, out var hitDoc, out var elements))
             {
                 using (hitDoc)
@@ -774,6 +947,17 @@ public sealed class InspectorServer : IDisposable
         return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"points array required\"}"));
     }
 
+    private sealed record InspectorFrame(
+        string Id,
+        DateTime CreatedUtc,
+        List<ElementInfo> Tree,
+        byte[] Png,
+        int Width,
+        int Height,
+        double RootOffsetX,
+        double RootOffsetY,
+        string ElementsHtml);
+
     private async Task<(int, string, byte[])> HandleProxyBackAsync()
     {
         var success = await _client.BackAsync();
@@ -824,6 +1008,629 @@ public sealed class InspectorServer : IDisposable
             ? (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true}"))
             : (500, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false}"));
     }
+
+    // Reads a single property value off an element, proxied to the agent. Powers the shared
+    // inspector's rich property grid (m6) — the same endpoint the canvas and VS Code shells use.
+    private async Task<(int, string, byte[])> HandleProxyGetPropertyAsync(string? body)
+    {
+        if (string.IsNullOrEmpty(body))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"Body required\"}"));
+
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+        var elementId = root.TryGetProperty("elementId", out var idProp) ? idProp.GetString() : null;
+        var name = root.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
+
+        if (!IsValidPropertyRef(elementId, name))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"elementId and name required\"}"));
+
+        var value = await _client.GetPropertyAsync(elementId!, name!);
+        var payload = JsonSerializer.Serialize(new { ok = true, value });
+        return (200, "application/json", Encoding.UTF8.GetBytes(payload));
+    }
+
+    // Live-edits a single property value on an element, proxied to the agent, then invalidates the
+    // screenshot cache so the next frame reflects the change.
+    private async Task<(int, string, byte[])> HandleProxySetPropertyAsync(string? body)
+    {
+        if (string.IsNullOrEmpty(body))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"Body required\"}"));
+
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+        var elementId = root.TryGetProperty("elementId", out var idProp) ? idProp.GetString() : null;
+        var name = root.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
+
+        // Only scalar JSON is a valid property value. Number/bool GetRawText() is culture-invariant
+        // ("0.5", "true"); reject null/array/object rather than sending "null" / JSON text downstream.
+        string? value = null;
+        var badValueKind = false;
+        if (root.TryGetProperty("value", out var valProp))
+        {
+            switch (valProp.ValueKind)
+            {
+                case JsonValueKind.String: value = valProp.GetString(); break;
+                case JsonValueKind.Number:
+                case JsonValueKind.True:
+                case JsonValueKind.False: value = valProp.GetRawText(); break;
+                default: badValueKind = true; break;
+            }
+        }
+        if (badValueKind)
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"value must be a string, number, or boolean\"}"));
+        if (!IsValidPropertyRef(elementId, name) || value is null)
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"elementId, name and value required\"}"));
+
+        var success = await _client.SetPropertyAsync(elementId!, name!, value);
+        InvalidateScreenshotCache();
+        return success
+            ? (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true}"))
+            : (500, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false}"));
+    }
+
+    // Guards the proxied property endpoints: non-empty and bounded elementId/name.
+    private static bool IsValidPropertyRef(string? elementId, string? name)
+        => !string.IsNullOrWhiteSpace(elementId) && !string.IsNullOrWhiteSpace(name)
+           && elementId!.Length <= 1024 && name!.Length <= 256;
+
+    // ── Workflow recording (feature C) ──
+    // The broker owns one app-scoped recording; the current valid lease holder controls it and the
+    // agent observes every accepted mutation across lease handoffs.
+    // These routes are compatibility adapters for the shared browser UI.
+    private async Task<(int, string, byte[])> HandleFlowRecordStartAsync(string? body)
+    {
+        await _flowAdmissionGate.WaitAsync();
+        try
+        {
+            if (Volatile.Read(ref _replayInProgress) == 1)
+            {
+                return (409, "application/json", Encoding.UTF8.GetBytes(
+                    "{\"ok\":false,\"error\":\"A replay is in progress — try again when it finishes.\"}"));
+            }
+
+            string? name = null, app = null, platform = null, preconditions = null;
+            if (!string.IsNullOrEmpty(body))
+            {
+                using var doc = JsonDocument.Parse(body);
+                var root = doc.RootElement;
+                name = root.TryGetProperty("name", out var n) ? n.GetString() : null;
+                app = root.TryGetProperty("app", out var a) ? a.GetString() : null;
+                platform = root.TryGetProperty("platform", out var p) ? p.GetString() : null;
+                preconditions = root.TryGetProperty("preconditions", out var pc) ? pc.GetString() : null;
+            }
+            if (string.IsNullOrWhiteSpace(name)) name = "scenario";
+
+            // Best-effort agent metadata + the current route (the recording's start checkpoint).
+            string? route = null;
+            try
+            {
+                var status = await _client.GetStatusAsync();
+                app ??= status?.App?.Name;
+                platform ??= status?.Device?.Platform;
+                route = status?.Route;
+            }
+            catch { /* best-effort — a recording can start without agent metadata */ }
+
+            var result = await _client.ControlMutationRecordingAsync("start", name, app, platform, preconditions);
+            var payload = JsonSerializer.Serialize(new
+            {
+                ok = result.Ok,
+                recordingId = result.RecordingId,
+                name = result.Name ?? name,
+                steps = result.Steps,
+                route,
+                error = result.Error
+            }, CamelCase);
+            return (result.Ok ? 200 : 400, "application/json", Encoding.UTF8.GetBytes(payload));
+        }
+        finally
+        {
+            _flowAdmissionGate.Release();
+        }
+    }
+
+    private async Task<(int, string, byte[])> HandleFlowRecordStepAsync(string? body)
+    {
+        var result = await _client.ControlMutationRecordingAsync("status");
+        var payload = JsonSerializer.Serialize(new
+        {
+            ok = result.Ok,
+            seq = result.Steps,
+            stepCount = result.Steps,
+            fragile = false,
+            error = result.Error
+        }, CamelCase);
+        return (result.Ok ? 200 : 400, "application/json", Encoding.UTF8.GetBytes(payload));
+    }
+
+    private async Task<(int, string, byte[])> HandleFlowRecordStopAsync(string? body)
+    {
+        var result = await _client.ControlMutationRecordingAsync("stop");
+        var payload = JsonSerializer.Serialize(new
+        {
+            ok = result.Ok,
+            markdown = result.Markdown,
+            name = result.Name,
+            steps = result.Steps,
+            warnings = result.Warnings,
+            error = result.Error
+        }, CamelCase);
+        return (result.Ok ? 200 : 400, "application/json", Encoding.UTF8.GetBytes(payload));
+    }
+
+    private async Task<(int, string, byte[])> HandleFlowRecordStatusAsync(string? body)
+    {
+        var result = await _client.ControlMutationRecordingAsync("status");
+        var payload = JsonSerializer.Serialize(new
+        {
+            ok = result.Ok,
+            recording = result.Recording,
+            recordingId = result.RecordingId,
+            name = result.Name,
+            steps = result.Steps,
+            error = result.Error
+        }, CamelCase);
+        return (result.Ok ? 200 : 400, "application/json", Encoding.UTF8.GetBytes(payload));
+    }
+
+    // Replays a recorded flow (its Markdown) against the live app via the existing FlowReplayer —
+    // the same engine as maui_flow_replay — and returns a per-step pass/fail report. This RE-DRIVES
+    // the app (destructive by nature); the UI gates it behind an explicit button and blocks it while
+    // a recording is active.
+    private static readonly JsonSerializerOptions CamelCase = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+    private async Task<(int, string, byte[])> HandleFlowReplayAsync(string? body)
+    {
+        if (string.IsNullOrEmpty(body))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"Body required\"}"));
+
+        string? markdown;
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object ||
+                !doc.RootElement.TryGetProperty("markdown", out var value) ||
+                value.ValueKind != JsonValueKind.String)
+            {
+                return (400, "application/json", Encoding.UTF8.GetBytes(
+                    "{\"ok\":false,\"error\":\"markdown must be a string.\"}"));
+            }
+            markdown = value.GetString();
+        }
+        catch (JsonException)
+        {
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"Invalid JSON body.\"}"));
+        }
+        if (string.IsNullOrEmpty(markdown))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"markdown required\"}"));
+
+        var parsed = Flows.FlowMarkdown.Parse(markdown);
+        if (!parsed.Ok || parsed.Flow is null)
+            return (400, "application/json", Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { ok = false, error = parsed.Error ?? "Could not parse the flow." })));
+        if (parsed.Flow.Steps.Count > MaxReplaySteps)
+            return (400, "application/json", Encoding.UTF8.GetBytes($"{{\"ok\":false,\"error\":\"Flow too large (max {MaxReplaySteps} steps).\"}}"));
+
+        var validation = Flows.FlowValidator.Validate(parsed.Flow);
+        if (!validation.Ok)
+        {
+            var payload = JsonSerializer.Serialize(new
+            {
+                ok = false,
+                error = "Flow failed validation.",
+                errors = validation.Errors,
+                warnings = validation.Warnings
+            }, CamelCase);
+            return (400, "application/json", Encoding.UTF8.GetBytes(payload));
+        }
+
+        await _flowAdmissionGate.WaitAsync();
+        try
+        {
+            var recording = await _client.ControlMutationRecordingAsync("status");
+            if (recording.Ok && recording.Recording)
+            {
+                return (409, "application/json", Encoding.UTF8.GetBytes(
+                    "{\"ok\":false,\"error\":\"Stop the active recording before replaying a flow.\"}"));
+            }
+
+            // Single-flight: only one replay at a time; the RouteAsync gate blocks concurrent
+            // mutations while this flag is set.
+            if (Interlocked.CompareExchange(ref _replayInProgress, 1, 0) != 0)
+                return (409, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"A replay is already in progress.\"}"));
+        }
+        finally
+        {
+            _flowAdmissionGate.Release();
+        }
+
+        try
+        {
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
+            var replayer = new Flows.FlowReplayer(_client);
+            var report = await replayer.ReplayAsync(parsed.Flow, null, cts.Token);
+            return (200, "application/json", Encoding.UTF8.GetBytes(JsonSerializer.Serialize(report, CamelCase)));
+        }
+        catch (OperationCanceledException)
+        {
+            // Surface a timeout as a normal replay failure, not a generic server error.
+            var timeout = JsonSerializer.Serialize(new { ok = false, error = "Replay timed out.", total = parsed.Flow.Steps.Count, passed = 0, failed = parsed.Flow.Steps.Count });
+            return (200, "application/json", Encoding.UTF8.GetBytes(timeout));
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _replayInProgress, 0);
+        }
+    }
+
+    private const int MaxReplaySteps = 2000;
+
+    // POST paths rejected (409) while a replay is driving the app.
+    private static bool IsBlockedDuringReplay(string path) => path switch
+    {
+        "/api/tap" or "/api/scroll" or "/api/gesture" or "/api/back" or "/api/fill" or "/api/key"
+            or "/api/setProperty" or "/api/navigate" or "/api/cdp/eval"
+            or "/api/flows/record/start" or "/api/flows/record/step" => true,
+        _ => false,
+    };
+
+    // Proxies a Shell navigation to the agent — powers the "Return to start route" checkpoint restore.
+    private async Task<(int, string, byte[])> HandleProxyNavigateAsync(string? body)
+    {
+        if (string.IsNullOrEmpty(body))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"Body required\"}"));
+        using var doc = JsonDocument.Parse(body);
+        var route = doc.RootElement.TryGetProperty("route", out var v) ? v.GetString() : null;
+        if (string.IsNullOrWhiteSpace(route) || route!.Length > 2048)
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"route required\"}"));
+        var success = await _client.NavigateAsync(route);
+        InvalidateScreenshotCache();
+        return success
+            ? (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true}"))
+            : (500, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"navigate failed\"}"));
+    }
+
+    // Returns the app's current Shell route so the inspector can capture a "return here" checkpoint
+    // (e.g. just before a replay). Read-only; navigation itself goes through /api/navigate.
+    private async Task<(int, string, byte[])> HandleCheckpointAsync(string? body)
+    {
+        string? route = null;
+        try { route = (await _client.GetStatusAsync())?.Route; } catch { /* best-effort */ }
+        var payload = JsonSerializer.Serialize(new { ok = true, route });
+        return (200, "application/json", Encoding.UTF8.GetBytes(payload));
+    }
+
+    // Returns the m5 XAML source location for an element, fetched ON DEMAND (so absolute paths are
+    // never embedded in every element div). Powers click-to-XAML "open source" via the host bridge.
+    private async Task<(int, string, byte[])> HandleSourceAsync(string? body)
+    {
+        if (string.IsNullOrEmpty(body))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"Body required\"}"));
+        using var doc = JsonDocument.Parse(body);
+        var elementId = doc.RootElement.TryGetProperty("elementId", out var v) ? v.GetString() : null;
+        if (string.IsNullOrWhiteSpace(elementId) || elementId!.Length > 1024)
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"elementId required\"}"));
+        var el = await _client.GetElementAsync(elementId);
+        if (el?.SourceFile is null)
+            return (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"No source available for this element.\"}"));
+        var payload = JsonSerializer.Serialize(new
+        {
+            ok = true,
+            file = el.SourceFile,
+            line = el.SourceLine,
+            column = el.SourceColumn,
+            sourceHash = el.SourceHash
+        });
+        return (200, "application/json", Encoding.UTF8.GetBytes(payload));
+    }
+
+    // ── N2 data tabs — read-only proxies to existing AgentClient reads (Logs/Network/Preferences/
+    // Device/Sensors/Files). POST-with-body so they inherit the Origin/CSRF guard; token-gated
+    // (IsTokenGatedPath) so only same-origin devflow.js can call them; secrets redacted server-side
+    // by default. None are in IsBlockedDuringReplay, so reads stay live during a replay. Secure
+    // Storage is intentionally NOT exposed (no safe read-only presentation for secret values). ──
+
+    private const int MaxLogLimit = 200;
+    private const int MaxNetworkLimit = 200;
+
+    // Paths whose responses expose more than the visible tree and therefore require the read token.
+    internal static bool IsTokenGatedPath(string path) => path switch
+    {
+        "/api/source" or "/api/logs" or "/api/network" or "/api/network/detail" or "/api/preferences"
+            or "/api/device" or "/api/sensors" or "/api/geolocation"
+            or "/api/files/roots" or "/api/files/list"
+            or "/api/cdp/webviews" or "/api/cdp/source" or "/api/cdp/eval" => true,
+        _ => false,
+    };
+
+    private async Task<(int, string, byte[])> HandleLogsAsync(string? body)
+    {
+        var limit = ReadIntField(body, "limit", 100, 1, MaxLogLimit);
+        var source = ReadStringField(body, "source");
+        try
+        {
+            var raw = await _client.GetLogsAsync(limit, 0, string.IsNullOrWhiteSpace(source) ? null : source);
+            // The agent returns a JSON array of {t,l,c,m,e,s}. Mask obvious secrets (JWT/Bearer) in
+            // the raw text — safe because the replacements never introduce quotes.
+            var masked = MaskSecrets(raw);
+            return Ok(WrapRaw("logs", masked));
+        }
+        catch { return Ok("{\"ok\":false,\"error\":\"logs unavailable\"}"); }
+    }
+
+    private async Task<(int, string, byte[])> HandleNetworkAsync(string? body)
+    {
+        var limit = ReadIntField(body, "limit", 100, 1, MaxNetworkLimit);
+        try
+        {
+            var requests = await _client.GetNetworkRequestsAsync(limit);
+            foreach (var r in requests) RedactNetwork(r);
+            return Ok(JsonSerializer.Serialize(new { ok = true, requests }, CamelCase));
+        }
+        catch { return Ok("{\"ok\":false,\"error\":\"network unavailable\"}"); }
+    }
+
+    private async Task<(int, string, byte[])> HandleNetworkDetailAsync(string? body)
+    {
+        var id = ReadStringField(body, "id");
+        if (string.IsNullOrWhiteSpace(id) || id!.Length > 256)
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"id required\"}"));
+        try
+        {
+            var detail = await _client.GetNetworkRequestDetailAsync(id);
+            if (detail is null) return Ok("{\"ok\":false,\"error\":\"not found\"}");
+            RedactNetwork(detail);
+            return Ok(JsonSerializer.Serialize(new { ok = true, request = detail }, CamelCase));
+        }
+        catch { return Ok("{\"ok\":false,\"error\":\"network unavailable\"}"); }
+    }
+
+    private async Task<(int, string, byte[])> HandlePreferencesAsync(string? body)
+    {
+        var shared = ReadStringField(body, "sharedName");
+        try
+        {
+            var prefs = await _client.GetPreferencesAsync(string.IsNullOrWhiteSpace(shared) ? null : shared);
+            // Unknown shape across platforms — mask obvious secrets in the serialized text; the client
+            // additionally masks values by key heuristic and only reveals on demand.
+            var masked = MaskSecrets(JsonSerializer.Serialize(prefs, CamelCase));
+            return Ok(WrapRaw("preferences", masked));
+        }
+        catch { return Ok("{\"ok\":false,\"error\":\"preferences unavailable\"}"); }
+    }
+
+    // device-info/display are always safe; battery/connectivity are best-effort (may be unsupported).
+    private static readonly string[] DeviceEndpoints = { "device-info", "device-display", "battery", "connectivity" };
+
+    private async Task<(int, string, byte[])> HandleDeviceAsync(string? body)
+    {
+        var result = new Dictionary<string, JsonElement>();
+        foreach (var ep in DeviceEndpoints)
+        {
+            try { result[ep] = await _client.GetPlatformInfoAsync(ep); }
+            catch { /* unsupported on this platform — omit */ }
+        }
+        return Ok(JsonSerializer.Serialize(new { ok = true, device = result }, CamelCase));
+    }
+
+    private async Task<(int, string, byte[])> HandleSensorsAsync(string? body)
+    {
+        try
+        {
+            var sensors = await _client.GetSensorsAsync();
+            return Ok(JsonSerializer.Serialize(new { ok = true, sensors }, CamelCase));
+        }
+        catch { return Ok("{\"ok\":false,\"error\":\"sensors unavailable\"}"); }
+    }
+
+    private async Task<(int, string, byte[])> HandleGeolocationAsync(string? body)
+    {
+        // Explicit user gesture only (the client wires this to a button, never auto-load); blocked
+        // during replay is unnecessary (reads pass) but the client pauses it. Clamp the timeout.
+        try
+        {
+            var loc = await _client.GetGeolocationAsync(accuracy: "medium", timeoutSeconds: 10);
+            return Ok(JsonSerializer.Serialize(new { ok = true, location = loc }, CamelCase));
+        }
+        catch { return Ok("{\"ok\":false,\"error\":\"geolocation unavailable\"}"); }
+    }
+
+    private async Task<(int, string, byte[])> HandleFilesRootsAsync(string? body)
+    {
+        try
+        {
+            var roots = await _client.ListStorageRootsAsync();
+            return Ok(JsonSerializer.Serialize(new { ok = true, roots }, CamelCase));
+        }
+        catch { return Ok("{\"ok\":false,\"error\":\"storage unavailable\"}"); }
+    }
+
+    private async Task<(int, string, byte[])> HandleFilesListAsync(string? body)
+    {
+        var root = ReadStringField(body, "root");
+        var path = ReadStringField(body, "path");
+        // Defense-in-depth at the broker before proxying: reject traversal, NUL, rooted/overlong
+        // paths, and overlong root ids. The agent's FileStoragePathResolver is the real boundary.
+        if (path is not null && (path.Contains("..", StringComparison.Ordinal) || path.Contains('\0')
+                || path.StartsWith('/') || path.StartsWith('\\') || path.Length > 4096))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"invalid path\"}"));
+        if (root is not null && (root.Length > 256 || root.Contains('\0')))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"invalid root\"}"));
+        try
+        {
+            var files = await _client.ListFilesAsync(string.IsNullOrWhiteSpace(path) ? null : path,
+                                                     string.IsNullOrWhiteSpace(root) ? null : root);
+            return Ok(JsonSerializer.Serialize(new { ok = true, files }, CamelCase));
+        }
+        catch { return Ok("{\"ok\":false,\"error\":\"files unavailable\"}"); }
+    }
+
+    // ── N3 (scoped): Blazor WebView CDP tab — list WebViews, view source, evaluate JS. Surfaces the
+    // existing chobitsu.js CDP bridge (the full chrome-devtools-frontend embed remains a later spike).
+    private async Task<(int, string, byte[])> HandleCdpWebViewsAsync(string? body)
+    {
+        try { var wv = await _client.GetCdpWebViewsAsync(); return Ok(JsonSerializer.Serialize(new { ok = true, webviews = wv }, CamelCase)); }
+        catch { return Ok("{\"ok\":false,\"error\":\"no WebViews / CDP unavailable\"}"); }
+    }
+
+    private async Task<(int, string, byte[])> HandleCdpSourceAsync(string? body)
+    {
+        var id = ReadStringField(body, "webviewId");
+        try { var src = await _client.GetCdpSourceAsync(string.IsNullOrWhiteSpace(id) ? null : id); return Ok(JsonSerializer.Serialize(new { ok = true, source = src }, CamelCase)); }
+        catch { return Ok("{\"ok\":false,\"error\":\"source unavailable\"}"); }
+    }
+
+    private async Task<(int, string, byte[])> HandleCdpEvalAsync(string? body)
+    {
+        var expr = ReadStringField(body, "expression");
+        var id = ReadStringField(body, "webviewId");
+        if (string.IsNullOrWhiteSpace(expr) || expr!.Length > 8192)
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"expression required\"}"));
+        try
+        {
+            var pars = new System.Text.Json.Nodes.JsonObject { ["expression"] = expr, ["returnByValue"] = true };
+            var res = await _client.SendCdpCommandAsync("Runtime.evaluate", pars, string.IsNullOrWhiteSpace(id) ? null : id);
+            return Ok(JsonSerializer.Serialize(new { ok = true, result = res }, CamelCase));
+        }
+        catch { return Ok("{\"ok\":false,\"error\":\"evaluate failed\"}"); }
+    }
+
+    // ── N2 helpers ──
+
+    private static (int, string, byte[]) Ok(string json) => (200, "application/json", Encoding.UTF8.GetBytes(json));
+    private static string WrapRaw(string field, string rawJson)
+        => "{\"ok\":true,\"" + field + "\":" + (string.IsNullOrWhiteSpace(rawJson) ? "null" : rawJson) + "}";
+
+    private static int ReadIntField(string? body, string name, int dflt, int min, int max)
+    {
+        if (string.IsNullOrEmpty(body)) return dflt;
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number && v.TryGetInt32(out var n))
+                return Math.Clamp(n, min, max);
+        }
+        catch { }
+        return dflt;
+    }
+
+    private static string? ReadStringField(string? body, string name)
+    {
+        if (string.IsNullOrEmpty(body)) return null;
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.String)
+                return v.GetString();
+        }
+        catch { }
+        return null;
+    }
+
+    private static readonly HashSet<string> SensitiveHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token",
+    };
+
+    private static readonly string[] SensitiveHeaderFragments = { "token", "secret", "auth", "cookie", "apikey", "api-key", "api_key" };
+
+    // Structural redaction of a captured HTTP request: mask sensitive headers, drop bodies, and strip
+    // secret query-string values from the URL/path.
+    private static void RedactNetwork(NetworkRequest r)
+    {
+        RedactHeaders(r.RequestHeaders);
+        RedactHeaders(r.ResponseHeaders);
+        r.RequestBody = r.RequestBody is null ? null : "<hidden>";
+        r.ResponseBody = r.ResponseBody is null ? null : "<hidden>";
+        r.Url = MaskUrlSecrets(r.Url);
+        if (r.Path is not null) r.Path = MaskUrlSecrets(r.Path);
+    }
+
+    internal static void RedactHeaders(Dictionary<string, string[]>? headers)
+    {
+        if (headers is null) return;
+        foreach (var key in headers.Keys.ToList())
+        {
+            var lower = key.ToLowerInvariant();
+            if (SensitiveHeaders.Contains(key) || SensitiveHeaderFragments.Any(f => lower.Contains(f)))
+                headers[key] = new[] { "<redacted>" };
+        }
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex UrlSecretRegex = new(
+        @"(?i)([?&](?:access_token|refresh_token|id_token|token|api[_-]?key|apikey|key|secret|password|code|sig|signature)=)[^&#\s]+",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    internal static string MaskUrlSecrets(string url)
+        => string.IsNullOrEmpty(url) ? url : UrlSecretRegex.Replace(url, "$1<redacted>");
+
+    // Mask JWTs, Bearer tokens, and "secretKey":"value" pairs in free-form JSON text without
+    // unbalancing quotes (replacements never introduce a double-quote).
+    private static readonly System.Text.RegularExpressions.Regex JwtRegex = new(
+        @"eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex BearerRegex = new(
+        @"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+    private static readonly System.Text.RegularExpressions.Regex SecretKvRegex = new(
+        "(?i)(\"(?:[a-z0-9_-]*(?:token|secret|password|apikey|api[_-]?key|authorization)[a-z0-9_-]*)\"\\s*:\\s*)\"[^\"]*\"",
+        System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    internal static string MaskSecrets(string text)
+    {
+        if (string.IsNullOrEmpty(text)) return text;
+        text = JwtRegex.Replace(text, "<jwt>");
+        text = BearerRegex.Replace(text, "$1<redacted>");
+        text = SecretKvRegex.Replace(text, "$1\"<redacted>\"");
+        return text;
+    }
+
+    internal static bool IsMutation(string path) => path switch
+    {
+        "/api/tap" or "/api/scroll" or "/api/gesture" or "/api/back" or "/api/fill" or "/api/key"
+            or "/api/setProperty" or "/api/navigate" or "/api/cdp/eval"
+            or "/api/flows/record/start" or "/api/flows/record/step" or "/api/flows/replay" => true,
+        _ => false,
+    };
+
+    // Presence + take-control endpoint for the agent-enforced global mutation lease.
+    private async Task<(int, string, byte[])> HandleControlAsync(
+        string? body,
+        string leaseId,
+        string holderKind,
+        string holderLabel)
+    {
+        var action = ReadStringField(body, "action") ?? "status";
+        var status = await _client.ControlMutationLeaseAsync(
+            action,
+            force: ReadBoolField(body, "force"),
+            leaseId,
+            holderKind,
+            holderLabel);
+        return Ok(JsonSerializer.Serialize(new
+        {
+            ok = status.Ok,
+            youAreWriter = status.YouHold,
+            heldByOther = status.HeldByOther,
+            holderKind = status.HolderKind,
+            label = status.Label,
+            expiresInMs = status.ExpiresInMs,
+            authority = status.Authority
+        }, CamelCase));
+    }
+
+    private static bool ReadBoolField(string? body, string name)
+    {
+        if (string.IsNullOrEmpty(body)) return false;
+        try { using var doc = JsonDocument.Parse(body); return doc.RootElement.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.True; }
+        catch { return false; }
+    }
+
+    /// <summary>
+    /// True when a broker request carries the exact embed token — i.e. a trusted LOCAL host shell
+    /// (canvas / VS Code) that may embed the inspector in an iframe. The token is only obtainable
+    /// from the local broker.json, so a remote clickjacking page cannot match it.
+    /// </summary>
+    internal static bool IsTrustedEmbed(string? embedToken, string? requestEmbed)
+        => !string.IsNullOrEmpty(embedToken) && string.Equals(embedToken, requestEmbed, StringComparison.Ordinal);
 
     // ── WebSocket proxy (pass-through to agent /ws/v1/ui/events) ──
 
@@ -1026,8 +1833,21 @@ public sealed class InspectorServer : IDisposable
         if (requestLine.Length < 2) return (null, false);
 
         var method = requestLine[0].ToUpperInvariant();
-        var path = requestLine[1].Split('?')[0].TrimEnd('/');
+        var fullPath = requestLine[1];
+        var queryStart = fullPath.IndexOf('?');
+        var path = (queryStart >= 0 ? fullPath[..queryStart] : fullPath).TrimEnd('/');
         if (string.IsNullOrEmpty(path)) path = "/";
+        var query = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (queryStart >= 0 && queryStart < fullPath.Length - 1)
+        {
+            foreach (var part in fullPath[(queryStart + 1)..].Split('&', StringSplitOptions.RemoveEmptyEntries))
+            {
+                var pair = part.Split('=', 2);
+                query[Uri.UnescapeDataString(pair[0])] = pair.Length == 2
+                    ? Uri.UnescapeDataString(pair[1])
+                    : "";
+            }
+        }
 
         var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         for (int i = 1; i < lines.Length; i++)
@@ -1076,6 +1896,7 @@ public sealed class InspectorServer : IDisposable
         {
             Method = method,
             Path = path,
+            Query = query,
             Headers = headers,
             Body = body
         }, false);
@@ -1110,6 +1931,7 @@ public sealed class InspectorServer : IDisposable
     {
         public string Method { get; init; } = "";
         public string Path { get; init; } = "";
+        public Dictionary<string, string> Query { get; init; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, string> Headers { get; init; } = new();
         public string? Body { get; init; }
     }

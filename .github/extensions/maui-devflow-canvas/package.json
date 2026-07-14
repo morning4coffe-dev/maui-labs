@@ -1,0 +1,20 @@
+{
+  "name": "maui-devflow-canvas",
+  "version": "0.1.0-preview.12",
+  "private": true,
+  "type": "module",
+  "description": "GitHub Copilot Canvas extension for MAUI DevFlow: a live, interactive view of a running .NET MAUI app (real screenshot + visual-tree overlay + editable property grid) that both the human and Copilot inspect, select, edit, and drive. Backed by the shared @maui-devflow/client over the DevFlow broker + in-app agent.",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node extension.mjs",
+    "selftest": "node selftest.mjs",
+    "selftest:recorder": "node selftest-recorder.mjs",
+    "test": "node --test \"test/**/*.test.mjs\""
+  },
+  "dependencies": {
+    "@github/copilot-sdk": "^1.0.0",
+    "@maui-devflow/client": "file:../../../src/DevFlow/js/devflow-client"
+  }
+}

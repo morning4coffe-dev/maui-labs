@@ -31,9 +31,22 @@ public class AgentClient : IDisposable
 
     private readonly HttpClient _http;
     private readonly string _baseUrl;
+    private readonly AsyncLocal<MutationLeaseIdentity?> _mutationLeaseOverride = new();
     private bool _disposed;
 
     public string BaseUrl => _baseUrl;
+
+    /// <summary>Stable identity used to coordinate mutating calls from this client.</summary>
+    public string MutationLeaseId { get; set; } = Guid.NewGuid().ToString("N");
+
+    /// <summary>Caller kind shown to other DevFlow hosts when this client holds the lease.</summary>
+    public string MutationLeaseHolderKind { get; set; } = "driver";
+
+    /// <summary>Human-readable holder label shown by inspector hosts.</summary>
+    public string? MutationLeaseLabel { get; set; }
+
+    /// <summary>Automatically claim the mutation lease before non-GET requests. Default: true.</summary>
+    public bool AutoAcquireMutationLease { get; set; } = true;
 
     /// <summary>
     /// Additional attempts for transient transport failures such as a dropped ADB port
@@ -73,7 +86,155 @@ public class AgentClient : IDisposable
     public AgentClient(string host = "localhost", int port = 9223)
     {
         _baseUrl = $"http://{host}:{port}";
-        _http = CreateHttpClient(host);
+        _http = CreateHttpClient(host, GetCurrentMutationLease);
+    }
+
+    /// <summary>
+    /// Temporarily uses a caller-provided mutation lease identity for all asynchronous calls made
+    /// within the returned scope. Used by shared proxy hosts that serve multiple browser sessions.
+    /// </summary>
+    public IDisposable UseMutationLease(string leaseId, string holderKind, string? label = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(leaseId);
+        var previous = _mutationLeaseOverride.Value;
+        _mutationLeaseOverride.Value = new MutationLeaseIdentity(leaseId, holderKind, label);
+        return new MutationLeaseScope(_mutationLeaseOverride, previous);
+    }
+
+    /// <summary>Claim, query, heartbeat, or release this caller's mutation lease.</summary>
+    public async Task<MutationLeaseStatus> ControlMutationLeaseAsync(
+        string action,
+        bool force = false,
+        string? leaseId = null,
+        string? holderKind = null,
+        string? label = null)
+    {
+        var current = GetCurrentMutationLease();
+        var id = string.IsNullOrWhiteSpace(leaseId) ? current?.LeaseId : leaseId;
+        var kind = string.IsNullOrWhiteSpace(holderKind) ? current?.HolderKind : holderKind;
+        var display = label ?? current?.Label;
+        var body = new JsonObject
+        {
+            ["action"] = action,
+            ["leaseId"] = id,
+            ["holderKind"] = kind,
+            ["label"] = display,
+            ["force"] = force
+        };
+
+        using var content = DriverJson.CreateJsonContent(body);
+        using var response = await _http.PostAsync($"{_baseUrl}{AgentApi}/lease", content);
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            // Rolling-upgrade compatibility: older agents predate mutation leases. They remain
+            // usable during a public-preview upgrade, while current agents enforce the lease.
+            return new MutationLeaseStatus
+            {
+                Ok = true,
+                Allowed = true,
+                YouHold = true,
+                Authority = "unsupported"
+            };
+        }
+        var responseBody = await response.Content.ReadAsStringAsync();
+        var status = DriverJson.Deserialize<MutationLeaseStatus>(responseBody) ?? new MutationLeaseStatus
+        {
+            Ok = false,
+            Error = $"Mutation lease request failed with HTTP {(int)response.StatusCode}."
+        };
+        status.Ok &= response.IsSuccessStatusCode;
+        return status;
+    }
+
+    public async Task<MutationRecordingStatus> ControlMutationRecordingAsync(
+        string action,
+        string? name = null,
+        string? app = null,
+        string? platform = null,
+        string? preconditions = null)
+    {
+        if (string.Equals(action, "status", StringComparison.OrdinalIgnoreCase))
+        {
+            var lease = await ControlMutationLeaseAsync("status");
+            if (lease.HeldByOther)
+            {
+                return new MutationRecordingStatus
+                {
+                    Ok = false,
+                    Error = $"Another DevFlow session is driving this app ({lease.Label ?? lease.HolderKind ?? "unknown holder"})."
+                };
+            }
+            if (!lease.YouHold)
+                return new MutationRecordingStatus { Ok = true, Recording = false, Steps = 0 };
+        }
+
+        var body = new JsonObject
+        {
+            ["action"] = action,
+            ["name"] = name,
+            ["app"] = app,
+            ["platform"] = platform,
+            ["preconditions"] = preconditions
+        };
+        using var response = string.Equals(action, "status", StringComparison.OrdinalIgnoreCase)
+            ? await SendRecordingRequestAsync(body)
+            : await SendWithTransientRetriesAsync(HttpMethod.Post, () => SendRecordingRequestAsync(body));
+        var responseBody = await response.Content.ReadAsStringAsync();
+        if (response.StatusCode == HttpStatusCode.NotFound)
+        {
+            return new MutationRecordingStatus
+            {
+                Ok = false,
+                Error = "The connected agent does not support coordinated workflow recording."
+            };
+        }
+        return DriverJson.Deserialize<MutationRecordingStatus>(responseBody) ?? new MutationRecordingStatus
+        {
+            Ok = false,
+            Error = $"Recording request failed with HTTP {(int)response.StatusCode}."
+        };
+    }
+
+    private async Task<HttpResponseMessage> SendRecordingRequestAsync(JsonObject body)
+    {
+        using var content = DriverJson.CreateJsonContent(body);
+        return await _http.PostAsync($"{_baseUrl}{AgentApi}/recording", content);
+    }
+
+    private MutationLeaseIdentity? GetCurrentMutationLease()
+    {
+        var current = _mutationLeaseOverride.Value;
+        if (current is not null)
+            return current;
+        if (string.IsNullOrWhiteSpace(MutationLeaseId))
+            return null;
+        return new MutationLeaseIdentity(
+            MutationLeaseId,
+            string.IsNullOrWhiteSpace(MutationLeaseHolderKind) ? "driver" : MutationLeaseHolderKind,
+            MutationLeaseLabel);
+    }
+
+    private async Task EnsureMutationLeaseAsync()
+    {
+        if (!AutoAcquireMutationLease)
+            return;
+
+        var identity = GetCurrentMutationLease();
+        if (identity is null)
+            throw new MutationLeaseException(new MutationLeaseStatus
+            {
+                Ok = false,
+                Error = "No DevFlow mutation lease identity is configured."
+            });
+
+        var status = await ControlMutationLeaseAsync(
+            "claim",
+            force: false,
+            identity.LeaseId,
+            identity.HolderKind,
+            identity.Label);
+        if (!status.YouHold)
+            throw new MutationLeaseException(status);
     }
 
     /// <summary>
@@ -89,16 +250,21 @@ public class AgentClient : IDisposable
     /// resolution order and falls back to the other loopback family on refusal. Explicit hosts
     /// (a literal IP or a real hostname) are left on the default connect path unchanged.
     /// </remarks>
-    private static HttpClient CreateHttpClient(string host)
+    private static HttpClient CreateHttpClient(
+        string host,
+        Func<MutationLeaseIdentity?> mutationLeaseProvider)
     {
-        if (!IsLoopbackAlias(host))
-            return new HttpClient { Timeout = TimeSpan.FromSeconds(30) };
-
-        var handler = new SocketsHttpHandler
+        HttpMessageHandler transport = !IsLoopbackAlias(host)
+            ? new HttpClientHandler()
+            : new SocketsHttpHandler
         {
             ConnectCallback = ConnectLoopbackAsync
         };
-        return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(30) };
+        var leaseHandler = new MutationLeaseHeaderHandler(mutationLeaseProvider)
+        {
+            InnerHandler = transport
+        };
+        return new HttpClient(leaseHandler) { Timeout = TimeSpan.FromSeconds(30) };
     }
 
     private static bool IsLoopbackAlias(string host)
@@ -848,8 +1014,11 @@ public class AgentClient : IDisposable
     {
         try
         {
-            using var content = DriverJson.CreateJsonContent(body);
-            var response = await _http.PutAsync($"{_baseUrl}{path}", content);
+            using var response = await SendWithTransientRetriesAsync(HttpMethod.Put, async () =>
+            {
+                using var content = DriverJson.CreateJsonContent(body);
+                return await _http.PutAsync($"{_baseUrl}{path}", content);
+            });
             if (!response.IsSuccessStatusCode)
                 return null;
 
@@ -908,6 +1077,8 @@ public class AgentClient : IDisposable
     {
         var retryCount = Math.Max(0, TransientFailureRetryCount);
         var isMutating = method != HttpMethod.Get;
+        if (isMutating)
+            await EnsureMutationLeaseAsync();
         if (isMutating && !RetryMutatingRequests)
             retryCount = 0;
 
@@ -1255,6 +1426,61 @@ public class AgentClient : IDisposable
         [System.Text.Json.Serialization.JsonPropertyName("success")]
         public bool Success { get; set; }
     }
+
+    private sealed record MutationLeaseIdentity(string LeaseId, string HolderKind, string? Label);
+
+    private sealed class MutationLeaseScope : IDisposable
+    {
+        private readonly AsyncLocal<MutationLeaseIdentity?> _slot;
+        private readonly MutationLeaseIdentity? _previous;
+        private bool _disposed;
+
+        public MutationLeaseScope(
+            AsyncLocal<MutationLeaseIdentity?> slot,
+            MutationLeaseIdentity? previous)
+        {
+            _slot = slot;
+            _previous = previous;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed) return;
+            _disposed = true;
+            _slot.Value = _previous;
+        }
+    }
+
+    private sealed class MutationLeaseHeaderHandler : DelegatingHandler
+    {
+        private readonly Func<MutationLeaseIdentity?> _leaseProvider;
+
+        public MutationLeaseHeaderHandler(Func<MutationLeaseIdentity?> leaseProvider)
+        {
+            _leaseProvider = leaseProvider;
+        }
+
+        protected override Task<HttpResponseMessage> SendAsync(
+            HttpRequestMessage request,
+            CancellationToken cancellationToken)
+        {
+            var lease = _leaseProvider();
+            if (lease is not null)
+            {
+                request.Headers.Remove("X-DevFlow-Lease");
+                request.Headers.TryAddWithoutValidation("X-DevFlow-Lease", lease.LeaseId);
+                request.Headers.Remove("X-DevFlow-Holder");
+                request.Headers.TryAddWithoutValidation("X-DevFlow-Holder", lease.HolderKind);
+                if (!string.IsNullOrWhiteSpace(lease.Label))
+                {
+                    request.Headers.Remove("X-DevFlow-Label");
+                    request.Headers.TryAddWithoutValidation("X-DevFlow-Label", lease.Label);
+                }
+            }
+
+            return base.SendAsync(request, cancellationToken);
+        }
+    }
 }
 
 public class AgentStatus
@@ -1273,6 +1499,9 @@ public class AgentStatus
     public string? Timestamp { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("running")]
     public bool Running { get; set; }
+
+    [System.Text.Json.Serialization.JsonPropertyName("route")]
+    public string? Route { get; set; }
 
     [System.Text.Json.Serialization.JsonIgnore]
     public string? Version => Agent?.Version;

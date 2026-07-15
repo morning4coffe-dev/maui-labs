@@ -22,6 +22,10 @@ public sealed class InspectorServer : IDisposable
     private readonly int _agentPort;
     private readonly AgentClient _client;
     private readonly string? _embedToken;
+    private readonly string? _agentId;
+    private readonly string? _appName;
+    private readonly string? _platform;
+    private readonly XamlSourcePropertyEditor _sourcePropertyEditor;
     // Per-inspector read token gating the N2 data tabs (Logs/Network/Preferences/Device/Sensors/
     // Files) — the app data these expose (tokens in network, secrets in prefs/logs) exceeds the
     // visible tree. Injected into the served page as a <meta>; devflow.js echoes it back in the
@@ -62,11 +66,29 @@ public sealed class InspectorServer : IDisposable
     public int AgentPort => _agentPort;
 
     public InspectorServer(int port, string agentHost, int agentPort, string? embedToken = null)
+        : this(port, agentHost, agentPort, embedToken, agentId: null, appName: null, platform: null, project: null, sessionId: null)
+    {
+    }
+
+    internal InspectorServer(
+        int port,
+        string agentHost,
+        int agentPort,
+        string? embedToken,
+        string? agentId,
+        string? appName,
+        string? platform,
+        string? project,
+        string? sessionId)
     {
         _port = port;
         _agentHost = agentHost;
         _agentPort = agentPort;
         _embedToken = embedToken;
+        _agentId = agentId;
+        _appName = appName;
+        _platform = platform;
+        _sourcePropertyEditor = new XamlSourcePropertyEditor(project, sessionId);
         _client = new AgentClient(agentHost, agentPort)
         {
             MutationLeaseHolderKind = "web-inspector",
@@ -549,6 +571,7 @@ public sealed class InspectorServer : IDisposable
                     "/api/key" => await HandleProxyKeyAsync(request.Body),
                     "/api/getProperty" => await HandleProxyGetPropertyAsync(request.Body),
                     "/api/setProperty" => await HandleProxySetPropertyAsync(request.Body),
+                    "/api/persistProperty" => await HandlePersistPropertyAsync(request.Body),
                     "/api/navigate" => await HandleProxyNavigateAsync(request.Body),
                     "/api/checkpoint" => await HandleCheckpointAsync(request.Body),
                     "/api/source" => await HandleSourceAsync(request.Body),
@@ -601,11 +624,22 @@ public sealed class InspectorServer : IDisposable
             screenshotUrl: $"screenshot.png?frame={Uri.EscapeDataString(frame.Id)}");
         // Inject the per-inspector read token so same-origin devflow.js can gate the N2 data tabs.
         var tokenMeta = $"<meta name=\"devflow-inspector-token\" content=\"{_readToken}\">";
+        var agentMeta = new StringBuilder()
+            .Append(BuildMeta("devflow-agent-id", _agentId))
+            .Append(BuildMeta("devflow-app-name", _appName))
+            .Append(BuildMeta("devflow-platform", _platform))
+            .Append(BuildMeta("devflow-agent-port", _agentPort.ToString(System.Globalization.CultureInfo.InvariantCulture)))
+            .ToString();
         html = html.Contains("</head>", StringComparison.Ordinal)
-            ? html.Replace("</head>", tokenMeta + "</head>")
-            : tokenMeta + html;
+            ? html.Replace("</head>", tokenMeta + agentMeta + "</head>")
+            : tokenMeta + agentMeta + html;
         return (200, "text/html; charset=utf-8", Encoding.UTF8.GetBytes(html));
     }
+
+    private static string BuildMeta(string name, string? value)
+        => string.IsNullOrWhiteSpace(value)
+            ? string.Empty
+            : $"<meta name=\"{name}\" content=\"{WebUtility.HtmlEncode(value)}\">";
 
     /// <summary>
     /// Returns JSON state for AJAX polling: screenshot (as timestamped URL) + element divs HTML.
@@ -1041,22 +1075,8 @@ public sealed class InspectorServer : IDisposable
         var elementId = root.TryGetProperty("elementId", out var idProp) ? idProp.GetString() : null;
         var name = root.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
 
-        // Only scalar JSON is a valid property value. Number/bool GetRawText() is culture-invariant
-        // ("0.5", "true"); reject null/array/object rather than sending "null" / JSON text downstream.
-        string? value = null;
-        var badValueKind = false;
-        if (root.TryGetProperty("value", out var valProp))
-        {
-            switch (valProp.ValueKind)
-            {
-                case JsonValueKind.String: value = valProp.GetString(); break;
-                case JsonValueKind.Number:
-                case JsonValueKind.True:
-                case JsonValueKind.False: value = valProp.GetRawText(); break;
-                default: badValueKind = true; break;
-            }
-        }
-        if (badValueKind)
+        // Only scalar JSON is a valid property value. Number/bool raw text is culture-invariant.
+        if (!TryReadScalarField(root, "value", out var value))
             return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"value must be a string, number, or boolean\"}"));
         if (!IsValidPropertyRef(elementId, name) || value is null)
             return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"elementId, name and value required\"}"));
@@ -1066,6 +1086,96 @@ public sealed class InspectorServer : IDisposable
         return success
             ? (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true}"))
             : (500, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false}"));
+    }
+
+    // Persists an Inspector property value to an existing direct-literal XAML attribute. The agent
+    // supplies source metadata; the broker validates and writes the local project file.
+    private async Task<(int, string, byte[])> HandlePersistPropertyAsync(string? body)
+    {
+        if (string.IsNullOrEmpty(body))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"Body required\"}"));
+
+        using var doc = JsonDocument.Parse(body);
+        var root = doc.RootElement;
+        var elementId = root.TryGetProperty("elementId", out var idProp) ? idProp.GetString() : null;
+        var name = root.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
+        if (!TryReadScalarField(root, "value", out var value))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"value must be a string, number, or boolean\"}"));
+        if (!IsValidPropertyRef(elementId, name) || value is null)
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"elementId, name and value required\"}"));
+        if (!XamlSourcePropertyEditor.IsSupportedPropertyName(name!))
+            return (400, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"This property is not supported for XAML source persistence.\"}"));
+
+        ElementInfo? element;
+        try
+        {
+            element = await _client.GetElementAsync(elementId!);
+        }
+        catch
+        {
+            return (502, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"Could not resolve the element source.\"}"));
+        }
+
+        if (element is null)
+            return (404, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"Element not found.\"}"));
+
+        bool runtimeAccepted;
+        try
+        {
+            runtimeAccepted = await _client.SetPropertyAsync(elementId!, name!, value);
+        }
+        catch
+        {
+            return (502, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"Could not validate the property value against the running app.\"}"));
+        }
+        if (!runtimeAccepted)
+        {
+            return (422, "application/json", Encoding.UTF8.GetBytes(
+                "{\"ok\":false,\"error\":\"The running app rejected this property value, so the XAML source was not changed.\"}"));
+        }
+        InvalidateScreenshotCache();
+
+        var result = await _sourcePropertyEditor.PersistAsync(element, name!, value);
+        var statusCode = result.Status switch
+        {
+            XamlSourceEditStatus.Success => 200,
+            XamlSourceEditStatus.InvalidRequest => 400,
+            XamlSourceEditStatus.Forbidden => 403,
+            XamlSourceEditStatus.Stale => 409,
+            XamlSourceEditStatus.SourceUnavailable or XamlSourceEditStatus.Unsupported => 422,
+            _ => 500,
+        };
+        var payload = JsonSerializer.Serialize(new
+        {
+            ok = result.Success,
+            error = result.Error,
+            file = result.File,
+            line = result.Line,
+            column = result.Column,
+            sourceHash = result.SourceHash
+        }, CamelCase);
+        return (statusCode, "application/json", Encoding.UTF8.GetBytes(payload));
+    }
+
+    private static bool TryReadScalarField(JsonElement root, string name, out string? value)
+    {
+        value = null;
+        if (!root.TryGetProperty(name, out var property))
+            return false;
+
+        switch (property.ValueKind)
+        {
+            case JsonValueKind.String:
+                value = property.GetString();
+                return value is not null;
+            case JsonValueKind.Number:
+            case JsonValueKind.True:
+            case JsonValueKind.False:
+                value = property.GetRawText();
+                return true;
+            default:
+                return false;
+        }
     }
 
     // Guards the proxied property endpoints: non-empty and bounded elementId/name.
@@ -1131,13 +1241,43 @@ public sealed class InspectorServer : IDisposable
 
     private async Task<(int, string, byte[])> HandleFlowRecordStepAsync(string? body)
     {
-        var result = await _client.ControlMutationRecordingAsync("status");
+        string? action = null;
+        string? assertsJson = null;
+        if (!string.IsNullOrWhiteSpace(body))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(body);
+                if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                    return BadRequest("Body must be a JSON object.");
+                action = doc.RootElement.TryGetProperty("action", out var actionElement)
+                    && actionElement.ValueKind == JsonValueKind.String
+                        ? actionElement.GetString()
+                        : null;
+                assertsJson = doc.RootElement.TryGetProperty("assertsJson", out var assertsElement)
+                    && assertsElement.ValueKind == JsonValueKind.String
+                        ? assertsElement.GetString()
+                        : null;
+            }
+            catch (JsonException)
+            {
+                return BadRequest("Invalid JSON body.");
+            }
+        }
+
+        var result = string.Equals(action, Flows.FlowActions.Assert, StringComparison.OrdinalIgnoreCase)
+            ? await _client.ObserveMutationRecordingAsync(new MutationRecordingObservation
+            {
+                Action = Flows.FlowActions.Assert,
+                AssertsJson = assertsJson
+            })
+            : await _client.ControlMutationRecordingAsync("status");
         var payload = JsonSerializer.Serialize(new
         {
             ok = result.Ok,
-            seq = result.Steps,
+            seq = result.Seq ?? result.Steps,
             stepCount = result.Steps,
-            fragile = false,
+            fragile = result.Fragile,
             error = result.Error
         }, CamelCase);
         return (result.Ok ? 200 : 400, "application/json", Encoding.UTF8.GetBytes(payload));
@@ -1267,7 +1407,7 @@ public sealed class InspectorServer : IDisposable
     private static bool IsBlockedDuringReplay(string path) => path switch
     {
         "/api/tap" or "/api/scroll" or "/api/gesture" or "/api/back" or "/api/fill" or "/api/key"
-            or "/api/setProperty" or "/api/navigate" or "/api/cdp/eval"
+            or "/api/setProperty" or "/api/persistProperty" or "/api/navigate" or "/api/cdp/eval"
             or "/api/flows/record/start" or "/api/flows/record/step" => true,
         _ => false,
     };
@@ -1334,7 +1474,7 @@ public sealed class InspectorServer : IDisposable
     // Paths whose responses expose more than the visible tree and therefore require the read token.
     internal static bool IsTokenGatedPath(string path) => path switch
     {
-        "/api/source" or "/api/logs" or "/api/network" or "/api/network/detail" or "/api/preferences"
+        "/api/source" or "/api/persistProperty" or "/api/logs" or "/api/network" or "/api/network/detail" or "/api/preferences"
             or "/api/device" or "/api/sensors" or "/api/geolocation"
             or "/api/files/roots" or "/api/files/list"
             or "/api/cdp/webviews" or "/api/cdp/source" or "/api/cdp/eval" => true,
@@ -1496,6 +1636,8 @@ public sealed class InspectorServer : IDisposable
     // ── N2 helpers ──
 
     private static (int, string, byte[]) Ok(string json) => (200, "application/json", Encoding.UTF8.GetBytes(json));
+    private static (int, string, byte[]) BadRequest(string error)
+        => (400, "application/json", Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { error }, CamelCase)));
     private static string WrapRaw(string field, string rawJson)
         => "{\"ok\":true,\"" + field + "\":" + (string.IsNullOrWhiteSpace(rawJson) ? "null" : rawJson) + "}";
 
@@ -1586,7 +1728,7 @@ public sealed class InspectorServer : IDisposable
     internal static bool IsMutation(string path) => path switch
     {
         "/api/tap" or "/api/scroll" or "/api/gesture" or "/api/back" or "/api/fill" or "/api/key"
-            or "/api/setProperty" or "/api/navigate" or "/api/cdp/eval"
+            or "/api/setProperty" or "/api/persistProperty" or "/api/navigate" or "/api/cdp/eval"
             or "/api/flows/record/start" or "/api/flows/record/step" or "/api/flows/replay" => true,
         _ => false,
     };

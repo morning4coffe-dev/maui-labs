@@ -1,8 +1,10 @@
 // shell.mjs — m2b + feature D: the canvas panel embeds the SHARED DevFlow broker inspector instead
 // of the hand-rendered ui.mjs, so the canvas shows the exact same inspector as a browser or the VS
 // Code host (visual tree, screenshot, tap/fill/scroll, the m6 rich property grid, record/replay).
-// The broker hosts it per-agent at http://localhost:{brokerPort}/inspector/{agentId}/. ui.mjs stays
-// as the fallback when no broker/agent is resolved.
+// The broker hosts it per-agent at http://localhost:{brokerPort}/inspector/{agentId}/. When no
+// broker/agent is resolved yet, `renderDisconnected` (below) is the runtime fallback — a lightweight
+// status shell in the same hybrid --df-* token language that self-heals via /inspector-ready polling.
+// The legacy hand-rendered ui.mjs remains on disk but is no longer used at runtime by either path.
 //
 // The nonce'd relay <script> is the canvas end of the authenticated host bridge. The canvas can't
 // open VS Code Chat or an editor, so it advertises only `saveRecording`: when the inspector finishes
@@ -39,15 +41,18 @@ export function renderShell(inspectorUrl, appName, bridgeId) {
       const bridgeId = ${bridgeLiteral};
       // Capabilities the canvas contributes: save recordings, receive the human's selection (so the
       // agent can answer about "the selected element"), and push that selection to Copilot as context.
-      const capabilities = bridgeId ? ['saveRecording', 'selection', 'copilot'] : [];
+      const capabilities = bridgeId ? ['saveRecording', 'selection', 'copilot', 'attachData'] : [];
       // Relay a control action to the canvas server (which updates the agent-facing selection store).
       function postControl(payload, cb) {
         try {
           fetch('/control', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(Object.assign({ bridgeId: bridgeId }, payload)) })
-            .then(function (r) { return r && r.ok ? r.json().catch(function () { return null; }) : null; })
+            .then(function (r) {
+              if (!r || !r.ok) return { ok: false, error: 'The Canvas host rejected the DevFlow request.' };
+              return r.json().catch(function () { return { ok: false, error: 'The Canvas host returned an invalid response.' }; });
+            })
             .then(function (j) { if (cb) cb(j); })
-            .catch(function () { /* best effort */ });
-        } catch (e) { /* best effort */ }
+            .catch(function () { if (cb) cb({ ok: false, error: 'The Canvas host did not respond.' }); });
+        } catch (e) { if (cb) cb({ ok: false, error: 'The Canvas host could not send the request.' }); }
       }
       // The Copilot canvas is a Chromium surface that follows the host app's light/dark setting via
       // prefers-color-scheme. Forward that as an explicit mode so the inspector themes correctly even
@@ -56,17 +61,128 @@ export function renderShell(inspectorUrl, appName, bridgeId) {
         try { return (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) ? 'dark' : 'light'; }
         catch (e) { return 'dark'; }
       }
+      // Literal GitHub Primer palette (same values the legacy ui.mjs hand-rolled) — the last-resort
+      // fallback whenever a --fgColor-*/--bgColor-*/--borderColor-* Primer variable isn't defined on
+      // the shell document (older/newer Canvas host build). Every value is a plain hex/rgba string —
+      // safe to ship through the theme.palette bridge (the shared inspector re-validates it anyway).
+      const PRIMER_FALLBACK = {
+        light: {
+          '--df-bg': '#ffffff', '--df-surface': '#f6f8fa', '--df-surface-2': '#eaeef2', '--df-fg': '#1f2328',
+          '--df-muted': '#656d76', '--df-border': '#d0d7de', '--df-border-subtle': '#d8dee4',
+          '--df-hover': '#eaeef2', '--df-hover-row': '#eaeef2', '--df-accent': '#0969da', '--df-accent-fg': '#ffffff',
+          '--df-selected': 'rgba(9,105,218,.10)', '--df-selected-fg': '#1f2328', '--df-danger': '#cf222e',
+          '--df-focus': '#0969da', '--df-warn': '#9a6700', '--df-error': '#cf222e',
+          '--df-type': '#0969da', '--df-name': '#8250df', '--df-source': '#9a6700', '--df-success': '#1a7f37',
+          '--df-outline-hover': '#0969da', '--df-outline-select': '#0969da'
+        },
+        dark: {
+          '--df-bg': '#0d1117', '--df-surface': '#161b22', '--df-surface-2': '#12161d', '--df-fg': '#e6edf3',
+          '--df-muted': '#8b949e', '--df-border': '#30363d', '--df-border-subtle': '#292e36',
+          '--df-hover': '#1c2230', '--df-hover-row': '#1c2230', '--df-accent': '#2f81f7', '--df-accent-fg': '#ffffff',
+          '--df-selected': 'rgba(47,129,247,.18)', '--df-selected-fg': '#e6edf3', '--df-danger': '#f85149',
+          '--df-focus': '#2f81f7', '--df-warn': '#d29922', '--df-error': '#f85149',
+          '--df-type': '#2f81f7', '--df-name': '#a371f7', '--df-source': '#d29922', '--df-success': '#3fb950',
+          '--df-outline-hover': '#2f81f7', '--df-outline-select': '#2f81f7'
+        }
+      };
+      // Best-effort Primer/Copilot CSS custom-property names for each shared df-* token — the canvas
+      // is a GitHub Primer surface, so these commonly resolve. getComputedStyle() picks whichever the
+      // host document actually defines; PRIMER_FALLBACK covers the rest.
+      const PRIMER_MAP = {
+        '--df-bg': ['--bgColor-default'], '--df-surface': ['--bgColor-muted'], '--df-surface-2': ['--bgColor-inset'],
+        '--df-fg': ['--fgColor-default'], '--df-muted': ['--fgColor-muted'],
+        '--df-border': ['--borderColor-default'], '--df-border-subtle': ['--borderColor-muted'],
+        '--df-hover': ['--bgColor-neutral-muted'], '--df-hover-row': ['--bgColor-neutral-muted'],
+        '--df-accent': ['--bgColor-accent-emphasis'], '--df-accent-fg': ['--fgColor-onEmphasis'],
+        '--df-selected': ['--bgColor-accent-muted'], '--df-selected-fg': ['--fgColor-default'],
+        '--df-danger': ['--fgColor-danger'], '--df-focus': ['--focus-outlineColor'],
+        '--df-warn': ['--fgColor-attention'], '--df-error': ['--fgColor-danger'],
+        '--df-type': ['--fgColor-accent'], '--df-name': ['--fgColor-done', '--fgColor-accent'],
+        '--df-source': ['--fgColor-attention'], '--df-success': ['--fgColor-success'],
+        '--df-outline-hover': ['--focus-outlineColor'], '--df-outline-select': ['--borderColor-accent-emphasis', '--fgColor-accent']
+      };
+      function resolveColor(value) {
+        if (!value || !document.body) return '';
+        try {
+          const probe = document.createElement('span');
+          probe.style.position = 'absolute';
+          probe.style.visibility = 'hidden';
+          probe.style.color = value;
+          document.body.appendChild(probe);
+          const color = getComputedStyle(probe).color;
+          probe.remove();
+          return color || '';
+        } catch (e) { return ''; }
+      }
+      function buildPalette(mode) {
+        const fallback = PRIMER_FALLBACK[mode] || PRIMER_FALLBACK.dark;
+        const out = {};
+        try {
+          const cs = getComputedStyle(document.documentElement);
+          for (const key in PRIMER_MAP) {
+            let v = '';
+            for (const cand of PRIMER_MAP[key]) { v = cs.getPropertyValue(cand).trim(); if (v) break; }
+            out[key] = resolveColor(v) || fallback[key];
+          }
+        } catch (e) { return Object.assign({}, fallback); }
+        return out;
+      }
+      function buildTheme() {
+        const mode = themeMode();
+        return { mode: mode, palette: buildPalette(mode) };
+      }
+      function prefersHighContrast() {
+        try {
+          return !!(window.matchMedia &&
+            (window.matchMedia('(prefers-contrast: more)').matches ||
+             window.matchMedia('(forced-colors: active)').matches));
+        }
+        catch (e) { return false; }
+      }
+      function prefersReducedMotion() {
+        try { return !!(window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches); }
+        catch (e) { return false; }
+      }
+      function safeFontFamily(v) {
+        const s = typeof v === 'string' ? v.trim() : '';
+        if (!s || s.length > 120 || !/^[A-Za-z0-9 ,'"_.\-]+$/.test(s)) return undefined;
+        return s;
+      }
+      function safeFontSize(v) {
+        const s = typeof v === 'string' ? v.trim() : '';
+        return /^[0-9]{1,3}(\.[0-9]+)?px$/.test(s) ? s : undefined;
+      }
+      function buildFont() {
+        // Host font metadata only — never routed through theme.palette (that channel is colors-only).
+        try {
+          const cs = getComputedStyle(document.body);
+          const family = safeFontFamily(cs.fontFamily);
+          const size = safeFontSize(cs.fontSize);
+          const out = {};
+          if (family) out.family = family;
+          if (size) out.size = size;
+          return Object.keys(out).length ? out : undefined;
+        } catch (e) { return undefined; }
+      }
+      function buildProfile() {
+        const profile = { surface: 'side-panel' };
+        if (prefersHighContrast()) profile.contrast = 'high';
+        if (prefersReducedMotion()) profile.reducedMotion = true;
+        const font = buildFont();
+        if (font) profile.font = font;
+        return profile;
+      }
       function announce() {
         try {
           if (frame.contentWindow && bridgeId) {
-            frame.contentWindow.postMessage({ type: 'devflow:host', v: 1, bridgeId: bridgeId, capabilities: capabilities, hostKind: 'copilot-canvas-ui', hostLabel: 'GitHub Copilot Canvas', theme: { mode: themeMode() } }, '*');
+            frame.contentWindow.postMessage({ type: 'devflow:host', v: 1, bridgeId: bridgeId, capabilities: capabilities, hostKind: 'copilot-canvas-ui', hostLabel: 'GitHub Copilot Canvas', theme: buildTheme(), profile: buildProfile() }, '*');
           }
         } catch (e) { /* cross-origin during teardown */ }
       }
       function sendTheme() {
         try {
           if (frame.contentWindow && bridgeId) {
-            frame.contentWindow.postMessage({ type: 'devflow:theme', v: 1, bridgeId: bridgeId, mode: themeMode() }, '*');
+            frame.contentWindow.postMessage(Object.assign({ type: 'devflow:theme', v: 1, bridgeId: bridgeId, profile: buildProfile() }, buildTheme()), '*');
           }
         } catch (e) { /* cross-origin during teardown */ }
       }
@@ -93,6 +209,21 @@ export function renderShell(inspectorUrl, appName, bridgeId) {
           else postControl({ action: 'attachSelection' });
           return;
         }
+        if (d.type === 'devflow:attachData') {
+          postControl({ action: 'attachData', snapshot: d.snapshot }, function (result) {
+            if (!frame.contentWindow || !d.requestId) return;
+            frame.contentWindow.postMessage({
+              type: 'devflow:hostResult',
+              v: 1,
+              bridgeId: bridgeId,
+              requestId: d.requestId,
+              ok: !!(result && result.ok),
+              message: result && result.status ? String(result.status) : null,
+              error: result && result.error ? String(result.error) : null,
+            }, '*');
+          });
+          return;
+        }
         if (d.type === 'devflow:recordingComplete') {
           fetch('/recording', {
             method: 'POST',
@@ -103,13 +234,96 @@ export function renderShell(inspectorUrl, appName, bridgeId) {
         }
       });
       // Attach the listener before navigating so no early 'ready' is lost.
-      // Re-push the mode when the host app toggles light/dark.
+      // Re-push mode/profile when the host app toggles light/dark, contrast, or reduced-motion.
       try {
-        const mq = window.matchMedia('(prefers-color-scheme: dark)');
-        if (mq && mq.addEventListener) mq.addEventListener('change', sendTheme);
-        else if (mq && mq.addListener) mq.addListener(sendTheme);
+        ['(prefers-color-scheme: dark)', '(prefers-contrast: more)', '(forced-colors: active)', '(prefers-reduced-motion: reduce)'].forEach(function (q) {
+          const mq = window.matchMedia(q);
+          if (mq && mq.addEventListener) mq.addEventListener('change', sendTheme);
+          else if (mq && mq.addListener) mq.addListener(sendTheme);
+        });
       } catch (e) { /* matchMedia is available in the canvas webview */ }
       frame.src = ${frameSrc};
+    })();
+  </script>
+</body>
+</html>`;
+}
+
+// renderDisconnected — the runtime fallback shown when no broker/agent has resolved yet (panel
+// opened mid-(re)connect, app not yet launched, broker restarting, …). Replaces the legacy
+// hand-rendered ui.mjs as the fallback: a small, dependency-free status shell that speaks the SAME
+// hybrid --df-* token language as the shared inspector and the two host shells (light/dark only —
+// there is no embedded inspector document to hand a Primer palette to yet), so the panel doesn't
+// visually jar once it converges to the real inspector. It polls the same /inspector-ready endpoint
+// ui.mjs used to self-heal with, and reloads into the shared inspector the moment it resolves.
+export function renderDisconnected(appName, nonce) {
+  const title = escapeHtml(appName || "MAUI app");
+  const safeNonce = String(nonce || "").replace(/[^A-Za-z0-9_-]/g, "") || "df";
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>${title}</title>
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; connect-src 'self'; script-src 'nonce-${safeNonce}';" />
+  <style>
+    :root {
+      color-scheme: light dark;
+      --df-bg: light-dark(#ffffff, #0d1117); --df-surface: light-dark(#f6f8fa, #161b22);
+      --df-fg: light-dark(#1f2328, #e6edf3); --df-muted: light-dark(#656d76, #8b949e);
+      --df-border: light-dark(#d0d7de, #30363d); --df-accent: light-dark(#0969da, #2f81f7);
+      --df-warn: light-dark(#9a6700, #d29922);
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; background: var(--df-bg); color: var(--df-fg);
+                 font: 13px/1.5 -apple-system, "Segoe UI", Roboto, sans-serif; }
+    main { height: 100%; display: flex; flex-direction: column; align-items: center; justify-content: center;
+           gap: 12px; padding: 24px; text-align: center; }
+    .card { max-width: 360px; padding: 20px 24px; border: 1px solid var(--df-border); border-radius: 10px;
+            background: var(--df-surface); }
+    .title { font-weight: 600; margin: 0 0 4px; }
+    .status { color: var(--df-muted); margin: 0 0 14px; }
+    .spinner { width: 22px; height: 22px; margin: 0 auto 14px; border-radius: 50%;
+               border: 2px solid var(--df-border); border-top-color: var(--df-accent);
+               animation: df-spin 0.9s linear infinite; }
+    @media (prefers-reduced-motion: reduce) { .spinner { animation: none; border-top-color: var(--df-warn); } }
+    @keyframes df-spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+  <main>
+    <div class="card">
+      <div class="spinner" role="presentation"></div>
+      <p class="title">${title}</p>
+      <p class="status" id="df-status">Waiting for the MAUI DevFlow agent to connect…</p>
+    </div>
+  </main>
+  <script nonce="${safeNonce}">
+    (function () {
+      // Self-heal: poll the same /inspector-ready endpoint the legacy fallback used, and reload into
+      // the shared inspector the instant a broker + a running app resolve. The 5s guard stops a
+      // flapping broker from hot-looping reloads.
+      var statusEl = document.getElementById('df-status');
+      function setStatus(text) { if (statusEl) statusEl.textContent = text; }
+      async function heal() {
+        try {
+          const r = await fetch('/inspector-ready', { cache: 'no-store' });
+          const j = await r.json();
+          if (j && j.ready) {
+            const last = +sessionStorage.getItem('df_healAt') || 0;
+            if (Date.now() - last > 5000) {
+              sessionStorage.setItem('df_healAt', String(Date.now()));
+              setStatus('Connected — opening the inspector…');
+              location.reload();
+            }
+          } else {
+            setStatus('Waiting for the MAUI DevFlow agent to connect…');
+          }
+        } catch (e) { setStatus('Waiting for the MAUI DevFlow broker…'); }
+      }
+      heal();
+      setInterval(heal, 2500);
     })();
   </script>
 </body>

@@ -18,6 +18,12 @@ desktop user may be able to connect. DevFlow therefore:
 - requires a global mutation lease before state-changing operations;
 - blocks cross-origin simple POSTs on control/file-writing bridges;
 - restricts source-file opening to local paths and asks before leaving the workspace.
+- requires an explicit Inspector action before writing a direct-literal property to XAML, verifies
+  the build-time source hash, and limits writes to files under the registered app project.
+
+Source writes use an atomic replacement with raw-byte conflict checks. If a concurrent save cannot
+be verified or restored safely, DevFlow keeps a uniquely named `.bak` recovery copy beside the
+XAML file and reports its path instead of deleting the uncertain version.
 
 ## Data DevFlow can expose
 
@@ -32,6 +38,13 @@ Depending on the enabled feature and caller permissions, DevFlow can expose:
 Do not use real credentials, tokens, personal data, or production customer data in preview
 recordings and screenshots. Treat saved Markdown workflows and downloaded files as sensitive
 artifacts.
+
+The Inspector Data paperclip is an explicit user action. It sends a bounded, point-in-time snapshot
+of the current Logs, Network, Preferences, Device, Sensors, or Files view to the active AI host.
+Snapshots apply structural secret redaction, exclude secure storage, geolocation, WebView content,
+network bodies, and file contents, and include the originating agent port so DevFlow MCP tools can
+retrieve fresher or deeper data. Redaction is defense-in-depth, not a guarantee; inspect test data
+before sharing it with an AI service.
 
 ## Build metadata and source maps
 

@@ -251,6 +251,11 @@ if (target) {
   try { src = readFileSync(new URL("./extension.mjs", import.meta.url), "utf8"); } catch { /* */ }
   check("extension registers an attach_selection action", /name:\s*"attach_selection"/.test(src));
   check("/control handles the attachSelection case", /case\s+"attachSelection"/.test(src));
+  check("/control handles the attachData case", /case\s+"attachData"/.test(src));
+  check("Data context is bounded before push", /safe context size/.test(src));
+  let shell = "";
+  try { shell = readFileSync(new URL("./shell.mjs", import.meta.url), "utf8"); } catch { /* */ }
+  check("Data attachment returns a host acknowledgement", /devflow:hostResult/.test(shell));
   check("push uses an extension_context attachment", /type:\s*"extension_context"/.test(src));
   check("push targets session.rpc.extensions.sendAttachmentsToMessage", /sendAttachmentsToMessage/.test(src));
   check("push feature-detects old runtimes (unsupported_runtime)", /unsupported_runtime/.test(src));
@@ -278,7 +283,10 @@ line("\n[10] round 2: overlay declutter · theme-settle · rev guard");
   check("store runs a theme-settle loop", /_settleThemeShot\s*\(/.test(storeSrc));
   check("store fingerprints screenshots (settle stability)", /hashBytes\s*\(/.test(storeSrc) && /_lastShotHash/.test(storeSrc));
   check("snapshot() carries a monotonic rev", /rev:\s*this\._rev/.test(storeSrc));
-  // ui.mjs — invisible hover hit-targets (not persistent boxes), x-ray toggle, themed chrome, rev guard.
+  // ui.mjs is the LEGACY hand-rendered panel — dormant at runtime (renderDisconnected in shell.mjs
+  // is the fallback now, see [13]), kept on disk for reference/rollback. These checks still assert
+  // its own source hasn't regressed, since it may be restored if the hybrid shell needs a rollback.
+  // invisible hover hit-targets (not persistent boxes), x-ray toggle, themed chrome, rev guard.
   check("overlay uses invisible hover hit-targets (.hit)", /"hit"/.test(uiSrc) && /\.hit:hover/.test(uiSrc));
   check("overlay no longer draws a persistent box per element", !/\.box\.sel/.test(uiSrc) && !/className\s*=\s*"box"/.test(uiSrc));
   check("header has a Show-all-bounds x-ray toggle", /btnBounds/.test(uiSrc) && /showall/.test(uiSrc));
@@ -406,14 +414,64 @@ line("\n[11] workflow recorder — record → .md → replay");
   }
 }
 
-// 12) Multi-byte UTF-8 edit — DevFlow agent capability probe (NON-FATAL, runs LAST).
+// 12) Hybrid host shells — VS Code + Canvas theme/profile handshake and the disconnected fallback.
+//     Offline-safe source checks only (no live agent needed): confirms the runtime fallback is the
+//     lightweight hybrid `renderDisconnected` shell (not the legacy ui.mjs), that both host shells
+//     send a `profile` object alongside `devflow:host`, and that the VS Code THEME_MAP covers the
+//     semantic/high-contrast tokens the shared inspector's THEME_VARS whitelist accepts.
+line("\n[12] hybrid host shells — theme/profile handshake · disconnected fallback");
+{
+  let extSrc = "", shellSrc = "", vscodeSrc = "";
+  try { extSrc = readFileSync(new URL("./extension.mjs", import.meta.url), "utf8"); } catch { /* */ }
+  try { shellSrc = readFileSync(new URL("./shell.mjs", import.meta.url), "utf8"); } catch { /* */ }
+  try {
+    vscodeSrc = readFileSync(new URL("../../../src/DevFlow/js/vscode-inspector/src/extension.ts", import.meta.url), "utf8");
+  } catch { /* the vscode-inspector package may not be checked out in every clone */ }
+
+  // extension.mjs — renderDisconnected (shell.mjs) is the runtime fallback; ui.mjs is no longer imported.
+  check("extension.mjs no longer imports the legacy ui.mjs renderHtml", !/from\s+["']\.\/ui\.mjs["']/.test(extSrc));
+  check("extension.mjs imports renderDisconnected from shell.mjs", /renderDisconnected/.test(extSrc) && /from\s+["']\.\/shell\.mjs["']/.test(extSrc));
+  check("the '/' handler falls back to renderDisconnected, not renderHtml", /renderDisconnected\s*\(/.test(extSrc) && !/renderHtml\s*\(/.test(extSrc));
+
+  // shell.mjs — renderDisconnected exists, self-heals via /inspector-ready, shares the hybrid tokens.
+  check("shell.mjs exports renderDisconnected", /export\s+function\s+renderDisconnected/.test(shellSrc));
+  check("renderDisconnected polls /inspector-ready and reloads", /inspector-ready/.test(shellSrc) && /location\.reload/.test(shellSrc));
+  check("renderDisconnected uses the shared --df-* token language", /--df-bg/.test(shellSrc) && /--df-accent/.test(shellSrc));
+  // shell.mjs — devflow:host carries a profile with surface/contrast/reducedMotion/font, and a real
+  // (non-light/dark-only) palette sourced from Primer/Copilot vars with a literal fallback.
+  check("canvas devflow:host includes a profile object", /type:\s*'devflow:host'[\s\S]{0,400}profile:\s*buildProfile\s*\(\)/.test(shellSrc));
+  check("canvas profile reports surface: 'side-panel'", /surface:\s*'side-panel'/.test(shellSrc));
+  check("canvas theme sends a palette (not just light/dark mode)", /buildPalette\s*\(/.test(shellSrc) && /PRIMER_MAP/.test(shellSrc));
+  check("canvas palette has a literal Primer fallback", /PRIMER_FALLBACK/.test(shellSrc));
+
+  // VS Code host shell — profile + extended THEME_MAP (best-effort; skipped if not checked out).
+  if (vscodeSrc) {
+    check("vscode devflow:host includes a profile object", /hostKind:\s*'vscode'[\s\S]{0,200}profile:\s*buildProfile\s*\(\)/.test(vscodeSrc));
+    check("vscode profile reports surface: 'editor'", /surface:\s*'editor'/.test(vscodeSrc));
+    check("vscode profile detects high-contrast themes", /contrast\s*=\s*'high'/.test(vscodeSrc) || /profile\.contrast/.test(vscodeSrc));
+    for (const tok of ["--df-type", "--df-name", "--df-source", "--df-success", "--df-outline-hover", "--df-outline-select"]) {
+      check(`vscode THEME_MAP covers ${tok}`, vscodeSrc.includes(`'${tok}'`));
+    }
+    check("vscode package.json documents mauiDevflow.openLocation", (() => {
+      try {
+        const pkg = JSON.parse(readFileSync(new URL("../../../src/DevFlow/js/vscode-inspector/package.json", import.meta.url), "utf8"));
+        const prop = pkg?.contributes?.configuration?.properties?.["mauiDevflow.openLocation"];
+        return !!prop && prop.default === "auto" && Array.isArray(prop.enum) && ["auto", "beside", "active"].every((v) => prop.enum.includes(v));
+      } catch { return false; }
+    })());
+  } else {
+    line("  \u2139 vscode-inspector source not found relative to this checkout \u2014 vscode-side checks skipped");
+  }
+}
+
+// 13) Multi-byte UTF-8 edit — DevFlow agent capability probe (NON-FATAL, runs LAST).
 //    Older agents hang on multi-byte request bodies: the agent's HTTP parser compared the
 //    already-read body length in CHARS against the byte-based Content-Length, so a body with a
 //    multi-byte char (e.g. "✓") looked "incomplete" and blocked until timeout. Fixed in maui-labs
 //    (AgentHttpServer.ReadRequestAsync). We probe it explicitly so this report reflects the running
 //    agent's capability without failing the core suite. Kept LAST because an unfixed agent can wedge
 //    its single-request accept loop on the multi-byte body, which would poison later agent calls.
-line("\n[12] multi-byte UTF-8 edit (agent capability, non-fatal)");
+line("\n[13] multi-byte UTF-8 edit (agent capability, non-fatal)");
 if (process.env.MAUI_SELFTEST_SKIP_MULTIBYTE) {
   line("  \u2139 skipped (MAUI_SELFTEST_SKIP_MULTIBYTE set) \u2014 avoids wedging an unfixed agent before a live demo");
 } else if (target) {

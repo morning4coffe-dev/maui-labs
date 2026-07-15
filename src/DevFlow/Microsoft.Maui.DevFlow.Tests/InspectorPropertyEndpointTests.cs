@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Maui.Cli.DevFlow.Inspector;
+using Microsoft.Maui.DevFlow.Driver;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -104,6 +105,69 @@ public class InspectorPropertyEndpointTests
         }
     }
 
+    [Fact]
+    public async Task PersistProperty_RuntimeRejectsValue_DoesNotWriteSource()
+    {
+        var tempRoot = Path.Combine(Path.GetTempPath(), "devflow-persist-endpoint", Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(tempRoot);
+        var sourcePath = Path.Combine(tempRoot, "MainPage.xaml");
+        const string xaml = """
+            <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui">
+                <Label Text="Original" FontSize="28" />
+            </ContentPage>
+            """;
+        await File.WriteAllTextAsync(Path.Combine(tempRoot, "TestApp.csproj"), "<Project />");
+        await File.WriteAllTextAsync(sourcePath, xaml);
+        var labelOffset = xaml.IndexOf("<Label", StringComparison.Ordinal);
+        var lineStart = xaml.LastIndexOf('\n', labelOffset) + 1;
+        var line = xaml[..labelOffset].Count(c => c == '\n') + 1;
+
+        await using var agent = new FakeAgent(
+            new ElementInfo
+            {
+                Id = "e1",
+                SourceFile = sourcePath,
+                SourceLine = line,
+                SourceColumn = labelOffset - lineStart + 2,
+                SourceHash = XamlSourcePropertyEditor.ComputeSourceHash(xaml),
+            },
+            rejectProperty: static (name, value) => name == "FontSize" && value.Length == 0);
+        var port = FreePort();
+        var inspector = new InspectorServer(
+            port,
+            "127.0.0.1",
+            agent.Port,
+            embedToken: null,
+            agentId: "agent",
+            appName: "TestApp",
+            platform: "windows",
+            project: Path.Combine(tempRoot, "TestApp.csproj"),
+            sessionId: null);
+        inspector.Start();
+        try
+        {
+            using var http = new HttpClient();
+            var page = await http.GetStringAsync($"http://127.0.0.1:{port}/");
+            var token = Regex.Match(page, "<meta\\s+name=\"devflow-inspector-token\"\\s+content=\"([^\"]+)\"").Groups[1].Value;
+            Assert.NotEmpty(token);
+
+            using var request = new HttpRequestMessage(HttpMethod.Post, $"http://127.0.0.1:{port}/api/persistProperty")
+            {
+                Content = Json("{\"elementId\":\"e1\",\"name\":\"FontSize\",\"value\":\"\"}")
+            };
+            request.Headers.Add("X-DevFlow-Inspector-Token", token);
+            var response = await http.SendAsync(request);
+
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, response.StatusCode);
+            Assert.Equal(xaml, await File.ReadAllTextAsync(sourcePath));
+        }
+        finally
+        {
+            await inspector.StopAsync();
+            try { Directory.Delete(tempRoot, recursive: true); } catch { }
+        }
+    }
+
     [Theory]
     [InlineData("tok-abc", "tok-abc", true)]   // exact match → trusted local shell
     [InlineData("tok-abc", "tok-xyz", false)]  // wrong token → not trusted (stays DENY)
@@ -135,9 +199,15 @@ public class InspectorPropertyEndpointTests
         private readonly CancellationTokenSource _cts = new();
         private readonly Task _loop;
         private readonly Dictionary<string, string> _props = new(StringComparer.Ordinal);
+        private readonly ElementInfo? _element;
+        private readonly Func<string, string, bool>? _rejectProperty;
 
-        public FakeAgent()
+        public FakeAgent(
+            ElementInfo? element = null,
+            Func<string, string, bool>? rejectProperty = null)
         {
+            _element = element;
+            _rejectProperty = rejectProperty;
             _listener = new TcpListener(IPAddress.Loopback, 0);
             _listener.Start();
             _loop = Loop(_cts.Token);
@@ -168,6 +238,14 @@ public class InspectorPropertyEndpointTests
 
                     string json = "{\"error\":\"not found\"}";
                     var status = "404 Not Found";
+                    if (method == "GET" &&
+                        _element is not null &&
+                        path.Equals($"/api/v1/ui/elements/{_element.Id}", StringComparison.Ordinal))
+                    {
+                        json = JsonSerializer.Serialize(_element);
+                        status = "200 OK";
+                    }
+
                     var m = PropRoute.Match(path);
                     if (m.Success)
                     {
@@ -175,9 +253,18 @@ public class InspectorPropertyEndpointTests
                         if (method == "PUT")
                         {
                             using var doc = JsonDocument.Parse(body);
-                            _props[key] = doc.RootElement.GetProperty("value").GetString() ?? "";
-                            json = "{\"success\":true}";
-                            status = "200 OK";
+                            var value = doc.RootElement.GetProperty("value").GetString() ?? "";
+                            if (_rejectProperty?.Invoke(m.Groups[2].Value, value) == true)
+                            {
+                                json = "{\"error\":\"invalid property value\"}";
+                                status = "400 Bad Request";
+                            }
+                            else
+                            {
+                                _props[key] = value;
+                                json = "{\"success\":true}";
+                                status = "200 OK";
+                            }
                         }
                         else if (method == "GET")
                         {

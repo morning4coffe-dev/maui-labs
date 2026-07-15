@@ -76,6 +76,36 @@ public class InspectorFlowReplayTests
     }
 
     [Fact]
+    public async Task RecordStep_Assert_ForwardsSyntheticObservation()
+    {
+        await using var agent = new ReplayAgent(recording: true);
+        await using var inspector = await StartInspectorAsync(agent.Port);
+        using var http = new HttpClient();
+        const string assertsJson =
+            "[{\"kind\":\"propEquals\",\"selector\":{\"automationId\":\"TodoDescription\"},\"name\":\"Text\",\"expected\":\"Hello\",\"verify\":true}]";
+
+        var response = await http.PostAsync(
+            $"{inspector.Url}/api/flows/record/step",
+            Json(JsonSerializer.Serialize(new
+            {
+                recordingId = "recording",
+                action = FlowActions.Assert.ToUpperInvariant(),
+                assertsJson
+            })));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var responseJson = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.Equal(2, responseJson.RootElement.GetProperty("seq").GetInt32());
+        Assert.Equal(2, responseJson.RootElement.GetProperty("stepCount").GetInt32());
+
+        using var forwarded = JsonDocument.Parse(Assert.IsType<string>(agent.LastRecordingRequestBody));
+        Assert.Equal("observe", forwarded.RootElement.GetProperty("action").GetString());
+        var observation = forwarded.RootElement.GetProperty("observation");
+        Assert.Equal(FlowActions.Assert, observation.GetProperty("action").GetString());
+        Assert.Equal(assertsJson, observation.GetProperty("assertsJson").GetString());
+    }
+
+    [Fact]
     public async Task Replay_RacingRecordingStart_ReturnsConflict()
     {
         await using var agent = new ReplayAgent(recording: false, blockRecordingStart: true);
@@ -202,6 +232,7 @@ public class InspectorFlowReplayTests
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         public TaskCompletionSource AllowRecordingStart { get; } =
             new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public string? LastRecordingRequestBody { get; private set; }
 
         private async Task AcceptLoopAsync(CancellationToken ct)
         {
@@ -268,6 +299,7 @@ public class InspectorFlowReplayTests
             }
             if (method == "POST" && path == "/api/v1/agent/recording")
             {
+                LastRecordingRequestBody = body;
                 string? action = null;
                 try
                 {
@@ -290,6 +322,11 @@ public class InspectorFlowReplayTests
                     _recording = true;
                     return ("200 OK",
                         "{\"ok\":true,\"recording\":true,\"recordingId\":\"recording\",\"name\":\"race\",\"steps\":0}");
+                }
+                if (action == "observe")
+                {
+                    return ("200 OK",
+                        "{\"ok\":true,\"recording\":true,\"recordingId\":\"recording\",\"steps\":2,\"seq\":2}");
                 }
                 if (action is "stop" or "cancel")
                     _recording = false;

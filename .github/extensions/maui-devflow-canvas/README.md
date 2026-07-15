@@ -15,7 +15,8 @@ This is the project-scoped (auto-discovered, committed) home for the extension, 
 ## Shared inspector architecture
 
 The Canvas embeds the broker-hosted inspector used by the browser and VS Code. Its extension host
-adds Copilot context attachment, project-local workflow persistence, and agent-callable actions.
+adds selected-element and redacted Data-snapshot context attachment, project-local workflow
+persistence, and agent-callable actions.
 Transport and discovery use `@maui-devflow/client`.
 
 An upstream fidelity fix rode along: the client's `getProperty` now mirrors the historical
@@ -35,7 +36,12 @@ Copilot Canvas ──► extension.mjs ──► broker-hosted shared inspector
   server that serves the panel; `joinSession(...)` at the bottom.
 - **`store.mjs`** (`LiveStore`) — fallback live model and agent-action state.
 - **`devflow.mjs`** (`DevflowDevice`) — **rewritten**: the adapter over `@maui-devflow/client`.
-- **`ui.mjs`** — server-rendered HTML for the panel (screenshot + overlay + property grid).
+- **`shell.mjs`** — embeds the shared broker-hosted inspector in an iframe (`renderShell`) and
+  renders the lightweight disconnected/loading status shell (`renderDisconnected`) shown while no
+  broker/agent has resolved yet; both share the hybrid `--df-*` theme-token language with the VS
+  Code host shell.
+- **`ui.mjs`** — legacy, hand-rendered panel HTML (screenshot + overlay + property grid). Kept on
+  disk for reference/rollback only — `renderDisconnected` in `shell.mjs` is the runtime fallback now.
 - **`recorder.mjs` / `replay.mjs`** — workflow persistence and replay. Active recording is owned
   by the broker and observes successful mutations from every DevFlow host.
 - **`selftest*.mjs`, `clean-open-canvases.mjs`** — bridge smoke test + offline proof + maintenance.

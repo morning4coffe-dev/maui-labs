@@ -54,6 +54,22 @@
           "type": "object",
           "properties": {}
         }
+      },
+      {
+        "name": "maui-devflow_getDataSnapshot",
+        "tags": [
+          "maui",
+          "devflow"
+        ],
+        "displayName": "MAUI DevFlow: Data Snapshot",
+        "modelDescription": "Returns the bounded, redacted point-in-time Data snapshot the user added from the DevFlow inspector (Logs, Network, Preferences, Device, Sensors, or file metadata). Use the included followUpTools identifiers to query DevFlow MCP for fresher or deeper detail when needed.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "mauiData",
+        "icon": "$(attach)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
       }
     ],
     "configuration": {
@@ -63,6 +79,21 @@
           "type": "number",
           "default": 0,
           "description": "Explicit DevFlow broker port. 0 = auto-discover via ~/.mauidevflow/broker.json."
+        },
+        "mauiDevflow.openLocation": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "beside",
+            "active"
+          ],
+          "enumDescriptions": [
+            "Open beside the active editor when one is open, otherwise in the active editor group.",
+            "Always open in a new column beside the active editor.",
+            "Always open in the currently active editor group."
+          ],
+          "default": "auto",
+          "description": "Where to place the DevFlow Inspector panel when it opens."
         }
       }
     }

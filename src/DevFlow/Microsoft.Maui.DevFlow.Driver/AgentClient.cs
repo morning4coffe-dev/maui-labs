@@ -179,6 +179,48 @@ public class AgentClient : IDisposable
         using var response = string.Equals(action, "status", StringComparison.OrdinalIgnoreCase)
             ? await SendRecordingRequestAsync(body)
             : await SendWithTransientRetriesAsync(HttpMethod.Post, () => SendRecordingRequestAsync(body));
+        return await ReadMutationRecordingResponseAsync(response);
+    }
+
+    public async Task<MutationRecordingStatus> ObserveMutationRecordingAsync(
+        MutationRecordingObservation observation)
+    {
+        ArgumentNullException.ThrowIfNull(observation);
+        if (string.IsNullOrWhiteSpace(observation.Action))
+            throw new ArgumentException("A recording observation action is required.", nameof(observation));
+
+        var observationBody = new JsonObject
+        {
+            ["action"] = observation.Action,
+            ["automationId"] = observation.AutomationId,
+            ["text"] = observation.Text,
+            ["type"] = observation.Type,
+            ["index"] = observation.Index,
+            ["id"] = observation.Id,
+            ["value"] = observation.Value,
+            ["name"] = observation.Name,
+            ["dx"] = observation.Dx,
+            ["dy"] = observation.Dy,
+            ["itemIndex"] = observation.ItemIndex,
+            ["position"] = observation.Position,
+            ["page"] = observation.Page,
+            ["navigated"] = observation.Navigated,
+            ["assertsJson"] = observation.AssertsJson
+        };
+        var body = new JsonObject
+        {
+            ["action"] = "observe",
+            ["observation"] = observationBody
+        };
+        using var response = await SendWithTransientRetriesAsync(
+            HttpMethod.Post,
+            () => SendRecordingRequestAsync(body));
+        return await ReadMutationRecordingResponseAsync(response);
+    }
+
+    private static async Task<MutationRecordingStatus> ReadMutationRecordingResponseAsync(
+        HttpResponseMessage response)
+    {
         var responseBody = await response.Content.ReadAsStringAsync();
         if (response.StatusCode == HttpStatusCode.NotFound)
         {

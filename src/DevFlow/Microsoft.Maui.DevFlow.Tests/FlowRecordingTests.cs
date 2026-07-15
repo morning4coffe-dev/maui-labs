@@ -450,6 +450,36 @@ public class FlowRecordingTests : System.IDisposable
     }
 
     [Fact]
+    public void BrokerCoordinator_PersistsSyntheticAssertObservation()
+    {
+        var coordinator = new BrokerFlowCoordinator();
+        Assert.True(coordinator.Start("agent", "assertion", "App", "Windows", null).Ok);
+        const string assertsJson =
+            "[{\"kind\":\"propEquals\",\"selector\":{\"automationId\":\"TodoDescription\"},\"name\":\"Text\",\"expected\":\"Hello\",\"verify\":true}]";
+
+        var observed = coordinator.Observe("agent", new FlowObservation
+        {
+            Action = FlowActions.Assert,
+            AssertsJson = assertsJson
+        });
+
+        Assert.True(observed.Ok, observed.Error);
+        Assert.Equal(1, observed.Seq);
+        Assert.Equal(1, observed.Steps);
+
+        var stopped = coordinator.Stop("agent");
+        Assert.True(stopped.Ok, stopped.Error);
+        var parsed = FlowMarkdown.Parse(stopped.Markdown!);
+        Assert.True(parsed.Ok, parsed.Error);
+        var step = Assert.Single(parsed.Flow!.Steps);
+        Assert.Equal(FlowActions.Assert, step.Action);
+        var assertion = Assert.Single(step.Asserts!);
+        Assert.Equal("propEquals", assertion.Kind);
+        Assert.Equal("TodoDescription", assertion.Selector!.AutomationId);
+        Assert.Equal("Hello", assertion.Expected);
+    }
+
+    [Fact]
     public void BrokerCoordinator_AllowsCurrentLeaseToContinueExistingRecording()
     {
         var coordinator = new BrokerFlowCoordinator();

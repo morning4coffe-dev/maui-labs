@@ -24,11 +24,12 @@ Live Canvas in GitHub Copilot.
 ## Features
 
 - screenshot and visual-tree inspection with hover, selection, and searchable hierarchy;
-- tap, fill, scroll, gesture, navigation, theme, and live property mutation;
-- logs, network, preferences, device, sensor, file, and WebView/CDP data docks;
+- tap, fill, scroll, gesture, navigation, theme, and live property mutation, with explicit
+  **Apply to XAML** persistence for existing direct-literal attributes;
+- logs, live-updating network, preferences, device, sensor, read-only file browsing, and WebView/CDP data docks;
 - click-to-XAML source navigation for Debug source maps;
 - broker-owned workflow recording and replayable Markdown output;
-- selected-element context attachment to GitHub Copilot;
+- selected-element and bounded, redacted Data-snapshot context attachment to GitHub Copilot;
 - responsive light, dark, and high-contrast host theming.
 
 ## Architecture
@@ -46,6 +47,22 @@ In-app DevFlow agent
 The broker discovers agents and serves the HTML/CSS/JavaScript bundle. Inspector mutations are
 proxied to the selected in-app agent. VS Code and Canvas embed the same page and add an
 authenticated host bridge for source navigation, recording persistence, and Copilot context.
+
+## Host-adaptive layout
+
+The shared inspector keeps one interaction model while adapting its chrome to the host viewport:
+
+- **Wide browser/editor:** tree, screenshot, and properties are docked as three panes.
+- **Compact editor:** the tree remains available while properties open as a drawer, preserving
+  screenshot width.
+- **Narrow Canvas/editor:** the screenshot is primary; tree and properties become coordinated
+  full-height drawers with a scrim.
+- **Short host:** drawers and overlay Data/timeline sheets protect the screenshot's vertical budget.
+
+The toolbar keeps interaction mode, tree, fit, and recording visible. Secondary actions move into
+an overflow menu on constrained hosts. Host bridges also supply their color palette, font metadata,
+contrast mode, and reduced-motion preference. VS Code placement is configurable with
+`mauiDevflow.openLocation` (`auto`, `beside`, or `active`).
 
 ## Atomic frames and coordinates
 
@@ -102,6 +119,23 @@ They can be disabled explicitly:
 ```xml
 <DevFlowXamlSourceMapsEnabled>false</DevFlowXamlSourceMapsEnabled>
 ```
+
+### Apply property values to XAML
+
+For source-mapped elements, each supported property row includes an **Apply to XAML** button. Live
+editing remains runtime-only until this button is selected. The broker then updates only an
+existing direct-literal attribute in the registered app project while preserving the rest of the
+file, its encoding, and line endings.
+
+The write is rejected when the property comes from a binding, resource, markup extension, style,
+property element, template, or code-created element. It is also rejected when the source changed
+outside Inspector after the app was built or after the previous Inspector write. Rebuild the app
+to refresh stale source maps.
+
+The broker validates the value against the running element before writing and restricts edits to
+the curated property grid. It binds relative project names to the build's default path-derived
+DevFlow session identity; builds using a custom `MauiDevFlowSessionId` should also set
+`MauiDevFlowIncludeProjectPath=true` to provide an unambiguous project root.
 
 ## Platform boundaries
 

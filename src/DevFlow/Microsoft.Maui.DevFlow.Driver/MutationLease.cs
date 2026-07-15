@@ -48,6 +48,40 @@ public sealed class MutationLeaseException : InvalidOperationException
     public MutationLeaseStatus Status { get; }
 }
 
+public sealed class MutationRecordingObservation
+{
+    [JsonPropertyName("action")]
+    public string Action { get; set; } = "";
+    [JsonPropertyName("automationId")]
+    public string? AutomationId { get; set; }
+    [JsonPropertyName("text")]
+    public string? Text { get; set; }
+    [JsonPropertyName("type")]
+    public string? Type { get; set; }
+    [JsonPropertyName("index")]
+    public int? Index { get; set; }
+    [JsonPropertyName("id")]
+    public string? Id { get; set; }
+    [JsonPropertyName("value")]
+    public string? Value { get; set; }
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+    [JsonPropertyName("dx")]
+    public double? Dx { get; set; }
+    [JsonPropertyName("dy")]
+    public double? Dy { get; set; }
+    [JsonPropertyName("itemIndex")]
+    public int? ItemIndex { get; set; }
+    [JsonPropertyName("position")]
+    public string? Position { get; set; }
+    [JsonPropertyName("page")]
+    public string? Page { get; set; }
+    [JsonPropertyName("navigated")]
+    public bool Navigated { get; set; }
+    [JsonPropertyName("assertsJson")]
+    public string? AssertsJson { get; set; }
+}
+
 public sealed class MutationRecordingStatus
 {
     [JsonPropertyName("ok")]

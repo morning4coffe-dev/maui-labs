@@ -51,6 +51,8 @@
   --df-shadow: 0 2px 12px rgba(0,0,0,0.5);   --df-shadow: light-dark(0 2px 10px rgba(0,0,0,0.16), 0 2px 12px rgba(0,0,0,0.5));
   --df-font: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
   --df-mono: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  --df-font-size: 12px;
+  --df-font-weight: normal;
 }
 
 :root[data-theme="light"] { color-scheme: light; }
@@ -64,7 +66,8 @@ body {
   background: var(--df-bg);
   color: var(--df-fg);
   overflow: hidden;
-  font-size: 12px;
+  font-size: var(--df-font-size);
+  font-weight: var(--df-font-weight);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -78,11 +81,11 @@ body {
 :focus-visible { outline: 2px solid var(--df-focus); outline-offset: 1px; }
 
 /* ── Layout: toolbar on top, [tree | viewport] middle, dock bottom ── */
-#df-app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
+#df-app { display: flex; flex-direction: column; height: 100vh; height: 100dvh; position: relative; }
 
 #df-toolbar {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
   gap: var(--df-gap);
   padding: 6px 8px;
@@ -90,6 +93,8 @@ body {
   border-bottom: 1px solid var(--df-border-subtle);
   flex: 0 0 auto;
   user-select: none;
+  position: relative;
+  z-index: 90;
 }
 
 .df-modes { display: inline-flex; border: 1px solid var(--df-border); border-radius: var(--df-radius); overflow: hidden; }
@@ -105,6 +110,7 @@ body {
   white-space: nowrap;
 }
 
+.df-mode-btn { display: inline-flex; align-items: center; gap: 5px; }
 .df-mode-btn + .df-mode-btn { border-left: 1px solid var(--df-border); }
 .df-tool-btn { border: 1px solid var(--df-border); border-radius: var(--df-radius); display: inline-flex; align-items: center; gap: 5px; }
 .df-mode-btn:hover, .df-tool-btn:hover { background: var(--df-hover); }
@@ -112,6 +118,22 @@ body {
 .df-tool-btn.df-recording { background: var(--df-danger); color: #fff; border-color: var(--df-danger); }
 .df-mode-btn:disabled, .df-tool-btn:disabled { opacity: 0.4; cursor: default; }
 .df-mode-btn:disabled:hover, .df-tool-btn:disabled:hover { background: var(--df-surface-2); }
+.df-toolbar-secondary { display: inline-flex; align-items: center; gap: var(--df-gap); }
+.df-more-btn { display: none; }
+
+.df-status {
+  display: block;
+  flex: 0 0 auto;
+  min-height: 24px;
+  padding: 3px 8px;
+  color: var(--df-muted);
+  background: var(--df-bg);
+  border-bottom: 1px solid var(--df-border-subtle);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.df-status:empty { display: none; }
 
 /* Icons — inline SVG sprite, themed via currentColor. fill/stroke are set here (on the referencing
    <svg>) so the <use> clones inherit them; filled glyphs (record/replay) carry their own fill attr. */
@@ -133,13 +155,21 @@ body.df-replaying #df-viewport-wrap::after {
 }
 
 .df-spacer { flex: 1 1 auto; }
-.df-status { color: var(--df-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 45%; }
 
 #df-body { display: flex; flex: 1 1 auto; min-height: 0; position: relative; }
+.df-pane-scrim {
+  position: absolute;
+  inset: 0;
+  z-index: 35;
+  border: 0;
+  background: rgba(0,0,0,0.28);
+  cursor: default;
+}
 
 /* ── Panes (tree | screenshot | properties) each with an uppercase section header ── */
 .df-pane { display: flex; flex-direction: column; min-height: 0; min-width: 0; }
 .df-pane-grow { flex: 1 1 auto; }
+#df-view-pane { min-width: 180px; min-height: 180px; }
 .df-pane-header { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 4px 10px;
   font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--df-muted);
   background: var(--df-surface); border-bottom: 1px solid var(--df-border-subtle); user-select: none; white-space: nowrap; }
@@ -160,11 +190,19 @@ body.df-tree-hidden #df-tree-pane { display: none; }
 .df-prop-row { display: flex; align-items: center; gap: 8px; padding: 3px 10px; }
 .df-prop-row:hover { background: var(--df-hover-row); }
 .df-prop-name { flex: 0 0 42%; color: var(--df-name); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.df-prop-field { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; }
+.df-prop-field { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 4px; }
 .df-prop-empty { color: var(--df-muted); padding: 14px 12px; font-size: 12px; }
 .df-field { width: 100%; box-sizing: border-box; background: var(--df-surface-2); color: var(--df-fg);
   border: 1px solid var(--df-border); border-radius: var(--df-radius-sm); padding: 3px 6px; font: inherit; }
 .df-field:focus { outline: none; border-color: var(--df-focus); }
+.df-field:disabled { opacity: .58; cursor: not-allowed; }
+.df-prop-source { flex: 0 0 auto; width: 25px; height: 25px; display: inline-flex; align-items: center; justify-content: center;
+  padding: 0; color: var(--df-source); background: var(--df-surface-2); border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-sm); cursor: pointer; }
+.df-prop-source:hover:not(:disabled) { background: var(--df-hover); border-color: var(--df-focus); }
+.df-prop-source:disabled { opacity: .45; cursor: not-allowed; }
+.df-prop-source.df-saved { color: var(--df-success); border-color: var(--df-success); }
+.df-text-field { resize: vertical; min-height: 25px; line-height: 1.35; }
 input.df-field[type="color"] { padding: 0; height: 24px; width: 44px; flex: 0 0 auto; background: transparent; cursor: pointer; }
 input.df-field[type="checkbox"] { width: auto; flex: 0 0 auto; }
 
@@ -211,13 +249,14 @@ body.df-show-all .devflow-element { outline: 1px solid var(--df-outline-all); }
 .df-hidden { display: none !important; }
 #df-dock { display: flex; flex-direction: column; height: clamp(180px, 34vh, 320px); flex: 0 0 auto;
   border-top: 1px solid var(--df-border); background: var(--df-bg); color: var(--df-fg); min-height: 0; }
-#df-dock-tabs { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; padding: 4px 8px;
+#df-dock-tabs { display: flex; flex-wrap: nowrap; align-items: center; gap: 4px; padding: 4px 8px;
   border-bottom: 1px solid var(--df-border-subtle); background: var(--df-surface); }
+.df-dock-tab-list { display: flex; flex: 1 1 auto; min-width: 0; overflow-x: auto; overflow-y: hidden; }
 .df-dock-tab { background: transparent; border-radius: var(--df-radius) var(--df-radius) 0 0; padding: 4px 10px; }
 .df-dock-tab:hover { background: var(--df-surface-2); }
 .df-dock-tab.df-active { background: var(--df-accent); color: var(--df-accent-fg); }
 .df-dock-meta { color: var(--df-muted); font-size: 11px; white-space: nowrap; margin-right: 4px; }
-#df-dock-body { flex: 1 1 auto; overflow: auto; padding: 8px 10px; font: 12px var(--df-mono); }
+#df-dock-body { flex: 1 1 auto; overflow: auto; padding: 0 10px 8px; font: 12px var(--df-mono); }
 #df-dock-body .df-empty { color: var(--df-muted); padding: 12px; font-family: var(--df-font); }
 #df-dock-body table { border-collapse: collapse; width: 100%; font-size: 12px; }
 #df-dock-body th { text-align: left; position: sticky; top: 0; background: var(--df-surface);
@@ -234,14 +273,29 @@ body.df-show-all .devflow-element { outline: 1px solid var(--df-outline-all); }
 .df-log-cat { color: var(--df-type); }
 .df-kv-key { color: var(--df-name); padding-right: 10px; white-space: nowrap; }
 .df-section-title { color: var(--df-type); font-weight: 600; margin: 8px 0 3px; font-family: var(--df-font); }
+#df-dock-body > .df-section-title:first-child { margin-top: 0; }
 .df-masked { color: var(--df-muted); font-style: italic; cursor: pointer; }
 .df-masked:hover { color: var(--df-warn); }
 .df-status-ok { color: var(--df-success); }
 .df-status-err { color: var(--df-error); }
-.df-crumb, .df-dir { color: var(--df-name); cursor: pointer; }
-.df-crumb:hover, .df-dir:hover { text-decoration: underline; }
+.df-crumb { color: var(--df-name); cursor: pointer; }
+.df-crumb:hover { text-decoration: underline; }
 .df-dock-btn { border: 1px solid var(--df-border); border-radius: var(--df-radius); padding: 3px 9px; font: 12px var(--df-font); margin: 4px 0; }
 .df-dock-btn:hover { background: var(--df-hover); }
+.df-icon-label, .df-file-link, .df-file-name { display: inline-flex; align-items: center; gap: 6px; }
+.df-files-toolbar { display: flex; align-items: center; flex-wrap: wrap; gap: 6px; font-family: var(--df-font); }
+.df-files-toolbar .df-dock-btn { margin-right: 4px; }
+.df-files-mode { color: var(--df-muted); font-size: 11px; }
+.df-files-root-info { color: var(--df-muted); font: 11px var(--df-font); padding: 0 0 4px; }
+.df-file-link { border: 0; padding: 0; background: transparent; color: var(--df-name); font: inherit; cursor: pointer; text-align: left; }
+.df-file-link:hover { text-decoration: underline; }
+.df-file-link .df-ic-xs, .df-file-name .df-ic-xs { color: var(--df-muted); }
+.df-files-empty { font-family: var(--df-font); }
+.df-files-empty strong { display: block; color: var(--df-fg); margin-bottom: 3px; }
+body.df-dock-collapsed #df-dock { height: auto !important; }
+body.df-dock-collapsed #df-dock-body { display: none; }
+#df-dock-collapse .df-ic { transform: rotate(90deg); transition: transform 0.12s ease; }
+body.df-dock-collapsed #df-dock-collapse .df-ic { transform: rotate(-90deg); }
 
 /* ── N4 presence chip ── */
 .df-presence { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; padding: 3px 9px; border-radius: 20px; white-space: nowrap; background: var(--df-surface-2); }
@@ -270,55 +324,159 @@ body.df-show-all .devflow-element { outline: 1px solid var(--df-outline-all); }
 .df-props-panel { background: var(--df-surface); color: var(--df-fg); border: 1px solid var(--df-outline-select);
   border-radius: var(--df-radius); box-shadow: var(--df-shadow); }
 
-/* ── Responsive: narrow hosts (Copilot canvas side panel, narrow VS Code) ── */
-/* Collapse tool-button text to just the icon; the leading glyph + title tooltip remain. */
-@media (max-width: 720px) {
-  .df-tool-btn .df-btn-label { display: none; }
-  .df-tool-btn { padding: 4px 8px; }
+/* ── Host-adaptive layout profiles ───────────────────────────────────────────
+   devflow.js classifies the INSPECTOR viewport, not the app screenshot, as:
+   wide | compact | narrow | short. The app aspect is used only for fit scaling. */
+
+/* Wide browser/editor: classic three-pane layout and the full action bar. */
+body[data-host-layout="wide"] #df-tree-pane { flex-basis: clamp(210px, 22vw, 300px); }
+body[data-host-layout="wide"] #df-props-pane { flex-basis: clamp(250px, 26vw, 340px); }
+
+/* Constrained hosts use a single-row primary toolbar plus an anchored overflow menu. */
+body:not([data-host-layout="wide"]) #df-toolbar {
+  gap: 4px;
+  padding: 5px 6px;
+}
+body:not([data-host-layout="wide"]) #df-toolbar > .df-sep { display: none; }
+body:not([data-host-layout="wide"]) #df-toolbar .df-btn-label { display: none; }
+body:not([data-host-layout="wide"]) #df-toolbar-secondary .df-btn-label { display: inline; }
+body:not([data-host-layout="wide"]) .df-mode-btn,
+body:not([data-host-layout="wide"]) .df-tool-btn { padding: 4px 8px; }
+body:not([data-host-layout="wide"]) .df-more-btn { display: inline-flex; }
+body:not([data-host-layout="wide"]) .df-toolbar-secondary {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 6px;
+  z-index: 120;
+  min-width: 190px;
+  max-height: min(70vh, 420px);
+  overflow: auto;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+  padding: 6px;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius);
+  background: var(--df-surface);
+  box-shadow: var(--df-shadow);
+}
+body:not([data-host-layout="wide"]).df-more-open .df-toolbar-secondary { display: flex; }
+body:not([data-host-layout="wide"]) .df-toolbar-secondary .df-tool-btn {
+  width: 100%;
+  justify-content: flex-start;
+  border-color: transparent;
+  background: transparent;
+}
+body:not([data-host-layout="wide"]) .df-toolbar-secondary .df-tool-btn:hover,
+body:not([data-host-layout="wide"]) .df-toolbar-secondary .df-tool-btn.df-active {
+  background: var(--df-hover);
+  color: var(--df-fg);
+}
+body:not([data-host-layout="wide"]).df-props-open #df-status { display: none; }
+
+/* Compact editor: keep the tree docked, preserve screenshot width with a properties drawer. */
+body[data-host-layout="compact"] #df-tree-pane { flex: 0 0 clamp(190px, 25vw, 240px); }
+body[data-host-layout="compact"] #df-props-pane:not(.df-hidden) {
+  position: absolute;
+  z-index: 46;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: min(44vw, 360px);
+  min-width: 280px;
+  box-shadow: var(--df-shadow);
+}
+body[data-host-layout="compact"] .df-pane-scrim {
+  left: clamp(190px, 25vw, 240px);
 }
 
-/* ── Smart layout: match the pane arrangement to the app's orientation when width is tight.
-   <body data-app-orient> is published from the app's reported window size (see applyScale in
-   devflow.js). A PORTRAIT app is narrow → keep the panels BESIDE it (stay a horizontal row).
-   A LANDSCAPE app is wide → stack the screenshot on top and put the panels BELOW it (a column),
-   so the wide screenshot keeps the full width. Above the breakpoint the familiar 3-pane row is
-   used for both orientations. */
-@media (max-width: 880px) {
-  /* Portrait: stay a row; let the side panels give up a little width so the app still shows. */
-  body[data-app-orient="portrait"] #df-tree-pane { flex-basis: clamp(140px, 30vw, 240px); }
-  body[data-app-orient="portrait"] #df-props-pane { flex-basis: clamp(160px, 34vw, 260px); }
+/* Narrow and short hosts make both side panes transient drawers, leaving the screenshot primary. */
+body[data-host-layout="narrow"] #df-tree-pane,
+body[data-host-layout="short"] #df-tree-pane {
+  position: absolute;
+  z-index: 45;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: min(86vw, 340px);
+  flex-basis: auto;
+  border-right: 1px solid var(--df-border);
+  box-shadow: var(--df-shadow);
+}
+body[data-host-layout="narrow"] #df-props-pane:not(.df-hidden),
+body[data-host-layout="short"] #df-props-pane:not(.df-hidden) {
+  position: absolute;
+  z-index: 46;
+  top: 0;
+  bottom: 0;
+  right: 0;
+  width: min(90vw, 380px);
+  flex-basis: auto;
+  border-left: 1px solid var(--df-border);
+  box-shadow: var(--df-shadow);
+}
+@media (max-width: 520px) {
+  body[data-host-layout="narrow"] #df-tree-pane,
+  body[data-host-layout="short"] #df-tree-pane,
+  body[data-host-layout="narrow"] #df-props-pane:not(.df-hidden),
+  body[data-host-layout="short"] #df-props-pane:not(.df-hidden) {
+    width: 100%;
+    max-width: none;
+  }
+}
+body[data-host-layout="short"] #df-view-pane { min-height: 0; }
 
-  /* Landscape: stack vertically — screenshot on top, tree + properties as strips beneath it. */
-  body[data-app-orient="landscape"] #df-body { flex-direction: column; }
-  body[data-app-orient="landscape"] #df-view-pane { order: -1; flex: 1 1 auto; min-height: 42%; }
-  body[data-app-orient="landscape"] #df-tree-pane {
-    flex: 0 1 auto; flex-basis: auto; max-height: 30%;
-    border-right: 0; border-top: 1px solid var(--df-border);
+/* Data and timeline become overlay sheets in constrained hosts, protecting screenshot space. */
+body:not([data-host-layout="wide"]) #df-dock {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 70;
+  height: min(48vh, 360px);
+  max-height: calc(100% - 72px);
+  box-shadow: 0 -4px 18px rgba(0,0,0,0.28);
+}
+body:not([data-host-layout="wide"]) .df-dock-meta { display: none; }
+body[data-host-layout="short"] #df-dock {
+  height: min(58vh, 260px);
+  max-height: calc(100% - 54px);
+}
+body:not([data-host-layout="wide"]) #df-timeline {
+  position: absolute;
+  left: 8px;
+  right: 8px;
+  bottom: 8px;
+  z-index: 65;
+  border: 1px solid var(--df-border);
+  border-radius: var(--df-radius);
+  box-shadow: var(--df-shadow);
+}
+body:not([data-host-layout="wide"]).df-dock-open #df-timeline { display: none; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.001ms !important;
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
   }
-  body[data-app-orient="landscape"] #df-props-pane:not(.df-hidden) {
-    flex: 0 1 auto; flex-basis: auto; max-height: 34%;
-    border-left: 0; border-top: 1px solid var(--df-border);
-  }
+}
+html[data-reduced-motion="true"] *, html[data-reduced-motion="true"] *::before, html[data-reduced-motion="true"] *::after {
+  scroll-behavior: auto !important;
+  transition-duration: 0.001ms !important;
+  animation-duration: 0.001ms !important;
+  animation-iteration-count: 1 !important;
 }
 
-/* Very narrow (portrait row): float the properties panel from the right so it can't crush the
-   tree + screenshot; below that the tree floats as a left drawer too. Landscape stays a column,
-   which already gives every pane the full width, so it needs no overlays. */
-@media (max-width: 560px) {
-  body[data-app-orient="portrait"] #df-props-pane:not(.df-hidden) {
-    position: absolute; z-index: 46; top: 0; bottom: 0; right: 0;
-    width: min(85vw, 320px); flex-basis: auto; box-shadow: var(--df-shadow);
+@media (forced-colors: active) {
+  .df-mode-btn, .df-tool-btn, .df-dock-tab, .df-icon-btn, .df-field {
+    forced-color-adjust: auto;
+    border-color: ButtonText;
   }
-}
-@media (max-width: 440px) {
-  body[data-app-orient="portrait"]:not(.df-tree-hidden) #df-tree-pane {
-    position: absolute; z-index: 40; top: 0; bottom: 0; left: 0;
-    width: min(78vw, 280px); flex-basis: auto; box-shadow: var(--df-shadow);
-  }
-  #df-toolbar { gap: 4px; padding: 5px 6px; }
-  .df-status { max-width: 100%; flex-basis: 100%; }
-}
-/* Short hosts (wide-but-short VS Code panels): give the app view more of the vertical budget. */
-@media (max-height: 520px) {
-  #df-dock { height: clamp(120px, 40vh, 220px); }
+  .devflow-element.df-hover { outline-color: Highlight; }
+  .devflow-element.df-selected { outline-color: Highlight; background: transparent; }
+  .df-tree-node.df-selected { background: Highlight; color: HighlightText; }
+  .df-pane-scrim { background: rgba(0,0,0,0.5); }
 }

@@ -857,7 +857,17 @@ public class BrokerServer : IDisposable
 
         if (inspector == null)
         {
-            var created = new InspectorServer(0, "localhost", agentPort, _embedToken);
+            var registration = connection.Registration;
+            var created = new InspectorServer(
+                0,
+                "localhost",
+                agentPort,
+                _embedToken,
+                registration.Id,
+                registration.AppName,
+                registration.Platform,
+                registration.Project,
+                registration.SessionId);
             inspector = _inspectors.GetOrAdd(connection.Registration.Id, created);
             if (!ReferenceEquals(inspector, created))
             {

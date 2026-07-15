@@ -13,13 +13,15 @@
 import { createReadStream, mkdirSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { joinSession, createCanvas, CanvasError } from "@github/copilot-sdk/extension";
 import { LiveStore } from "./store.mjs";
 import { Recorder, slugify } from "./recorder.mjs";
 import { replayTest } from "./replay.mjs";
-import { renderHtml } from "./ui.mjs";
-import { renderShell } from "./shell.mjs";
+// NOTE: ui.mjs (the legacy hand-rendered fallback UI) is no longer imported — it stays on disk for
+// reference/rollback but the runtime fallback is now `renderDisconnected` in shell.mjs, which shares
+// the same hybrid --df-* token language as the shared inspector instead of a bespoke Primer clone.
+import { renderShell, renderDisconnected } from "./shell.mjs";
 import { readBrokerState } from "@maui-devflow/client";
 
 // Device targeting is optional — the CLI auto-discovers the agent via the broker. Override
@@ -131,12 +133,44 @@ function readJsonBody(req) {
   });
 }
 
-// Push the current canvas selection into the Copilot composer as an
-// `extension_context` pill — a context chip that rides along with the human's
-// NEXT chat message. This is the SDK's extension→chat push:
-//   session.rpc.extensions.sendAttachmentsToMessage({ instanceId, attachments })
-// (passive: it does not start an agent turn). The `instanceId` binds the push
-// to this canvas so the runtime can stamp provenance.
+// Push a lightweight `extension_context` pill into the Copilot composer. The pill rides with the
+// human's NEXT message and never starts a turn on its own.
+async function pushContextPill(instanceId, options) {
+  const st = instances.get(instanceId);
+  const nowTs = Date.now();
+  if (st && st._lastPushKey === options.pushKey && nowTs - (st._lastPushAt || 0) < 30000) {
+    return { ok: true, deduped: true, status: options.duplicateStatus };
+  }
+  const api = sharedSession?.rpc?.extensions?.sendAttachmentsToMessage;
+  if (typeof api !== "function") {
+    return {
+      ok: false,
+      code: "unsupported_runtime",
+      error:
+        "This Copilot build can't receive canvas context yet. Update the Copilot CLI/app " +
+        "(session.extensions.sendAttachmentsToMessage is unavailable).",
+    };
+  }
+  try {
+    // Keep this pill-only. Large image blobs previously stalled the following agent turn.
+    // Do not pass instanceId: canvas provenance resolution can wedge host restarts, while the
+    // complete bounded payload already travels inline with the extension_context entry.
+    const r = await withTimeout(
+      api.call(sharedSession.rpc.extensions, {
+        attachments: [{ type: "extension_context", title: options.title, payload: options.payload }],
+      }),
+      8000,
+      "Attach-to-Copilot",
+    );
+    if (r && r.timedOut) return { ok: false, error: r.error };
+  } catch (e) {
+    return { ok: false, error: `Could not attach ${options.errorLabel}: ${String(e?.message || e)}` };
+  }
+  if (st) { st._lastPushKey = options.pushKey; st._lastPushAt = nowTs; }
+  return { ok: true, status: options.successStatus };
+}
+
+// Push the current canvas selection into the Copilot composer.
 async function pushSelectionContext(instanceId, store, fallbackElement) {
   let sel = store.selectionContext();
   // Fall back to the element the inspector pushed if the store selection isn't set (the human's
@@ -150,56 +184,39 @@ async function pushSelectionContext(instanceId, store, fallbackElement) {
   if (!sel || !sel.selectedId) {
     return { ok: false, error: "Nothing is selected — click an element in the canvas first." };
   }
-  // Idempotent attach: pushing the SAME selection again (an accidental double-click, or a
-  // "did that actually work?" re-click) would stack duplicate context pills in the composer.
-  // Skip a repeat push of the same element within a short window. Selecting a different element
-  // (different key) or a longer gap allows a fresh attach for a new message.
-  const st = instances.get(instanceId);
-  const pushKey = sel.selectedId + "::" + (sel.summary || "");
-  const nowTs = Date.now();
-  if (st && st._lastPushKey === pushKey && nowTs - (st._lastPushAt || 0) < 30000) {
-    return { ok: true, deduped: true, status: `${sel.summary} is already attached to Copilot` };
-  }
-  const api = sharedSession?.rpc?.extensions?.sendAttachmentsToMessage;
-  if (typeof api !== "function") {
-    return {
-      ok: false,
-      code: "unsupported_runtime",
-      error:
-        "This Copilot build can't receive canvas context yet. Update the Copilot CLI/app to " +
-        "attach the selection (session.extensions.sendAttachmentsToMessage is unavailable).",
-    };
-  }
   const title = `MAUI selection · ${sel.summary}`;
   const payload = { ...sel, capturedAt: new Date().toISOString() };
-  try {
-    // Push ONLY the lightweight context pill (small JSON metadata). We deliberately do
-    // NOT auto-push a screenshot blob anymore: a large inline base64 image over the shared
-    // RPC made the FOLLOWING agent turn stall ("Session appears unresponsive"). The context
-    // pill is the robust, guaranteed path; if the agent wants a visual it can pull one on
-    // demand via the `screenshot` capability. Time-boxed so a slow runtime can't hang the
-    // human's click either.
-    //
-    // IMPORTANT: do NOT pass `instanceId` here. Per the Copilot SDK, supplying it makes the
-    // runtime "resolve the canvas, verify it is owned by the calling extension, and stamp
-    // canvasId/instanceId onto each extension_context entry" when the NEXT turn runs — and that
-    // canvas-resolution step wedges the agent turn ("Session appears unresponsive"), especially
-    // as the extension host process is (re)spawned around turns. Omitting it skips resolution;
-    // the pill still carries the full inline `payload`, so the agent gets the selection as
-    // context. We only forgo the provenance stamp (canvasId/instanceId), which we don't rely on.
-    const r = await withTimeout(
-      api.call(sharedSession.rpc.extensions, {
-        attachments: [{ type: "extension_context", title, payload }],
-      }),
-      8000,
-      "Attach-to-Copilot",
-    );
-    if (r && r.timedOut) return { ok: false, error: r.error };
-  } catch (e) {
-    return { ok: false, error: `Could not attach selection: ${String(e?.message || e)}` };
+  return pushContextPill(instanceId, {
+    title,
+    payload,
+    pushKey: `selection:${sel.selectedId}:${sel.summary || ""}`,
+    duplicateStatus: `${sel.summary} is already attached to Copilot`,
+    successStatus: `Attached ${sel.summary} to Copilot`,
+    errorLabel: "selection",
+  });
+}
+
+const DATA_CONTEXT_SCOPES = new Set(["logs", "network", "preferences", "device", "sensors", "files"]);
+
+async function pushDataContext(instanceId, snapshot) {
+  if (!snapshot || snapshot.kind !== "dataSnapshot" || snapshot.redacted !== true
+      || !DATA_CONTEXT_SCOPES.has(snapshot.scope) || typeof snapshot.title !== "string") {
+    return { ok: false, error: "The DevFlow Data snapshot is invalid." };
   }
-  if (st) { st._lastPushKey = pushKey; st._lastPushAt = nowTs; }
-  return { ok: true, status: `Attached ${sel.summary} to Copilot` };
+  const serialized = JSON.stringify(snapshot);
+  if (serialized.length > 20000) {
+    return { ok: false, error: "The DevFlow Data snapshot exceeded the safe context size." };
+  }
+  const payload = JSON.parse(serialized);
+  const digest = createHash("sha256").update(serialized).digest("hex").slice(0, 16);
+  return pushContextPill(instanceId, {
+    title: `MAUI data · ${snapshot.title}`,
+    payload,
+    pushKey: `data:${snapshot.scope}:${digest}`,
+    duplicateStatus: `${snapshot.title} is already attached to Copilot`,
+    successStatus: `Attached ${snapshot.title} to Copilot`,
+    errorLabel: "Data context",
+  });
 }
 
 // Browser (side-panel) control actions → store methods. All async.
@@ -224,6 +241,7 @@ async function applyControl(st, body, instanceId) {
   case "screenshot":   return store.refresh({ shot: true });
   case "logs":         return store.getLogs(body.limit || 100);
   case "attachSelection": return pushSelectionContext(instanceId, store, body.element);
+  case "attachData":   return pushDataContext(instanceId, body.snapshot);
   // ── Workflow Test Recorder ──────────────────────────────────────────────
   case "record.start": {
     const r = await store.device.recordingStart({ name: body.name, preconditions: body.preconditions });
@@ -268,7 +286,7 @@ async function applyControl(st, body, instanceId) {
 }
 
 // m2b: build the SHARED broker inspector URL for this instance's resolved agent, or null when no
-// broker/agent is available yet (then the canvas falls back to the hand-rendered ui.mjs). The
+// broker/agent is available yet (then the canvas falls back to the disconnected shell). The
 // ?embed={token} param (m7) proves this is a trusted local shell so the inspector relaxes its
 // anti-framing headers and the iframe can load.
 function brokerInspectorUrl(st) {
@@ -282,7 +300,7 @@ function brokerInspectorUrl(st) {
       return state.embedToken ? `${base}?embed=${encodeURIComponent(state.embedToken)}` : base;
     }
   } catch {
-    // Broker state unreadable — fall back to the local hand-rendered UI.
+    // Broker state unreadable — fall back to the disconnected shell.
   }
   return null;
 }
@@ -306,7 +324,7 @@ async function fetchBrokerAgents(port) {
 
 // Resilient variant: build the shared inspector URL even when resolvedAgent() is momentarily
 // stale, by matching the broker's live agent list on the app port we're connected to. This keeps
-// the canvas on the SHARED tool across broker restarts instead of dropping to the legacy PoC UI.
+// the canvas on the SHARED tool across broker restarts instead of dropping to the disconnected shell.
 async function resolveInspectorUrl(st) {
   const direct = brokerInspectorUrl(st);
   if (direct) return direct;
@@ -321,7 +339,7 @@ async function resolveInspectorUrl(st) {
       return state.embedToken ? `${base}?embed=${encodeURIComponent(state.embedToken)}` : base;
     }
   } catch {
-    // fall back to ui.mjs
+    // fall back to the disconnected shell
   }
   return null;
 }
@@ -368,20 +386,24 @@ async function startServer(instanceId, input = {}) {
       // The canvas IS the shared inspector: it reverse-proxies the broker's per-agent inspector
       // (the same devflow.js/inspector.html the browser + VS Code host use). If the agent isn't
       // resolved yet (panel opened during connect), resolve it FIRST — otherwise we'd fall back to
-      // the legacy PoC ui.mjs. The canvas should always be the shared tool whenever a broker + a
-      // running app are reachable; ui.mjs is only a last resort when nothing resolves.
+      // the lightweight disconnected shell. The canvas should always be the shared tool whenever a
+      // broker + a running app are reachable; renderDisconnected is only a last resort (and self-
+      // heals via /inspector-ready) when nothing resolves yet.
       let inspectorUrl = await resolveInspectorUrl(st);
       if (!inspectorUrl) {
-        try { await withTimeout(st.store.refresh(), 5000, "resolve-agent"); } catch { /* fall through to ui.mjs */ }
+        try { await withTimeout(st.store.refresh(), 5000, "resolve-agent"); } catch { /* fall through to the disconnected shell */ }
         inspectorUrl = await resolveInspectorUrl(st);
       }
-      res.end(inspectorUrl ? renderShell(inspectorUrl, st.store.snapshot()?.info?.appName, st.bridgeId) : renderHtml(st.bridgeId));
+      res.end(inspectorUrl
+        ? renderShell(inspectorUrl, st.store.snapshot()?.info?.appName, st.bridgeId)
+        : renderDisconnected(st.store.snapshot()?.info?.appName, st.bridgeId));
       return;
     }
 
-    // Cheap readiness probe for the ui.mjs self-heal: report whether the SHARED inspector is now
-    // reachable (broker + a resolved running app). The fallback UI polls this and reloads into the
-    // shared inspector once it flips true, so a panel opened mid-(re)connect converges on its own.
+    // Cheap readiness probe for the disconnected shell's self-heal: report whether the SHARED
+    // inspector is now reachable (broker + a resolved running app). The fallback UI polls this and
+    // reloads into the shared inspector once it flips true, so a panel opened mid-(re)connect
+    // converges on its own.
     if (url.pathname === "/inspector-ready" && req.method === "GET") {
       res.setHeader("Content-Type", "application/json");
       res.setHeader("Cache-Control", "no-store");

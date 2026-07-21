@@ -22,7 +22,18 @@ public class PlatformAgentService : DevFlowAgentService
 {
     public PlatformAgentService(AgentOptions? options = null) : base(options) { }
 
-    protected override VisualTreeWalker CreateTreeWalker() => new PlatformVisualTreeWalker();
+    internal PlatformAgentService(
+        AgentOptions? options,
+        NativeElementRegistrationRegistry nativeElementRegistry,
+        IDisposable nativeElementSubscription)
+        : base(options, nativeElementRegistry, nativeElementSubscription)
+    {
+    }
+
+    protected override VisualTreeWalker CreateTreeWalker()
+        => NativeElementRegistry is null
+            ? new PlatformVisualTreeWalker()
+            : new PlatformVisualTreeWalker(NativeElementRegistry);
 
     protected override double GetWindowDisplayDensity(IWindow? window)
     {
@@ -530,8 +541,9 @@ public class PlatformAgentService : DevFlowAgentService
         return false;
     }
 
-    protected override bool TryScheduleNativeTapFirst(VisualElement ve)
+    protected override async Task<bool> TryNativeTapFirstAsync(VisualElement ve)
     {
+        await Task.CompletedTask;
         try
         {
 #if WINDOWS
@@ -542,20 +554,45 @@ public class PlatformAgentService : DevFlowAgentService
                     Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.CreatePeerForElement(buttonBase);
                 if (peer?.GetPattern(Microsoft.UI.Xaml.Automation.Peers.PatternInterface.Invoke) is Microsoft.UI.Xaml.Automation.Provider.IInvokeProvider invokeProvider)
                 {
-                    // Wrap the dispatched lambda so a stale/disabled element doesn't
-                    // surface as CoreApplication.UnhandledErrorDetected and crash the
-                    // host app. The TryEnqueue bool only reports whether the work
-                    // item was queued, not whether the invoke itself succeeded.
-                    return buttonBase.DispatcherQueue.TryEnqueue(() =>
+                    var completion = new TaskCompletionSource<bool>(
+                        TaskCreationOptions.RunContinuationsAsynchronously);
+                    var invocationState = 0;
+                    if (!buttonBase.DispatcherQueue.TryEnqueue(() =>
                     {
-                        try { invokeProvider.Invoke(); }
-                        catch (Exception ex) when (ex is System.Runtime.InteropServices.COMException
-                                                      or InvalidOperationException
-                                                      or UnauthorizedAccessException)
+                        if (Interlocked.CompareExchange(ref invocationState, 1, 0) != 0)
+                        {
+                            completion.TrySetResult(false);
+                            return;
+                        }
+
+                        try
+                        {
+                            invokeProvider.Invoke();
+                            completion.TrySetResult(true);
+                        }
+                        catch (Exception ex)
                         {
                             System.Diagnostics.Debug.WriteLine($"[Microsoft.Maui.DevFlow] WinUI native invoke skipped: {ex.GetBaseException().Message}");
+                            completion.TrySetResult(false);
                         }
-                    });
+                    }))
+                    {
+                        return false;
+                    }
+
+                    var winner = await Task.WhenAny(
+                        completion.Task,
+                        Task.Delay(TimeSpan.FromSeconds(5)));
+                    if (winner == completion.Task)
+                        return await completion.Task;
+
+                    if (Interlocked.CompareExchange(ref invocationState, 2, 0) == 0)
+                        return false;
+
+                    // Invocation already started. Treat it as handled so a modal or
+                    // long-running click handler does not block the automation request
+                    // or trigger the managed fallback a second time.
+                    return true;
                 }
             }
 #endif
@@ -566,6 +603,8 @@ public class PlatformAgentService : DevFlowAgentService
     }
 
 #if MACOS
+    protected override bool SupportsNativeElementScreenshots => true;
+
     protected override async Task<byte[]?> CaptureScreenshotAsync(VisualElement rootElement)
     {
         try
@@ -734,6 +773,27 @@ public class PlatformAgentService : DevFlowAgentService
         return base.CaptureElementScreenshotAsync(element);
     }
 
+    protected override Task<byte[]?> CaptureNativeElementScreenshotAsync(
+        object nativeElement,
+        ElementInfo? elementInfo)
+    {
+        try
+        {
+            var view = nativeElement switch
+            {
+                NSView nsView => nsView,
+                NSSearchToolbarItem searchItem => searchItem.SearchField,
+                NSToolbarItem toolbarItem => toolbarItem.View,
+                _ => null
+            };
+            if (view is not null)
+                return Task.FromResult<byte[]?>(CaptureNSView(view));
+        }
+        catch { }
+
+        return Task.FromResult<byte[]?>(null);
+    }
+
     private static byte[]? CaptureNSView(NSView view)
     {
         var bounds = view.Bounds;
@@ -823,7 +883,7 @@ public class PlatformAgentService : DevFlowAgentService
         return await base.CaptureScreenshotAsync(rootElement);
     }
 
-    protected override Task<byte[]?> CaptureFullScreenAsync()
+    protected override Task<byte[]?> CaptureFullScreenAsync(int? windowIndex = null)
         => DispatchAsync(() => CaptureAllWindowsComposited());
 
     /// <summary>
@@ -898,6 +958,200 @@ public class PlatformAgentService : DevFlowAgentService
         return pngData?.ToArray();
     }
 #elif WINDOWS
+    protected override bool SupportsNativeElementScreenshots => true;
+
+    protected override async Task<byte[]?> CaptureNativeElementScreenshotAsync(
+        object nativeElement,
+        ElementInfo? elementInfo)
+    {
+        if (nativeElement is System.Windows.Automation.AutomationElement automationElement)
+            return await Task.Run(() => Windows.NativeWindowProbe.CaptureElementScreenshot(automationElement));
+
+        if (nativeElement is not Microsoft.UI.Xaml.UIElement uiElement)
+            return null;
+
+        try
+        {
+            var renderTarget = new Microsoft.UI.Xaml.Media.Imaging.RenderTargetBitmap();
+            await renderTarget.RenderAsync(uiElement);
+            if (renderTarget.PixelWidth <= 0 || renderTarget.PixelHeight <= 0)
+                return null;
+
+            var pixelBuffer = await renderTarget.GetPixelsAsync();
+            var pixels = new byte[checked((int)pixelBuffer.Length)];
+            using (var reader = global::Windows.Storage.Streams.DataReader.FromBuffer(pixelBuffer))
+                reader.ReadBytes(pixels);
+
+            using var bitmap = new SkiaSharp.SKBitmap(
+                renderTarget.PixelWidth,
+                renderTarget.PixelHeight,
+                SkiaSharp.SKColorType.Bgra8888,
+                SkiaSharp.SKAlphaType.Premul);
+            System.Runtime.InteropServices.Marshal.Copy(
+                pixels,
+                0,
+                bitmap.GetPixels(),
+                pixels.Length);
+            using var image = SkiaSharp.SKImage.FromBitmap(bitmap);
+            using var png = image.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100);
+            return png.ToArray();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    protected override async Task<byte[]?> CaptureFullScreenAsync(int? windowIndex = null)
+    {
+        var target = await DispatchAsync(() =>
+        {
+            var index = windowIndex ?? 0;
+            var platformWindow = Application.Current?.Windows.ElementAtOrDefault(index)?
+                .Handler?.PlatformView as Microsoft.UI.Xaml.Window;
+            return (
+                Hwnd: platformWindow is null
+                    ? IntPtr.Zero
+                    : WinRT.Interop.WindowNative.GetWindowHandle(platformWindow),
+                Root: platformWindow?.Content);
+        });
+        if (target.Hwnd == IntPtr.Zero || target.Root is null)
+            return null;
+
+        var baseScreenshot = await Task.Run(
+            () => Windows.NativeWindowProbe.CaptureCompositedWindowScreenshot(target.Hwnd));
+        if (baseScreenshot is null)
+            return null;
+
+        try
+        {
+            return await DispatchAsync<byte[]>(
+                () => CompositeWinUiPopupsAsync(baseScreenshot, target.Root))
+                ?? baseScreenshot;
+        }
+        catch
+        {
+            return baseScreenshot;
+        }
+    }
+
+    private static async Task<byte[]?> CompositeWinUiPopupsAsync(
+        byte[] baseScreenshot,
+        Microsoft.UI.Xaml.UIElement root)
+    {
+        if (root.XamlRoot is null)
+            return baseScreenshot;
+
+        using var rootBitmap = SkiaSharp.SKBitmap.Decode(baseScreenshot);
+        if (rootBitmap is null)
+            return baseScreenshot;
+
+        using var canvas = new SkiaSharp.SKCanvas(rootBitmap);
+        var rootScaleX = root is Microsoft.UI.Xaml.FrameworkElement rootElement
+            && rootElement.ActualWidth > 0
+                ? rootBitmap.Width / rootElement.ActualWidth
+                : 1d;
+        var rootScaleY = root is Microsoft.UI.Xaml.FrameworkElement rootElementForHeight
+            && rootElementForHeight.ActualHeight > 0
+                ? rootBitmap.Height / rootElementForHeight.ActualHeight
+                : 1d;
+
+        using var popupCaptureCts = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+        var popupCount = 0;
+        foreach (var popup in Microsoft.UI.Xaml.Media.VisualTreeHelper
+            .GetOpenPopupsForXamlRoot(root.XamlRoot))
+        {
+            if (popupCaptureCts.IsCancellationRequested || popupCount >= 8)
+                break;
+            if (!popup.IsOpen || popup.Child is not Microsoft.UI.Xaml.UIElement popupChild)
+                continue;
+            popupCount++;
+
+            SkiaSharp.SKBitmap? renderedPopup;
+            try
+            {
+                renderedPopup = await RenderWinUiBitmapAsync(
+                    popupChild,
+                    popupCaptureCts.Token);
+            }
+            catch
+            {
+                continue;
+            }
+
+            using var popupBitmap = renderedPopup;
+            if (popupBitmap is null)
+                continue;
+
+            global::Windows.Foundation.Point origin;
+            try
+            {
+                origin = popupChild.TransformToVisual(root)
+                    .TransformPoint(new global::Windows.Foundation.Point(0, 0));
+            }
+            catch
+            {
+                origin = new global::Windows.Foundation.Point(
+                    popup.HorizontalOffset,
+                    popup.VerticalOffset);
+            }
+
+            canvas.DrawBitmap(
+                popupBitmap,
+                (float)(origin.X * rootScaleX),
+                (float)(origin.Y * rootScaleY));
+        }
+
+        canvas.Flush();
+        using var image = SkiaSharp.SKImage.FromBitmap(rootBitmap);
+        using var png = image.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100);
+        return png.ToArray();
+    }
+
+    private static async Task<SkiaSharp.SKBitmap?> RenderWinUiBitmapAsync(
+        Microsoft.UI.Xaml.UIElement element,
+        CancellationToken cancellationToken)
+    {
+        using var captureCts = CancellationTokenSource.CreateLinkedTokenSource(
+            cancellationToken);
+        captureCts.CancelAfter(TimeSpan.FromSeconds(2));
+
+        var renderTarget = new Microsoft.UI.Xaml.Media.Imaging.RenderTargetBitmap();
+        await renderTarget.RenderAsync(element)
+            .AsTask(captureCts.Token);
+        if (renderTarget.PixelWidth <= 0 || renderTarget.PixelHeight <= 0)
+            return null;
+
+        const long MaxCapturePixels = 16_777_216;
+        var pixelCount = (long)renderTarget.PixelWidth * renderTarget.PixelHeight;
+        if (pixelCount > MaxCapturePixels)
+            return null;
+
+        var pixelBuffer = await renderTarget.GetPixelsAsync()
+            .AsTask(captureCts.Token);
+        if (pixelBuffer.Length > int.MaxValue
+            || pixelBuffer.Length > MaxCapturePixels * 4)
+        {
+            return null;
+        }
+
+        var pixels = new byte[(int)pixelBuffer.Length];
+        using (var reader = global::Windows.Storage.Streams.DataReader.FromBuffer(pixelBuffer))
+            reader.ReadBytes(pixels);
+
+        var bitmap = new SkiaSharp.SKBitmap(
+            renderTarget.PixelWidth,
+            renderTarget.PixelHeight,
+            SkiaSharp.SKColorType.Bgra8888,
+            SkiaSharp.SKAlphaType.Premul);
+        System.Runtime.InteropServices.Marshal.Copy(
+            pixels,
+            0,
+            bitmap.GetPixels(),
+            pixels.Length);
+        return bitmap;
+    }
+
     protected override async Task<byte[]?> CaptureScreenshotAsync(VisualElement rootElement)
     {
         // MAUI's VisualDiagnostics doesn't capture WebView2 GPU-rendered content on Windows.

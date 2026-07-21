@@ -5,6 +5,7 @@ using UIKit;
 #endif
 #if MACOS
 using AppKit;
+using Microsoft.Maui.Platforms.MacOS.Platform;
 #endif
 #if WINDOWS
 using Microsoft.Maui.DevFlow.Agent.Windows;
@@ -18,10 +19,438 @@ namespace Microsoft.Maui.DevFlow.Agent;
 /// </summary>
 public class PlatformVisualTreeWalker : VisualTreeWalker
 {
+    public PlatformVisualTreeWalker()
+    {
+    }
+
+    internal PlatformVisualTreeWalker(NativeElementRegistrationRegistry nativeElementRegistry)
+        : base(nativeElementRegistry)
+    {
+    }
+
+    internal override ElementInfo CreateRegisteredNativeElementInfo(
+        NativeElementRegistrationSnapshot registration,
+        string? ownerId)
+    {
+        var info = base.CreateRegisteredNativeElementInfo(registration, ownerId);
+        try
+        {
+#if ANDROID
+            info.Framework = "android-native";
+            if (registration.NativeElement is global::Android.Views.View androidView)
+            {
+                var location = new int[2];
+                androidView.GetLocationInWindow(location);
+                var density = androidView.Context?.Resources?.DisplayMetrics?.Density ?? 1f;
+                info.WindowBounds = new BoundsInfo
+                {
+                    X = location[0] / density,
+                    Y = location[1] / density,
+                    Width = androidView.Width / density,
+                    Height = androidView.Height / density
+                };
+                info.BoundsQuality = "exact";
+                info.IsVisible = androidView.Visibility == global::Android.Views.ViewStates.Visible && androidView.IsShown;
+                info.IsEnabled = androidView.Enabled;
+                info.IsFocused = androidView.HasFocus;
+                if (androidView.Id != global::Android.Views.View.NoId)
+                {
+                    try
+                    {
+                        info.AutomationId = androidView.Resources?.GetResourceEntryName(androidView.Id);
+                    }
+                    catch
+                    {
+                    }
+                }
+                info.Text = androidView.ContentDescription;
+            }
+            else if (registration.NativeElement is global::Android.Views.IMenuItem menuItem)
+            {
+                info.Type = "MenuItem";
+                info.IsVisible = menuItem.IsVisible;
+                info.IsEnabled = menuItem.IsEnabled;
+                info.IsFocused = menuItem.IsChecked;
+                info.Text = menuItem.TitleFormatted?.ToString();
+                info.NativeProperties ??= new Dictionary<string, string?>();
+                info.NativeProperties["itemId"] = menuItem.ItemId.ToString();
+                info.NativeProperties["groupId"] = menuItem.GroupId.ToString();
+                info.NativeProperties["isCheckable"] = menuItem.IsCheckable.ToString();
+                info.NativeProperties["isChecked"] = menuItem.IsChecked.ToString();
+                if (menuItem.ActionView is global::Android.Views.View actionView)
+                {
+                    var location = new int[2];
+                    actionView.GetLocationInWindow(location);
+                    var density = actionView.Context?.Resources?.DisplayMetrics?.Density ?? 1f;
+                    info.WindowBounds = new BoundsInfo
+                    {
+                        X = location[0] / density,
+                        Y = location[1] / density,
+                        Width = actionView.Width / density,
+                        Height = actionView.Height / density
+                    };
+                    info.BoundsQuality = "exact";
+                }
+            }
+#elif IOS || MACCATALYST
+            info.Framework = "apple-native";
+            if (registration.NativeElement is UIKit.UIView uiView)
+            {
+                var window = uiView.Window;
+                var windowView = window?.RootViewController?.View ?? window;
+                if (windowView is not null)
+                {
+                    var bounds = uiView.ConvertRectToView(uiView.Bounds, windowView);
+                    info.WindowBounds = new BoundsInfo
+                    {
+                        X = bounds.X,
+                        Y = bounds.Y,
+                        Width = bounds.Width,
+                        Height = bounds.Height
+                    };
+                    info.BoundsQuality = "exact";
+                }
+                info.IsVisible = IsAppleViewVisible(uiView);
+                info.IsEnabled = uiView is not UIKit.UIControl control || control.Enabled;
+                info.IsFocused = uiView.IsFirstResponder;
+                info.AutomationId = uiView.AccessibilityIdentifier;
+                info.Text = uiView.AccessibilityLabel;
+            }
+            else if (registration.NativeElement is UIKit.UIBarItem barItem)
+            {
+                info.Type = barItem.GetType().Name;
+                info.IsEnabled = barItem.Enabled;
+                info.AutomationId = barItem.AccessibilityIdentifier;
+                info.Text = barItem.AccessibilityLabel ?? barItem.Title;
+                var frame = barItem.AccessibilityFrame;
+                var ownerWindow = FindAppleWindow(registration.Owner)
+                    ?? FindAppleWindow(frame);
+                info.IsVisible = ownerWindow is not null && !frame.IsEmpty;
+                if (!frame.IsEmpty && ownerWindow is not null)
+                {
+                    var windowFrame = ownerWindow.ConvertRectFromCoordinateSpace(
+                        frame,
+                        ownerWindow.Screen.CoordinateSpace);
+                    info.WindowBounds = new BoundsInfo
+                    {
+                        X = windowFrame.X,
+                        Y = windowFrame.Y,
+                        Width = windowFrame.Width,
+                        Height = windowFrame.Height
+                    };
+                    info.BoundsQuality = "accessibility";
+                }
+            }
+            else if (registration.NativeElement is UIKit.UIMenuElement menuElement)
+            {
+                info.Type = menuElement.GetType().Name;
+                info.IsVisible = true;
+                info.IsEnabled = menuElement switch
+                {
+                    UIKit.UIAction action => !action.Attributes.HasFlag(UIKit.UIMenuElementAttributes.Disabled),
+                    UIKit.UICommand command => !command.Attributes.HasFlag(UIKit.UIMenuElementAttributes.Disabled),
+                    _ => true
+                };
+                info.Text = menuElement.Title;
+            }
+#elif WINDOWS
+            info.Framework = "windows-native";
+            if (registration.NativeElement is Microsoft.UI.Xaml.FrameworkElement frameworkElement)
+            {
+                var hasExactBounds = frameworkElement.IsLoaded
+                    && frameworkElement.XamlRoot is not null
+                    && frameworkElement.ActualWidth > 0
+                    && frameworkElement.ActualHeight > 0;
+                if (hasExactBounds)
+                {
+                    var point = frameworkElement.TransformToVisual(null)
+                        .TransformPoint(new global::Windows.Foundation.Point(0, 0));
+                    info.WindowBounds = new BoundsInfo
+                    {
+                        X = point.X,
+                        Y = point.Y,
+                        Width = frameworkElement.ActualWidth,
+                        Height = frameworkElement.ActualHeight
+                    };
+                    info.BoundsQuality = "exact";
+                }
+                info.IsVisible = hasExactBounds && IsWinUiElementVisible(frameworkElement);
+                info.IsEnabled = frameworkElement is not Microsoft.UI.Xaml.Controls.Control control || control.IsEnabled;
+                info.IsFocused = frameworkElement.FocusState != Microsoft.UI.Xaml.FocusState.Unfocused;
+                info.AutomationId = Microsoft.UI.Xaml.Automation.AutomationProperties.GetAutomationId(frameworkElement);
+                info.Text = Microsoft.UI.Xaml.Automation.AutomationProperties.GetName(frameworkElement);
+                if (string.IsNullOrEmpty(info.Text)
+                    && frameworkElement is Microsoft.UI.Xaml.Controls.AppBarButton appBarButton)
+                {
+                    info.Text = appBarButton.Label;
+                }
+            }
+#elif MACOS
+            info.Framework = "macos-native";
+            if (registration.NativeElement is AppKit.NSView nsView)
+            {
+                var contentView = nsView.Window?.ContentView;
+                if (contentView is not null)
+                {
+                    var bounds = nsView.ConvertRectToView(nsView.Bounds, contentView);
+                    info.WindowBounds = new BoundsInfo
+                    {
+                        X = bounds.X,
+                        Y = contentView.Bounds.Height - bounds.Y - bounds.Height,
+                        Width = bounds.Width,
+                        Height = bounds.Height
+                    };
+                    info.BoundsQuality = "exact";
+                }
+                info.IsVisible = IsAppKitViewVisible(nsView);
+                info.IsEnabled = nsView is not AppKit.NSControl control || control.Enabled;
+                info.IsFocused = nsView.Window?.FirstResponder == nsView;
+                info.AutomationId = nsView.AccessibilityIdentifier;
+                info.Text = nsView.AccessibilityLabel;
+            }
+            else if (registration.NativeElement is AppKit.NSToolbarItem toolbarItem)
+            {
+                info.Type = toolbarItem.GetType().Name;
+                info.IsEnabled = toolbarItem.Enabled;
+                info.Text = toolbarItem.Label ?? toolbarItem.ToolTip;
+                var itemView = toolbarItem is AppKit.NSSearchToolbarItem searchToolbarItem
+                    ? searchToolbarItem.SearchField
+                    : toolbarItem.View;
+                info.IsVisible = !toolbarItem.Hidden;
+                if (itemView?.Window?.ContentView is { } contentView)
+                {
+                    var bounds = itemView.ConvertRectToView(itemView.Bounds, contentView);
+                    info.WindowBounds = new BoundsInfo
+                    {
+                        X = bounds.X,
+                        Y = contentView.Bounds.Height - bounds.Y - bounds.Height,
+                        Width = bounds.Width,
+                        Height = bounds.Height
+                    };
+                    info.BoundsQuality = "exact";
+                    info.IsVisible = info.IsVisible && IsAppKitViewVisible(itemView);
+                    info.IsFocused = itemView.Window?.FirstResponder == itemView;
+                    info.AutomationId = itemView.AccessibilityIdentifier;
+                    info.Text ??= itemView.AccessibilityLabel;
+                }
+
+                info.Capabilities ??= ["select"];
+                if (toolbarItem is AppKit.NSSearchToolbarItem)
+                {
+                    AddCapability(info.Capabilities, "invoke");
+                    AddCapability(info.Capabilities, "focus");
+                    AddCapability(info.Capabilities, "set-value");
+                }
+                else if (toolbarItem.Action is not null)
+                {
+                    AddCapability(info.Capabilities, "invoke");
+                }
+            }
+#endif
+        }
+        catch
+        {
+            info.BoundsQuality = "unknown";
+        }
+
+        return info;
+    }
+
 #if WINDOWS
+    private static bool IsWinUiElementVisible(Microsoft.UI.Xaml.FrameworkElement element)
+    {
+        Microsoft.UI.Xaml.DependencyObject? current = element;
+        while (current is Microsoft.UI.Xaml.FrameworkElement frameworkElement)
+        {
+            if (frameworkElement.Visibility != Microsoft.UI.Xaml.Visibility.Visible
+                || frameworkElement.Opacity <= 0)
+            {
+                return false;
+            }
+
+            current = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetParent(frameworkElement);
+        }
+
+        return element.IsLoaded && element.XamlRoot is not null;
+    }
+#endif
+
+#if MACOS
+    private static bool IsAppKitViewVisible(AppKit.NSView view)
+    {
+        if (view.Window is null)
+            return false;
+
+        AppKit.NSView? current = view;
+        while (current is not null)
+        {
+            if (current.Hidden || current.AlphaValue <= 0)
+                return false;
+            current = current.Superview;
+        }
+
+        return true;
+    }
+#endif
+
+    private static void AddCapability(List<string> capabilities, string capability)
+    {
+        if (!capabilities.Contains(capability, StringComparer.Ordinal))
+            capabilities.Add(capability);
+    }
+
+#if IOS || MACCATALYST
+    private static bool IsAppleViewVisible(UIKit.UIView view)
+    {
+        if (view.Window is null)
+            return false;
+
+        UIKit.UIView? current = view;
+        while (current is not null)
+        {
+            if (current.Hidden || current.Alpha <= 0)
+                return false;
+            current = current.Superview;
+        }
+
+        return true;
+    }
+
+    private static UIKit.UIWindow? FindAppleWindow(object owner)
+    {
+        var current = owner as Element;
+        while (current is not null)
+        {
+            if (current is Microsoft.Maui.Controls.Window window
+                && window.Handler?.PlatformView is UIKit.UIWindow uiWindow)
+                return uiWindow;
+            current = current.Parent;
+        }
+
+        return null;
+    }
+
+    private static UIKit.UIWindow? FindAppleWindow(CoreGraphics.CGRect screenFrame)
+    {
+        UIKit.UIWindow? fallback = null;
+        foreach (var scene in UIKit.UIApplication.SharedApplication.ConnectedScenes)
+        {
+            if (scene is not UIKit.UIWindowScene windowScene)
+                continue;
+
+            foreach (var window in windowScene.Windows)
+            {
+                if (window.Hidden || window.Alpha <= 0)
+                    continue;
+                fallback ??= window;
+                if (window.Frame.IntersectsWith(screenFrame))
+                    return window;
+            }
+        }
+
+        return fallback;
+    }
+#endif
+
+#if ANDROID || IOS || MACCATALYST || MACOS
+    public override string TryNativeElementFocus(string elementId)
+    {
+        if (!elementId.StartsWith("native:registered:", StringComparison.Ordinal))
+            return base.TryNativeElementFocus(elementId);
+
+        var nativeElement = GetNativeElementById(elementId);
+#if ANDROID
+        if (nativeElement is global::Android.Views.View androidView)
+            return androidView.RequestFocus()
+                ? "ok"
+                : $"Native element '{elementId}' could not be focused";
+#elif IOS || MACCATALYST
+        if (nativeElement is UIKit.UIView uiView)
+            return uiView.BecomeFirstResponder()
+                ? "ok"
+                : $"Native element '{elementId}' could not be focused";
+#elif MACOS
+        if (nativeElement is AppKit.NSSearchToolbarItem searchToolbarItem)
+            return searchToolbarItem.SearchField.Window?.MakeFirstResponder(searchToolbarItem.SearchField) == true
+                ? "ok"
+                : $"Native element '{elementId}' could not be focused";
+        if (nativeElement is AppKit.NSView nsView)
+            return nsView.Window?.MakeFirstResponder(nsView) == true
+                ? "ok"
+                : $"Native element '{elementId}' could not be focused";
+#endif
+
+        return $"Native element '{elementId}' was not found";
+    }
+#endif
+
+    #if MACOS
+        public override string TryNativeElementTap(string elementId)
+        {
+            if (!elementId.StartsWith("native:registered:", StringComparison.Ordinal))
+                return base.TryNativeElementTap(elementId);
+
+            var baseResult = base.TryNativeElementTap(elementId);
+            if (baseResult == "ok")
+                return baseResult;
+
+            var nativeElement = GetNativeElementById(elementId);
+            if (nativeElement is AppKit.NSSearchToolbarItem searchToolbarItem)
+                return TryNativeElementFocus(elementId);
+
+            if (nativeElement is AppKit.NSToolbarItem toolbarItem
+                && toolbarItem.Action is not null)
+            {
+                return AppKit.NSApplication.SharedApplication.SendAction(
+                    toolbarItem.Action,
+                    toolbarItem.Target,
+                    toolbarItem)
+                        ? "ok"
+                        : $"Native element '{elementId}' action was not handled";
+            }
+
+            return baseResult;
+        }
+
+        public override string TryNativeElementSetValue(string elementId, string value)
+        {
+            if (elementId.StartsWith("native:registered:", StringComparison.Ordinal)
+                && GetNativeElementById(elementId) is AppKit.NSSearchToolbarItem searchToolbarItem)
+            {
+                searchToolbarItem.SearchField.StringValue = value;
+                if (GetRegisteredNativeOwner(elementId) is MacOSSearchToolbarItem searchOwner)
+                    searchOwner.Text = value;
+                else if (GetRegisteredNativeOwner(elementId) is Page ownerPage
+                    && MacOSToolbar.GetSearchItem(ownerPage) is { } pageSearchOwner)
+                {
+                    pageSearchOwner.Text = value;
+                }
+                return "ok";
+            }
+
+            return base.TryNativeElementSetValue(elementId, value);
+        }
+    #endif
+
+    #if WINDOWS
     private readonly NativeWindowProbe _nativeProbe = new();
     private readonly object _nativeObjectsLock = new();
     private Dictionary<string, object> _nativeObjects = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, object> _nativeHitObjects = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ElementInfo> _nativeHitInfos = new(StringComparer.OrdinalIgnoreCase);
+    private const int MaxNativeHitCacheSize = 256;
+
+    internal override bool AreElementIdentitiesEqual(object first, object second)
+        => NativeWindowProbe.SameIdentity(first, second);
+
+    internal override object GetElementIdentity(object element)
+        => element is System.Windows.Automation.AutomationElement automationElement
+            ? NativeWindowProbe.GetStableIdentity(automationElement)
+            : base.GetElementIdentity(element);
+
+    internal override bool ShouldRetainElementIdentityStrongly(object identity)
+        => NativeWindowProbe.IsDurableIdentity(identity)
+            || base.ShouldRetainElementIdentityStrongly(identity);
 #endif
 
     protected override void PopulateNativeInfo(ElementInfo info, VisualElement ve)
@@ -78,8 +507,13 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                     props["buttonTitle"] = nsButton.Title;
                 if (nsView is NSTextField nsTextField)
                 {
-                    props["stringValue"] = nsTextField.StringValue;
+                    var isPassword = ve is Entry { IsPassword: true }
+                        || nsTextField is NSSecureTextField;
+                    props["stringValue"] = SensitiveValueRedactor.Redact(
+                        nsTextField.StringValue,
+                        isPassword);
                     props["isEditable"] = nsTextField.Editable.ToString();
+                    props["isPassword"] = isPassword.ToString();
                 }
                 props["isHidden"] = nsView.Hidden.ToString();
                 props["alphaValue"] = nsView.AlphaValue.ToString("F2");
@@ -657,13 +1091,53 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
         return roots;
     }
 
-    public override object? GetNativeElementById(string id)
+    public override List<ElementInfo> HitTestNativeElements(
+        IReadOnlyList<IntPtr> knownWindowHandles,
+        double x,
+        double y)
     {
         lock (_nativeObjectsLock)
         {
+            var hitObjects = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            var hits = _nativeProbe.HitTest(hitObjects, knownWindowHandles, x, y);
+            foreach (var hit in hits)
+            {
+                if (hitObjects.TryGetValue(hit.Id, out var nativeObject))
+                {
+                    if (!_nativeHitObjects.ContainsKey(hit.Id)
+                        && _nativeHitObjects.Count >= MaxNativeHitCacheSize)
+                    {
+                        var expiredId = _nativeHitObjects.Keys.First();
+                        _nativeHitObjects.Remove(expiredId);
+                        _nativeHitInfos.Remove(expiredId);
+                    }
+
+                    _nativeHitObjects[hit.Id] = nativeObject;
+                    _nativeHitInfos[hit.Id] = hit;
+                }
+            }
+
+            return hits;
+        }
+    }
+
+    public override object? GetNativeElementById(string id)
+    {
+        if (id.StartsWith("native:registered:", StringComparison.Ordinal))
+            return base.GetNativeElementById(id);
+
+        lock (_nativeObjectsLock)
+        {
+            if (NativeWindowProbe.TryGetAutomationElement(_nativeHitObjects, id) is { } hitElement)
+                return hitElement;
             if (NativeWindowProbe.TryGetAutomationElement(_nativeObjects, id) is { } cached)
                 return cached;
         }
+
+        if (_nativeProbe.FindByRuntimeId(id) is { } runtimeElement)
+            return runtimeElement;
+        if (_nativeProbe.FindByHitId(id) is { } recoveredHitElement)
+            return recoveredHitElement;
 
         // Preserve native ID stability on cache miss: re-walk with the same HWND
         // the id was originally produced under. A plain Array.Empty<IntPtr>() walk
@@ -677,15 +1151,27 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
 
     public override ElementInfo? GetNativeElementInfoById(string id)
     {
+        if (id.StartsWith("native:registered:", StringComparison.Ordinal))
+            return base.GetNativeElementInfoById(id);
+
         // Cache-first: avoid a full UIA tree walk (which calls EnumerateProcessTopLevels
         // and enumerates every same-process window) when the requested id was already
         // resolved by a recent tree/query call.
         Dictionary<string, object> cache;
         lock (_nativeObjectsLock)
+        {
+            if (_nativeHitInfos.TryGetValue(id, out var hitInfo))
+                return hitInfo;
             cache = _nativeObjects;
+        }
 
         if (NativeWindowProbe.TryBuildCachedElementInfo(cache, id) is { } cached)
             return cached;
+
+        if (_nativeProbe.FindByRuntimeId(id) is { } runtimeElement)
+            return NativeWindowProbe.TryBuildElementInfo(runtimeElement, id);
+        if (_nativeProbe.FindByHitId(id) is { } recoveredHitElement)
+            return NativeWindowProbe.TryBuildElementInfo(recoveredHitElement, id);
 
         var seedHwnds = NativeWindowProbe.ExtractHwndsFromId(id);
         return FlattenElementInfos(WalkNativeTree(seedHwnds))
@@ -694,6 +1180,9 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
 
     public override string TryNativeElementTap(string elementId)
     {
+        if (elementId.StartsWith("native:registered:", StringComparison.Ordinal))
+            return base.TryNativeElementTap(elementId);
+
         var element = GetNativeAutomationElement(elementId);
         if (element is null)
             return $"Native element '{elementId}' was not found";
@@ -703,8 +1192,22 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
             : $"Native element '{elementId}' does not support invoke, toggle, selection, or expand/collapse";
     }
 
+    protected internal override string TryNativeElementTap(string elementId, object nativeElement)
+    {
+        if (elementId.StartsWith("native:registered:", StringComparison.Ordinal))
+            return base.TryNativeElementTap(elementId, nativeElement);
+
+        return nativeElement is System.Windows.Automation.AutomationElement element
+            && NativeWindowProbe.TryInvoke(element)
+                ? "ok"
+                : $"Native element '{elementId}' does not support invoke, toggle, selection, or expand/collapse";
+    }
+
     public override string TryNativeElementSetValue(string elementId, string value)
     {
+        if (elementId.StartsWith("native:registered:", StringComparison.Ordinal))
+            return base.TryNativeElementSetValue(elementId, value);
+
         var element = GetNativeAutomationElement(elementId);
         if (element is null)
             return $"Native element '{elementId}' was not found";
@@ -714,8 +1217,30 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
             : $"Native element '{elementId}' does not support writable value";
     }
 
+    protected internal override string TryNativeElementSetValue(
+        string elementId,
+        object nativeElement,
+        string value)
+    {
+        if (elementId.StartsWith("native:registered:", StringComparison.Ordinal))
+            return base.TryNativeElementSetValue(elementId, nativeElement, value);
+
+        return nativeElement is System.Windows.Automation.AutomationElement element
+            && NativeWindowProbe.TrySetValue(element, value)
+                ? "ok"
+                : $"Native element '{elementId}' does not support writable value";
+    }
+
     public override string TryNativeElementFocus(string elementId)
     {
+        if (elementId.StartsWith("native:registered:", StringComparison.Ordinal))
+        {
+            return GetNativeElementById(elementId) is Microsoft.UI.Xaml.Controls.Control control
+                && control.Focus(Microsoft.UI.Xaml.FocusState.Programmatic)
+                    ? "ok"
+                    : $"Native element '{elementId}' could not be focused";
+        }
+
         var element = GetNativeAutomationElement(elementId);
         if (element is null)
             return $"Native element '{elementId}' was not found";
@@ -725,8 +1250,35 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
             : $"Native element '{elementId}' could not be focused";
     }
 
+    protected internal override string TryNativeElementFocus(string elementId, object nativeElement)
+    {
+        if (elementId.StartsWith("native:registered:", StringComparison.Ordinal))
+        {
+            return nativeElement is Microsoft.UI.Xaml.Controls.Control control
+                && control.Focus(Microsoft.UI.Xaml.FocusState.Programmatic)
+                    ? "ok"
+                    : $"Native element '{elementId}' could not be focused";
+        }
+
+        return nativeElement is System.Windows.Automation.AutomationElement element
+            && NativeWindowProbe.TryFocus(element)
+                ? "ok"
+                : $"Native element '{elementId}' could not be focused";
+    }
+
     public override string TryNativeElementScroll(string elementId, double deltaX, double deltaY)
     {
+        if (elementId.StartsWith("native:registered:", StringComparison.Ordinal))
+        {
+            if (GetNativeElementById(elementId) is Microsoft.UI.Xaml.UIElement uiElement)
+            {
+                uiElement.StartBringIntoView();
+                return "ok";
+            }
+
+            return $"Native element '{elementId}' was not found";
+        }
+
         var element = GetNativeAutomationElement(elementId);
         if (element is null)
             return $"Native element '{elementId}' was not found";
@@ -734,6 +1286,29 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
         return NativeWindowProbe.TryScroll(element, deltaX, deltaY)
             ? "ok"
             : $"Native element '{elementId}' does not support scrolling";
+    }
+
+    protected internal override string TryNativeElementScroll(
+        string elementId,
+        object nativeElement,
+        double deltaX,
+        double deltaY)
+    {
+        if (elementId.StartsWith("native:registered:", StringComparison.Ordinal))
+        {
+            if (nativeElement is Microsoft.UI.Xaml.UIElement uiElement)
+            {
+                uiElement.StartBringIntoView();
+                return "ok";
+            }
+
+            return $"Native element '{elementId}' was not found";
+        }
+
+        return nativeElement is System.Windows.Automation.AutomationElement element
+            && NativeWindowProbe.TryScroll(element, deltaX, deltaY)
+                ? "ok"
+                : $"Native element '{elementId}' does not support scrolling";
     }
 
     private System.Windows.Automation.AutomationElement? GetNativeAutomationElement(string id)

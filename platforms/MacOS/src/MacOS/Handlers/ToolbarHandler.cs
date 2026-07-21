@@ -61,6 +61,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
     MacOSShareToolbarItem? _shareItem;
     readonly List<MacOSPopUpToolbarItem> _popUpItems = new();
     readonly List<MacOSViewToolbarItem> _viewItems = new();
+    readonly HashSet<NSObject> _registeredNativeElements = new();
     bool _isRefreshing;
 
     public void AttachToWindow(NSWindow window)
@@ -355,6 +356,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
             {
                 if (_window?.Toolbar != null)
                     _window.Toolbar = null;
+                UnregisterNativeElements();
                 return;
             }
 
@@ -371,6 +373,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
                 if (_splitView != null)
                     _toolbar.InsertItem(TrackingSeparatorId, 0);
             }
+            ReconcileNativeElements();
             return;
         }
 
@@ -654,6 +657,8 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
             // not change when navigating between pages with the same toolbar
             // structure, but the title text does.
             UpdateTitleLabel();
+
+            ReconcileNativeElements();
         }
         }
         finally
@@ -783,6 +788,10 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
             };
             button.SetButtonType(NSButtonType.MomentaryPushIn);
             nsItem.View = button;
+            RegisterNativeElement(
+                _shell ?? (object?)_flyoutPage ?? _currentPage,
+                nsItem,
+                "ShellFlyoutToggle");
             return nsItem;
         }
 
@@ -821,6 +830,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
             }
 
             nsItem.View = button;
+            RegisterNativeElement(_currentPage, nsItem, "BackButton");
             return nsItem;
         }
 
@@ -986,6 +996,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
             nsItem.View = button;
         }
 
+        RegisterNativeElement(mauiItem, nsItem, "ToolbarItem");
         return nsItem;
     }
 
@@ -1071,6 +1082,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
     {
         var nsSearchItem = new NSSearchToolbarItem(SearchId);
         _nativeSearchItem = nsSearchItem;
+        RegisterNativeElement(_currentPage, nsSearchItem, "SearchHandler");
 
         var searchField = nsSearchItem.SearchField;
         if (_searchItem != null)
@@ -1133,6 +1145,107 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
             _nativeSearchItem = null;
         }
         _searchItem = null;
+    }
+
+    void RegisterNativeElement(object? owner, NSObject nativeElement, string role)
+    {
+        if (owner is null)
+            return;
+
+        NativeElementDiagnosticsBridge.Register(owner, nativeElement, role);
+        _registeredNativeElements.Add(nativeElement);
+    }
+
+    void ReconcileNativeElements()
+    {
+        if (_toolbar is null)
+        {
+            UnregisterNativeElements();
+            return;
+        }
+
+        var currentItems = _toolbar.Items
+            .Cast<NSObject>()
+            .ToHashSet(ReferenceEqualityComparer.Instance);
+        foreach (var nativeElement in _registeredNativeElements.ToArray())
+        {
+            if (currentItems.Contains(nativeElement))
+                continue;
+
+            NativeElementDiagnosticsBridge.Unregister(nativeElement);
+            _registeredNativeElements.Remove(nativeElement);
+        }
+
+        foreach (var nativeItem in _toolbar.Items)
+        {
+            if (TryGetNativeRegistration(nativeItem, out var owner, out var role))
+                RegisterNativeElement(owner, nativeItem, role);
+        }
+    }
+
+    bool TryGetNativeRegistration(
+        NSToolbarItem nativeItem,
+        out object? owner,
+        out string role)
+    {
+        owner = null;
+        role = string.Empty;
+
+        if (nativeItem.Identifier == SidebarToggleId)
+        {
+            owner = _shell ?? (object?)_flyoutPage ?? _currentPage;
+            role = "ShellFlyoutToggle";
+            return owner is not null;
+        }
+
+        if (nativeItem.Identifier == BackButtonId)
+        {
+            owner = _currentPage;
+            role = "BackButton";
+            return owner is not null;
+        }
+
+        if (nativeItem.Identifier == SearchId)
+        {
+            owner = _currentPage;
+            role = "SearchHandler";
+            return owner is not null;
+        }
+
+        if (nativeItem.Identifier.StartsWith(SidebarItemIdPrefix, StringComparison.Ordinal))
+        {
+            var indexText = nativeItem.Identifier[SidebarItemIdPrefix.Length..];
+            if (int.TryParse(indexText, out var index)
+                && index >= 0
+                && index < _sidebarItems.Count)
+            {
+                owner = _sidebarItems[index];
+                role = "ToolbarItem";
+                return true;
+            }
+        }
+
+        if (nativeItem.Identifier.StartsWith(ItemIdPrefix, StringComparison.Ordinal))
+        {
+            var indexText = nativeItem.Identifier[ItemIdPrefix.Length..];
+            if (int.TryParse(indexText, out var index)
+                && index >= 0
+                && index < _items.Count)
+            {
+                owner = _items[index];
+                role = "ToolbarItem";
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    void UnregisterNativeElements()
+    {
+        foreach (var nativeElement in _registeredNativeElements)
+            NativeElementDiagnosticsBridge.Unregister(nativeElement);
+        _registeredNativeElements.Clear();
     }
 
     // ── Menu Toolbar Item ──────────────────────────────────────────────
@@ -1427,6 +1540,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
 
     public void Detach()
     {
+        UnregisterNativeElements();
         CleanupSearchItem();
         SetPage(null);
         if (_window != null)

@@ -12,7 +12,55 @@ public sealed class MockAgentServer : IAsyncDisposable
 {
     private readonly List<RecordedRequest> _recordedRequests = [];
     private readonly object _lock = new();
+    private readonly bool _supportsCaptureEpoch;
+    private readonly bool _failFirstHitTestCandidate;
+    private readonly bool _changeHitTestCandidates;
+    private readonly bool _staleFirstHitTestCandidate;
+    private readonly bool _staleFirstFill;
+    private readonly bool _failScreenshotsAfterFirst;
+    private readonly bool _useScrollableHitTestCandidate;
+    private readonly int _nativeProbeBusyHitTestCount;
+    private readonly bool _failTapWithServerError;
+    private readonly bool _staleFirstElementTap;
+    private readonly bool _staleFirstKey;
+    private readonly bool _includeDetachedNativeRoot;
+    private readonly bool _returnEmptyTree;
+    private int _hitTestCount;
+    private int _tapCount;
+    private int _fillCount;
+    private int _screenshotCount;
+    private int _keyCount;
     private WebApplication? _app;
+
+    public MockAgentServer(
+        bool supportsCaptureEpoch = true,
+        bool failFirstHitTestCandidate = false,
+        bool changeHitTestCandidates = false,
+        bool staleFirstHitTestCandidate = false,
+        bool staleFirstFill = false,
+        bool failScreenshotsAfterFirst = false,
+        bool useScrollableHitTestCandidate = false,
+        int nativeProbeBusyHitTestCount = 0,
+        bool failTapWithServerError = false,
+        bool staleFirstElementTap = false,
+        bool staleFirstKey = false,
+        bool includeDetachedNativeRoot = false,
+        bool returnEmptyTree = false)
+    {
+        _supportsCaptureEpoch = supportsCaptureEpoch;
+        _failFirstHitTestCandidate = failFirstHitTestCandidate;
+        _changeHitTestCandidates = changeHitTestCandidates;
+        _staleFirstHitTestCandidate = staleFirstHitTestCandidate;
+        _staleFirstFill = staleFirstFill;
+        _failScreenshotsAfterFirst = failScreenshotsAfterFirst;
+        _useScrollableHitTestCandidate = useScrollableHitTestCandidate;
+        _nativeProbeBusyHitTestCount = nativeProbeBusyHitTestCount;
+        _failTapWithServerError = failTapWithServerError;
+        _staleFirstElementTap = staleFirstElementTap;
+        _staleFirstKey = staleFirstKey;
+        _includeDetachedNativeRoot = includeDetachedNativeRoot;
+        _returnEmptyTree = returnEmptyTree;
+    }
 
     public int Port { get; private set; }
 
@@ -85,10 +133,14 @@ public sealed class MockAgentServer : IAsyncDisposable
             _recordedRequests.Clear();
     }
 
-    private static void RegisterAgentEndpoints(WebApplication app)
+    private void RegisterAgentEndpoints(WebApplication app)
     {
         app.MapGet("/api/v1/agent/status", () => Results.Content(MockAgentResponses.AgentStatus, "application/json"));
-        app.MapGet("/api/v1/agent/capabilities", () => Results.Content(MockAgentResponses.AgentCapabilities, "application/json"));
+        app.MapGet("/api/v1/agent/capabilities", () => Results.Content(
+            _supportsCaptureEpoch
+                ? MockAgentResponses.AgentCapabilities
+                : MockAgentResponses.LegacyAgentCapabilities,
+            "application/json"));
     }
 
     private static void RegisterExtensionEndpoints(WebApplication app)
@@ -103,19 +155,165 @@ public sealed class MockAgentServer : IAsyncDisposable
         });
     }
 
-    private static void RegisterUiEndpoints(WebApplication app)
+    private void RegisterUiEndpoints(WebApplication app)
     {
-        app.MapGet("/api/v1/ui/tree", () => Results.Content(MockAgentResponses.VisualTree, "application/json"));
-        app.MapGet("/api/v1/ui/elements", () => Results.Content(MockAgentResponses.QueryElements, "application/json"));
+        app.MapGet("/api/v1/ui/tree", () => Results.Content(
+            _returnEmptyTree
+                ? "[]"
+                : _includeDetachedNativeRoot
+                ? MockAgentResponses.VisualTreeWithDetachedNativeRoot
+                : MockAgentResponses.VisualTree,
+            "application/json"));
+        app.MapGet("/api/v1/ui/elements", (HttpContext context) =>
+        {
+            var response =
+                string.Equals(
+                    context.Request.Query["automationId"],
+                    "DuplicateActionTarget",
+                    StringComparison.Ordinal)
+                    ? MockAgentResponses.DuplicateActionElements
+                    : string.Equals(
+                        context.Request.Query["text"],
+                        "Shared action",
+                        StringComparison.Ordinal)
+                        ? MockAgentResponses.DistinctActionElements
+                        : MockAgentResponses.QueryElements;
+            return Results.Content(response, "application/json");
+        });
         app.MapGet("/api/v1/ui/elements/{id}", (string id) => Results.Content(MockAgentResponses.SingleElement(id), "application/json"));
         app.MapGet("/api/v1/ui/elements/{id}/properties/{name}", (string id, string name) =>
             Results.Content($$"""{"id":"{{id}}","property":"{{name}}","value":"Hello, World!"}""", "application/json"));
         app.MapPut("/api/v1/ui/elements/{id}/properties/{name}", () =>
             Results.Content(MockAgentResponses.ActionSuccess, "application/json"));
-        app.MapGet("/api/v1/ui/hit-test", () => Results.Content(MockAgentResponses.HitTestResult, "application/json"));
-        app.MapGet("/api/v1/ui/screenshot", () => Results.File(MockAgentResponses.ScreenshotPng, "image/png"));
+        app.MapGet("/api/v1/ui/hit-test", () =>
+        {
+            var hitTestNumber = Interlocked.Increment(ref _hitTestCount);
+            if (hitTestNumber <= _nativeProbeBusyHitTestCount)
+            {
+                return Results.Json(
+                    new
+                    {
+                        success = false,
+                        error = "Native hit testing is busy.",
+                        reason = "native-probe-busy",
+                        details = new { retryable = true }
+                    },
+                    statusCode: StatusCodes.Status409Conflict);
+            }
 
-        foreach (var action in new[] { "tap", "fill", "clear", "focus", "navigate", "scroll", "resize", "back", "key", "gesture", "batch" })
+            var epoch = hitTestNumber + 40;
+            var parentId = _changeHitTestCandidates && epoch > 41
+                ? "hit-parent-refreshed"
+                : "hit-parent";
+            var response = _useScrollableHitTestCandidate
+                ? MockAgentResponses.ScrollableHitTestResult(epoch)
+                : MockAgentResponses.HitTestResult(epoch, parentId);
+            return Results.Content(response, "application/json");
+        });
+        app.MapGet("/api/v1/ui/screenshot", () =>
+        {
+            if (_failScreenshotsAfterFirst
+                && Interlocked.Increment(ref _screenshotCount) > 1)
+            {
+                return Results.Json(
+                    new
+                    {
+                        success = false,
+                        error = "The UI snapshot is stale.",
+                        reason = "stale-capture-epoch"
+                    },
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+
+            return Results.File(MockAgentResponses.ScreenshotPng, "image/png");
+        });
+
+        app.MapPost("/api/v1/ui/actions/tap", async (HttpContext context) =>
+        {
+            var tapNumber = Interlocked.Increment(ref _tapCount);
+            using var body = await JsonDocument.ParseAsync(context.Request.Body);
+            if (_failTapWithServerError)
+            {
+                return Results.Json(
+                    new { success = false, error = "Agent action failed." },
+                    statusCode: StatusCodes.Status500InternalServerError);
+            }
+
+            if (_staleFirstElementTap
+                && tapNumber == 1
+                && body.RootElement.TryGetProperty("elementId", out var directElementId)
+                && directElementId.GetString() == "element-42")
+            {
+                return Results.Json(
+                    new
+                    {
+                        success = false,
+                        error = "The UI snapshot is stale.",
+                        reason = "stale-capture-epoch"
+                    },
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+
+            if (_staleFirstHitTestCandidate
+                && tapNumber == 1
+                && body.RootElement.TryGetProperty("elementId", out var staleElementId)
+                && staleElementId.GetString() == "hit-child")
+            {
+                return Results.Json(
+                    new
+                    {
+                        success = false,
+                        error = "The UI snapshot is stale.",
+                        reason = "stale-capture-epoch"
+                    },
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+
+            if (_failFirstHitTestCandidate
+                && body.RootElement.TryGetProperty("elementId", out var elementId)
+                && elementId.GetString() == "hit-child")
+            {
+                return Results.BadRequest(new { success = false, error = "not tappable" });
+            }
+
+            return Results.Content(MockAgentResponses.ActionSuccess, "application/json");
+        });
+
+        app.MapPost("/api/v1/ui/actions/fill", () =>
+        {
+            if (_staleFirstFill && Interlocked.Increment(ref _fillCount) == 1)
+            {
+                return Results.Json(
+                    new
+                    {
+                        success = false,
+                        error = "The UI snapshot is stale.",
+                        reason = "stale-capture-epoch"
+                    },
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+
+            return Results.Content(MockAgentResponses.ActionSuccess, "application/json");
+        });
+
+        app.MapPost("/api/v1/ui/actions/key", () =>
+        {
+            if (_staleFirstKey && Interlocked.Increment(ref _keyCount) == 1)
+            {
+                return Results.Json(
+                    new
+                    {
+                        success = false,
+                        error = "The UI snapshot is stale.",
+                        reason = "stale-capture-epoch"
+                    },
+                    statusCode: StatusCodes.Status409Conflict);
+            }
+
+            return Results.Content(MockAgentResponses.ActionSuccess, "application/json");
+        });
+
+        foreach (var action in new[] { "clear", "focus", "navigate", "scroll", "resize", "back", "gesture", "batch" })
             app.MapPost($"/api/v1/ui/actions/{action}", () => Results.Content(MockAgentResponses.ActionSuccess, "application/json"));
     }
 

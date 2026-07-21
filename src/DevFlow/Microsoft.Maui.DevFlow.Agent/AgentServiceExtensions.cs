@@ -86,7 +86,13 @@ public static class AgentServiceExtensions
                 options.Port = metaPort.Value;
         }
 
-        var service = new PlatformAgentService(options);
+        var nativeElementRegistry = new NativeElementRegistrationRegistry();
+        var nativeElementDiagnosticSubscriber =
+            new MauiNativeElementDiagnosticSubscriber(nativeElementRegistry);
+        var service = new PlatformAgentService(
+            options,
+            nativeElementRegistry,
+            nativeElementDiagnosticSubscriber);
         service.SetSessionId(sessionId);
         if (brokerReg != null)
         {
@@ -95,7 +101,8 @@ public static class AgentServiceExtensions
             brokerReg.CurrentPort = options.Port;
             service.SetBrokerRegistration(brokerReg);
         }
-        builder.Services.AddSingleton<DevFlowAgentService>(service);
+        builder.Services.AddSingleton(nativeElementRegistry);
+        builder.Services.AddSingleton<DevFlowAgentService>(_ => service);
 
         if (options.EnableFileLogging)
         {

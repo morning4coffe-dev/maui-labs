@@ -30,7 +30,7 @@ public sealed class MyNewTool
         [Description("Describe this optional parameter and its default behavior")] bool optionalFlag = false,
         [Description("Agent HTTP port (optional if only one agent connected)")] int? agentPort = null)
     {
-        var agent = await session.GetAgentClientAsync(agentPort);
+        using var agent = await session.GetAgentClientAsync(agentPort);
         // Call agent.* methods to interact with the running app
         var result = await agent.SomeMethodAsync(requiredParam);
         return result ?? "No result";

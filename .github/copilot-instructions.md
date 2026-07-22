@@ -73,7 +73,7 @@ public sealed class MyNewTool
         [Description("Describe this parameter clearly")] string requiredParam,
         [Description("Describe this optional parameter")] string? optionalParam = null)
     {
-        var agent = await session.GetAgentClientAsync(agentPort);
+        using var agent = await session.GetAgentClientAsync(agentPort);
         // Use agent.* methods
         return "Result";
     }

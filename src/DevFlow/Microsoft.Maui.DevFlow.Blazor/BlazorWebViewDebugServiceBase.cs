@@ -9,6 +9,10 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
 {
     private bool _disposed;
     private readonly List<WebViewBridge> _bridges = new();
+    private readonly object _bridgesGate = new();
+    private int _agentWiringStarted;
+
+    internal event Action<int, WebViewBridge>? WebViewBridgeAdded;
 
     /// <summary>Optional log callback for debug messages.</summary>
     public Action<string>? LogCallback { get; set; }
@@ -20,10 +24,24 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
     public Action<string, string, string?>? WebViewLogCallback { get; set; }
 
     /// <summary>Whether at least one WebView is ready for CDP commands.</summary>
-    public bool IsReady => _bridges.Any(b => b.IsReady);
+    public bool IsReady
+    {
+        get
+        {
+            lock (_bridgesGate)
+                return _bridges.Any(b => b.IsReady);
+        }
+    }
 
     /// <summary>The registered WebView bridges.</summary>
-    public IReadOnlyList<WebViewBridge> Bridges => _bridges;
+    public IReadOnlyList<WebViewBridge> Bridges
+    {
+        get
+        {
+            lock (_bridgesGate)
+                return _bridges.ToArray();
+        }
+    }
 
     protected BlazorWebViewDebugServiceBase() { }
 
@@ -116,8 +134,29 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
         Action<string> navigate, string? automationId = null)
     {
         var bridge = new WebViewBridge(this, evalJs, reload, navigate, automationId);
-        _bridges.Add(bridge);
-        return _bridges.Count - 1;
+        int index;
+        lock (_bridgesGate)
+        {
+            index = _bridges.Count;
+            _bridges.Add(bridge);
+        }
+        WebViewBridgeAdded?.Invoke(index, bridge);
+        return index;
+    }
+
+    internal bool TryBeginAgentWiring()
+        => Interlocked.CompareExchange(ref _agentWiringStarted, 1, 0) == 0;
+
+    internal void ResetAgentWiring()
+        => Volatile.Write(ref _agentWiringStarted, 0);
+
+    /// <summary>
+    /// Marks a bridge unavailable when its native WebView handler is detached. The bridge remains
+    /// in the indexed list so agent context IDs stay stable, but it is no longer selected as ready.
+    /// </summary>
+    protected void DeactivateWebViewBridge(int bridgeIndex)
+    {
+        GetBridge(bridgeIndex)?.Deactivate();
     }
 
     /// <summary>
@@ -126,8 +165,8 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
     /// </summary>
     protected async Task InitializeBridgeAsync(int bridgeIndex)
     {
-        if (bridgeIndex < 0 || bridgeIndex >= _bridges.Count) return;
-        var bridge = _bridges[bridgeIndex];
+        var bridge = GetBridge(bridgeIndex);
+        if (bridge is null) return;
 
         Log($"[BlazorDevFlow] Waiting for WebView {bridgeIndex} to load (max {GetWebViewLoadDelayMs()}ms)...");
         await WaitForWebViewLoadedAsync(bridge.EvalJsProbe);
@@ -142,8 +181,8 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
     /// </summary>
     internal async Task ResetAndReinitializeBridgeAsync(int bridgeIndex)
     {
-        if (bridgeIndex < 0 || bridgeIndex >= _bridges.Count) return;
-        var bridge = _bridges[bridgeIndex];
+        var bridge = GetBridge(bridgeIndex);
+        if (bridge is null) return;
 
         Log($"[BlazorDevFlow] Re-initialization: waiting for WebView {bridgeIndex} to settle (max {GetWebViewLoadDelayMs()}ms)...");
         await WaitForWebViewLoadedAsync(bridge.EvalJsProbe);
@@ -160,18 +199,26 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
     /// <summary>Send a CDP command to a specific WebView bridge.</summary>
     public Task<string> SendCdpCommandAsync(int bridgeIndex, string cdpJson)
     {
-        if (bridgeIndex < 0 || bridgeIndex >= _bridges.Count)
+        var bridge = GetBridge(bridgeIndex);
+        if (bridge is null)
             return Task.FromResult("{\"error\":\"Invalid WebView index\"}");
-        return _bridges[bridgeIndex].SendCdpCommandAsync(cdpJson);
+        return bridge.SendCdpCommandAsync(cdpJson);
     }
 
     // Backward compat: checks first bridge
     public void Initialize()
     {
-        if (_bridges.Count > 0 && _bridges[0].IsReady)
+        var bridge = GetBridge(0);
+        if (bridge?.IsReady == true)
         {
-            PostToMainThread(async () => await _bridges[0].InjectDebugScriptAsync());
+            PostToMainThread(async () => await bridge.InjectDebugScriptAsync());
         }
+    }
+
+    private WebViewBridge? GetBridge(int bridgeIndex)
+    {
+        lock (_bridgesGate)
+            return bridgeIndex >= 0 && bridgeIndex < _bridges.Count ? _bridges[bridgeIndex] : null;
     }
 
     internal void Log(string message)
@@ -192,7 +239,11 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
-        foreach (var bridge in _bridges)
+        WebViewBridgeAdded = null;
+        WebViewBridge[] bridges;
+        lock (_bridgesGate)
+            bridges = _bridges.ToArray();
+        foreach (var bridge in bridges)
             bridge.Dispose();
         Log("[BlazorDevFlow] Disposed");
     }
@@ -211,6 +262,7 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
         private Task? _injectTask;
         private int _cdpIdCounter = 1000;
         private CancellationTokenSource? _drainCts;
+        private bool _active = true;
 
         /// <summary>AutomationId of the MAUI BlazorWebView control.</summary>
         public string? AutomationId { get; }
@@ -219,7 +271,10 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
         public string? ElementId { get; set; }
 
         /// <summary>Whether this WebView is ready for CDP commands.</summary>
-        public bool IsReady => _chobitsuLoaded;
+        public bool IsReady => _active && _chobitsuLoaded;
+
+        /// <summary>Whether the native WebView backing this bridge is still attached.</summary>
+        public bool IsActive => _active;
 
         /// <summary>Internal: exposes the JS evaluator so the owner can probe the page before injection.</summary>
         internal Func<string, Task<string?>> EvalJsProbe => _evalJs;
@@ -237,6 +292,8 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
 
         internal async Task InjectDebugScriptAsync()
         {
+            if (!_active) return;
+
             Task injectTask;
             lock (_injectGate)
             {
@@ -260,6 +317,13 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
         internal void ResetReadyState()
         {
             _chobitsuLoaded = false;
+        }
+
+        internal void Deactivate()
+        {
+            _active = false;
+            _chobitsuLoaded = false;
+            _drainCts?.Cancel();
         }
 
         private async Task InjectDebugScriptCoreAsync()
@@ -356,6 +420,9 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
         {
             try
             {
+                if (!_active)
+                    return "{\"error\":\"WebView is no longer available\"}";
+
                 var json = System.Text.Json.JsonDocument.Parse(cdpJson);
                 var hasId = json.RootElement.TryGetProperty("id", out var idProp);
                 var id = hasId ? idProp.GetInt32() : 0;
@@ -441,6 +508,7 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
                         return await SendCdpCommandCoreAsync(cdpJson, allowRecovery: false);
                 }
 
+                ResetReadyState();
                 return "{\"error\":\"cdp timeout\"}";
             }
             catch (Exception ex)
@@ -613,7 +681,7 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
 
         public void Dispose()
         {
-            _drainCts?.Cancel();
+            Deactivate();
             _drainCts?.Dispose();
         }
     }

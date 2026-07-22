@@ -28,7 +28,7 @@ public class BrokerRegistration : IDisposable
     private readonly string _platform;
     private readonly string _appName;
     private readonly string? _sessionId;
-    private readonly string _agentId;
+    private string _agentId;
     private int _brokerPort;
     private int? _assignedPort;
     private ILogger? _logger;
@@ -87,7 +87,7 @@ public class BrokerRegistration : IDisposable
         _sessionId = sessionId;
         _brokerPort = brokerPort;
         _logger = logger;
-        _agentId = ComputeId(project, tfm);
+        _agentId = ComputeId(project, tfm, sessionId, Environment.ProcessId);
     }
 
     /// <summary>
@@ -121,6 +121,8 @@ public class BrokerRegistration : IDisposable
 
             if (response?.Type == "registered" && response.Port > 0)
             {
+                if (!string.IsNullOrWhiteSpace(response.Id))
+                    _agentId = response.Id;
                 _assignedPort = response.Port;
                 logger?.LogInformation("DevFlow agent registered. Broker assigned port: {Port}", _assignedPort);
 
@@ -215,6 +217,8 @@ public class BrokerRegistration : IDisposable
                         previous = _ws;
                         _ws = candidate;
                         candidate = null;
+                        if (!string.IsNullOrWhiteSpace(response.Id))
+                            _agentId = response.Id;
                         _assignedPort = response.Port;
                     }
                     previous?.Dispose();
@@ -247,6 +251,24 @@ public class BrokerRegistration : IDisposable
     public static string ComputeId(string project, string tfm)
     {
         var input = $"{project}|{tfm}";
+        return ComputeId(input);
+    }
+
+    /// <summary>
+    /// Computes a process-specific agent identity while preserving the legacy identity
+    /// for registrations that do not provide a process ID.
+    /// </summary>
+    public static string ComputeId(string project, string tfm, string? sessionId, int processId)
+    {
+        if (processId <= 0)
+            return ComputeId(project, tfm);
+
+        var input = $"{project}|{tfm}|{sessionId ?? ""}|{processId}";
+        return ComputeId(input);
+    }
+
+    private static string ComputeId(string input)
+    {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(input));
         return Convert.ToHexString(hash)[..12].ToLowerInvariant();
     }
@@ -371,7 +393,8 @@ public class BrokerRegistration : IDisposable
         currentPort = CurrentPort,
         version = typeof(BrokerRegistration).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion,
-        sessionId = _sessionId
+        sessionId = _sessionId,
+        processId = Environment.ProcessId
     });
 
     private record RegistrationResponse

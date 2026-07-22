@@ -56,9 +56,6 @@ public partial class MainPage : ContentPage
                 AutomationId = "TodoCheckBox"
             };
             checkBox.SetBinding(CheckBox.IsCheckedProperty, "IsCompleted");
-            checkBox.SetBinding(SemanticProperties.DescriptionProperty,
-                new Binding("Title", stringFormat: "Mark {0} completed"));
-            SemanticProperties.SetHint(checkBox, "Toggles completion");
             checkBox.CheckedChanged += OnTodoCheckedChanged;
 
             var label = new Label
@@ -90,9 +87,6 @@ public partial class MainPage : ContentPage
                 Padding = new Thickness(8, 0),
                 AutomationId = "DeleteButton"
             };
-            deleteButton.SetBinding(SemanticProperties.DescriptionProperty,
-                new Binding("Title", stringFormat: "Delete {0}"));
-            SemanticProperties.SetHint(deleteButton, "Removes this todo");
             deleteButton.Clicked += OnDeleteTodo;
 
             Grid.SetColumn(checkBox, 0);

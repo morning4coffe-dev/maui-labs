@@ -55,34 +55,6 @@ jobs:
             src/DevFlow/js/package-lock.json
             .github/extensions/maui-devflow-canvas/package-lock.json
 
-      - name: Validate host release train
-        shell: bash
-        run: |
-          set -euo pipefail
-          node <<'NODE'
-          const fs = require('node:fs');
-          const versions = fs.readFileSync('eng/Versions.props', 'utf8');
-          const property = (name) => {
-            const match = versions.match(new RegExp(`<${name}>([^<]+)</${name}>`));
-            if (!match) throw new Error(`Missing ${name} in eng/Versions.props`);
-            return match[1];
-          };
-          const base = `${property('MajorVersion')}.${property('MinorVersion')}.${property('PatchVersion')}`;
-          const expected = `${base}-${property('PreReleaseVersionLabel')}.${property('PreReleaseVersionIteration')}`;
-          const read = (path) => JSON.parse(fs.readFileSync(path, 'utf8'));
-          const manifests = [
-            ['src/DevFlow/js/package.json', read('src/DevFlow/js/package.json').version, expected],
-            ['src/DevFlow/js/devflow-client/package.json', read('src/DevFlow/js/devflow-client/package.json').version, expected],
-            ['.github/extensions/maui-devflow-canvas/package.json', read('.github/extensions/maui-devflow-canvas/package.json').version, expected],
-            ['src/DevFlow/js/vscode-inspector/package.json', read('src/DevFlow/js/vscode-inspector/package.json').version, base],
-            ['src/DevFlow/js/vscode-inspector @maui-devflow/client', read('src/DevFlow/js/vscode-inspector/package.json').devDependencies['@maui-devflow/client'], expected],
-          ];
-          for (const [name, actual, wanted] of manifests) {
-            if (actual !== wanted) throw new Error(`${name}: expected ${wanted}, found ${actual}`);
-          }
-          console.log(`Validated DevFlow release train ${expected}`);
-          NODE
-
       - name: Build and test shared client and VS Code host
         working-directory: src/DevFlow/js
         run: |
@@ -97,37 +69,3 @@ jobs:
           npm ci
           npm test
           npm run selftest:recorder
-
-      - name: Stage immutable host artifacts
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p artifacts/devflow-hosts
-          canvas_version="$(node -p "require('./.github/extensions/maui-devflow-canvas/package.json').version")"
-          cp src/DevFlow/js/vscode-inspector/dist/maui-devflow-inspector.vsix \
-            "artifacts/devflow-hosts/maui-devflow-inspector-${canvas_version}.vsix"
-          canvas_archive="artifacts/devflow-hosts/maui-devflow-canvas-${canvas_version}.tar.gz"
-          tar \
-            --exclude='.github/extensions/maui-devflow-canvas/node_modules' \
-            --exclude='src/DevFlow/js/devflow-client/dist-test' \
-            -czf "$canvas_archive" \
-            .github/extensions/maui-devflow-canvas \
-            src/DevFlow/js/package.json \
-            src/DevFlow/js/package-lock.json \
-            src/DevFlow/js/devflow-client
-          if tar -tzf "$canvas_archive" | grep -Eq '(^|/)(node_modules|dist-test)(/|$)'; then
-            echo "::error::Canvas artifact contains runner-local dependencies or generated test output."
-            exit 1
-          fi
-          (
-            cd artifacts/devflow-hosts
-            sha256sum *.vsix *.tar.gz > SHA256SUMS
-          )
-
-      - name: Upload host release artifacts
-        uses: actions/upload-artifact@v7
-        with:
-          name: devflow-host-artifacts
-          path: artifacts/devflow-hosts/
-          if-no-files-found: error
-          retention-days: 30

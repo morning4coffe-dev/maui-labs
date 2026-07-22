@@ -274,7 +274,11 @@ public class BrokerServer : IDisposable
                 return;
             }
 
-            var id = AgentRegistration.ComputeId(registration.Project, registration.Tfm);
+            var id = AgentRegistration.ComputeId(
+                registration.Project,
+                registration.Tfm,
+                registration.SessionId,
+                registration.ProcessId);
 
             // If the agent already has an HTTP listener (late reconnection), use its current port
             int assignedPort;
@@ -309,6 +313,7 @@ public class BrokerServer : IDisposable
                 Port = assignedPort,
                 Version = registration.Version,
                 SessionId = registration.SessionId,
+                ProcessId = registration.ProcessId,
                 ConnectedAt = DateTime.UtcNow
             };
 

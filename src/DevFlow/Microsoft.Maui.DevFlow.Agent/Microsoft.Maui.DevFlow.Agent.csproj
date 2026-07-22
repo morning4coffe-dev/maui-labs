@@ -12,7 +12,6 @@
     <IsShipping>true</IsShipping>
     <Description>In-app agent for .NET MAUI automation. Exposes visual tree, element interactions, and screenshots via HTTP/JSON API.</Description>
     <PackageTags>maui;automation;testing;visual-tree;agent</PackageTags>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>

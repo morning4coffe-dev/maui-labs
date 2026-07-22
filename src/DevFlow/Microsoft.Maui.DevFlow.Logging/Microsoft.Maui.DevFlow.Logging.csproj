@@ -7,7 +7,6 @@
     <IsShipping>true</IsShipping>
     <Description>Buffered rotating JSONL file logger for Microsoft.Maui.DevFlow. No MAUI dependency.</Description>
     <PackageTags>logging;jsonl;rotating</PackageTags>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>

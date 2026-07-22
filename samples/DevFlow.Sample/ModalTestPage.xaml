@@ -9,7 +9,7 @@
     </ContentPage.BackgroundColor>
 
     <VerticalStackLayout Spacing="12" Padding="20" VerticalOptions="Center">
-        <Label Text="Modal Page"
+        <Label Text="🔲 Modal Page"
                FontSize="18"
                FontAttributes="Bold"
                HorizontalOptions="Center"

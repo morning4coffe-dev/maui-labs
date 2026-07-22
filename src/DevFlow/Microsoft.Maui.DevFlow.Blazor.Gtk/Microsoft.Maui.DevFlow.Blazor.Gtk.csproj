@@ -9,7 +9,6 @@
     <PackageId>Microsoft.Maui.DevFlow.Blazor.Gtk</PackageId>
     <Description>Blazor WebView CDP debugging for Maui.Gtk apps using WebKitGTK. Enables Chrome DevTools Protocol access for Blazor Hybrid content on Linux.</Description>
     <PackageTags>maui;blazor;debugging;cdp;gtk;linux;webkit</PackageTags>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>

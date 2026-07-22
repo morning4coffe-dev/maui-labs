@@ -67,7 +67,6 @@ Single-file Comet apps server + companion app for rapid prototyping (alpha; sist
 A comprehensive MAUI testing, automation, and debugging toolkit. The DevFlow CLI is integrated into the `maui` CLI as `maui devflow` — see [Cli](#cli) above.
 
 - **In-app HTTP agent** for visual tree inspection, element interaction, and screenshots
-- **Shared live inspector** for browsers, VS Code, and GitHub Copilot Canvas, with a global mutation lease and cross-host workflow recording
 - **Blazor CDP bridge** for Chrome DevTools Protocol on Blazor WebViews
 - **MCP server** for AI agent integration (via `maui devflow mcp`)
 - **Platform drivers** for iOS, Android, Mac Catalyst, Windows, and Linux/GTK

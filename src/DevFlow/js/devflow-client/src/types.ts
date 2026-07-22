@@ -81,6 +81,7 @@ export interface AgentRegistration {
   port: number;
   version?: string | null;
   sessionId?: string | null;
+  processId?: number | null;
   connectedAt?: string;
   [key: string]: unknown;
 }

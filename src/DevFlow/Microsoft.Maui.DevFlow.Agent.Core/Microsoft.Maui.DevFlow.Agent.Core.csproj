@@ -8,7 +8,6 @@
     <PackageId>Microsoft.Maui.DevFlow.Agent.Core</PackageId>
     <Description>Core agent infrastructure for Microsoft.Maui.DevFlow. HTTP server, visual tree walking, logging, and element interaction — platform-agnostic.</Description>
     <PackageTags>maui;automation;testing;agent;core</PackageTags>
-    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
 
   <ItemGroup>

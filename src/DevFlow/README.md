@@ -171,8 +171,6 @@ These options apply to all `maui devflow` subcommands:
 ## Documentation
 
 - [DevFlow Web Inspector and MAUI DevFlow Inspector hosts](../../docs/DevFlow/inspector.md)
-- [Privacy and Security](../../docs/DevFlow/privacy-and-security.md)
-- [Public Preview Release Guide](../../docs/DevFlow/public-preview-release.md)
 - [Broker Architecture](../../docs/DevFlow/broker.md)
 - [Protocol Spec](../../docs/DevFlow/spec/README.md)
 - [Android Setup](../../docs/DevFlow/setup-guides/android-setup.md)

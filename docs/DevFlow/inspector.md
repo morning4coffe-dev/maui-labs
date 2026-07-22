@@ -1,8 +1,5 @@
 # DevFlow Web Inspector
 
-> **Public preview.** APIs and UX may change and this product is not covered by the Microsoft
-> Support Policy.
-
 The DevFlow Web Inspector mirrors a running .NET MAUI app as a screenshot plus an interactive
 visual-tree overlay. It is served directly at `http://localhost:19223/inspector/`.
 
@@ -105,8 +102,7 @@ therefore cannot drive the app concurrently.
 - Lease release or takeover hands an active app-scoped recording to the next valid lease holder.
 - Closing Canvas releases its lease; abandoned leases also expire automatically.
 
-The lease is coordination, not authentication. See
-[Privacy and Security](privacy-and-security.md).
+The lease coordinates writers; it is not an authentication boundary.
 
 ## Workflow recording
 
@@ -164,7 +160,7 @@ DevFlow session identity; builds using a custom `MauiDevFlowSessionId` should al
 The WebView data tab lists attached Blazor WebViews, displays page source, and evaluates JavaScript
 through the existing CDP bridge. Every expression requires confirmation because arbitrary
 JavaScript can read or change live application data. A bundled Chrome DevTools frontend is
-intentionally outside the Inspector preview scope; use external browser platform tools when the
+intentionally outside the Inspector scope; use external browser platform tools when the
 full DOM, console, network, and debugger experience is required.
 
 System dialogs and MAUI alerts are outside the in-app MAUI visual tree. The **Alerts** data tab uses
@@ -195,8 +191,7 @@ endpoint. Older clients cannot mutate current agents because they do not send a 
 Inspector falls back to its legacy static property table when an older agent does not expose
 runtime descriptors. The Node client negotiates `ui.events`; unsupported agents enter a stable
 `polling-only` state and recheck the capability every 60 seconds so an in-place upgrade recovers
-without reconnect churn. During public preview, upgrade the agent packages and all host tooling
-together.
+without reconnect churn. Upgrade the agent packages and host tooling together.
 
 ## Implementation
 
@@ -210,8 +205,3 @@ together.
 | VS Code host | `src/DevFlow/js/vscode-inspector/` |
 | Copilot Canvas host | `.github/extensions/maui-devflow-canvas/` |
 | Playwright tests | `src/DevFlow/Microsoft.Maui.DevFlow.Inspector.Tests/` |
-
-See [Inspector feature implementation](inspector-feature-implementation.md) for the end-to-end
-implementation path behind each user-facing feature.
-
-See [Public Preview Release](public-preview-release.md) for CI and promotion gates.

@@ -9,9 +9,6 @@ This is the project-scoped (auto-discovered, committed) home for the extension, 
 `.github/extensions/<name>/` convention. It replaces the earlier user-scoped extension at
 `~/.copilot/extensions/maui-live-canvas`.
 
-> **Status: public preview.** APIs and UX may change and this extension is not covered by the
-> Microsoft Support Policy.
-
 ## Shared inspector architecture
 
 The Canvas host embeds the existing DevFlow Web Inspector also used by the browser and VS Code. It
@@ -39,7 +36,7 @@ Copilot Canvas ──► extension.mjs ──► broker-hosted shared inspector
   Code host shell.
 - **`recorder.mjs` / `replay.mjs`** — workflow persistence and replay. Active recording is owned
   by the broker and observes successful mutations from every DevFlow host.
-- **`selftest*.mjs`, `clean-open-canvases.mjs`** — bridge smoke test + offline proof + maintenance.
+- **`selftest*.mjs`** — bridge smoke test and offline proof.
 
 ### File map
 
@@ -49,7 +46,6 @@ Copilot Canvas ──► extension.mjs ──► broker-hosted shared inspector
 | `store.mjs`, `extension.mjs` | Live state and Canvas host integration |
 | `recorder.mjs`, `replay.mjs` | Workflow persistence and replay |
 | `selftest*.mjs`, `test/device.test.mjs` | Live smoke checks and offline contract tests |
-| `clean-open-canvases.mjs`, `MAUI-TEST-AGENT.md` | Canvas maintenance and test-authoring guidance |
 
 ## Migration from the old user extension
 
@@ -99,9 +95,6 @@ MAUI_DEVFLOW_FORCE_LEASE=1 npm run selftest
 `set_theme`, `screenshot`, `get_logs`, `start_recording`, `get_recording`,
 `stop_and_save_test`, `save_test`, `list_tests`, `replay_test`.
 
-Kept identical to preserve action-level compatibility with existing prompts and
-`MAUI-TEST-AGENT.md`.
-
 ## Coordination and safety
 
 - The Canvas uses the same global mutation lease as the browser, VS Code, MCP, and CLI.
@@ -111,9 +104,6 @@ Kept identical to preserve action-level compatibility with existing prompts and
 - The Inspector context menu can attach only the selected element, only the loaded workflow, both,
   or the current redacted Data snapshot.
 - Replays are blocked while a workflow recording is active.
-
-See [privacy and security](../../../docs/DevFlow/privacy-and-security.md) before using DevFlow with
-sensitive app data.
 
 ## Requirements
 

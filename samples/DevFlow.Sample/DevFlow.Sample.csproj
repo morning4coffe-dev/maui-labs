@@ -49,7 +49,7 @@
     <Import Project="..\..\src\DevFlow\Microsoft.Maui.DevFlow.Agent.Core\buildTransitive\Microsoft.Maui.DevFlow.Agent.Core.props" />
     <Import Project="..\..\src\DevFlow\Microsoft.Maui.DevFlow.Agent.Core\buildTransitive\Microsoft.Maui.DevFlow.Agent.Core.targets" />
 
-    <!-- During project-to-project references, Microsoft.Maui.DevFlow.Blazor's WebView dependency
+    <!-- During project-to-project references, Microsoft.Maui.DevFlow.Blazor's WebView dependency
          leaks static web assets (blazor.modules.json, blazor.webview.js) that conflict
          with this project's own WebView reference. Remove only the _framework/ duplicates,
          preserving the library's own assets (chobitsu.js, JS initializer). -->

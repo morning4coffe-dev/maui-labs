@@ -4,9 +4,6 @@ Live-inspect and drive a running .NET MAUI app from VS Code. This MAUI DevFlow I
 embeds the existing DevFlow Web Inspector, including the visual tree, screenshot overlay, property
 editing, workflow recording, and click-to-XAML navigation.
 
-> **Public preview.** APIs and UX may change and this extension is not covered by the Microsoft
-> Support Policy.
-
 ## Requirements
 
 1. Install the preview `Microsoft.Maui.Cli` global tool and DevFlow agent packages.
@@ -37,5 +34,4 @@ Remote, and WSL workspaces connect to the broker beside the app tooling.
 - **Workflow** loads saved tests from the project's `maui-tests` directory or an OS-selected
   Markdown file and shows replay results in the shared Inspector panel.
 
-See the [DevFlow Web Inspector documentation](https://github.com/dotnet/maui-labs/blob/main/docs/DevFlow/inspector.md)
-and [privacy and security guidance](https://github.com/dotnet/maui-labs/blob/main/docs/DevFlow/privacy-and-security.md).
+See the [DevFlow Web Inspector documentation](https://github.com/dotnet/maui-labs/blob/main/docs/DevFlow/inspector.md).

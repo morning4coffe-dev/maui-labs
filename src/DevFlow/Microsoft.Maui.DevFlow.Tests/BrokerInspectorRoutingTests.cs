@@ -1,5 +1,6 @@
 using Microsoft.Maui.Cli.DevFlow.Broker;
 using System.Collections.Concurrent;
+using AgentBrokerRegistration = Microsoft.Maui.DevFlow.Agent.Core.BrokerRegistration;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -76,5 +77,39 @@ public class BrokerInspectorRoutingTests
         Assert.DoesNotContain(current, superseded);
         Assert.Equal(replacements.Length, superseded.Distinct().Count());
         Assert.Contains(initial, superseded);
+    }
+
+    [Fact]
+    public void AgentIds_SameBuildDifferentProcesses_CanCoexist()
+    {
+        const string project = "DevFlow.Sample";
+        const string tfm = "net10.0-android";
+        const string sessionId = "sample-session";
+
+        var first = AgentRegistration.ComputeId(project, tfm, sessionId, processId: 1001);
+        var second = AgentRegistration.ComputeId(project, tfm, sessionId, processId: 1002);
+
+        Assert.NotEqual(first, second);
+        Assert.Equal(first, AgentBrokerRegistration.ComputeId(project, tfm, sessionId, processId: 1001));
+        Assert.Equal(second, AgentBrokerRegistration.ComputeId(project, tfm, sessionId, processId: 1002));
+
+        var agents = new Dictionary<string, object>
+        {
+            [first] = new object(),
+            [second] = new object()
+        };
+        Assert.Equal(2, agents.Count);
+    }
+
+    [Fact]
+    public void AgentIds_WithoutProcessIdentity_UseLegacyId()
+    {
+        const string project = "DevFlow.Sample";
+        const string tfm = "net10.0-windows10.0.19041.0";
+
+        var legacy = AgentRegistration.ComputeId(project, tfm);
+
+        Assert.Equal(legacy, AgentRegistration.ComputeId(project, tfm, "session", processId: null));
+        Assert.Equal(legacy, AgentBrokerRegistration.ComputeId(project, tfm, "session", processId: 0));
     }
 }

@@ -13,6 +13,8 @@
             -->
 
             <Style x:Key="DialogButton" TargetType="Button">
+                <Setter Property="MinimumHeightRequest" Value="48" />
+                <Setter Property="MinimumWidthRequest" Value="48" />
                 <Setter Property="BackgroundColor">
                     <Setter.Value>
                         <AppThemeBinding Light="#6750A4" Dark="#D0BCFF" />
@@ -23,6 +25,29 @@
                         <AppThemeBinding Light="#FFFFFF" Dark="#381E72" />
                     </Setter.Value>
                 </Setter>
+            </Style>
+
+            <Style TargetType="Button">
+                <Setter Property="MinimumHeightRequest" Value="48" />
+                <Setter Property="MinimumWidthRequest" Value="48" />
+            </Style>
+
+            <Style TargetType="ImageButton">
+                <Setter Property="MinimumHeightRequest" Value="48" />
+                <Setter Property="MinimumWidthRequest" Value="48" />
+            </Style>
+
+            <Style TargetType="Entry">
+                <Setter Property="MinimumHeightRequest" Value="48" />
+            </Style>
+
+            <Style TargetType="Picker">
+                <Setter Property="MinimumHeightRequest" Value="48" />
+            </Style>
+
+            <Style TargetType="CheckBox">
+                <Setter Property="MinimumHeightRequest" Value="48" />
+                <Setter Property="MinimumWidthRequest" Value="48" />
             </Style>
 
         </ResourceDictionary>

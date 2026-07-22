@@ -1,0 +1,124 @@
+name: Promote DevFlow Preview Artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      run-id:
+        description: Successful CI - DevFlow workflow run containing devflow-host-artifacts
+        required: true
+        type: string
+      integration-run-id:
+        description: Successful all-platform DevFlow Integration Tests run for the same release commit
+        required: true
+        type: string
+      commit-sha:
+        description: Exact release commit SHA produced by the CI run
+        required: true
+        type: string
+      tag:
+        description: Preview release tag, for example devflow-v0.1.0-preview.12
+        required: true
+        type: string
+      manual-host-validation-confirmed:
+        description: Packaged VSIX and Canvas bundle passed the manual host checklist
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Validate source workflow run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.run-id }}
+          EXPECTED_SHA: ${{ inputs.commit-sha }}
+        run: |
+          set -euo pipefail
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
+          test "$(jq -r .name <<<"$run")" = "CI - DevFlow"
+          test "$(jq -r .status <<<"$run")" = "completed"
+          test "$(jq -r .conclusion <<<"$run")" = "success"
+          test "$(jq -r .head_sha <<<"$run")" = "$EXPECTED_SHA"
+          test "$(jq -r .head_branch <<<"$run")" = "main"
+          event="$(jq -r .event <<<"$run")"
+          test "$event" = "push" || test "$event" = "workflow_dispatch"
+
+      - name: Validate integration workflow run
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ inputs.integration-run-id }}
+          EXPECTED_SHA: ${{ inputs.commit-sha }}
+        run: |
+          set -euo pipefail
+          run="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID")"
+          test "$(jq -r .name <<<"$run")" = "DevFlow Integration Tests"
+          test "$(jq -r .status <<<"$run")" = "completed"
+          test "$(jq -r .conclusion <<<"$run")" = "success"
+          test "$(jq -r .head_sha <<<"$run")" = "$EXPECTED_SHA"
+          test "$(jq -r .head_branch <<<"$run")" = "main"
+          test "$(jq -r .event <<<"$run")" = "workflow_dispatch"
+          jobs="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$RUN_ID/jobs?per_page=100")"
+          for job in android ios maccatalyst windows; do
+            test "$(jq --arg job "$job" '[.jobs[] | select(.name == $job and .conclusion == "success")] | length' <<<"$jobs")" = "1"
+          done
+          test "$(jq '[.jobs[] | select(.name == "windows" and .conclusion == "success") | .steps[] | select(.name == "Run live inspector Playwright tests (windows)" and .conclusion == "success")] | length' <<<"$jobs")" = "1"
+
+      - name: Confirm manual host validation
+        shell: bash
+        env:
+          CONFIRMED: ${{ inputs.manual-host-validation-confirmed }}
+        run: test "$CONFIRMED" = "true"
+
+      - name: Download immutable host artifacts
+        uses: actions/download-artifact@v8
+        with:
+          name: devflow-host-artifacts
+          run-id: ${{ inputs.run-id }}
+          github-token: ${{ github.token }}
+          path: artifacts
+
+      - name: Validate release train
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        working-directory: artifacts
+        run: |
+          set -euo pipefail
+          version="${TAG#devflow-v}"
+          test "$TAG" = "devflow-v$version"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview\.[0-9]+$ ]]
+          test -f "maui-devflow-inspector-$version.vsix"
+          test -f "maui-devflow-canvas-$version.tar.gz"
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag '$TAG' already exists; refusing to promote artifacts onto an existing ref." >&2
+            exit 1
+          fi
+
+      - name: Verify artifact checksums
+        shell: bash
+        working-directory: artifacts
+        run: sha256sum --check SHA256SUMS
+
+      - name: Create draft public-preview release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ inputs.commit-sha }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          gh release create "$TAG" artifacts/*.vsix artifacts/*.tar.gz artifacts/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$EXPECTED_SHA" \
+            --title "MAUI DevFlow $TAG" \
+            --notes "Public-preview host artifacts promoted unchanged from CI run ${{ inputs.run-id }}. NuGet and CLI packages are promoted separately by the signed official pipeline." \
+            --prerelease \
+            --draft

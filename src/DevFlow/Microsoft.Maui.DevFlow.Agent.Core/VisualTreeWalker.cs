@@ -587,21 +587,39 @@ public class VisualTreeWalker
         if (_nativeElementRegistry?.TryGet(elementId, out var registration) != true)
             return $"Native element '{elementId}' was not found";
 
-        return registration.Owner switch
+        var semanticResult = registration.Owner switch
         {
             MenuItem menuItem => ActivateMenuItem(menuItem),
-            ShellContent shellContent => ActivateShellContent(shellContent, registration.Role),
-            ShellSection shellSection => ActivateShellSection(shellSection, registration.Role),
+            ShellContent shellContent
+                when !registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
+                => ActivateShellContent(shellContent, registration.Role),
+            ShellSection shellSection
+                when !registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
+                => ActivateShellSection(shellSection, registration.Role),
             ShellItem shellItem
                 when !registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
                 => ActivateShellItem(shellItem, registration.Role),
             Shell shell
                 when registration.Role.Equals("ShellFlyoutToggle", StringComparison.Ordinal)
                 => ToggleShellFlyout(shell),
+            Page page
+                when page.Parent is TabbedPage && IsTabRole(registration.Role)
+                => ActivateTabbedPage(page),
             SearchHandler => TryNativeElementFocus(elementId),
-            _ => $"Native element '{elementId}' owner '{registration.Owner.GetType().FullName}' does not support invoke"
+            _ => null
         };
+
+        if (semanticResult is not null)
+            return semanticResult;
+
+        return TryInvokeRegisteredNativeElement(elementId, registration.NativeElement)
+            ?? $"Native element '{elementId}' owner '{registration.Owner.GetType().FullName}' does not support invoke";
     }
+
+    protected virtual string? TryInvokeRegisteredNativeElement(
+        string elementId,
+        object nativeElement)
+        => null;
 
     protected internal virtual string TryNativeElementTap(
         string elementId,
@@ -667,8 +685,15 @@ public class VisualTreeWalker
             return "ok";
         }
 
-        return $"Native element '{elementId}' owner '{registration.Owner.GetType().FullName}' does not support writable value";
+        return TrySetValueRegisteredNativeElement(elementId, registration.NativeElement, value)
+            ?? $"Native element '{elementId}' owner '{registration.Owner.GetType().FullName}' does not support writable value";
     }
+
+    protected virtual string? TrySetValueRegisteredNativeElement(
+        string elementId,
+        object nativeElement,
+        string value)
+        => null;
 
     protected internal virtual string TryNativeElementSetValue(
         string elementId,
@@ -770,11 +795,13 @@ public class VisualTreeWalker
         };
     }
 
-    private static List<string> GetRegisteredNativeCapabilities(
+    private List<string> GetRegisteredNativeCapabilities(
         NativeElementRegistrationSnapshot registration)
     {
         var capabilities = new List<string> { "select" };
-        if (registration.Owner is MenuItem or ShellSection or ShellContent
+        if (registration.Owner is MenuItem
+            || registration.Owner is ShellSection or ShellContent
+                && !registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
             || registration.Owner is ShellItem
                 && !registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
             || registration.Owner is Shell
@@ -784,15 +811,45 @@ public class VisualTreeWalker
         {
             capabilities.Add("invoke");
         }
+        else if (registration.Owner is Page { Parent: TabbedPage }
+            && IsTabRole(registration.Role))
+        {
+            capabilities.Add("invoke");
+        }
         else if (registration.Owner is SearchHandler)
         {
             capabilities.Add("invoke");
             capabilities.Add("focus");
             capabilities.Add("set-value");
         }
+        else if (CanInvokeRegisteredNativeElement(registration.NativeElement))
+        {
+            capabilities.Add("invoke");
+        }
+
+        if (CanFocusRegisteredNativeElement(registration.NativeElement)
+            && !capabilities.Contains("focus", StringComparer.Ordinal))
+        {
+            capabilities.Add("focus");
+        }
+
+        if (CanSetValueRegisteredNativeElement(registration.NativeElement)
+            && !capabilities.Contains("set-value", StringComparer.Ordinal))
+        {
+            capabilities.Add("set-value");
+        }
 
         return capabilities;
     }
+
+    protected virtual bool CanInvokeRegisteredNativeElement(object nativeElement)
+        => false;
+
+    protected virtual bool CanFocusRegisteredNativeElement(object nativeElement)
+        => false;
+
+    protected virtual bool CanSetValueRegisteredNativeElement(object nativeElement)
+        => false;
 
     private static string ActivateMenuItem(MenuItem menuItem)
     {
@@ -808,6 +865,20 @@ public class VisualTreeWalker
         shell.FlyoutIsPresented = !shell.FlyoutIsPresented;
         return "ok";
     }
+
+    private static string ActivateTabbedPage(Page page)
+    {
+        if (page.Parent is not TabbedPage tabbedPage)
+            return $"Tab page '{page.Title}' is not attached to a TabbedPage";
+        if (!page.IsEnabled)
+            return $"Tab page '{page.Title}' is disabled";
+
+        tabbedPage.CurrentPage = page;
+        return "ok";
+    }
+
+    private static bool IsTabRole(string role)
+        => role.Equals("ShellTab", StringComparison.Ordinal);
 
     private static async Task<string> ActivateBackButtonAsync(Page page)
     {

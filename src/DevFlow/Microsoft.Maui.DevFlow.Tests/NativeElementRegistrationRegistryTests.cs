@@ -2,6 +2,7 @@ using Microsoft.Maui.DevFlow.Agent.Core;
 using Microsoft.Maui.Controls;
 using System.Reflection;
 using System.Diagnostics;
+using System.Runtime.CompilerServices;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -415,6 +416,53 @@ public class NativeElementRegistrationRegistryTests
     }
 
     [Fact]
+    public void TryNativeElementTap_UnsupportedOwner_UsesNativeFallback()
+    {
+        var registry = new NativeElementRegistrationRegistry();
+        var nativeElement = new object();
+        var id = registry.Register(new object(), nativeElement, "DialogAction");
+        var walker = new FallbackVisualTreeWalker(registry);
+
+        var info = walker.GetNativeElementInfoById(id);
+        var result = walker.TryNativeElementTap(id);
+
+        Assert.Equal("ok", result);
+        Assert.True(walker.FallbackInvoked);
+        Assert.Contains("invoke", info!.Capabilities!);
+    }
+
+    [Fact]
+    public void TryNativeElementTap_DialogOwnedByTabbedPage_UsesNativeFallback()
+    {
+        var registry = new NativeElementRegistrationRegistry();
+        var page = new ContentPage();
+        var tabbedPage = (TabbedPage)RuntimeHelpers.GetUninitializedObject(typeof(TabbedPage));
+        typeof(Element)
+            .GetField("_realParent", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .SetValue(page, new WeakReference<Element>(tabbedPage));
+        var id = registry.Register(page, new object(), "DialogAction");
+        var walker = new FallbackVisualTreeWalker(registry);
+
+        var result = walker.TryNativeElementTap(id);
+
+        Assert.Equal("ok", result);
+        Assert.True(walker.FallbackInvoked);
+    }
+
+    [Fact]
+    public void TryNativeElementTap_ShellOverflowRow_UsesNativeFallback()
+    {
+        var registry = new NativeElementRegistrationRegistry();
+        var id = registry.Register(new ShellSection(), new object(), "ShellTabOverflow");
+        var walker = new FallbackVisualTreeWalker(registry);
+
+        var result = walker.TryNativeElementTap(id);
+
+        Assert.Equal("ok", result);
+        Assert.True(walker.FallbackInvoked);
+    }
+
+    [Fact]
     public void TryNativeElementTap_ShellFlyoutItem_SelectsItemAndClosesFlyout()
     {
         var registry = new NativeElementRegistrationRegistry();
@@ -448,7 +496,7 @@ public class NativeElementRegistrationRegistryTests
         shell.FlyoutIsPresented = true;
         var toggleId = registry.Register(shell, new object(), "ShellFlyoutToggle");
         var itemId = registry.Register(settings, new object(), "ShellFlyout");
-        var walker = new VisualTreeWalker(registry);
+        var walker = new FallbackVisualTreeWalker(registry);
 
         var toggleResult = walker.TryNativeElementTap(toggleId);
         var itemResult = walker.TryNativeElementTap(itemId);
@@ -457,6 +505,7 @@ public class NativeElementRegistrationRegistryTests
         Assert.Same(settings, shell.CurrentItem);
         Assert.True(shell.FlyoutIsPresented);
         Assert.Equal("ok", itemResult);
+        Assert.False(walker.FallbackInvoked);
     }
 
     [Fact]
@@ -574,6 +623,27 @@ public class NativeElementRegistrationRegistryTests
             };
             info.BoundsQuality = "exact";
             return info;
+        }
+    }
+
+    private sealed class FallbackVisualTreeWalker : VisualTreeWalker
+    {
+        public FallbackVisualTreeWalker(NativeElementRegistrationRegistry registry)
+            : base(registry)
+        {
+        }
+
+        public bool FallbackInvoked { get; private set; }
+
+        protected override bool CanInvokeRegisteredNativeElement(object nativeElement)
+            => true;
+
+        protected override string? TryInvokeRegisteredNativeElement(
+            string elementId,
+            object nativeElement)
+        {
+            FallbackInvoked = true;
+            return "ok";
         }
     }
 }

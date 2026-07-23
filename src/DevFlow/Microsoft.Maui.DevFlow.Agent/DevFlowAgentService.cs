@@ -602,6 +602,332 @@ public class PlatformAgentService : DevFlowAgentService
         return false;
     }
 
+#if ANDROID || IOS || MACCATALYST
+    private const long MaxNativeElementScreenshotPixels = 16_777_216;
+
+#if ANDROID
+    protected override Task<byte[]?> CaptureFullScreenAsync(int? windowIndex = null)
+        => DispatchAsync(() => CaptureAndroidFullScreen(windowIndex));
+#endif
+
+    protected override bool SupportsNativeElementScreenshots => true;
+
+    protected override Task<byte[]?> CaptureNativeElementScreenshotAsync(
+        object nativeElement,
+        ElementInfo? elementInfo)
+    {
+        try
+        {
+#if ANDROID
+            var view = nativeElement switch
+            {
+                global::Android.Views.View androidView => androidView,
+                global::Android.Views.IMenuItem menuItem => menuItem.ActionView,
+                _ => null
+            };
+            return Task.FromResult(CaptureAndroidView(view));
+#elif IOS || MACCATALYST
+            if (nativeElement is UIKit.UIView uiView)
+                return Task.FromResult(CaptureAppleView(uiView));
+
+            if (nativeElement is UIKit.UIViewController viewController)
+                return Task.FromResult(CaptureAppleView(viewController.View));
+
+            if (nativeElement is UIKit.UIBarButtonItem { CustomView: { } customView })
+                return Task.FromResult(CaptureAppleView(customView));
+
+            if (nativeElement is UIKit.UIBarItem barItem && !barItem.AccessibilityFrame.IsEmpty)
+            {
+                UIKit.UIWindow? ownerWindow = null;
+                if (elementInfo?.WindowId is int windowId
+                    && _app is not null
+                    && windowId >= 0
+                    && windowId < _app.Windows.Count
+                    && _app.Windows[windowId].Handler?.PlatformView is UIKit.UIWindow uiWindow)
+                {
+                    ownerWindow = uiWindow;
+                }
+
+                return Task.FromResult(CaptureAppleScreenRect(
+                    barItem.AccessibilityFrame,
+                    ownerWindow));
+            }
+
+            return Task.FromResult<byte[]?>(null);
+#endif
+        }
+        catch
+        {
+            return Task.FromResult<byte[]?>(null);
+        }
+    }
+
+#if ANDROID
+    private byte[]? CaptureAndroidFullScreen(int? windowIndex)
+    {
+        var window = _app is null || _app.Windows.Count == 0
+            ? null
+            : windowIndex is int index && index >= 0 && index < _app.Windows.Count
+                ? _app.Windows[index]
+                : _app.Windows[0];
+        var activity = window?.Handler?.PlatformView as global::Android.App.Activity
+            ?? Microsoft.Maui.ApplicationModel.Platform.CurrentActivity;
+        var rootView = activity?.Window?.DecorView?.RootView;
+        if (rootView is null
+            || !rootView.IsAttachedToWindow
+            || rootView.Width <= 0
+            || rootView.Height <= 0
+            || (long)rootView.Width * rootView.Height > MaxNativeElementScreenshotPixels)
+        {
+            return null;
+        }
+
+        using var bitmap = global::Android.Graphics.Bitmap.CreateBitmap(
+            rootView.Width,
+            rootView.Height,
+            global::Android.Graphics.Bitmap.Config.Argb8888!);
+        using var canvas = new global::Android.Graphics.Canvas(bitmap);
+        rootView.Draw(canvas);
+
+        var rootLocation = new int[2];
+        rootView.GetLocationOnScreen(rootLocation);
+        var overlayRoots = new List<global::Android.Views.View>();
+        foreach (var registration in NativeElementRegistry?.GetSnapshot()
+            ?? Array.Empty<NativeElementRegistrationSnapshot>())
+        {
+            if (!registration.Role.Equals("Dialog", StringComparison.Ordinal)
+                && !registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            if (registration.NativeElement is not global::Android.Views.View registeredView)
+                continue;
+            if (!ReferenceEquals(FindAndroidActivity(registeredView.Context), activity))
+                continue;
+
+            var overlayRoot = registeredView.RootView;
+            if (overlayRoot is null
+                || ReferenceEquals(overlayRoot, rootView)
+                || !overlayRoot.IsAttachedToWindow
+                || !overlayRoot.IsShown
+                || overlayRoot.Width <= 0
+                || overlayRoot.Height <= 0
+                || overlayRoots.Any(existing => ReferenceEquals(existing, overlayRoot)))
+            {
+                continue;
+            }
+
+            overlayRoots.Add(overlayRoot);
+        }
+
+        if (overlayRoots.Count > 0)
+        {
+            canvas.DrawColor(global::Android.Graphics.Color.Argb(80, 0, 0, 0));
+            foreach (var overlayRoot in overlayRoots)
+            {
+                var location = new int[2];
+                overlayRoot.GetLocationOnScreen(location);
+                var saveCount = canvas.Save();
+                canvas.Translate(
+                    location[0] - rootLocation[0],
+                    location[1] - rootLocation[1]);
+                overlayRoot.Draw(canvas);
+                canvas.RestoreToCount(saveCount);
+            }
+        }
+
+        return EncodeAndroidBitmap(bitmap);
+    }
+
+    private static global::Android.App.Activity? FindAndroidActivity(
+        global::Android.Content.Context? context)
+    {
+        while (context is global::Android.Content.ContextWrapper wrapper)
+        {
+            if (context is global::Android.App.Activity activity)
+                return activity;
+
+            var baseContext = wrapper.BaseContext;
+            if (ReferenceEquals(baseContext, context))
+                break;
+            context = baseContext;
+        }
+
+        return context as global::Android.App.Activity;
+    }
+
+    private static byte[]? CaptureAndroidView(global::Android.Views.View? view)
+    {
+        if (view is null
+            || !view.IsAttachedToWindow
+            || view.Width <= 0
+            || view.Height <= 0
+            || (long)view.Width * view.Height > MaxNativeElementScreenshotPixels)
+        {
+            return null;
+        }
+
+        using var bitmap = global::Android.Graphics.Bitmap.CreateBitmap(
+            view.Width,
+            view.Height,
+            global::Android.Graphics.Bitmap.Config.Argb8888!);
+        using var canvas = new global::Android.Graphics.Canvas(bitmap);
+        view.Draw(canvas);
+        return EncodeAndroidBitmap(bitmap);
+    }
+
+    private static byte[]? EncodeAndroidBitmap(global::Android.Graphics.Bitmap bitmap)
+    {
+        using var stream = new MemoryStream();
+        return bitmap.Compress(
+            global::Android.Graphics.Bitmap.CompressFormat.Png!,
+            quality: 100,
+            stream)
+                ? stream.ToArray()
+                : null;
+    }
+#elif IOS || MACCATALYST
+    private static byte[]? CaptureAppleView(UIKit.UIView? view)
+    {
+        if (view?.Window is not { } window
+            || view.Hidden
+            || view.Alpha <= 0
+            || view.Bounds.Width <= 0
+            || view.Bounds.Height <= 0
+            || !IsAppleCaptureSizeSupported(view.Bounds.Size, window.Screen.Scale))
+        {
+            return null;
+        }
+
+        using var format = new UIKit.UIGraphicsImageRendererFormat
+        {
+            Scale = window.Screen.Scale,
+            Opaque = view.Opaque
+        };
+        using var renderer = new UIKit.UIGraphicsImageRenderer(
+            new CoreGraphics.CGRect(0, 0, view.Bounds.Width, view.Bounds.Height),
+            format);
+        using var image = renderer.CreateImage(context =>
+        {
+            context.CGContext.TranslateCTM(-view.Bounds.X, -view.Bounds.Y);
+            if (!view.DrawViewHierarchy(view.Bounds, afterScreenUpdates: false))
+                view.Layer.RenderInContext(context.CGContext);
+        });
+        using var pngData = image.AsPNG();
+        return pngData?.ToArray();
+    }
+
+    private static byte[]? CaptureAppleScreenRect(
+        CoreGraphics.CGRect screenFrame,
+        UIKit.UIWindow? ownerWindow)
+    {
+        ownerWindow ??= FindAppleWindow(screenFrame);
+        var windowScene = ownerWindow?.WindowScene;
+        if (ownerWindow is null
+            || screenFrame.IsEmpty
+            || !IsAppleCaptureSizeSupported(screenFrame.Size, ownerWindow.Screen.Scale))
+        {
+            return null;
+        }
+
+        var ownerFrame = ownerWindow.ConvertRectFromCoordinateSpace(
+            screenFrame,
+            ownerWindow.Screen.CoordinateSpace);
+        if (!ownerWindow.Bounds.IntersectsWith(ownerFrame))
+            return null;
+
+        var windows = windowScene?.Windows;
+        if (windows is null)
+        {
+#pragma warning disable CA1422 // Legacy AppDelegate apps can have no UIWindowScene on current iOS versions.
+            windows = UIKit.UIApplication.SharedApplication.Windows;
+#pragma warning restore CA1422
+        }
+
+        var visibleWindows = windows
+            .Where(window => !window.Hidden && window.Alpha > 0)
+            .Where(window => ReferenceEquals(window.Screen, ownerWindow.Screen))
+            .OrderBy(window => (double)window.WindowLevel)
+            .ToList();
+        if (visibleWindows.Count == 0)
+            return null;
+
+        using var format = new UIKit.UIGraphicsImageRendererFormat
+        {
+            Scale = ownerWindow.Screen.Scale
+        };
+        using var renderer = new UIKit.UIGraphicsImageRenderer(
+            new CoreGraphics.CGRect(0, 0, screenFrame.Width, screenFrame.Height),
+            format);
+        using var image = renderer.CreateImage(context =>
+        {
+            context.CGContext.SaveState();
+            context.CGContext.TranslateCTM(-screenFrame.X, -screenFrame.Y);
+            foreach (var window in visibleWindows)
+            {
+                context.CGContext.SaveState();
+                context.CGContext.TranslateCTM(window.Frame.X, window.Frame.Y);
+                window.DrawViewHierarchy(window.Bounds, afterScreenUpdates: false);
+                context.CGContext.RestoreState();
+            }
+            context.CGContext.RestoreState();
+        });
+        using var pngData = image.AsPNG();
+        return pngData?.ToArray();
+    }
+
+    private static UIKit.UIWindow? FindAppleWindow(CoreGraphics.CGRect screenFrame)
+    {
+        UIKit.UIWindow? fallback = null;
+        foreach (var scene in UIKit.UIApplication.SharedApplication.ConnectedScenes)
+        {
+            if (scene is not UIKit.UIWindowScene windowScene)
+                continue;
+
+            foreach (var window in windowScene.Windows)
+            {
+                if (window.Hidden || window.Alpha <= 0)
+                    continue;
+
+                fallback ??= window;
+                var windowFrame = window.ConvertRectFromCoordinateSpace(
+                    screenFrame,
+                    window.Screen.CoordinateSpace);
+                if (window.Bounds.IntersectsWith(windowFrame))
+                    return window;
+            }
+        }
+
+#pragma warning disable CA1422 // Legacy AppDelegate apps can have no UIWindowScene on current iOS versions.
+        foreach (var window in UIKit.UIApplication.SharedApplication.Windows)
+#pragma warning restore CA1422
+        {
+            if (window.Hidden || window.Alpha <= 0)
+                continue;
+
+            fallback ??= window;
+            var windowFrame = window.ConvertRectFromCoordinateSpace(
+                screenFrame,
+                window.Screen.CoordinateSpace);
+            if (window.Bounds.IntersectsWith(windowFrame))
+                return window;
+        }
+
+        return fallback;
+    }
+
+    private static bool IsAppleCaptureSizeSupported(
+        CoreGraphics.CGSize logicalSize,
+        double scale)
+        => logicalSize.Width > 0
+            && logicalSize.Height > 0
+            && scale > 0
+            && logicalSize.Width * scale * logicalSize.Height * scale
+                <= MaxNativeElementScreenshotPixels;
+#endif
+#endif
+
 #if MACOS
     protected override bool SupportsNativeElementScreenshots => true;
 

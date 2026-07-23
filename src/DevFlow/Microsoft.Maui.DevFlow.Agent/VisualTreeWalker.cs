@@ -37,20 +37,32 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
         {
 #if ANDROID
             info.Framework = "android-native";
+            info.IsVisible = false;
             if (registration.NativeElement is global::Android.Views.View androidView)
             {
-                var location = new int[2];
-                androidView.GetLocationInWindow(location);
                 var density = androidView.Context?.Resources?.DisplayMetrics?.Density ?? 1f;
-                info.WindowBounds = new BoundsInfo
+                info.NativeProperties ??= new Dictionary<string, string?>();
+                info.NativeProperties["displayDensity"] = density.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture);
+                var hasExactBounds = androidView.IsAttachedToWindow
+                    && androidView.Width > 0
+                    && androidView.Height > 0;
+                if (hasExactBounds)
                 {
-                    X = location[0] / density,
-                    Y = location[1] / density,
-                    Width = androidView.Width / density,
-                    Height = androidView.Height / density
-                };
-                info.BoundsQuality = "exact";
-                info.IsVisible = androidView.Visibility == global::Android.Views.ViewStates.Visible && androidView.IsShown;
+                    var location = new int[2];
+                    GetAndroidLocationInAppWindow(androidView, location);
+                    info.WindowBounds = new BoundsInfo
+                    {
+                        X = location[0] / density,
+                        Y = location[1] / density,
+                        Width = androidView.Width / density,
+                        Height = androidView.Height / density
+                    };
+                    info.BoundsQuality = "exact";
+                }
+                info.IsVisible = hasExactBounds
+                    && androidView.Visibility == global::Android.Views.ViewStates.Visible
+                    && androidView.IsShown;
                 info.IsEnabled = androidView.Enabled;
                 info.IsFocused = androidView.HasFocus;
                 if (androidView.Id != global::Android.Views.View.NoId)
@@ -63,12 +75,22 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                     {
                     }
                 }
-                info.Text = androidView.ContentDescription;
+                if (androidView is global::Android.Widget.TextView textView)
+                {
+                    var isPassword = textView is global::Android.Widget.EditText editText
+                        && editText.TransformationMethod
+                            is global::Android.Text.Method.PasswordTransformationMethod;
+                    info.Text = SensitiveValueRedactor.Redact(textView.Text, isPassword);
+                    info.NativeProperties["isPassword"] = isPassword.ToString();
+                }
+                else
+                {
+                    info.Text = androidView.ContentDescription;
+                }
             }
             else if (registration.NativeElement is global::Android.Views.IMenuItem menuItem)
             {
                 info.Type = "MenuItem";
-                info.IsVisible = menuItem.IsVisible;
                 info.IsEnabled = menuItem.IsEnabled;
                 info.IsFocused = menuItem.IsChecked;
                 info.Text = menuItem.TitleFormatted?.ToString();
@@ -77,11 +99,17 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                 info.NativeProperties["groupId"] = menuItem.GroupId.ToString();
                 info.NativeProperties["isCheckable"] = menuItem.IsCheckable.ToString();
                 info.NativeProperties["isChecked"] = menuItem.IsChecked.ToString();
-                if (menuItem.ActionView is global::Android.Views.View actionView)
+                info.NativeProperties["logicalVisibility"] = menuItem.IsVisible.ToString();
+                if (menuItem.ActionView is global::Android.Views.View actionView
+                    && actionView.IsAttachedToWindow
+                    && actionView.Width > 0
+                    && actionView.Height > 0)
                 {
                     var location = new int[2];
-                    actionView.GetLocationInWindow(location);
+                    GetAndroidLocationInAppWindow(actionView, location);
                     var density = actionView.Context?.Resources?.DisplayMetrics?.Density ?? 1f;
+                    info.NativeProperties["displayDensity"] = density.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture);
                     info.WindowBounds = new BoundsInfo
                     {
                         X = location[0] / density,
@@ -90,17 +118,20 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                         Height = actionView.Height / density
                     };
                     info.BoundsQuality = "exact";
+                    info.IsVisible = menuItem.IsVisible
+                        && actionView.Visibility == global::Android.Views.ViewStates.Visible
+                        && actionView.IsShown;
                 }
             }
 #elif IOS || MACCATALYST
             info.Framework = "apple-native";
+            info.IsVisible = false;
             if (registration.NativeElement is UIKit.UIView uiView)
             {
                 var window = uiView.Window;
-                var windowView = window?.RootViewController?.View ?? window;
-                if (windowView is not null)
+                if (window is not null && uiView.Bounds.Width > 0 && uiView.Bounds.Height > 0)
                 {
-                    var bounds = uiView.ConvertRectToView(uiView.Bounds, windowView);
+                    var bounds = uiView.ConvertRectToView(uiView.Bounds, window);
                     info.WindowBounds = new BoundsInfo
                     {
                         X = bounds.X,
@@ -109,12 +140,39 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                         Height = bounds.Height
                     };
                     info.BoundsQuality = "exact";
+                    info.NativeProperties ??= new Dictionary<string, string?>();
+                    info.NativeProperties["displayDensity"] = window.Screen.Scale.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture);
                 }
                 info.IsVisible = IsAppleViewVisible(uiView);
                 info.IsEnabled = uiView is not UIKit.UIControl control || control.Enabled;
                 info.IsFocused = uiView.IsFirstResponder;
                 info.AutomationId = uiView.AccessibilityIdentifier;
-                info.Text = uiView.AccessibilityLabel;
+                if (uiView is UIKit.UITextField textField)
+                {
+                    info.Text = SensitiveValueRedactor.Redact(
+                        textField.Text,
+                        textField.SecureTextEntry);
+                    info.NativeProperties ??= new Dictionary<string, string?>();
+                    info.NativeProperties["isPassword"] = textField.SecureTextEntry.ToString();
+                }
+                else if (uiView is UIKit.UISearchBar searchBar)
+                {
+                    info.Text = searchBar.Text;
+                }
+                else if (uiView is UIKit.UIButton button)
+                {
+                    info.Text = button.Title(UIKit.UIControlState.Normal)
+                        ?? uiView.AccessibilityLabel;
+                }
+                else if (uiView is UIKit.UILabel label)
+                {
+                    info.Text = label.Text;
+                }
+                else
+                {
+                    info.Text = uiView.AccessibilityLabel;
+                }
             }
             else if (registration.NativeElement is UIKit.UIBarItem barItem)
             {
@@ -125,7 +183,6 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                 var frame = barItem.AccessibilityFrame;
                 var ownerWindow = FindAppleWindow(registration.Owner)
                     ?? FindAppleWindow(frame);
-                info.IsVisible = ownerWindow is not null && !frame.IsEmpty;
                 if (!frame.IsEmpty && ownerWindow is not null)
                 {
                     var windowFrame = ownerWindow.ConvertRectFromCoordinateSpace(
@@ -139,12 +196,15 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                         Height = windowFrame.Height
                     };
                     info.BoundsQuality = "accessibility";
+                    info.IsVisible = ownerWindow.Bounds.IntersectsWith(windowFrame);
+                    info.NativeProperties ??= new Dictionary<string, string?>();
+                    info.NativeProperties["displayDensity"] = ownerWindow.Screen.Scale.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture);
                 }
             }
             else if (registration.NativeElement is UIKit.UIMenuElement menuElement)
             {
                 info.Type = menuElement.GetType().Name;
-                info.IsVisible = true;
                 info.IsEnabled = menuElement switch
                 {
                     UIKit.UIAction action => !action.Attributes.HasFlag(UIKit.UIMenuElementAttributes.Disabled),
@@ -152,6 +212,17 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                     _ => true
                 };
                 info.Text = menuElement.Title;
+                info.NativeProperties ??= new Dictionary<string, string?>();
+                info.NativeProperties["logicalVisibility"] = bool.TrueString;
+            }
+            else if (registration.NativeElement is UIKit.UIAlertAction alertAction)
+            {
+                info.Type = nameof(UIKit.UIAlertAction);
+                info.IsEnabled = alertAction.Enabled;
+                info.Text = alertAction.Title;
+                info.NativeProperties ??= new Dictionary<string, string?>();
+                info.NativeProperties["style"] = alertAction.Style.ToString();
+                info.NativeProperties["logicalVisibility"] = bool.TrueString;
             }
 #elif WINDOWS
             info.Framework = "windows-native";
@@ -256,6 +327,44 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
         return info;
     }
 
+#if ANDROID
+    private static void GetAndroidLocationInAppWindow(
+        global::Android.Views.View view,
+        int[] location)
+    {
+        view.GetLocationOnScreen(location);
+        var rootView = FindAndroidActivity(view.Context)?
+            .Window?
+            .DecorView?
+            .RootView
+            ?? view.RootView;
+        if (rootView is null)
+            return;
+
+        var rootLocation = new int[2];
+        rootView.GetLocationOnScreen(rootLocation);
+        location[0] -= rootLocation[0];
+        location[1] -= rootLocation[1];
+    }
+
+    private static global::Android.App.Activity? FindAndroidActivity(
+        global::Android.Content.Context? context)
+    {
+        while (context is global::Android.Content.ContextWrapper wrapper)
+        {
+            if (context is global::Android.App.Activity activity)
+                return activity;
+
+            var baseContext = wrapper.BaseContext;
+            if (ReferenceEquals(baseContext, context))
+                break;
+            context = baseContext;
+        }
+
+        return context as global::Android.App.Activity;
+    }
+#endif
+
 #if WINDOWS
     private static bool IsWinUiElementVisible(Microsoft.UI.Xaml.FrameworkElement element)
     {
@@ -316,6 +425,19 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
         return true;
     }
 
+    private static UIKit.UITableView? FindAppleTableView(UIKit.UIView view)
+    {
+        UIKit.UIView? current = view.Superview;
+        while (current is not null)
+        {
+            if (current is UIKit.UITableView tableView)
+                return tableView;
+            current = current.Superview;
+        }
+
+        return null;
+    }
+
     private static UIKit.UIWindow? FindAppleWindow(object owner)
     {
         var current = owner as Element;
@@ -352,6 +474,169 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
     }
 #endif
 
+#if ANDROID || IOS || MACCATALYST
+    protected override bool CanInvokeRegisteredNativeElement(object nativeElement)
+    {
+#if ANDROID
+        return nativeElement is global::Android.Views.View
+        {
+            IsAttachedToWindow: true,
+            IsShown: true,
+            Enabled: true,
+            Clickable: true
+        };
+#elif IOS || MACCATALYST
+        if (nativeElement is UIKit.UITableViewCell cell)
+        {
+            var tableView = FindAppleTableView(cell);
+            return IsAppleViewVisible(cell)
+                && cell.UserInteractionEnabled
+                && tableView?.IndexPathForCell(cell) is not null
+                && tableView.Delegate is not null;
+        }
+
+        if (nativeElement is UIKit.UIControl control)
+            return IsAppleViewVisible(control)
+                && control.Enabled
+                && control.AllTargets.Count > 0;
+
+        return nativeElement is UIKit.UIBarButtonItem
+        {
+            Enabled: true,
+            Action: not null
+        };
+#endif
+    }
+
+    protected override bool CanFocusRegisteredNativeElement(object nativeElement)
+    {
+#if ANDROID
+        return nativeElement is global::Android.Views.View
+        {
+            IsAttachedToWindow: true,
+            IsShown: true,
+            Enabled: true,
+            Focusable: true
+        };
+#elif IOS || MACCATALYST
+        return nativeElement is UIKit.UIView view
+            && IsAppleViewVisible(view)
+            && view.CanBecomeFirstResponder;
+#endif
+    }
+
+    protected override bool CanSetValueRegisteredNativeElement(object nativeElement)
+    {
+#if ANDROID
+        return nativeElement is global::Android.Widget.EditText
+        {
+            IsAttachedToWindow: true,
+            Enabled: true
+        };
+#elif IOS || MACCATALYST
+        return nativeElement is UIKit.UITextField { Enabled: true }
+            or UIKit.UISearchBar { UserInteractionEnabled: true };
+#endif
+    }
+
+    protected override string? TrySetValueRegisteredNativeElement(
+        string elementId,
+        object nativeElement,
+        string value)
+    {
+#if ANDROID
+        if (nativeElement is global::Android.Widget.EditText editText)
+        {
+            if (!CanSetValueRegisteredNativeElement(editText))
+                return $"Native element '{elementId}' is not attached and enabled";
+
+            editText.Text = value;
+            editText.SetSelection(editText.Text?.Length ?? 0);
+            return "ok";
+        }
+#elif IOS || MACCATALYST
+        if (nativeElement is UIKit.UITextField textField)
+        {
+            if (!CanSetValueRegisteredNativeElement(textField))
+                return $"Native element '{elementId}' is not enabled";
+
+            textField.Text = value;
+            textField.SendActionForControlEvents(UIKit.UIControlEvent.EditingChanged);
+            return "ok";
+        }
+
+        if (nativeElement is UIKit.UISearchBar searchBar)
+        {
+            if (!CanSetValueRegisteredNativeElement(searchBar))
+                return $"Native element '{elementId}' is not enabled";
+
+            searchBar.Text = value;
+            return "ok";
+        }
+#endif
+
+        return null;
+    }
+
+    protected override string? TryInvokeRegisteredNativeElement(
+        string elementId,
+        object nativeElement)
+    {
+#if ANDROID
+        if (nativeElement is global::Android.Views.View androidView)
+        {
+            if (!CanInvokeRegisteredNativeElement(androidView))
+                return $"Native element '{elementId}' is not attached, visible, enabled, and clickable";
+
+            return androidView.PerformClick()
+                ? "ok"
+                : $"Native element '{elementId}' did not handle the click";
+        }
+#elif IOS || MACCATALYST
+        if (nativeElement is UIKit.UITableViewCell cell)
+        {
+            var tableView = FindAppleTableView(cell);
+            var indexPath = tableView?.IndexPathForCell(cell);
+            if (!CanInvokeRegisteredNativeElement(cell)
+                || tableView is null
+                || indexPath is null)
+            {
+                return $"Native element '{elementId}' is not a visible, actionable table row";
+            }
+
+            tableView.SelectRow(indexPath, animated: true, UIKit.UITableViewScrollPosition.None);
+            tableView.Delegate?.RowSelected(tableView, indexPath);
+            return "ok";
+        }
+
+        if (nativeElement is UIKit.UIControl control)
+        {
+            if (!CanInvokeRegisteredNativeElement(control))
+                return $"Native element '{elementId}' is not visible, enabled, and actionable";
+
+            control.SendActionForControlEvents(UIKit.UIControlEvent.TouchUpInside);
+            return "ok";
+        }
+
+        if (nativeElement is UIKit.UIBarButtonItem barButtonItem)
+        {
+            if (!CanInvokeRegisteredNativeElement(barButtonItem))
+                return $"Native element '{elementId}' is not enabled and actionable";
+
+            return UIKit.UIApplication.SharedApplication.SendAction(
+                barButtonItem.Action!,
+                barButtonItem.Target,
+                barButtonItem,
+                null)
+                    ? "ok"
+                    : $"Native element '{elementId}' action was not handled";
+        }
+#endif
+
+        return null;
+    }
+#endif
+
 #if ANDROID || IOS || MACCATALYST || MACOS
     public override string TryNativeElementFocus(string elementId)
     {
@@ -384,7 +669,7 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
     }
 #endif
 
-    #if MACOS
+#if MACOS
         public override string TryNativeElementTap(string elementId)
         {
             if (!elementId.StartsWith("native:registered:", StringComparison.Ordinal))
@@ -430,9 +715,9 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
 
             return base.TryNativeElementSetValue(elementId, value);
         }
-    #endif
+#endif
 
-    #if WINDOWS
+#if WINDOWS
     private readonly NativeWindowProbe _nativeProbe = new();
     private readonly object _nativeObjectsLock = new();
     private Dictionary<string, object> _nativeObjects = new(StringComparer.OrdinalIgnoreCase);

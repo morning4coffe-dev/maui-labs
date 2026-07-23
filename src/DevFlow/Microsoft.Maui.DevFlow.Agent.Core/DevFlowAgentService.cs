@@ -1882,27 +1882,31 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             return new ScreenshotCaptureOutcome
             {
                 Data = bytes,
-                Density = GetNativeElementDisplayDensity(elementInfo)
+                Density = GetNativeElementDisplayDensity(elementInfo) ?? 1.0
             };
         }
 
         return await DispatchAsync<ScreenshotCaptureOutcome>(async () =>
         {
+            var nativeElementInfo = resolvedElement is VisualElement
+                ? null
+                : _treeWalker.GetNativeElementInfoById(elementId);
             var bytes = resolvedElement is VisualElement visualElement
                 ? await CaptureElementScreenshotAsync(visualElement)
                 : await CaptureNativeElementScreenshotAsync(
                     resolvedElement,
-                    _treeWalker.GetNativeElementInfoById(elementId));
+                    nativeElementInfo);
             return new ScreenshotCaptureOutcome
             {
                 Data = bytes,
                 Failure = bytes == null ? DescribeScreenshotFailure() : null,
-                Density = GetWindowDisplayDensity(GetWindow(windowIndex))
+                Density = GetNativeElementDisplayDensity(nativeElementInfo)
+                    ?? GetWindowDisplayDensity(GetWindow(nativeElementInfo?.WindowId ?? windowIndex))
             };
         }) ?? new ScreenshotCaptureOutcome();
     }
 
-    private static double GetNativeElementDisplayDensity(ElementInfo? elementInfo)
+    private static double? GetNativeElementDisplayDensity(ElementInfo? elementInfo)
     {
         if (elementInfo?.NativeProperties?.TryGetValue(
                 "displayDensity",
@@ -1918,7 +1922,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             return density;
         }
 
-        return 1.0;
+        return null;
     }
 
     private static UiCaptureContext GetReservedCapture(HttpRequest request)
@@ -4031,141 +4035,141 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
                     switch (actionName)
                     {
-                case "tap":
-                    response = await HandleTap(new HttpRequest
-                    {
-                        Method = "POST",
-                        MutationState = reservation.Capture,
-                        Body = JsonSerializer.Serialize(new ActionRequest
-                        {
-                            ElementId = action.ElementId
-                        })
-                    });
-                    break;
-                case "fill":
-                    response = await HandleFill(new HttpRequest
-                    {
-                        Method = "POST",
-                        MutationState = reservation.Capture,
-                        Body = JsonSerializer.Serialize(new FillRequest
-                        {
-                            ElementId = action.ElementId,
-                            Text = action.Text ?? string.Empty
-                        })
-                    });
-                    break;
-                case "clear":
-                    response = await HandleClear(new HttpRequest
-                    {
-                        Method = "POST",
-                        MutationState = reservation.Capture,
-                        Body = JsonSerializer.Serialize(new ActionRequest
-                        {
-                            ElementId = action.ElementId
-                        })
-                    });
-                    break;
-                case "focus":
-                    response = await HandleFocus(new HttpRequest
-                    {
-                        Method = "POST",
-                        MutationState = reservation.Capture,
-                        Body = JsonSerializer.Serialize(new ActionRequest
-                        {
-                            ElementId = action.ElementId
-                        })
-                    });
-                    break;
-                case "navigate":
-                    response = await HandleNavigate(new HttpRequest
-                    {
-                        Method = "POST",
-                        Body = JsonSerializer.Serialize(new NavigateRequest { Route = action.Route ?? string.Empty })
-                    });
-                    break;
-                case "resize":
-                    response = await HandleResize(new HttpRequest { Method = "POST", Body = JsonSerializer.Serialize(new ResizeRequest(action.Width, action.Height)) });
-                    break;
-                case "scroll":
-                    response = await HandleScroll(new HttpRequest
-                    {
-                        Method = "POST",
-                        MutationState = reservation.Capture,
-                        Body = JsonSerializer.Serialize(new ScrollRequest
-                        {
-                            ElementId = action.ElementId,
-                            DeltaX = action.DeltaX,
-                            DeltaY = action.DeltaY,
-                            ItemIndex = action.ItemIndex,
-                            GroupIndex = action.GroupIndex,
-                            ScrollToPosition = action.ScrollToPosition,
-                            Animated = action.Animated
-                        })
-                    });
-                    break;
-                case "back":
-                    response = await HandleBack(new HttpRequest { Method = "POST" });
-                    break;
-                case "key":
-                    response = await HandleKey(new HttpRequest
-                    {
-                        Method = "POST",
-                        MutationState = reservation.Capture,
-                        Body = JsonSerializer.Serialize(new KeyActionRequest
-                        {
-                            ElementId = action.ElementId,
-                            Key = action.Key,
-                            Text = action.Text
-                        })
-                    });
-                    break;
-                case "gesture":
-                    response = await HandleGesture(new HttpRequest
-                    {
-                        Method = "POST",
-                        MutationState = reservation.Capture,
-                        Body = JsonSerializer.Serialize(new GestureActionRequest
-                        {
-                            ElementId = action.ElementId,
-                            Type = action.Type ?? action.Action,
-                            Direction = action.Direction,
-                            Distance = action.Distance,
-                            DurationMs = action.DurationMs
-                        })
-                    });
-                    break;
-                case "set-property":
-                case "set_property":
-                    response = await HandleSetProperty(new HttpRequest
-                    {
-                        Method = "PUT",
-                        MutationState = reservation.Capture,
-                        RouteParams = new Dictionary<string, string>
-                        {
-                            ["id"] = action.ElementId ?? string.Empty,
-                            ["name"] = action.Property ?? string.Empty
-                        },
-                        Body = JsonSerializer.Serialize(new SetPropertyRequest
-                        {
-                            Value = action.Value ?? string.Empty
-                        })
-                    });
-                    break;
-                case "invoke-action":
-                case "invoke_action":
-                    response = await HandleInvokeAction(new HttpRequest
-                    {
-                        Method = "POST",
-                        RouteParams = new Dictionary<string, string>
-                        {
-                            ["name"] = action.Name ?? string.Empty
-                        },
-                        Body = JsonSerializer.Serialize(new InvokeActionRequest { Args = action.Args })
-                    });
-                    break;
-                    default:
-                        response = HttpResponse.Error($"Unsupported batch action '{actionName}'");
-                        break;
+                        case "tap":
+                            response = await HandleTap(new HttpRequest
+                            {
+                                Method = "POST",
+                                MutationState = reservation.Capture,
+                                Body = JsonSerializer.Serialize(new ActionRequest
+                                {
+                                    ElementId = action.ElementId
+                                })
+                            });
+                            break;
+                        case "fill":
+                            response = await HandleFill(new HttpRequest
+                            {
+                                Method = "POST",
+                                MutationState = reservation.Capture,
+                                Body = JsonSerializer.Serialize(new FillRequest
+                                {
+                                    ElementId = action.ElementId,
+                                    Text = action.Text ?? string.Empty
+                                })
+                            });
+                            break;
+                        case "clear":
+                            response = await HandleClear(new HttpRequest
+                            {
+                                Method = "POST",
+                                MutationState = reservation.Capture,
+                                Body = JsonSerializer.Serialize(new ActionRequest
+                                {
+                                    ElementId = action.ElementId
+                                })
+                            });
+                            break;
+                        case "focus":
+                            response = await HandleFocus(new HttpRequest
+                            {
+                                Method = "POST",
+                                MutationState = reservation.Capture,
+                                Body = JsonSerializer.Serialize(new ActionRequest
+                                {
+                                    ElementId = action.ElementId
+                                })
+                            });
+                            break;
+                        case "navigate":
+                            response = await HandleNavigate(new HttpRequest
+                            {
+                                Method = "POST",
+                                Body = JsonSerializer.Serialize(new NavigateRequest { Route = action.Route ?? string.Empty })
+                            });
+                            break;
+                        case "resize":
+                            response = await HandleResize(new HttpRequest { Method = "POST", Body = JsonSerializer.Serialize(new ResizeRequest(action.Width, action.Height)) });
+                            break;
+                        case "scroll":
+                            response = await HandleScroll(new HttpRequest
+                            {
+                                Method = "POST",
+                                MutationState = reservation.Capture,
+                                Body = JsonSerializer.Serialize(new ScrollRequest
+                                {
+                                    ElementId = action.ElementId,
+                                    DeltaX = action.DeltaX,
+                                    DeltaY = action.DeltaY,
+                                    ItemIndex = action.ItemIndex,
+                                    GroupIndex = action.GroupIndex,
+                                    ScrollToPosition = action.ScrollToPosition,
+                                    Animated = action.Animated
+                                })
+                            });
+                            break;
+                        case "back":
+                            response = await HandleBack(new HttpRequest { Method = "POST" });
+                            break;
+                        case "key":
+                            response = await HandleKey(new HttpRequest
+                            {
+                                Method = "POST",
+                                MutationState = reservation.Capture,
+                                Body = JsonSerializer.Serialize(new KeyActionRequest
+                                {
+                                    ElementId = action.ElementId,
+                                    Key = action.Key,
+                                    Text = action.Text
+                                })
+                            });
+                            break;
+                        case "gesture":
+                            response = await HandleGesture(new HttpRequest
+                            {
+                                Method = "POST",
+                                MutationState = reservation.Capture,
+                                Body = JsonSerializer.Serialize(new GestureActionRequest
+                                {
+                                    ElementId = action.ElementId,
+                                    Type = action.Type ?? action.Action,
+                                    Direction = action.Direction,
+                                    Distance = action.Distance,
+                                    DurationMs = action.DurationMs
+                                })
+                            });
+                            break;
+                        case "set-property":
+                        case "set_property":
+                            response = await HandleSetProperty(new HttpRequest
+                            {
+                                Method = "PUT",
+                                MutationState = reservation.Capture,
+                                RouteParams = new Dictionary<string, string>
+                                {
+                                    ["id"] = action.ElementId ?? string.Empty,
+                                    ["name"] = action.Property ?? string.Empty
+                                },
+                                Body = JsonSerializer.Serialize(new SetPropertyRequest
+                                {
+                                    Value = action.Value ?? string.Empty
+                                })
+                            });
+                            break;
+                        case "invoke-action":
+                        case "invoke_action":
+                            response = await HandleInvokeAction(new HttpRequest
+                            {
+                                Method = "POST",
+                                RouteParams = new Dictionary<string, string>
+                                {
+                                    ["name"] = action.Name ?? string.Empty
+                                },
+                                Body = JsonSerializer.Serialize(new InvokeActionRequest { Args = action.Args })
+                            });
+                            break;
+                        default:
+                            response = HttpResponse.Error($"Unsupported batch action '{actionName}'");
+                            break;
                     }
                 }
 

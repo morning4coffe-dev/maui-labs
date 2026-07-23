@@ -5,10 +5,8 @@ broker discovery, the agent HTTP API, and the live event stream — with typed r
 security-gated transport seam.
 
 It is the common foundation for the Copilot Canvas and VS Code hosts, and mirrors the C#
-`AgentClient` (`Microsoft.Maui.DevFlow.Driver`).
-
-> Status: **public preview** (`0.1.0-preview.12`). It is consumed as a workspace/bundled package,
-> not published independently to npm.
+`AgentClient` (`Microsoft.Maui.DevFlow.Driver`). It is consumed as a workspace/bundled package,
+not published independently to npm.
 
 ## Why this exists
 

@@ -25,7 +25,7 @@
 // - Never throws into a live action (captureStep is wrapped; failures are swallowed).
 // - Deterministic: toMarkdown() always produces a valid machine-readable `.md` with NO LLM needed.
 //   The fenced ```json maui-test block is the SOURCE OF TRUTH for replay; the prose is for humans and
-//   may be enriched by the maui-test-agent without touching that block.
+//   can evolve independently without changing that block.
 // - ASCII-only strings (matches the canvas's "no multibyte in shared payloads" rule).
 
 import { existsSync, mkdirSync, mkdtempSync, copyFileSync, writeFileSync, readdirSync, rmSync, statSync } from "node:fs";

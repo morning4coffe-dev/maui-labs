@@ -114,9 +114,25 @@ public sealed class NativeWindowProbe
             }
         }
 
-        return results.Count > 0
-            ? results
-            : HitTestByBounds(nativeObjects, knownHwnds, x, y);
+        var boundsResults = HitTestByBounds(nativeObjects, knownHwnds, x, y);
+        if (boundsResults.Count == 0)
+            return results;
+        if (results.Count == 0)
+            return boundsResults;
+
+        var merged = new List<ElementInfo>(boundsResults.Count + results.Count);
+        var seenIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var result in boundsResults)
+        {
+            if (seenIds.Add(result.Id))
+                merged.Add(result);
+        }
+        foreach (var result in results)
+        {
+            if (seenIds.Add(result.Id))
+                merged.Add(result);
+        }
+        return merged;
     }
 
     private void AppendBoundsHits(

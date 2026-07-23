@@ -345,10 +345,9 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                 {
                     for (var type = element.GetType(); type is not null; type = type.BaseType)
                     {
-                        if (string.Equals(
-                            type.FullName,
-                            "Microsoft.AspNetCore.Components.WebView.Maui.BlazorWebView",
-                            StringComparison.Ordinal))
+                        if (type.FullName is
+                            "Microsoft.AspNetCore.Components.WebView.Maui.BlazorWebView" or
+                            "Microsoft.Maui.Platforms.MacOS.Controls.MacOSBlazorWebView")
                         {
                             return true;
                         }
@@ -6922,22 +6921,25 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     {
         try
         {
-            return await MainThread.InvokeOnMainThreadAsync(() =>
+            return await DispatchAsync(() =>
             {
-                var info = AppInfo.Current;
                 var theme = BuildThemeInfoPayload(Application.Current ?? _app);
                 return HttpResponse.Json(new
                 {
-                    name = info.Name,
-                    packageName = info.PackageName,
-                    version = info.VersionString,
-                    buildNumber = info.BuildString,
+                    name = TryGetAppInfoString(() => AppInfo.Current.Name)
+                        ?? _app?.GetType().Assembly.GetName().Name
+                        ?? "unknown",
+                    packageName = TryGetAppInfoString(() => AppInfo.Current.PackageName) ?? "unknown",
+                    version = TryGetAppInfoString(() => AppInfo.Current.VersionString) ?? "unknown",
+                    buildNumber = TryGetAppInfoString(() => AppInfo.Current.BuildString) ?? "unknown",
                     theme = theme.Theme,
-                    requestedTheme = info.RequestedTheme.ToString(),
+                    requestedTheme = TryGetAppInfoString(() => AppInfo.Current.RequestedTheme.ToString())
+                        ?? theme.RequestedTheme,
                     requestedThemeValue = theme.RequestedTheme,
                     userAppTheme = theme.UserAppTheme,
                     effectiveTheme = theme.EffectiveTheme,
-                    requestedLayoutDirection = info.RequestedLayoutDirection.ToString(),
+                    requestedLayoutDirection = TryGetAppInfoString(
+                        () => AppInfo.Current.RequestedLayoutDirection.ToString()) ?? "Unknown",
                 });
             });
         }
@@ -7118,7 +7120,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     {
         try
         {
-            return await MainThread.InvokeOnMainThreadAsync(() =>
+            return await DispatchAsync(() =>
             {
                 var display = DeviceDisplay.MainDisplayInfo;
                 return HttpResponse.Json(new
@@ -7129,6 +7131,25 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     orientation = display.Orientation.ToString(),
                     rotation = display.Rotation.ToString(),
                     refreshRate = display.RefreshRate,
+                });
+            });
+        }
+        catch (Exception ex) when (ex.GetType().Name == "NotImplementedInReferenceAssemblyException")
+        {
+            return await DispatchAsync(() =>
+            {
+                var window = GetWindow(ParseWindowIndex(request));
+                var width = window?.Width ?? 0;
+                var height = window?.Height ?? 0;
+                return HttpResponse.Json(new
+                {
+                    width,
+                    height,
+                    density = GetWindowDisplayDensity(window),
+                    orientation = width >= height ? "Landscape" : "Portrait",
+                    rotation = "Rotation0",
+                    refreshRate = 0d,
+                    source = "window",
                 });
             });
         }

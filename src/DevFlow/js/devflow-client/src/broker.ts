@@ -33,10 +33,17 @@ export async function fetchAgents(
   brokerPort: number,
   timeoutMs = 1500,
 ): Promise<AgentRegistration[] | null> {
-  const r = await httpRaw(brokerPort, "GET", "/api/agents", {
-    timeoutMs,
-    hostHeader: `localhost:${brokerPort}`,
-  });
+  // Keep the socket address and Host header aligned. macOS HttpListener routes a
+  // 127.0.0.1 socket with a localhost Host header to a generic 404 response.
+  let r = await httpRaw(brokerPort, "GET", "/api/agents", { timeoutMs });
+  if (!r.ok) {
+    // Some Windows configurations cannot register the literal-IP prefix without a URL ACL.
+    r = await httpRaw(brokerPort, "GET", "/api/agents", {
+      timeoutMs,
+      host: "localhost",
+      hostHeader: `localhost:${brokerPort}`,
+    });
+  }
   if (!r.ok || !r.buffer) return null;
   const data = parseJsonSafe(r.buffer.toString("utf8"));
   return Array.isArray(data) ? (data as AgentRegistration[]) : null;

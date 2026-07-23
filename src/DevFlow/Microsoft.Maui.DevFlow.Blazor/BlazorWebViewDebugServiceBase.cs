@@ -97,16 +97,19 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
     /// Wait for the WebView's document.readyState to reach 'complete', bounded by GetWebViewLoadDelayMs().
     /// Falls back to a fixed delay if evaluation isn't available.
     /// </summary>
-    private async Task WaitForWebViewLoadedAsync(Func<string, Task<string?>> evalJs)
+    private async Task WaitForWebViewLoadedAsync(
+        Func<string, Task<string?>> evalJs,
+        CancellationToken cancellationToken)
     {
         var maxDelayMs = GetWebViewLoadDelayMs();
         // Minimum settle time before first probe, to let the platform fully attach the WebView.
         var minSettleMs = Math.Min(200, maxDelayMs);
-        await Task.Delay(minSettleMs);
+        await Task.Delay(minSettleMs, cancellationToken);
 
         var deadline = DateTime.UtcNow.AddMilliseconds(maxDelayMs - minSettleMs);
         while (DateTime.UtcNow < deadline)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             try
             {
                 var state = await evalJs("document.readyState");
@@ -122,7 +125,7 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
                 // Evaluator may not be ready yet; keep waiting.
             }
 
-            await Task.Delay(100);
+            await Task.Delay(100, cancellationToken);
         }
     }
 
@@ -132,8 +135,26 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
     /// </summary>
     protected int AddWebViewBridge(Func<string, Task<string?>> evalJs, Action reload,
         Action<string> navigate, string? automationId = null)
+        => AddWebViewBridge(
+            evalJs,
+            reload,
+            navigate,
+            automationId,
+            deactivated: null);
+
+    /// <summary>
+    /// Register a new WebView bridge with native attachment and cleanup callbacks.
+    /// </summary>
+    protected int AddWebViewBridge(Func<string, Task<string?>> evalJs, Action reload,
+        Action<string> navigate, string? automationId, Action? deactivated)
     {
-        var bridge = new WebViewBridge(this, evalJs, reload, navigate, automationId);
+        var bridge = new WebViewBridge(
+            this,
+            evalJs,
+            reload,
+            navigate,
+            automationId,
+            deactivated);
         int index;
         lock (_bridgesGate)
         {
@@ -169,7 +190,17 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
         if (bridge is null) return;
 
         Log($"[BlazorDevFlow] Waiting for WebView {bridgeIndex} to load (max {GetWebViewLoadDelayMs()}ms)...");
-        await WaitForWebViewLoadedAsync(bridge.EvalJsProbe);
+        try
+        {
+            await WaitForWebViewLoadedAsync(bridge.EvalJsProbe, bridge.LifetimeToken);
+        }
+        catch (OperationCanceledException) when (!bridge.IsActive)
+        {
+            return;
+        }
+
+        if (!bridge.IsActive)
+            return;
 
         Log($"[BlazorDevFlow] Injecting debug script into WebView {bridgeIndex}...");
         await bridge.InjectDebugScriptAsync();
@@ -185,7 +216,17 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
         if (bridge is null) return;
 
         Log($"[BlazorDevFlow] Re-initialization: waiting for WebView {bridgeIndex} to settle (max {GetWebViewLoadDelayMs()}ms)...");
-        await WaitForWebViewLoadedAsync(bridge.EvalJsProbe);
+        try
+        {
+            await WaitForWebViewLoadedAsync(bridge.EvalJsProbe, bridge.LifetimeToken);
+        }
+        catch (OperationCanceledException) when (!bridge.IsActive)
+        {
+            return;
+        }
+
+        if (!bridge.IsActive)
+            return;
 
         Log($"[BlazorDevFlow] Re-injecting debug script into WebView {bridgeIndex}...");
         bridge.ResetReadyState();
@@ -254,15 +295,17 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
     public class WebViewBridge : IDisposable
     {
         private readonly BlazorWebViewDebugServiceBase _owner;
-        private readonly Func<string, Task<string?>> _evalJs;
-        private readonly Action _reload;
-        private readonly Action<string> _navigate;
+        private Func<string, Task<string?>> _evalJs;
+        private Action _reload;
+        private Action<string> _navigate;
+        private Action? _deactivated;
         private bool _chobitsuLoaded;
         private readonly object _injectGate = new();
         private Task? _injectTask;
         private int _cdpIdCounter = 1000;
         private CancellationTokenSource? _drainCts;
-        private bool _active = true;
+        private readonly CancellationTokenSource _lifetimeCts = new();
+        private int _active = 1;
 
         /// <summary>AutomationId of the MAUI BlazorWebView control.</summary>
         public string? AutomationId { get; }
@@ -271,28 +314,31 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
         public string? ElementId { get; set; }
 
         /// <summary>Whether this WebView is ready for CDP commands.</summary>
-        public bool IsReady => _active && _chobitsuLoaded;
+        public bool IsReady => IsActive && _chobitsuLoaded;
 
         /// <summary>Whether the native WebView backing this bridge is still attached.</summary>
-        public bool IsActive => _active;
+        public bool IsActive => Volatile.Read(ref _active) != 0;
 
         /// <summary>Internal: exposes the JS evaluator so the owner can probe the page before injection.</summary>
         internal Func<string, Task<string?>> EvalJsProbe => _evalJs;
 
+        internal CancellationToken LifetimeToken => _lifetimeCts.Token;
+
         internal WebViewBridge(BlazorWebViewDebugServiceBase owner,
             Func<string, Task<string?>> evalJs, Action reload, Action<string> navigate,
-            string? automationId)
+            string? automationId, Action? deactivated)
         {
             _owner = owner;
             _evalJs = evalJs;
             _reload = reload;
             _navigate = navigate;
+            _deactivated = deactivated;
             AutomationId = automationId;
         }
 
         internal async Task InjectDebugScriptAsync()
         {
-            if (!_active) return;
+            if (!IsActive) return;
 
             Task injectTask;
             lock (_injectGate)
@@ -308,7 +354,13 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
                 }
             }
 
-            await injectTask;
+            try
+            {
+                await injectTask;
+            }
+            catch (OperationCanceledException) when (!IsActive)
+            {
+            }
         }
 
         /// <summary>
@@ -316,24 +368,44 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
         /// </summary>
         internal void ResetReadyState()
         {
-            _chobitsuLoaded = false;
+            if (IsActive)
+                _chobitsuLoaded = false;
         }
 
         internal void Deactivate()
         {
-            _active = false;
+            if (Interlocked.Exchange(ref _active, 0) == 0)
+                return;
+
             _chobitsuLoaded = false;
+            _lifetimeCts.Cancel();
             _drainCts?.Cancel();
+            _evalJs = static _ => Task.FromResult<string?>(null);
+            _reload = static () => { };
+            _navigate = static _ => { };
+
+            var deactivated = Interlocked.Exchange(ref _deactivated, null);
+            try
+            {
+                deactivated?.Invoke();
+            }
+            catch (Exception ex)
+            {
+                _owner.LogError("[BlazorDevFlow] Failed to clean up a deactivated WebView bridge", ex);
+            }
         }
 
         private async Task InjectDebugScriptCoreAsync()
         {
+            var cancellationToken = _lifetimeCts.Token;
+
             // Wait for chobitsu to become available. Some apps may provide it via a script tag,
             // while others rely on the embedded fallback injection below.
             // We poll briefly before falling back to direct eval injection.
             var loaded = false;
             for (int i = 0; i < 10; i++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var check = await _evalJs(
                     "typeof chobitsu !== 'undefined' ? 'loaded' : 'waiting'");
                 if (i == 0 || check?.ToString() == "loaded")
@@ -344,7 +416,7 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
                     break;
                 }
 
-                await Task.Delay(500);
+                await Task.Delay(500, cancellationToken);
             }
 
             if (!loaded)
@@ -359,6 +431,7 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
                     // Wait for Blazor to replace "Loading..." with actual content (up to 30s).
                     for (int w = 0; w < 60; w++)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         var appContent = await _evalJs(
                             "document.querySelector('#app')?.innerHTML?.substring(0, 20) || ''");
                         var content = appContent?.ToString() ?? "";
@@ -367,28 +440,51 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
                             _owner.Log($"[BlazorDevFlow] Blazor rendered (content: {content})");
                             break;
                         }
-                        await Task.Delay(500);
+                        await Task.Delay(500, cancellationToken);
                     }
 
-                    _owner.Log("[BlazorDevFlow] Injecting embedded chobitsu.js via eval...");
-                    var embeddedJs = ChobitsuDebugScript.GetEmbeddedChobitsuJs();
-                    await _evalJs(embeddedJs);
+                    cancellationToken.ThrowIfCancellationRequested();
+                    _owner.Log("[BlazorDevFlow] Loading bundled chobitsu.js through the WebView host...");
+                    await _evalJs(ChobitsuDebugScript.GetLoadScript());
+                    for (var i = 0; i < 20; i++)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var verify = await _evalJs("typeof chobitsu !== 'undefined' ? 'loaded' : 'waiting'");
+                        if (verify?.ToString() == "loaded")
+                        {
+                            _owner.Log("[BlazorDevFlow] Chobitsu loaded from the bundled script.");
+                            loaded = true;
+                            break;
+                        }
+                        await Task.Delay(250, cancellationToken);
+                    }
 
-                    // Verify it loaded
-                    var verify = await _evalJs("typeof chobitsu !== 'undefined' ? 'loaded' : 'waiting'");
-                    if (verify?.ToString() == "loaded")
+                    if (!loaded)
                     {
-                        _owner.Log("[BlazorDevFlow] Chobitsu loaded via embedded fallback.");
-                        loaded = true;
+                        cancellationToken.ThrowIfCancellationRequested();
+                        _owner.Log("[BlazorDevFlow] Injecting embedded chobitsu.js via eval...");
+                        var embeddedJs = ChobitsuDebugScript.GetEmbeddedChobitsuJs();
+                        await _evalJs(embeddedJs);
+
+                        var verify = await _evalJs("typeof chobitsu !== 'undefined' ? 'loaded' : 'waiting'");
+                        if (verify?.ToString() == "loaded")
+                        {
+                            _owner.Log("[BlazorDevFlow] Chobitsu loaded via embedded fallback.");
+                            loaded = true;
+                        }
+                        else
+                        {
+                            _owner.Log($"[BlazorDevFlow] Embedded chobitsu injection did not define chobitsu global (got: {verify}).");
+                        }
                     }
-                    else
-                    {
-                        _owner.Log($"[BlazorDevFlow] Embedded chobitsu injection did not define chobitsu global (got: {verify}).");
-                    }
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
                 }
                 catch (Exception ex)
                 {
-                    _owner.LogError("[BlazorDevFlow] Failed to inject embedded chobitsu.js", ex);
+                    _owner.LogError("[BlazorDevFlow] Failed to load chobitsu.js", ex);
                 }
 
                 if (!loaded)
@@ -400,12 +496,22 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
 
             try
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var result = await _evalJs(script);
                 _owner.Log($"[BlazorDevFlow] Script injection result: {result?.ToString() ?? "null"}");
+                if (!IsActive)
+                    return;
+
                 _chobitsuLoaded = true;
 
                 await InjectConsoleInterceptAsync();
+                if (!IsActive)
+                    return;
+
                 StartLogDrain();
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
             }
             catch (Exception ex)
             {
@@ -420,7 +526,7 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
         {
             try
             {
-                if (!_active)
+                if (!IsActive)
                     return "{\"error\":\"WebView is no longer available\"}";
 
                 var json = System.Text.Json.JsonDocument.Parse(cdpJson);
@@ -610,9 +716,14 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
 
         private void StartLogDrain()
         {
-            _drainCts?.Cancel();
-            _drainCts = new CancellationTokenSource();
-            var ct = _drainCts.Token;
+            if (!IsActive)
+                return;
+
+            var drainCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
+            var previous = Interlocked.Exchange(ref _drainCts, drainCts);
+            previous?.Cancel();
+            previous?.Dispose();
+            var ct = drainCts.Token;
 
             Task.Run(async () =>
             {
@@ -682,7 +793,8 @@ public abstract class BlazorWebViewDebugServiceBase : IDisposable
         public void Dispose()
         {
             Deactivate();
-            _drainCts?.Dispose();
+            Interlocked.Exchange(ref _drainCts, null)?.Dispose();
+            _lifetimeCts.Dispose();
         }
     }
 }

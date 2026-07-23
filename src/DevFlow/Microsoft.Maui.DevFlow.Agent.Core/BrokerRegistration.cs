@@ -64,6 +64,11 @@ public class BrokerRegistration : IDisposable
     internal bool HasBrokerAuthority => !_disposed && _assignedPort.HasValue;
     internal string AgentId => _agentId;
     internal int BrokerPort => _brokerPort;
+    private static readonly string[] _brokerHttpHosts = ["127.0.0.1", "localhost"];
+    internal static IReadOnlyList<string> BrokerHttpHosts => _brokerHttpHosts;
+
+    internal static bool ShouldTryAlternateBrokerHost(HttpStatusCode statusCode)
+        => statusCode is HttpStatusCode.BadRequest or HttpStatusCode.NotFound;
 
     /// <summary>
     /// Sets the static logger to be used by all BrokerRegistration instances that don't have an instance logger.
@@ -281,10 +286,9 @@ public class BrokerRegistration : IDisposable
         try
         {
             var json = JsonSerializer.Serialize(request, _leaseJsonOptions);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            using var response = await _brokerHttp.PostAsync(
-                $"http://localhost:{_brokerPort}/api/leases/{Uri.EscapeDataString(_agentId)}",
-                content).ConfigureAwait(false);
+            using var response = await PostBrokerAsync(
+                $"/api/leases/{Uri.EscapeDataString(_agentId)}",
+                json).ConfigureAwait(false);
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
                 return null;
             var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
@@ -314,10 +318,9 @@ public class BrokerRegistration : IDisposable
         try
         {
             var json = JsonSerializer.Serialize(request, _leaseJsonOptions);
-            using var content = new StringContent(json, Encoding.UTF8, "application/json");
-            using var response = await _brokerHttp.PostAsync(
-                $"http://localhost:{_brokerPort}/api/recordings/{Uri.EscapeDataString(_agentId)}",
-                content).ConfigureAwait(false);
+            using var response = await PostBrokerAsync(
+                $"/api/recordings/{Uri.EscapeDataString(_agentId)}",
+                json).ConfigureAwait(false);
             var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
             if (string.IsNullOrWhiteSpace(body))
                 return null;
@@ -334,10 +337,47 @@ public class BrokerRegistration : IDisposable
         }
     }
 
+    private async Task<HttpResponseMessage> PostBrokerAsync(string path, string json)
+    {
+        for (var index = 0; index < _brokerHttpHosts.Length; index++)
+        {
+            var host = _brokerHttpHosts[index];
+            try
+            {
+                using var content = new StringContent(json, Encoding.UTF8, "application/json");
+                var response = await _brokerHttp.PostAsync(
+                    $"http://{host}:{_brokerPort}{path}",
+                    content).ConfigureAwait(false);
+                if (index == _brokerHttpHosts.Length - 1 ||
+                    !ShouldTryAlternateBrokerHost(response.StatusCode))
+                {
+                    return response;
+                }
+
+                (_logger ?? _staticLogger)?.LogDebug(
+                    "DevFlow broker rejected Host {Host} with status {StatusCode}; retrying alternate loopback host.",
+                    host,
+                    (int)response.StatusCode);
+                response.Dispose();
+            }
+            catch (HttpRequestException ex) when (index < _brokerHttpHosts.Length - 1)
+            {
+                (_logger ?? _staticLogger)?.LogDebug(
+                    "DevFlow broker request through Host {Host} failed; retrying alternate loopback host: {Message}",
+                    host,
+                    ex.Message);
+            }
+        }
+
+        throw new HttpRequestException("The DevFlow broker was unavailable on all loopback hosts.");
+    }
+
     private static async ValueTask<Stream> ConnectBrokerLoopbackAsync(
         SocketsHttpConnectionContext context,
         CancellationToken cancellationToken)
     {
+        // The callback always dials IPv4 loopback. PostBrokerAsync varies the HTTP Host header
+        // independently so it can match either literal-IP or localhost-only broker prefixes.
         var socket = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp)
         {
             NoDelay = true

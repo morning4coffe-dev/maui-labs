@@ -243,13 +243,23 @@ public class AlertManagerSubscription : DispatchProxy
             var response = alert.RunModal();
             completionScope.Complete(() => onResult(response), onUnhandledException);
         }
-        catch
+        catch (Exception ex)
         {
-            // Setup failed synchronously (before any sheet/modal was shown), so the exception
-            // below propagates to the synchronous caller as usual - it never crosses the
-            // native completion boundary. Still route through onUnhandledException so the
-            // MAUI result is set instead of leaving the caller's task uncompleted.
-            completionScope.Complete(() => { }, onUnhandledException);
+            // Setup failed synchronously, before any sheet/modal was shown, so this exception
+            // never crosses the native completion boundary - Fail's fallback runs directly on
+            // this call stack. Rethrowing afterward preserves the pre-existing synchronous
+            // failure behavior: Page.DisplayAlertAsync (and friends) call
+            // AlertManager.RequestAlert/RequestPrompt/RequestActionSheet - which is what
+            // eventually calls this method - synchronously and only return arguments.Result.Task
+            // to their own caller afterward, so a synchronous throw here means that Task was
+            // never handed to anyone who could await/observe it; the caller simply sees this
+            // exception thrown directly out of DisplayAlertAsync, as it always has. Calling
+            // Fail first, defensively, guarantees the dialog's MAUI task is still always
+            // completed and every registration is still always disposed exactly once, even if a
+            // future caller ends up holding a reference to that Task before this point is
+            // reached, or if this path is ever reached from a context where the exception
+            // doesn't propagate all the way back out.
+            completionScope.Fail(ex, onUnhandledException);
             throw;
         }
     }

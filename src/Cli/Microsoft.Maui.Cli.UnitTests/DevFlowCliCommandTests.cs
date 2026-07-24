@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.Maui.Cli.DevFlow;
 using Microsoft.Maui.Cli.UnitTests.Fixtures;
@@ -262,6 +263,28 @@ public class DevFlowCliCommandTests
     }
 
     [Fact]
+    public async Task UiProperty_Get_NativeElementRejection_SurfacesReasonAndFails()
+    {
+        // Reproduces the raw agent behavior: GET /properties/{name} on a native element
+        // returns HTTP 400 with {"success":false,"error":"...","reason":"native-property-not-supported"}.
+        // The CLI must surface that structured error instead of exiting 0 with a null value.
+        await using var server = new MockAgentServer(rejectNativeProperty: true);
+        await server.StartAsync();
+        var cli = new CliTestHarness(server.Port);
+
+        var result = await cli.InvokeAsync(
+            "devflow", "ui", "property", "native:registered:cb3c73a5cacf4474beabb80704798b43", "Opacity", "--json");
+
+        Assert.NotEqual(0, result.ExitCode);
+        using var document = JsonDocument.Parse(result.StdErr);
+        var error = document.RootElement.GetProperty("error").GetString();
+        Assert.Contains("native-property-not-supported", error);
+        Assert.Contains(
+            "Generic property reflection is not supported for native elements",
+            error);
+    }
+
+    [Fact]
     public async Task UiSetProperty_Put_HitsPropertyRoute()
     {
         var (server, cli) = await CreateFixturesAsync();
@@ -274,6 +297,86 @@ public class DevFlowCliCommandTests
         Assert.Equal("PUT", req.Method);
         Assert.Equal("/api/v1/ui/elements/el-1/properties/Text", req.Path);
         Assert.Contains("newvalue", req.Body);
+    }
+
+    [Fact]
+    public async Task UiSetProperty_Put_NativeElementRejection_SurfacesReasonAndFails()
+    {
+        // Reproduces the raw agent behavior: PUT /properties/{name} on a native element
+        // returns HTTP 400 with the detailed rejection, but the CLI previously collapsed
+        // it to a generic "Failed to set Opacity" message. It must now surface the
+        // server's error text and reason, and set a nonzero exit code.
+        await using var server = new MockAgentServer(rejectNativeProperty: true);
+        await server.StartAsync();
+        var cli = new CliTestHarness(server.Port);
+
+        var result = await cli.InvokeAsync(
+            "devflow", "ui", "set-property", "native:registered:cb3c73a5cacf4474beabb80704798b43", "Opacity", "0.5", "--json");
+
+        Assert.NotEqual(0, result.ExitCode);
+        using var document = JsonDocument.Parse(result.StdErr);
+        var error = document.RootElement.GetProperty("error").GetString();
+        Assert.Contains("native-property-not-supported", error);
+        Assert.Contains(
+            "Generic property mutation is not supported for native elements",
+            error);
+    }
+
+    [Fact]
+    public async Task UiHitTest_InvariantDecimalCoordinates_AreAccepted()
+    {
+        // Under locales where ',' is the decimal separator, "1240.5" must still parse
+        // as the invariant value 1240.5 rather than failing argument parsing or being
+        // misinterpreted (e.g. as 12405 with ',' removed/ignored).
+        var (server, cli) = await CreateFixturesAsync();
+        await using var _ = server;
+
+        var result = await cli.InvokeAsync("devflow", "ui", "hit-test", "1240.5", "26.0", "--json");
+
+        Assert.Equal(0, result.ExitCode);
+        var req = Assert.Single(server.RecordedRequests, r => r.Path == "/api/v1/ui/hit-test");
+        Assert.Contains("x=1240.5", req.QueryString);
+        Assert.Contains("y=26", req.QueryString);
+    }
+
+    [Fact]
+    public async Task UiHitTest_InvalidCoordinate_FailsWithNonzeroExit()
+    {
+        var (server, cli) = await CreateFixturesAsync();
+        await using var _ = server;
+
+        var result = await cli.InvokeAsync("devflow", "ui", "hit-test", "not-a-number", "26.0", "--json");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.DoesNotContain(server.RecordedRequests, r => r.Path == "/api/v1/ui/hit-test");
+    }
+
+    [Fact]
+    public async Task UiHitTest_UnderCommaDecimalCulture_SendsInvariantQueryString()
+    {
+        // Even when the host process' current culture uses ',' as the decimal separator,
+        // the outgoing request to the agent must still use invariant '.' formatting so the
+        // agent-side parser (which is not guaranteed to be culture-aware) receives a value
+        // it can parse, and so the round-trip of "1240.5" isn't corrupted into "1240,5".
+        var (server, cli) = await CreateFixturesAsync();
+        await using var _ = server;
+
+        var originalCulture = CultureInfo.CurrentCulture;
+        CultureInfo.CurrentCulture = CultureInfo.GetCultureInfo("de-DE");
+        try
+        {
+            var result = await cli.InvokeAsync("devflow", "ui", "hit-test", "1240.5", "26.0", "--json");
+
+            Assert.Equal(0, result.ExitCode);
+            var req = Assert.Single(server.RecordedRequests, r => r.Path == "/api/v1/ui/hit-test");
+            Assert.Contains("x=1240.5", req.QueryString);
+            Assert.Contains("y=26", req.QueryString);
+            Assert.DoesNotContain(",", req.QueryString);
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+        }
     }
 
     // ========== logs ==========

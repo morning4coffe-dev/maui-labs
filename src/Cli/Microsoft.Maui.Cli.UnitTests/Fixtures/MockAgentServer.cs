@@ -25,6 +25,7 @@ public sealed class MockAgentServer : IAsyncDisposable
     private readonly bool _staleFirstKey;
     private readonly bool _includeDetachedNativeRoot;
     private readonly bool _returnEmptyTree;
+    private readonly bool _rejectNativeProperty;
     private int _hitTestCount;
     private int _tapCount;
     private int _fillCount;
@@ -45,7 +46,8 @@ public sealed class MockAgentServer : IAsyncDisposable
         bool staleFirstElementTap = false,
         bool staleFirstKey = false,
         bool includeDetachedNativeRoot = false,
-        bool returnEmptyTree = false)
+        bool returnEmptyTree = false,
+        bool rejectNativeProperty = false)
     {
         _supportsCaptureEpoch = supportsCaptureEpoch;
         _failFirstHitTestCandidate = failFirstHitTestCandidate;
@@ -60,6 +62,7 @@ public sealed class MockAgentServer : IAsyncDisposable
         _staleFirstKey = staleFirstKey;
         _includeDetachedNativeRoot = includeDetachedNativeRoot;
         _returnEmptyTree = returnEmptyTree;
+        _rejectNativeProperty = rejectNativeProperty;
     }
 
     public int Port { get; private set; }
@@ -182,9 +185,37 @@ public sealed class MockAgentServer : IAsyncDisposable
         });
         app.MapGet("/api/v1/ui/elements/{id}", (string id) => Results.Content(MockAgentResponses.SingleElement(id), "application/json"));
         app.MapGet("/api/v1/ui/elements/{id}/properties/{name}", (string id, string name) =>
-            Results.Content($$"""{"id":"{{id}}","property":"{{name}}","value":"Hello, World!"}""", "application/json"));
+        {
+            if (_rejectNativeProperty)
+            {
+                return Results.Json(
+                    new
+                    {
+                        success = false,
+                        error = "Generic property reflection is not supported for native elements. Use the element metadata and advertised capabilities instead.",
+                        reason = "native-property-not-supported"
+                    },
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            return Results.Content($$"""{"id":"{{id}}","property":"{{name}}","value":"Hello, World!"}""", "application/json");
+        });
         app.MapPut("/api/v1/ui/elements/{id}/properties/{name}", () =>
-            Results.Content(MockAgentResponses.ActionSuccess, "application/json"));
+        {
+            if (_rejectNativeProperty)
+            {
+                return Results.Json(
+                    new
+                    {
+                        success = false,
+                        error = "Generic property mutation is not supported for native elements. Use a native action advertised by the element capabilities instead.",
+                        reason = "native-property-not-supported"
+                    },
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            return Results.Content(MockAgentResponses.ActionSuccess, "application/json");
+        });
         app.MapGet("/api/v1/ui/hit-test", () =>
         {
             var hitTestNumber = Interlocked.Increment(ref _hitTestCount);

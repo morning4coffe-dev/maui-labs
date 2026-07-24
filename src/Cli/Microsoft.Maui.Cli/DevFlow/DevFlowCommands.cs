@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.CommandLine.Parsing;
+using System.Globalization;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
@@ -403,7 +404,9 @@ public class DevFlowCommands
 
         // MAUI hittest
         var hitTestXArg = new Argument<double>("x") { Description = "X coordinate" };
+        hitTestXArg.CustomParser = result => ParseInvariantCoordinate(result, "x");
         var hitTestYArg = new Argument<double>("y") { Description = "Y coordinate" };
+        hitTestYArg.CustomParser = result => ParseInvariantCoordinate(result, "y");
         var mauiHitTestCmd = new Command("hit-test", "Find elements at a point") { hitTestXArg, hitTestYArg, windowOption };
         mauiHitTestCmd.Aliases.Add("hittest");
         mauiHitTestCmd.SetAction(async (ctx, ct) =>
@@ -3055,6 +3058,21 @@ public class DevFlowCommands
         }
     }
 
+    /// <summary>
+    /// Parses a hit-test coordinate using invariant culture so dot-decimal input (e.g. "1240.5")
+    /// is accepted regardless of the host's current culture (some locales use ',' as the
+    /// decimal separator, which would otherwise reject valid CLI input or misparse it).
+    /// </summary>
+    private static double ParseInvariantCoordinate(ArgumentResult result, string name)
+    {
+        var token = result.Tokens.Count > 0 ? result.Tokens[0].Value : null;
+        if (token != null && double.TryParse(token, NumberStyles.Float, CultureInfo.InvariantCulture, out var value))
+            return value;
+
+        result.AddError($"Invalid {name} coordinate '{token}'. Provide a number using '.' as the decimal separator (e.g. 1240.5).");
+        return default;
+    }
+
     private static async Task MauiHitTestAsync(string host, int port, bool json, double x, double y, int? window)
     {
         try
@@ -3358,17 +3376,29 @@ public class DevFlowCommands
         try
         {
             using var client = await CreateAgentClientAsync(host, port);
-            var success = await client.SetPropertyAsync(elementId, propertyName, value);
-            if (success)
+            var result = await client.SetPropertyResultAsync(
+                elementId,
+                propertyName,
+                value,
+                captureEpoch: null,
+                registryGeneration: null);
+            if (result.Success)
             {
                 Output.WriteActionResult(true, "SetProperty", elementId, json,
                     $"Set {propertyName} = {value}");
+                return;
             }
-            else
-            {
-                Output.WriteError($"Failed to set {propertyName}", json);
-                _errorOccurred = true;
-            }
+
+            var message = !string.IsNullOrWhiteSpace(result.Error)
+                ? result.Error!
+                : $"Failed to set {propertyName}";
+            if (!string.IsNullOrWhiteSpace(result.Reason))
+                message += $" (reason: {result.Reason})";
+            if (result.TransportFailure)
+                message += " The DevFlow agent could not be reached.";
+
+            Output.WriteError(message, json, retryable: result.Retryable);
+            _errorOccurred = true;
         }
         catch (Exception ex) { Output.WriteError(ex.Message, json); _errorOccurred = true; }
     }

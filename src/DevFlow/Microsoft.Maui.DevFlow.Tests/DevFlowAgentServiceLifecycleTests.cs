@@ -727,7 +727,10 @@ public class DevFlowAgentServiceLifecycleTests
         service.BindApp(app);
         Assert.NotNull(await WaitForStatusAsync(client));
 
-        Assert.Null(await client.GetPropertyAsync(elementId, nameof(NativePropertyTarget.IsEnabled)));
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.GetPropertyAsync(elementId, nameof(NativePropertyTarget.IsEnabled)));
+        Assert.Contains("native-property-not-supported", ex.Message);
+        Assert.Contains("Generic property reflection is not supported for native elements", ex.Message);
         Assert.False(await client.SetPropertyAsync(
             elementId,
             nameof(NativePropertyTarget.IsEnabled),

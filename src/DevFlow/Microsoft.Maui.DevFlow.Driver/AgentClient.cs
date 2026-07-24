@@ -1,5 +1,6 @@
 using System.Net;
 using System.Net.Sockets;
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -865,11 +866,43 @@ public class AgentClient : IDisposable
     /// <summary>
     /// Get a specific property value from an element.
     /// </summary>
+    /// <remarks>
+    /// Surfaces the server's structured rejection (e.g. <c>native-property-not-supported</c>
+    /// for native elements) as a thrown exception instead of silently returning <c>null</c>,
+    /// so callers can distinguish an explicit read rejection from a plain "property not found".
+    /// Transport failures and unparsable responses are also surfaced rather than collapsed
+    /// to a success-shaped <c>null</c>.
+    /// </remarks>
     public async Task<string?> GetPropertyAsync(string elementId, string propertyName)
     {
         var result = await GetJsonAsync($"{UiApi}/elements/{elementId}/properties/{propertyName}");
-        if (result.ValueKind == JsonValueKind.Object && result.TryGetProperty("value", out var val))
-            return val.GetString();
+
+        if (result.ValueKind == JsonValueKind.Undefined)
+        {
+            throw new InvalidOperationException(
+                $"Failed to get property '{propertyName}' on element '{elementId}': the DevFlow agent could not be reached or returned an unreadable response.");
+        }
+
+        if (result.ValueKind == JsonValueKind.Object)
+        {
+            if (result.TryGetProperty("success", out var successProperty)
+                && successProperty.ValueKind == JsonValueKind.False
+                && result.TryGetProperty("reason", out var reasonProperty)
+                && reasonProperty.ValueKind == JsonValueKind.String)
+            {
+                var error = result.TryGetProperty("error", out var errorProperty)
+                    && errorProperty.ValueKind == JsonValueKind.String
+                        ? errorProperty.GetString()
+                        : $"Failed to get property '{propertyName}' on element '{elementId}'.";
+                var reason = reasonProperty.GetString();
+
+                throw new InvalidOperationException($"{error} (reason: {reason})");
+            }
+
+            if (result.TryGetProperty("value", out var val))
+                return val.GetString();
+        }
+
         return null;
     }
 
@@ -1093,7 +1126,9 @@ public class AgentClient : IDisposable
         double y,
         int? window = null)
     {
-        var path = $"{UiApi}/hit-test?x={x}&y={y}";
+        // Format with invariant culture so the outgoing request always uses '.' as the
+        // decimal separator, regardless of the CLI/driver process's current culture.
+        var path = $"{UiApi}/hit-test?x={x.ToString(CultureInfo.InvariantCulture)}&y={y.ToString(CultureInfo.InvariantCulture)}";
         if (window.HasValue)
             path += $"&window={window.Value}";
 
@@ -1312,6 +1347,7 @@ public class AgentClient : IDisposable
             });
             var responseBody = await response.Content.ReadAsStringAsync();
             string? reason = null;
+            string? error = null;
             var actionSucceeded = response.IsSuccessStatusCode;
             var explicitlyRetryable = false;
             try
@@ -1326,6 +1362,11 @@ public class AgentClient : IDisposable
                     }
                     if (result.TryGetProperty("reason", out var reasonProperty))
                         reason = reasonProperty.GetString();
+                    if (result.TryGetProperty("error", out var errorProperty)
+                        && errorProperty.ValueKind == JsonValueKind.String)
+                    {
+                        error = errorProperty.GetString();
+                    }
                     if (result.TryGetProperty("details", out var details)
                         && details.ValueKind == JsonValueKind.Object
                         && details.TryGetProperty("retryable", out var retryableProperty)
@@ -1346,7 +1387,10 @@ public class AgentClient : IDisposable
                 reason,
                 Retryable: explicitlyRetryable
                     || reason is "stale-capture-epoch" or "ui-mutation-busy",
-                TransportFailure: false);
+                TransportFailure: false)
+            {
+                Error = error
+            };
         }
         catch (Exception ex) when (IsExpectedClientException(ex))
         {
@@ -1849,7 +1893,11 @@ public readonly record struct ActionResult(
     int? StatusCode,
     string? Reason,
     bool Retryable,
-    bool TransportFailure);
+    bool TransportFailure)
+{
+    /// <summary>Human-readable server error message (e.g. from the response's "error" field), when available.</summary>
+    public string? Error { get; init; }
+}
 
 public readonly record struct UiReadResult(
     bool Success,

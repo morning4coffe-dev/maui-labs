@@ -67,11 +67,13 @@ public class AlertManagerSubscription : DispatchProxy
         if (arguments.Cancel != null)
             alert.AddButton(arguments.Cancel);
 
-        var response = PresentDialog(sender, alert, input: null);
-        // First button added (Accept) = NSAlertFirstButtonReturn (1000)
-        // Second button (Cancel) = NSAlertSecondButtonReturn (1001)
-        var accepted = arguments.Accept != null && response == (nint)1000;
-        arguments.SetResult(accepted);
+        PresentDialog(sender, alert, input: null, response =>
+        {
+            // First button added (Accept) = NSAlertFirstButtonReturn (1000)
+            // Second button (Cancel) = NSAlertSecondButtonReturn (1001)
+            var accepted = arguments.Accept != null && response == (nint)1000;
+            arguments.SetResult(accepted);
+        });
     }
 
     static void OnPromptRequested(Page? sender, PromptArguments? arguments)
@@ -91,11 +93,13 @@ public class AlertManagerSubscription : DispatchProxy
         alert.AccessoryView = input;
         alert.Window.InitialFirstResponder = input;
 
-        var response = PresentDialog(sender, alert, input);
-        if (response == (nint)1000) // Accept
-            arguments.SetResult(input.StringValue);
-        else
-            arguments.SetResult(null);
+        PresentDialog(sender, alert, input, response =>
+        {
+            if (response == (nint)1000) // Accept
+                arguments.SetResult(input.StringValue);
+            else
+                arguments.SetResult(null);
+        });
     }
 
     static void OnActionSheetRequested(Page? sender, ActionSheetArguments? arguments)
@@ -121,33 +125,42 @@ public class AlertManagerSubscription : DispatchProxy
         if (arguments.Cancel != null)
             alert.AddButton(arguments.Cancel);
 
-        var response = PresentDialog(sender, alert, input: null);
-        var buttonIndex = (int)(response - 1000);
+        PresentDialog(sender, alert, input: null, response =>
+        {
+            var buttonIndex = (int)(response - 1000);
 
-        var allButtons = arguments.Buttons.Where(b => b != null).ToList();
-        if (arguments.Destruction != null) allButtons.Add(arguments.Destruction);
-        if (arguments.Cancel != null) allButtons.Add(arguments.Cancel);
+            var allButtons = arguments.Buttons.Where(b => b != null).ToList();
+            if (arguments.Destruction != null) allButtons.Add(arguments.Destruction);
+            if (arguments.Cancel != null) allButtons.Add(arguments.Cancel);
 
-        if (buttonIndex >= 0 && buttonIndex < allButtons.Count)
-            arguments.SetResult(allButtons[buttonIndex]);
-        else
-            arguments.SetResult(arguments.Cancel);
+            if (buttonIndex >= 0 && buttonIndex < allButtons.Count)
+                arguments.SetResult(allButtons[buttonIndex]);
+            else
+                arguments.SetResult(arguments.Cancel);
+        });
     }
 
     /// <summary>
     /// Registers the dialog surface, its buttons, and (for prompts) its input field as
-    /// DevFlow-inspectable native elements for the lifetime of the modal session, runs the
-    /// alert, and unregisters everything before returning - whether the alert is dismissed by
-    /// a native action, a programmatic close, or an exception while presenting it.
+    /// DevFlow-inspectable native elements, then presents the alert as a nonblocking sheet on
+    /// the initiating window so this call returns immediately - unlike <c>NSAlert.RunModal()</c>,
+    /// which spins a nested run loop that starves the DevFlow agent's HTTP dispatcher for as
+    /// long as the alert is on screen, making every registration made above unreachable until
+    /// the alert is dismissed. <paramref name="onResult"/> runs once the sheet is dismissed
+    /// (by a native action or a programmatic close), and every registration is unregistered
+    /// immediately afterward - or immediately if presentation itself throws before the sheet
+    /// is shown - via <see cref="DialogCompletionScope"/>, so nothing is retained past
+    /// dismissal on any path.
     /// </summary>
-    static nint PresentDialog(Page? sender, NSAlert alert, NSTextField? input)
+    static void PresentDialog(Page? sender, NSAlert alert, NSTextField? input, Action<nint> onResult)
     {
         // Prefer the initiating page as the owner so registrations follow the same
         // ownership convention as other Dialog/DialogAction registrations; fall back to the
         // alert itself when no page is available (e.g. the alert wasn't page-initiated).
         object owner = (object?)sender ?? alert;
 
-        var scope = new DialogNativeRegistrationScope(NativeElementDiagnosticsBridge.Unregister);
+        var registrationScope = new DialogNativeRegistrationScope(NativeElementDiagnosticsBridge.Unregister);
+        var completionScope = new DialogCompletionScope(registrationScope);
         try
         {
             // Accessing the window forces AppKit to finalize its (possibly implicit) button
@@ -159,7 +172,7 @@ public class AlertManagerSubscription : DispatchProxy
                     dialogSurface,
                     DialogNativeElementContract.DialogRole,
                     DialogNativeElementContract.RealizedViewDiscriminator);
-                scope.Track(dialogSurface);
+                registrationScope.Track(dialogSurface);
             }
 
             foreach (var button in alert.Buttons)
@@ -169,7 +182,7 @@ public class AlertManagerSubscription : DispatchProxy
                     button,
                     DialogNativeElementContract.DialogActionRole,
                     DialogNativeElementContract.RealizedViewDiscriminator);
-                scope.Track(button);
+                registrationScope.Track(button);
             }
 
             if (input is not null)
@@ -179,15 +192,45 @@ public class AlertManagerSubscription : DispatchProxy
                     input,
                     DialogNativeElementContract.DialogRole,
                     DialogNativeElementContract.RealizedViewDiscriminator);
-                scope.Track(input);
+                registrationScope.Track(input);
             }
 
-            return alert.RunModal();
+            var window = ResolveWindow(sender);
+            if (window is not null)
+            {
+                alert.BeginSheetForResponse(window, response => completionScope.Complete(() => onResult(response)));
+                return;
+            }
+
+            // No live window was found (e.g. no window has been created yet). This is not
+            // expected during normal operation - a Page-initiated alert implies a visible
+            // window - and there is no nonblocking API for a windowless alert, so fall back to
+            // the blocking presentation rather than silently dropping the alert. Inspection
+            // isn't defeated by this path in practice: with no window at all, there is nothing
+            // else for DevFlow to inspect while it is blocked.
+            var response = alert.RunModal();
+            completionScope.Complete(() => onResult(response));
         }
-        finally
+        catch
         {
-            scope.Dispose();
+            completionScope.Complete(() => { });
+            throw;
         }
+    }
+
+    /// <summary>
+    /// Resolves the NSWindow that should host the alert sheet: the initiating page's own
+    /// window (matching the Page-to-PlatformView resolution convention used elsewhere in this
+    /// backend, e.g. <c>ApplicationHandler.MapCloseWindow</c>), falling back to the app's key
+    /// window or main window when the page has none.
+    /// </summary>
+    static NSWindow? ResolveWindow(Page? sender)
+    {
+        if (sender?.Window?.Handler?.PlatformView is NSWindow pageWindow)
+            return pageWindow;
+
+        var app = NSApplication.SharedApplication;
+        return app.KeyWindow ?? app.MainWindow;
     }
 
     protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) => null;

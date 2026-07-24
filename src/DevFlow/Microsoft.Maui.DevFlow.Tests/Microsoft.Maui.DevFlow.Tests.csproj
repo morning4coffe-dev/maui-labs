@@ -30,6 +30,10 @@
               Link="DialogNativeRegistrationScope.cs" />
     <Compile Include="..\..\..\platforms\MacOS\src\MacOS\Platform\DialogNativeElementContract.cs"
               Link="DialogNativeElementContract.cs" />
+    <Compile Include="..\..\..\platforms\MacOS\src\MacOS\Platform\DialogCompletionScope.cs"
+              Link="DialogCompletionScope.cs" />
+    <Compile Include="..\..\..\platforms\MacOS\src\MacOS\Platform\ToolbarItemInvocationOutcome.cs"
+              Link="ToolbarItemInvocationOutcome.cs" />
   </ItemGroup>
 
   <ItemGroup>

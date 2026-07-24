@@ -757,10 +757,15 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
             if (nativeElement is AppKit.NSToolbarItem toolbarItem
                 && toolbarItem.Action is not null)
             {
-                return AppKit.NSApplication.SharedApplication.SendAction(
+                var dispatched = AppKit.NSApplication.SharedApplication.SendAction(
                     toolbarItem.Action,
                     toolbarItem.Target,
-                    toolbarItem)
+                    toolbarItem);
+
+                return ToolbarItemInvocationOutcome.IsSuccessful(
+                    toolbarItem.Enabled,
+                    toolbarItem.Target is not null,
+                    dispatched)
                         ? "ok"
                         : $"Native element '{elementId}' action was not handled";
             }

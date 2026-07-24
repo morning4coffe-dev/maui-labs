@@ -277,7 +277,25 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                 info.IsEnabled = nsView is not AppKit.NSControl control || control.Enabled;
                 info.IsFocused = nsView.Window?.FirstResponder == nsView;
                 info.AutomationId = nsView.AccessibilityIdentifier;
-                info.Text = nsView.AccessibilityLabel;
+                if (nsView is AppKit.NSButton nsButton)
+                {
+                    info.Text = string.IsNullOrEmpty(nsButton.Title)
+                        ? nsButton.AccessibilityLabel
+                        : nsButton.Title;
+                }
+                else if (nsView is AppKit.NSTextField nsTextField)
+                {
+                    var isPassword = nsTextField is AppKit.NSSecureTextField;
+                    info.Text = SensitiveValueRedactor.Redact(nsTextField.StringValue, isPassword);
+                    info.NativeProperties ??= new Dictionary<string, string?>();
+                    info.NativeProperties["isPassword"] = isPassword.ToString();
+                    if (!string.IsNullOrEmpty(nsTextField.PlaceholderString))
+                        info.NativeProperties["placeholder"] = nsTextField.PlaceholderString;
+                }
+                else
+                {
+                    info.Text = nsView.AccessibilityLabel;
+                }
             }
             else if (registration.NativeElement is AppKit.NSToolbarItem toolbarItem)
             {

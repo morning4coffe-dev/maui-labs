@@ -1,4 +1,3 @@
-using System.Globalization;
 using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.Controls;
@@ -155,22 +154,31 @@ public class AlertManagerSubscription : DispatchProxy
             // list before we enumerate alert.Buttons below.
             if (alert.Window.ContentView is NSView dialogSurface)
             {
-                NativeElementDiagnosticsBridge.Register(owner, dialogSurface, "Dialog");
+                NativeElementDiagnosticsBridge.Register(
+                    owner,
+                    dialogSurface,
+                    DialogNativeElementContract.DialogRole,
+                    DialogNativeElementContract.RealizedViewDiscriminator);
                 scope.Track(dialogSurface);
             }
 
-            var buttons = alert.Buttons;
-            for (var index = 0; index < buttons.Length; index++)
+            foreach (var button in alert.Buttons)
             {
-                var button = buttons[index];
                 NativeElementDiagnosticsBridge.Register(
-                    owner, button, "DialogAction", index.ToString(CultureInfo.InvariantCulture));
+                    owner,
+                    button,
+                    DialogNativeElementContract.DialogActionRole,
+                    DialogNativeElementContract.RealizedViewDiscriminator);
                 scope.Track(button);
             }
 
             if (input is not null)
             {
-                NativeElementDiagnosticsBridge.Register(owner, input, "DialogInput");
+                NativeElementDiagnosticsBridge.Register(
+                    owner,
+                    input,
+                    DialogNativeElementContract.DialogRole,
+                    DialogNativeElementContract.RealizedViewDiscriminator);
                 scope.Track(input);
             }
 

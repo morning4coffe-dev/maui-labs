@@ -23,11 +23,13 @@
 
   <!-- Compiled by reference (not a project reference) because the source lives in the
        macOS-only (net10.0-macos) MacOS platform project, which this net10.0 test project
-       cannot reference. The helper itself has no AppKit/MAUI dependency, so it can be
-       compiled and unit tested here directly. -->
+       cannot reference. Both files have no AppKit/MAUI dependency, so they can be compiled
+       and unit tested here directly. -->
   <ItemGroup>
     <Compile Include="..\..\..\platforms\MacOS\src\MacOS\Platform\DialogNativeRegistrationScope.cs"
               Link="DialogNativeRegistrationScope.cs" />
+    <Compile Include="..\..\..\platforms\MacOS\src\MacOS\Platform\DialogNativeElementContract.cs"
+              Link="DialogNativeElementContract.cs" />
   </ItemGroup>
 
   <ItemGroup>

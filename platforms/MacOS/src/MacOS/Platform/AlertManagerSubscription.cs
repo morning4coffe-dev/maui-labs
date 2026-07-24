@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Reflection;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.Controls;
@@ -67,7 +68,7 @@ public class AlertManagerSubscription : DispatchProxy
         if (arguments.Cancel != null)
             alert.AddButton(arguments.Cancel);
 
-        var response = alert.RunModal();
+        var response = PresentDialog(sender, alert, input: null);
         // First button added (Accept) = NSAlertFirstButtonReturn (1000)
         // Second button (Cancel) = NSAlertSecondButtonReturn (1001)
         var accepted = arguments.Accept != null && response == (nint)1000;
@@ -91,7 +92,7 @@ public class AlertManagerSubscription : DispatchProxy
         alert.AccessoryView = input;
         alert.Window.InitialFirstResponder = input;
 
-        var response = alert.RunModal();
+        var response = PresentDialog(sender, alert, input);
         if (response == (nint)1000) // Accept
             arguments.SetResult(input.StringValue);
         else
@@ -121,7 +122,7 @@ public class AlertManagerSubscription : DispatchProxy
         if (arguments.Cancel != null)
             alert.AddButton(arguments.Cancel);
 
-        var response = alert.RunModal();
+        var response = PresentDialog(sender, alert, input: null);
         var buttonIndex = (int)(response - 1000);
 
         var allButtons = arguments.Buttons.Where(b => b != null).ToList();
@@ -132,6 +133,53 @@ public class AlertManagerSubscription : DispatchProxy
             arguments.SetResult(allButtons[buttonIndex]);
         else
             arguments.SetResult(arguments.Cancel);
+    }
+
+    /// <summary>
+    /// Registers the dialog surface, its buttons, and (for prompts) its input field as
+    /// DevFlow-inspectable native elements for the lifetime of the modal session, runs the
+    /// alert, and unregisters everything before returning - whether the alert is dismissed by
+    /// a native action, a programmatic close, or an exception while presenting it.
+    /// </summary>
+    static nint PresentDialog(Page? sender, NSAlert alert, NSTextField? input)
+    {
+        // Prefer the initiating page as the owner so registrations follow the same
+        // ownership convention as other Dialog/DialogAction registrations; fall back to the
+        // alert itself when no page is available (e.g. the alert wasn't page-initiated).
+        object owner = (object?)sender ?? alert;
+
+        var scope = new DialogNativeRegistrationScope(NativeElementDiagnosticsBridge.Unregister);
+        try
+        {
+            // Accessing the window forces AppKit to finalize its (possibly implicit) button
+            // list before we enumerate alert.Buttons below.
+            if (alert.Window.ContentView is NSView dialogSurface)
+            {
+                NativeElementDiagnosticsBridge.Register(owner, dialogSurface, "Dialog");
+                scope.Track(dialogSurface);
+            }
+
+            var buttons = alert.Buttons;
+            for (var index = 0; index < buttons.Length; index++)
+            {
+                var button = buttons[index];
+                NativeElementDiagnosticsBridge.Register(
+                    owner, button, "DialogAction", index.ToString(CultureInfo.InvariantCulture));
+                scope.Track(button);
+            }
+
+            if (input is not null)
+            {
+                NativeElementDiagnosticsBridge.Register(owner, input, "DialogInput");
+                scope.Track(input);
+            }
+
+            return alert.RunModal();
+        }
+        finally
+        {
+            scope.Dispose();
+        }
     }
 
     protected override object? Invoke(MethodInfo? targetMethod, object?[]? args) => null;

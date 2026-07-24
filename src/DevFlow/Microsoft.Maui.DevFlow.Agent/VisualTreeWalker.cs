@@ -474,7 +474,7 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
     }
 #endif
 
-#if ANDROID || IOS || MACCATALYST
+#if ANDROID || IOS || MACCATALYST || MACOS
     protected override bool CanInvokeRegisteredNativeElement(object nativeElement)
     {
 #if ANDROID
@@ -511,6 +511,9 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
             Enabled: true,
             Action: not null
         };
+#elif MACOS
+        return nativeElement is AppKit.NSButton { Enabled: true } button
+            && IsAppKitViewVisible(button);
 #endif
     }
 
@@ -528,6 +531,11 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
         return nativeElement is UIKit.UIView view
             && IsAppleViewVisible(view)
             && view.CanBecomeFirstResponder;
+#elif MACOS
+        return nativeElement is AppKit.NSView view
+            && (view is not AppKit.NSControl control || control.Enabled)
+            && IsAppKitViewVisible(view)
+            && view.AcceptsFirstResponder();
 #endif
     }
 
@@ -542,6 +550,9 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
 #elif IOS || MACCATALYST
         return nativeElement is UIKit.UITextField { Enabled: true }
             or UIKit.UISearchBar { UserInteractionEnabled: true };
+#elif MACOS
+        return nativeElement is AppKit.NSTextField { Enabled: true, Editable: true } textField
+            && IsAppKitViewVisible(textField);
 #endif
     }
 
@@ -577,6 +588,15 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                 return $"Native element '{elementId}' is not enabled";
 
             searchBar.Text = value;
+            return "ok";
+        }
+#elif MACOS
+        if (nativeElement is AppKit.NSTextField textField)
+        {
+            if (!CanSetValueRegisteredNativeElement(textField))
+                return $"Native element '{elementId}' is not editable and enabled";
+
+            textField.StringValue = value;
             return "ok";
         }
 #endif
@@ -652,6 +672,17 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                 null)
                     ? "ok"
                     : $"Native element '{elementId}' action was not handled";
+        }
+#elif MACOS
+        if (nativeElement is AppKit.NSButton button)
+        {
+            if (!CanInvokeRegisteredNativeElement(button))
+                return $"Native element '{elementId}' is not visible and enabled";
+
+            // PerformClick drives the same target/action machinery AppKit wires up for a
+            // physical click, including closing a modal NSAlert with the button's response.
+            button.PerformClick(button);
+            return "ok";
         }
 #endif
 

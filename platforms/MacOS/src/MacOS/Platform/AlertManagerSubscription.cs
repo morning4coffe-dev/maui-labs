@@ -67,13 +67,22 @@ public class AlertManagerSubscription : DispatchProxy
         if (arguments.Cancel != null)
             alert.AddButton(arguments.Cancel);
 
-        PresentDialog(sender, alert, input: null, response =>
-        {
-            // First button added (Accept) = NSAlertFirstButtonReturn (1000)
-            // Second button (Cancel) = NSAlertSecondButtonReturn (1001)
-            var accepted = arguments.Accept != null && response == (nint)1000;
-            arguments.SetResult(accepted);
-        });
+        PresentDialog(
+            sender,
+            alert,
+            input: null,
+            onResult: response =>
+            {
+                // First button added (Accept) = NSAlertFirstButtonReturn (1000)
+                // Second button (Cancel) = NSAlertSecondButtonReturn (1001)
+                var accepted = arguments.Accept != null && response == (nint)1000;
+                arguments.SetResult(accepted);
+            },
+            onUnhandledException: ex =>
+            {
+                LogDialogCompletionFailure(nameof(OnAlertRequested), ex);
+                arguments.SetResult(false);
+            });
     }
 
     static void OnPromptRequested(Page? sender, PromptArguments? arguments)
@@ -93,13 +102,22 @@ public class AlertManagerSubscription : DispatchProxy
         alert.AccessoryView = input;
         alert.Window.InitialFirstResponder = input;
 
-        PresentDialog(sender, alert, input, response =>
-        {
-            if (response == (nint)1000) // Accept
-                arguments.SetResult(input.StringValue);
-            else
+        PresentDialog(
+            sender,
+            alert,
+            input,
+            onResult: response =>
+            {
+                if (response == (nint)1000) // Accept
+                    arguments.SetResult(input.StringValue);
+                else
+                    arguments.SetResult(null);
+            },
+            onUnhandledException: ex =>
+            {
+                LogDialogCompletionFailure(nameof(OnPromptRequested), ex);
                 arguments.SetResult(null);
-        });
+            });
     }
 
     static void OnActionSheetRequested(Page? sender, ActionSheetArguments? arguments)
@@ -110,7 +128,9 @@ public class AlertManagerSubscription : DispatchProxy
         var alert = new NSAlert();
         alert.MessageText = arguments.Title ?? string.Empty;
 
-        foreach (var button in arguments.Buttons)
+        // Buttons is documented as nullable (a null params array from the caller flows
+        // straight through), so it must be treated as optional here and below.
+        foreach (var button in arguments.Buttons ?? Enumerable.Empty<string>())
         {
             if (button != null)
                 alert.AddButton(button);
@@ -125,19 +145,22 @@ public class AlertManagerSubscription : DispatchProxy
         if (arguments.Cancel != null)
             alert.AddButton(arguments.Cancel);
 
-        PresentDialog(sender, alert, input: null, response =>
-        {
-            var buttonIndex = (int)(response - 1000);
-
-            var allButtons = arguments.Buttons.Where(b => b != null).ToList();
-            if (arguments.Destruction != null) allButtons.Add(arguments.Destruction);
-            if (arguments.Cancel != null) allButtons.Add(arguments.Cancel);
-
-            if (buttonIndex >= 0 && buttonIndex < allButtons.Count)
-                arguments.SetResult(allButtons[buttonIndex]);
-            else
+        PresentDialog(
+            sender,
+            alert,
+            input: null,
+            onResult: response =>
+            {
+                var buttonIndex = (int)(response - 1000);
+                var result = ActionSheetResultResolver.Resolve(
+                    arguments.Buttons, arguments.Destruction, arguments.Cancel, buttonIndex);
+                arguments.SetResult(result);
+            },
+            onUnhandledException: ex =>
+            {
+                LogDialogCompletionFailure(nameof(OnActionSheetRequested), ex);
                 arguments.SetResult(arguments.Cancel);
-        });
+            });
     }
 
     /// <summary>
@@ -147,12 +170,19 @@ public class AlertManagerSubscription : DispatchProxy
     /// which spins a nested run loop that starves the DevFlow agent's HTTP dispatcher for as
     /// long as the alert is on screen, making every registration made above unreachable until
     /// the alert is dismissed. <paramref name="onResult"/> runs once the sheet is dismissed
-    /// (by a native action or a programmatic close), and every registration is unregistered
-    /// immediately afterward - or immediately if presentation itself throws before the sheet
-    /// is shown - via <see cref="DialogCompletionScope"/>, so nothing is retained past
-    /// dismissal on any path.
+    /// (by a native action or a programmatic close); if it throws (or presentation itself
+    /// fails before the sheet is shown), <paramref name="onUnhandledException"/> runs instead
+    /// so the corresponding MAUI result is still always set exactly once and no exception
+    /// escapes into the native completion callback. Every registration is unregistered
+    /// immediately after completion (success or fallback) via
+    /// <see cref="DialogCompletionScope"/>, so nothing is retained past dismissal on any path.
     /// </summary>
-    static void PresentDialog(Page? sender, NSAlert alert, NSTextField? input, Action<nint> onResult)
+    static void PresentDialog(
+        Page? sender,
+        NSAlert alert,
+        NSTextField? input,
+        Action<nint> onResult,
+        Action<Exception> onUnhandledException)
     {
         // Prefer the initiating page as the owner so registrations follow the same
         // ownership convention as other Dialog/DialogAction registrations; fall back to the
@@ -198,7 +228,9 @@ public class AlertManagerSubscription : DispatchProxy
             var window = ResolveWindow(sender);
             if (window is not null)
             {
-                alert.BeginSheetForResponse(window, response => completionScope.Complete(() => onResult(response)));
+                alert.BeginSheetForResponse(
+                    window,
+                    response => completionScope.Complete(() => onResult(response), onUnhandledException));
                 return;
             }
 
@@ -209,14 +241,26 @@ public class AlertManagerSubscription : DispatchProxy
             // isn't defeated by this path in practice: with no window at all, there is nothing
             // else for DevFlow to inspect while it is blocked.
             var response = alert.RunModal();
-            completionScope.Complete(() => onResult(response));
+            completionScope.Complete(() => onResult(response), onUnhandledException);
         }
         catch
         {
-            completionScope.Complete(() => { });
+            // Setup failed synchronously (before any sheet/modal was shown), so the exception
+            // below propagates to the synchronous caller as usual - it never crosses the
+            // native completion boundary. Still route through onUnhandledException so the
+            // MAUI result is set instead of leaving the caller's task uncompleted.
+            completionScope.Complete(() => { }, onUnhandledException);
             throw;
         }
     }
+
+    /// <summary>
+    /// Logs an unexpected failure while computing or applying a dialog's result, matching this
+    /// backend's existing "[Type.Method] {exception}" error logging convention (see e.g.
+    /// <c>ShellHandler.ShowCurrentPage</c>, <c>ImageHandler</c>).
+    /// </summary>
+    static void LogDialogCompletionFailure(string dialogMethod, Exception ex)
+        => Console.Error.WriteLine($"[AlertManagerSubscription.{dialogMethod}] Dialog result completion failed: {ex}");
 
     /// <summary>
     /// Resolves the NSWindow that should host the alert sheet: the initiating page's own

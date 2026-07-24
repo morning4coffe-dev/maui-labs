@@ -34,6 +34,8 @@
               Link="DialogCompletionScope.cs" />
     <Compile Include="..\..\..\platforms\MacOS\src\MacOS\Platform\ToolbarItemInvocationOutcome.cs"
               Link="ToolbarItemInvocationOutcome.cs" />
+    <Compile Include="..\..\..\platforms\MacOS\src\MacOS\Platform\ActionSheetResultResolver.cs"
+              Link="ActionSheetResultResolver.cs" />
   </ItemGroup>
 
   <ItemGroup>

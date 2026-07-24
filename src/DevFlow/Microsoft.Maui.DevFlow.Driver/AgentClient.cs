@@ -867,11 +867,14 @@ public class AgentClient : IDisposable
     /// Get a specific property value from an element.
     /// </summary>
     /// <remarks>
-    /// Surfaces the server's structured rejection (e.g. <c>native-property-not-supported</c>
-    /// for native elements) as a thrown exception instead of silently returning <c>null</c>,
-    /// so callers can distinguish an explicit read rejection from a plain "property not found".
-    /// Transport failures and unparsable responses are also surfaced rather than collapsed
-    /// to a success-shaped <c>null</c>.
+    /// Surfaces any explicit server rejection (any response body with <c>"success": false</c>,
+    /// such as <c>native-property-not-supported</c> for native elements, "Agent not bound to
+    /// app", or a plain "property not found") as a thrown exception instead of silently
+    /// returning <c>null</c>, so callers always see the server's real error/reason rather than
+    /// a success-shaped null. Transport failures and unparsable responses are also surfaced
+    /// rather than collapsed to a success-shaped <c>null</c>. Only a response that does not
+    /// explicitly report <c>"success": false</c> and lacks a <c>"value"</c> field falls back
+    /// to returning <c>null</c>.
     /// </remarks>
     public async Task<string?> GetPropertyAsync(string elementId, string propertyName)
     {
@@ -886,17 +889,20 @@ public class AgentClient : IDisposable
         if (result.ValueKind == JsonValueKind.Object)
         {
             if (result.TryGetProperty("success", out var successProperty)
-                && successProperty.ValueKind == JsonValueKind.False
-                && result.TryGetProperty("reason", out var reasonProperty)
-                && reasonProperty.ValueKind == JsonValueKind.String)
+                && successProperty.ValueKind == JsonValueKind.False)
             {
                 var error = result.TryGetProperty("error", out var errorProperty)
                     && errorProperty.ValueKind == JsonValueKind.String
                         ? errorProperty.GetString()
                         : $"Failed to get property '{propertyName}' on element '{elementId}'.";
-                var reason = reasonProperty.GetString();
 
-                throw new InvalidOperationException($"{error} (reason: {reason})");
+                if (result.TryGetProperty("reason", out var reasonProperty)
+                    && reasonProperty.ValueKind == JsonValueKind.String)
+                {
+                    error = $"{error} (reason: {reasonProperty.GetString()})";
+                }
+
+                throw new InvalidOperationException(error);
             }
 
             if (result.TryGetProperty("value", out var val))

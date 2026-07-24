@@ -58,19 +58,26 @@ public class UiPropertyTests : IntegrationTestBase
         await NavigateToMainPageAsync();
         var addButton = await FindElementAsync("AddButton");
 
-        var value = await Client.GetPropertyAsync(addButton.Id, "Opacity");
-
-        if (value == null)
+        // GetPropertyAsync now throws (rather than returning null) when the agent responds
+        // with an explicit "success": false rejection, so the graceful fallback below is
+        // expressed as a try/catch instead of a null check.
+        string? value;
+        try
         {
-            Output.WriteLine("Opacity property returned null — trying IsVisible instead.");
-            var isVisible = await Client.GetPropertyAsync(addButton.Id, "IsVisible");
-            if (isVisible == null)
+            value = await Client.GetPropertyAsync(addButton.Id, "Opacity");
+        }
+        catch (InvalidOperationException ex)
+        {
+            Output.WriteLine($"Opacity property was rejected ('{ex.Message}') — trying IsVisible instead.");
+            try
             {
-                Output.WriteLine("IsVisible also returned null — property access may not be supported for this element type.");
-                return;
+                var isVisible = await Client.GetPropertyAsync(addButton.Id, "IsVisible");
+                Assert.NotNull(isVisible);
             }
-
-            Assert.NotNull(isVisible);
+            catch (InvalidOperationException ex2)
+            {
+                Output.WriteLine($"IsVisible was also rejected ('{ex2.Message}') — property access may not be supported for this element type.");
+            }
             return;
         }
 
@@ -84,7 +91,10 @@ public class UiPropertyTests : IntegrationTestBase
         await NavigateToMainPageAsync();
         var addButton = await FindElementAsync("AddButton");
 
-        var value = await Client.GetPropertyAsync(addButton.Id, "NonExistentProperty12345");
-        Output.WriteLine($"Non-existent property returned: '{value ?? "(null)"}'");
+        // The agent responds with an explicit "success": false rejection for an unknown
+        // property, which GetPropertyAsync now surfaces as an exception rather than null.
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => Client.GetPropertyAsync(addButton.Id, "NonExistentProperty12345"));
+        Output.WriteLine($"Non-existent property surfaced: '{ex.Message}'");
     }
 }

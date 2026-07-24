@@ -26,6 +26,8 @@ public sealed class MockAgentServer : IAsyncDisposable
     private readonly bool _includeDetachedNativeRoot;
     private readonly bool _returnEmptyTree;
     private readonly bool _rejectNativeProperty;
+    private readonly bool _malformedPropertyResponse;
+    private readonly bool _propertyFailureWithoutReason;
     private int _hitTestCount;
     private int _tapCount;
     private int _fillCount;
@@ -47,7 +49,9 @@ public sealed class MockAgentServer : IAsyncDisposable
         bool staleFirstKey = false,
         bool includeDetachedNativeRoot = false,
         bool returnEmptyTree = false,
-        bool rejectNativeProperty = false)
+        bool rejectNativeProperty = false,
+        bool malformedPropertyResponse = false,
+        bool propertyFailureWithoutReason = false)
     {
         _supportsCaptureEpoch = supportsCaptureEpoch;
         _failFirstHitTestCandidate = failFirstHitTestCandidate;
@@ -63,6 +67,8 @@ public sealed class MockAgentServer : IAsyncDisposable
         _includeDetachedNativeRoot = includeDetachedNativeRoot;
         _returnEmptyTree = returnEmptyTree;
         _rejectNativeProperty = rejectNativeProperty;
+        _malformedPropertyResponse = malformedPropertyResponse;
+        _propertyFailureWithoutReason = propertyFailureWithoutReason;
     }
 
     public int Port { get; private set; }
@@ -186,6 +192,27 @@ public sealed class MockAgentServer : IAsyncDisposable
         app.MapGet("/api/v1/ui/elements/{id}", (string id) => Results.Content(MockAgentResponses.SingleElement(id), "application/json"));
         app.MapGet("/api/v1/ui/elements/{id}/properties/{name}", (string id, string name) =>
         {
+            if (_malformedPropertyResponse)
+            {
+                // Simulates a transport failure / unparsable response deterministically:
+                // an empty 200 body causes GetJsonAsync to return JsonValueKind.Undefined,
+                // without relying on brittle real network-failure timing.
+                return Results.Content(string.Empty, "application/json");
+            }
+
+            if (_propertyFailureWithoutReason)
+            {
+                // Mirrors server responses such as "Agent not bound to app" that report
+                // "success": false but omit the optional "reason" field entirely.
+                return Results.Json(
+                    new
+                    {
+                        success = false,
+                        error = "Agent not bound to app"
+                    },
+                    statusCode: StatusCodes.Status400BadRequest);
+            }
+
             if (_rejectNativeProperty)
             {
                 return Results.Json(

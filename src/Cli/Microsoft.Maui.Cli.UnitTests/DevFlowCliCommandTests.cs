@@ -285,6 +285,44 @@ public class DevFlowCliCommandTests
     }
 
     [Fact]
+    public async Task UiProperty_Get_FailureWithoutReason_StillSurfacesErrorAndFails()
+    {
+        // Some rejections (e.g. "Agent not bound to app") report "success": false but omit
+        // the optional "reason" field entirely. GetPropertyAsync must still treat any
+        // explicit "success": false as an error rather than only ones that carry a reason.
+        await using var server = new MockAgentServer(propertyFailureWithoutReason: true);
+        await server.StartAsync();
+        var cli = new CliTestHarness(server.Port);
+
+        var result = await cli.InvokeAsync("devflow", "ui", "property", "el-1", "Opacity", "--json");
+
+        Assert.NotEqual(0, result.ExitCode);
+        using var document = JsonDocument.Parse(result.StdErr);
+        var error = document.RootElement.GetProperty("error").GetString();
+        Assert.Contains("Agent not bound to app", error);
+        Assert.DoesNotContain("(reason:", error);
+    }
+
+    [Fact]
+    public async Task UiProperty_Get_MalformedResponse_FailsWithNonzeroExitAndUsefulMessage()
+    {
+        // A malformed/empty response (or a transport failure caught by GetJsonAsync) collapses
+        // to JsonValueKind.Undefined. GetPropertyAsync must throw instead of returning a
+        // success-shaped null, and the CLI must exit nonzero with a useful message.
+        await using var server = new MockAgentServer(malformedPropertyResponse: true);
+        await server.StartAsync();
+        var cli = new CliTestHarness(server.Port);
+
+        var result = await cli.InvokeAsync("devflow", "ui", "property", "el-1", "Opacity", "--json");
+
+        Assert.NotEqual(0, result.ExitCode);
+        using var document = JsonDocument.Parse(result.StdErr);
+        var error = document.RootElement.GetProperty("error").GetString();
+        Assert.Contains("Opacity", error);
+        Assert.Contains("could not be reached", error);
+    }
+
+    [Fact]
     public async Task UiSetProperty_Put_HitsPropertyRoute()
     {
         var (server, cli) = await CreateFixturesAsync();

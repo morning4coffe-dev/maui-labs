@@ -593,6 +593,96 @@ public class NativeElementRegistrationRegistryTests
         Assert.Contains("disabled", result, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Fact]
+    public async Task TryNativeElementTap_BackButton_UsesShellLevelBehavior()
+    {
+        var registry = new NativeElementRegistrationRegistry();
+        var invoked = false;
+        var page = new ContentPage();
+        var shellContent = new ShellContent { Content = page };
+        var shellSection = new ShellSection();
+        shellSection.Items.Add(shellContent);
+        var shellItem = new ShellItem();
+        shellItem.Items.Add(shellSection);
+        var shell = new Shell();
+        shell.Items.Add(shellItem);
+        Shell.SetBackButtonBehavior(shell, new BackButtonBehavior
+        {
+            Command = new Command(() => invoked = true)
+        });
+        var id = registry.Register(page, new object(), "BackButton");
+        var walker = new VisualTreeWalker(registry);
+
+        var result = await walker.TryRegisteredNativeElementTapAsync(id);
+
+        Assert.Equal("ok", result);
+        Assert.True(invoked);
+    }
+
+    [Fact]
+    public async Task ActivateBackButtonMarker_UsesConfiguredBehavior()
+    {
+        var invoked = false;
+        var page = new ContentPage();
+        var navigationPage = new NavigationPage(new ContentPage());
+        await navigationPage.Navigation.PushAsync(page);
+        var marker = new VisualTreeWalker.BackButtonMarker
+        {
+            Navigation = page.Navigation,
+            Behavior = new BackButtonBehavior
+            {
+                Command = new Command(() => invoked = true)
+            }
+        };
+
+        var result = await VisualTreeWalker.ActivateBackButtonMarkerAsync(marker);
+
+        Assert.Equal("ok", result);
+        Assert.True(invoked);
+        Assert.Same(page, navigationPage.CurrentPage);
+    }
+
+    [Fact]
+    public void BuildSyntheticElementInfo_BackButton_ReflectsBehaviorState()
+    {
+        var walker = new VisualTreeWalker();
+        var marker = new VisualTreeWalker.BackButtonMarker
+        {
+            Navigation = new NavigationPage().Navigation,
+            Behavior = new BackButtonBehavior
+            {
+                IsVisible = false,
+                IsEnabled = false
+            }
+        };
+
+        var info = walker.BuildSyntheticElementInfo("BackButton", marker);
+
+        Assert.NotNull(info);
+        Assert.False(info.IsVisible);
+        Assert.False(info.IsEnabled);
+    }
+
+    [Fact]
+    public async Task ActivateBackButtonMarker_RejectsHiddenNavigationBar()
+    {
+        var first = new ContentPage();
+        var page = new ContentPage();
+        var navigationPage = new NavigationPage(first);
+        await navigationPage.Navigation.PushAsync(page);
+        NavigationPage.SetHasNavigationBar(page, false);
+        var marker = new VisualTreeWalker.BackButtonMarker
+        {
+            Navigation = page.Navigation,
+            Page = page
+        };
+
+        var result = await VisualTreeWalker.ActivateBackButtonMarkerAsync(marker);
+
+        Assert.Contains("hidden", result, StringComparison.OrdinalIgnoreCase);
+        Assert.Same(page, navigationPage.CurrentPage);
+    }
+
     private static ShellItem CreateShellItem(string title)
     {
         var shellItem = new ShellItem { Title = title };

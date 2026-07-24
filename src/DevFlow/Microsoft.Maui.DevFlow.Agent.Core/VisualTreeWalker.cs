@@ -44,6 +44,7 @@ public class VisualTreeWalker
         public INavigation Navigation { get; init; } = null!;
         public string Title { get; init; } = "Back";
         public BackButtonBehavior? Behavior { get; init; }
+        public Page? Page { get; init; }
     }
 
     /// <summary>
@@ -281,6 +282,12 @@ public class VisualTreeWalker
             IsVisible = true,
             IsEnabled = true,
         };
+        if (marker is BackButtonMarker backButton)
+        {
+            info.IsVisible = (backButton.Behavior?.IsVisible ?? true)
+                && (backButton.Page is null || IsNavigationBarVisible(backButton.Page));
+            info.IsEnabled = backButton.Behavior?.IsEnabled ?? true;
+        }
 
         // Set bounds if available (synthetic bounds are already window-absolute)
         if (_syntheticBounds.TryGetValue(id, out var entry))
@@ -884,7 +891,7 @@ public class VisualTreeWalker
     {
         try
         {
-            var behavior = Shell.GetBackButtonBehavior(page);
+            var behavior = GetEffectiveBackButtonBehavior(page);
             if (behavior is { IsEnabled: false })
                 return "Back button is disabled";
             if (behavior?.Command is { } command)
@@ -921,6 +928,26 @@ public class VisualTreeWalker
         {
             return $"Back navigation failed: {ex.GetBaseException().Message}";
         }
+    }
+
+    internal static async Task<string> ActivateBackButtonMarkerAsync(BackButtonMarker marker)
+    {
+        if (marker.Page is not null && !IsNavigationBarVisible(marker.Page))
+            return "Back button is hidden";
+        if (marker.Behavior is { IsVisible: false })
+            return "Back button is hidden";
+        if (marker.Behavior is { IsEnabled: false })
+            return "Back button is disabled";
+        if (marker.Behavior?.Command is { } command)
+        {
+            if (!command.CanExecute(marker.Behavior.CommandParameter))
+                return "Back button command cannot execute";
+            command.Execute(marker.Behavior.CommandParameter);
+            return "ok";
+        }
+
+        await marker.Navigation.PopAsync();
+        return "ok";
     }
 
     private static Shell? FindOwningShell(Page page)
@@ -1548,6 +1575,9 @@ public class VisualTreeWalker
 
     private object? FindBackButtonById(Page page, string parentId, string targetId)
     {
+        if (!IsNavigationBarVisible(page))
+            return null;
+
         var (nav, title) = ResolveBackNavigation(page);
         if (nav == null) return null;
 
@@ -1555,7 +1585,8 @@ public class VisualTreeWalker
         {
             Navigation = nav,
             Title = title,
-            Behavior = GetEffectiveBackButtonBehavior(page)
+            Behavior = GetEffectiveBackButtonBehavior(page),
+            Page = page
         };
         var id = GenerateObjectId(marker, "BackButton");
         return id == targetId ? marker : null;
@@ -1669,19 +1700,8 @@ public class VisualTreeWalker
 
     private void AddNavBarTitle(Page page, string parentId, ElementInfo parentInfo)
     {
-        // Skip if nav bar is hidden
-        try
-        {
-            if (page.Parent is Shell || FindAncestor<Shell>(page) != null)
-            {
-                if (!Shell.GetNavBarIsVisible(page)) return;
-            }
-            else if (page.Parent is NavigationPage)
-            {
-                if (!NavigationPage.GetHasNavigationBar(page)) return;
-            }
-        }
-        catch { }
+        if (!IsNavigationBarVisible(page))
+            return;
 
         var title = page.Title;
         if (string.IsNullOrEmpty(title)) return;
@@ -1991,6 +2011,9 @@ public class VisualTreeWalker
 
     private ElementInfo? CreateBackButtonInfo(Page page, string parentId)
     {
+        if (!IsNavigationBarVisible(page))
+            return null;
+
         var (nav, title) = ResolveBackNavigation(page);
         if (nav == null) return null;
 
@@ -1998,7 +2021,8 @@ public class VisualTreeWalker
         {
             Navigation = nav,
             Title = title,
-            Behavior = GetEffectiveBackButtonBehavior(page)
+            Behavior = GetEffectiveBackButtonBehavior(page),
+            Page = page
         };
         var id = GenerateObjectId(marker, "BackButton");
         return new ElementInfo
@@ -2010,9 +2034,25 @@ public class VisualTreeWalker
             FullType = "Microsoft.Maui.DevFlow.Agent.Core.BackButton",
             AutomationId = "BackButton",
             Text = $"← {title}",
-            IsVisible = true,
-            IsEnabled = true,
+            IsVisible = marker.Behavior?.IsVisible ?? true,
+            IsEnabled = marker.Behavior?.IsEnabled ?? true,
         };
+    }
+
+    private static bool IsNavigationBarVisible(Page page)
+    {
+        try
+        {
+            if (page.Parent is Shell || FindAncestor<Shell>(page) is not null)
+                return Shell.GetNavBarIsVisible(page);
+            if (page.Parent is NavigationPage || FindAncestor<NavigationPage>(page) is not null)
+                return NavigationPage.GetHasNavigationBar(page);
+        }
+        catch
+        {
+        }
+
+        return true;
     }
 
     private static BackButtonBehavior? GetEffectiveBackButtonBehavior(Page page)

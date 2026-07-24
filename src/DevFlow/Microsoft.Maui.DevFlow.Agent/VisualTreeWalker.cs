@@ -498,7 +498,13 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
         if (nativeElement is UIKit.UIControl control)
             return IsAppleViewVisible(control)
                 && control.Enabled
-                && control.AllTargets.Count > 0;
+                && (control.AllTargets.Count > 0
+                    || control is UIKit.UIButton
+                    {
+                        Menu: not null,
+                        ShowsMenuAsPrimaryAction: true
+                    } && (OperatingSystem.IsIOSVersionAtLeast(17, 4)
+                        || OperatingSystem.IsMacCatalystVersionAtLeast(17, 4)));
 
         return nativeElement is UIKit.UIBarButtonItem
         {
@@ -613,6 +619,22 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
         {
             if (!CanInvokeRegisteredNativeElement(control))
                 return $"Native element '{elementId}' is not visible, enabled, and actionable";
+
+            if (control is UIKit.UIButton
+                {
+                    Menu: not null,
+                    ShowsMenuAsPrimaryAction: true
+                } menuButton)
+            {
+                if (OperatingSystem.IsIOSVersionAtLeast(17, 4)
+                    || OperatingSystem.IsMacCatalystVersionAtLeast(17, 4))
+                {
+                    menuButton.PerformPrimaryAction();
+                    return "ok";
+                }
+
+                return $"Native menu launcher '{elementId}' requires iOS or Mac Catalyst 17.4 or later for programmatic invocation";
+            }
 
             control.SendActionForControlEvents(UIKit.UIControlEvent.TouchUpInside);
             return "ok";

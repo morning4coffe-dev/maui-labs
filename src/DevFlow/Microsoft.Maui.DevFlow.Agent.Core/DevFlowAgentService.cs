@@ -3116,8 +3116,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     ((IMenuItemController)ti).Activate();
                     return "ok";
                 case VisualTreeWalker.BackButtonMarker back:
-                    await back.Navigation.PopAsync();
-                    return "ok";
+                    return await VisualTreeWalker.ActivateBackButtonMarkerAsync(back);
                 case VisualTreeWalker.FlyoutButtonMarker flyoutBtn:
                     flyoutBtn.Shell.FlyoutIsPresented = true;
                     return "ok";

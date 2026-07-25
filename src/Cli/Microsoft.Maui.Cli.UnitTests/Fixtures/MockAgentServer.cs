@@ -28,6 +28,7 @@ public sealed class MockAgentServer : IAsyncDisposable
     private readonly bool _rejectNativeProperty;
     private readonly bool _malformedPropertyResponse;
     private readonly bool _propertyFailureWithoutReason;
+    private readonly bool _propertyNotFound;
     private int _hitTestCount;
     private int _tapCount;
     private int _fillCount;
@@ -51,7 +52,8 @@ public sealed class MockAgentServer : IAsyncDisposable
         bool returnEmptyTree = false,
         bool rejectNativeProperty = false,
         bool malformedPropertyResponse = false,
-        bool propertyFailureWithoutReason = false)
+        bool propertyFailureWithoutReason = false,
+        bool propertyNotFound = false)
     {
         _supportsCaptureEpoch = supportsCaptureEpoch;
         _failFirstHitTestCandidate = failFirstHitTestCandidate;
@@ -69,6 +71,7 @@ public sealed class MockAgentServer : IAsyncDisposable
         _rejectNativeProperty = rejectNativeProperty;
         _malformedPropertyResponse = malformedPropertyResponse;
         _propertyFailureWithoutReason = propertyFailureWithoutReason;
+        _propertyNotFound = propertyNotFound;
     }
 
     public int Port { get; private set; }
@@ -211,6 +214,21 @@ public sealed class MockAgentServer : IAsyncDisposable
                         error = "Agent not bound to app"
                     },
                     statusCode: StatusCodes.Status400BadRequest);
+            }
+
+            if (_propertyNotFound)
+            {
+                // Mirrors the real agent's genuine "property not found" response: HTTP 404,
+                // "success": false, no "reason" field. This must still resolve to a null
+                // return (not an exception) to preserve the maui_get_property/maui_assert
+                // not-found contract.
+                return Results.Json(
+                    new
+                    {
+                        success = false,
+                        error = $"Property '{name}' not found on element '{id}'"
+                    },
+                    statusCode: StatusCodes.Status404NotFound);
             }
 
             if (_rejectNativeProperty)

@@ -323,6 +323,25 @@ public class DevFlowCliCommandTests
     }
 
     [Fact]
+    public async Task UiProperty_Get_PropertyNotFound_ReturnsNullValueWithZeroExit()
+    {
+        // A genuine "property not found" is reported by the agent as HTTP 404 with
+        // "success": false and no "reason". This must keep returning a null value with
+        // exit code 0, preserving the documented not-found contract (distinct from other
+        // explicit success:false failures, which must still fail with a nonzero exit).
+        await using var server = new MockAgentServer(propertyNotFound: true);
+        await server.StartAsync();
+        var cli = new CliTestHarness(server.Port);
+
+        var result = await cli.InvokeAsync("devflow", "ui", "property", "el-1", "Missing", "--json");
+
+        Assert.Equal(0, result.ExitCode);
+        var root = result.ParseJsonOutput();
+        Assert.Equal("Missing", root.GetProperty("property").GetString());
+        Assert.Equal(System.Text.Json.JsonValueKind.Null, root.GetProperty("value").ValueKind);
+    }
+
+    [Fact]
     public async Task UiSetProperty_Put_HitsPropertyRoute()
     {
         var (server, cli) = await CreateFixturesAsync();

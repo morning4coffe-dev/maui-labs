@@ -867,18 +867,19 @@ public class AgentClient : IDisposable
     /// Get a specific property value from an element.
     /// </summary>
     /// <remarks>
-    /// Surfaces any explicit server rejection (any response body with <c>"success": false</c>,
-    /// such as <c>native-property-not-supported</c> for native elements, "Agent not bound to
-    /// app", or a plain "property not found") as a thrown exception instead of silently
-    /// returning <c>null</c>, so callers always see the server's real error/reason rather than
-    /// a success-shaped null. Transport failures and unparsable responses are also surfaced
-    /// rather than collapsed to a success-shaped <c>null</c>. Only a response that does not
-    /// explicitly report <c>"success": false</c> and lacks a <c>"value"</c> field falls back
-    /// to returning <c>null</c>.
+    /// Surfaces explicit server rejections (a response body with <c>"success": false</c>, such
+    /// as <c>native-property-not-supported</c> for native elements or "Agent not bound to app")
+    /// as a thrown exception instead of silently returning <c>null</c>, so callers see the
+    /// server's real error/reason rather than a success-shaped null. Transport failures and
+    /// unparsable responses are also surfaced rather than collapsed to a success-shaped
+    /// <c>null</c>. The one exception is a genuine "property not found", which the server
+    /// reports via HTTP 404 with no other structured reason: that case still returns
+    /// <c>null</c>, preserving the documented not-found contract relied on by MCP tools like
+    /// <c>maui_get_property</c> and <c>maui_assert</c>.
     /// </remarks>
     public async Task<string?> GetPropertyAsync(string elementId, string propertyName)
     {
-        var result = await GetJsonAsync($"{UiApi}/elements/{elementId}/properties/{propertyName}");
+        var (result, statusCode) = await GetJsonWithStatusAsync($"{UiApi}/elements/{elementId}/properties/{propertyName}");
 
         if (result.ValueKind == JsonValueKind.Undefined)
         {
@@ -891,16 +892,21 @@ public class AgentClient : IDisposable
             if (result.TryGetProperty("success", out var successProperty)
                 && successProperty.ValueKind == JsonValueKind.False)
             {
+                var hasReason = result.TryGetProperty("reason", out var reasonProperty)
+                    && reasonProperty.ValueKind == JsonValueKind.String;
+
+                // A plain "property not found" is reported via HTTP 404 without any other
+                // structured reason. Keep that as a null return rather than an exception.
+                if (statusCode == 404 && !hasReason)
+                    return null;
+
                 var error = result.TryGetProperty("error", out var errorProperty)
                     && errorProperty.ValueKind == JsonValueKind.String
                         ? errorProperty.GetString()
                         : $"Failed to get property '{propertyName}' on element '{elementId}'.";
 
-                if (result.TryGetProperty("reason", out var reasonProperty)
-                    && reasonProperty.ValueKind == JsonValueKind.String)
-                {
+                if (hasReason)
                     error = $"{error} (reason: {reasonProperty.GetString()})";
-                }
 
                 throw new InvalidOperationException(error);
             }
@@ -1288,6 +1294,28 @@ public class AgentClient : IDisposable
         catch (Exception ex) when (IsExpectedClientException(ex)) { return default; }
     }
 
+    /// <summary>
+    /// Like <see cref="GetJsonAsync(string)"/>, but also retains the HTTP status code so
+    /// callers can distinguish a genuine "not found" (404) from other structured failures
+    /// without relying on message text matching.
+    /// </summary>
+    private async Task<(JsonElement Json, int? StatusCode)> GetJsonWithStatusAsync(string path)
+    {
+        int? statusCode = null;
+        try
+        {
+            var body = await GetStringWithRetryableUiReadAsync(
+                $"{_baseUrl}{path}",
+                returnErrorBody: true,
+                onStatusCode: code => statusCode = code);
+            if (string.IsNullOrWhiteSpace(body))
+                return (default, statusCode);
+
+            return (DriverJson.ParseElement(body), statusCode);
+        }
+        catch (Exception ex) when (IsExpectedClientException(ex)) { return (default, statusCode); }
+    }
+
     private static void AddCaptureMetadata(
         JsonObject payload,
         long? captureEpoch,
@@ -1488,7 +1516,8 @@ public class AgentClient : IDisposable
 
     private async Task<string> GetStringWithRetryableUiReadAsync(
         string url,
-        bool returnErrorBody = false)
+        bool returnErrorBody = false,
+        Action<int>? onStatusCode = null)
     {
         var retryWindow = TimeSpan.FromSeconds(1);
         var startedAt = System.Diagnostics.Stopwatch.StartNew();
@@ -1496,6 +1525,7 @@ public class AgentClient : IDisposable
         {
             using var response = await SendWithTransientRetriesAsync(() => _http.GetAsync(url));
             var body = await response.Content.ReadAsStringAsync();
+            onStatusCode?.Invoke((int)response.StatusCode);
             if (response.IsSuccessStatusCode)
                 return body;
 

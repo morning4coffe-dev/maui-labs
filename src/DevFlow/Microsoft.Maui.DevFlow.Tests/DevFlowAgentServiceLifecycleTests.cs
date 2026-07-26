@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Reflection;
@@ -611,6 +612,24 @@ public class DevFlowAgentServiceLifecycleTests
 
         Assert.Equal(0, document.RootElement.GetProperty("window").GetInt32());
         Assert.True(document.RootElement.GetProperty("captureEpoch").GetInt64() > 0);
+    }
+
+    [Fact]
+    public void HitTestCoordinates_UseInvariantCulture()
+    {
+        var originalCulture = CultureInfo.CurrentCulture;
+        try
+        {
+            CultureInfo.CurrentCulture = new CultureInfo("de-DE");
+
+            Assert.True(DevFlowAgentService.TryParseCoordinate("95.5", out var coordinate));
+            Assert.Equal(95.5, coordinate);
+            Assert.False(DevFlowAgentService.TryParseCoordinate("95,5", out _));
+        }
+        finally
+        {
+            CultureInfo.CurrentCulture = originalCulture;
+        }
     }
 
     [Fact]

@@ -2047,9 +2047,9 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     {
         if (_app == null) return HttpResponse.Error("Agent not bound to app");
 
-        if (!request.QueryParams.TryGetValue("x", out var xStr) || !double.TryParse(xStr, out var x))
+        if (!request.QueryParams.TryGetValue("x", out var xStr) || !TryParseCoordinate(xStr, out var x))
             return HttpResponse.Error("x coordinate is required");
-        if (!request.QueryParams.TryGetValue("y", out var yStr) || !double.TryParse(yStr, out var y))
+        if (!request.QueryParams.TryGetValue("y", out var yStr) || !TryParseCoordinate(yStr, out var y))
             return HttpResponse.Error("y coordinate is required");
 
         var windowIndex = ParseWindowIndex(request) ?? 0;
@@ -2254,6 +2254,13 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             ? HttpResponse.Json(result)
             : HttpResponse.Error($"Window {windowIndex} not found");
     }
+
+    internal static bool TryParseCoordinate(string value, out double coordinate)
+        => double.TryParse(
+            value,
+            NumberStyles.Float,
+            CultureInfo.InvariantCulture,
+            out coordinate);
 
     /// <summary>
     /// Builds a set of active ShellItem objects for filtering hit test results.

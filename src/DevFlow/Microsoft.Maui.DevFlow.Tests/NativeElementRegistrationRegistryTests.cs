@@ -405,6 +405,19 @@ public class NativeElementRegistrationRegistryTests
     }
 
     [Fact]
+    public void RegisteredShellTabOverflowItem_AdvertisesInvoke()
+    {
+        var registry = new NativeElementRegistrationRegistry();
+        var owner = new ShellItem();
+        var id = registry.Register(owner, new object(), "ShellTabOverflow", "TabBarItem");
+        var walker = new VisualTreeWalker(registry);
+
+        var info = walker.GetNativeElementInfoById(id);
+
+        Assert.Equal(["select", "invoke"], info?.Capabilities);
+    }
+
+    [Fact]
     public void WalkTree_PasswordEntry_RedactsText()
     {
         var walker = new VisualTreeWalker();
@@ -505,6 +518,33 @@ public class NativeElementRegistrationRegistryTests
 
         Assert.Equal("ok", result);
         Assert.True(walker.FallbackInvoked);
+    }
+
+    [Fact]
+    public void TryNativeElementTap_RealizedShellOverflowRow_ActivatesSection()
+    {
+        var shell = new Shell();
+        var firstItem = CreateShellItem("First");
+        var secondItem = CreateShellItem("Second");
+        shell.Items.Add(firstItem);
+        shell.Items.Add(secondItem);
+        shell.CurrentItem = firstItem;
+        var targetSection = secondItem.Items[0];
+        var registry = new NativeElementRegistrationRegistry();
+        var id = registry.Register(
+            targetSection,
+            new object(),
+            "ShellTabOverflow",
+            "OverflowRow");
+        var walker = new VisualTreeWalker(registry);
+
+        var info = walker.GetNativeElementInfoById(id);
+        var result = walker.TryNativeElementTap(id);
+
+        Assert.Equal(["select", "invoke"], info?.Capabilities);
+        Assert.Equal("ok", result);
+        Assert.Same(secondItem, shell.CurrentItem);
+        Assert.Same(targetSection, secondItem.CurrentItem);
     }
 
     [Fact]

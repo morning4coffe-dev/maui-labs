@@ -600,9 +600,11 @@ public class VisualTreeWalker
             MenuItem menuItem => ActivateMenuItem(menuItem),
             ShellContent shellContent
                 when !registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
+                    || IsOverflowRow(registration)
                 => ActivateShellContent(shellContent, registration.Role),
             ShellSection shellSection
                 when !registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
+                    || IsOverflowRow(registration)
                 => ActivateShellSection(shellSection, registration.Role),
             ShellItem shellItem
                 when !registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
@@ -611,7 +613,8 @@ public class VisualTreeWalker
                 when registration.Role.Equals("ShellFlyoutToggle", StringComparison.Ordinal)
                 => ToggleShellFlyout(shell),
             Page page
-                when page.Parent is TabbedPage && IsTabRole(registration.Role)
+                when page.Parent is TabbedPage
+                    && (IsTabRole(registration.Role) || IsOverflowRow(registration))
                 => ActivateTabbedPage(page),
             SearchHandler => TryNativeElementFocus(elementId),
             _ => null
@@ -808,9 +811,15 @@ public class VisualTreeWalker
         NativeElementRegistrationSnapshot registration)
     {
         var capabilities = new List<string> { "select" };
-        if (registration.Owner is MenuItem
+        if (registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
+            && registration.Discriminator?.Equals("TabBarItem", StringComparison.Ordinal) == true)
+        {
+            capabilities.Add("invoke");
+        }
+        else if (registration.Owner is MenuItem
             || registration.Owner is ShellSection or ShellContent
-                && !registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
+                && (!registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
+                    || IsOverflowRow(registration))
             || registration.Owner is ShellItem
                 && !registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
             || registration.Owner is Shell
@@ -821,7 +830,7 @@ public class VisualTreeWalker
             capabilities.Add("invoke");
         }
         else if (registration.Owner is Page { Parent: TabbedPage }
-            && IsTabRole(registration.Role))
+            && (IsTabRole(registration.Role) || IsOverflowRow(registration)))
         {
             capabilities.Add("invoke");
         }
@@ -888,6 +897,10 @@ public class VisualTreeWalker
 
     private static bool IsTabRole(string role)
         => role.Equals("ShellTab", StringComparison.Ordinal);
+
+    private static bool IsOverflowRow(NativeElementRegistrationSnapshot registration)
+        => registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
+            && registration.Discriminator?.Equals("OverflowRow", StringComparison.Ordinal) == true;
 
     private static async Task<string> ActivateBackButtonAsync(Page page)
     {

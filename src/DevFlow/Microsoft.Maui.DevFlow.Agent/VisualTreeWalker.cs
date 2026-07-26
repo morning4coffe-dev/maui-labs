@@ -691,6 +691,21 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                     ? "ok"
                     : $"Native element '{elementId}' action was not handled";
         }
+
+        if (nativeElement is UIKit.UITabBarItem tabBarItem
+            && GetNativeElementInfoById(elementId) is
+            {
+                Role: "shell-tab-overflow",
+                Discriminator: "TabBarItem"
+            })
+        {
+            var tabBarController = FindAppleTabBarController(tabBarItem);
+            if (tabBarController is null)
+                return $"Native More tab '{elementId}' is not attached to a tab bar controller";
+
+            tabBarController.SelectedViewController = tabBarController.MoreNavigationController;
+            return "ok";
+        }
 #elif MACOS
         if (nativeElement is AppKit.NSButton button)
         {
@@ -706,6 +721,57 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
 
         return null;
     }
+
+#if IOS || MACCATALYST
+    private static UIKit.UITabBarController? FindAppleTabBarController(
+        UIKit.UITabBarItem tabBarItem)
+    {
+        foreach (var scene in UIKit.UIApplication.SharedApplication.ConnectedScenes)
+        {
+            if (scene is not UIKit.UIWindowScene windowScene)
+                continue;
+
+            foreach (var window in windowScene.Windows)
+            {
+                if (FindAppleTabBarController(window.RootViewController, tabBarItem)
+                    is { } controller)
+                {
+                    return controller;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static UIKit.UITabBarController? FindAppleTabBarController(
+        UIKit.UIViewController? controller,
+        UIKit.UITabBarItem tabBarItem)
+    {
+        if (controller is null)
+            return null;
+
+        if (controller is UIKit.UITabBarController tabBarController
+            && tabBarController.TabBar.Items?.Any(item => ReferenceEquals(item, tabBarItem)) == true)
+        {
+            return tabBarController;
+        }
+
+        if (FindAppleTabBarController(controller.PresentedViewController, tabBarItem)
+            is { } presentedController)
+        {
+            return presentedController;
+        }
+
+        foreach (var child in controller.ChildViewControllers)
+        {
+            if (FindAppleTabBarController(child, tabBarItem) is { } childController)
+                return childController;
+        }
+
+        return null;
+    }
+#endif
 #endif
 
 #if ANDROID || IOS || MACCATALYST || MACOS

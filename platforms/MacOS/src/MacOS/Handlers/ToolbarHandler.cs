@@ -165,8 +165,11 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
 
     bool ShouldShowBackButton()
     {
-        // Respect HasNavigationBar on the current page
-        if (_currentPage != null && !NavigationPage.GetHasNavigationBar(_currentPage))
+        if (_currentPage == null
+            || !NavigationPage.GetHasNavigationBar(_currentPage)
+            || !Shell.GetNavBarIsVisible(_currentPage)
+            || _shell != null && !Shell.GetNavBarIsVisible(_shell)
+            || GetEffectiveBackButtonBehavior() is { IsVisible: false })
             return false;
 
         if (_navigationPage != null)
@@ -182,6 +185,23 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
 
         return false;
     }
+
+    bool IsBackButtonEnabled()
+    {
+        if (_currentPage == null)
+            return false;
+
+        var behavior = GetEffectiveBackButtonBehavior();
+        return behavior is not { IsEnabled: false }
+            && (behavior?.Command is not { } command
+                || command.CanExecute(behavior.CommandParameter));
+    }
+
+    BackButtonBehavior? GetEffectiveBackButtonBehavior()
+        => _currentPage == null
+            ? null
+            : Shell.GetBackButtonBehavior(_currentPage)
+                ?? (_shell == null ? null : Shell.GetBackButtonBehavior(_shell));
 
     string? GetBackButtonTitle()
     {
@@ -210,6 +230,8 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
         _isRefreshing = true;
         try
         {
+        var previousItems = _items.ToArray();
+        var previousSidebarItems = _sidebarItems.ToArray();
         UnsubscribeCommands();
         _items.Clear();
         _sidebarItems.Clear();
@@ -619,8 +641,33 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
         {
             var currentIds = _toolbar.Items.Select(i => i.Identifier).ToList();
             var desiredIds = _itemIdentifiers;
+            bool HasSourceChanged(string identifier)
+            {
+                if (identifier.StartsWith(ItemIdPrefix, StringComparison.Ordinal)
+                    && int.TryParse(identifier.AsSpan(ItemIdPrefix.Length), out var itemIndex))
+                {
+                    return itemIndex >= previousItems.Length
+                        || itemIndex >= _items.Count
+                        || !ReferenceEquals(previousItems[itemIndex], _items[itemIndex]);
+                }
 
-            if (!currentIds.SequenceEqual(desiredIds))
+                if (identifier.StartsWith(SidebarItemIdPrefix, StringComparison.Ordinal)
+                    && int.TryParse(
+                        identifier.AsSpan(SidebarItemIdPrefix.Length),
+                        out var sidebarIndex))
+                {
+                    return sidebarIndex >= previousSidebarItems.Length
+                        || sidebarIndex >= _sidebarItems.Count
+                        || !ReferenceEquals(
+                            previousSidebarItems[sidebarIndex],
+                            _sidebarItems[sidebarIndex]);
+                }
+
+                return false;
+            }
+
+            if (!currentIds.SequenceEqual(desiredIds)
+                || currentIds.Any(HasSourceChanged))
             {
                 NSAnimationContext.BeginGrouping();
                 NSAnimationContext.CurrentContext.Duration = 0;
@@ -628,7 +675,9 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
                 // Remove items that are no longer present (iterate backwards)
                 for (int i = currentIds.Count - 1; i >= 0; i--)
                 {
-                    if (i >= desiredIds.Count || currentIds[i] != desiredIds[i])
+                    if (i >= desiredIds.Count
+                        || currentIds[i] != desiredIds[i]
+                        || HasSourceChanged(currentIds[i]))
                         _toolbar.RemoveItem(i);
                     else
                         currentIds[i] = null!; // mark as matched
@@ -652,6 +701,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
             // MacOSToolbarItem.IsVisible changes take effect without
             // removing/re-inserting items.
             SyncItemVisibility();
+            SyncBackButton();
 
             // Always update the title label text — the identifier list may
             // not change when navigating between pages with the same toolbar
@@ -747,13 +797,66 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
 
             if (source != null)
                 nsItem.Hidden = !MacOSToolbarItem.GetIsVisible(source);
+
+            if (source is ToolbarItem toolbarItem)
+                SyncToolbarItem(nsItem, toolbarItem);
+        }
+    }
+
+    void SyncToolbarItem(NSToolbarItem nsItem, ToolbarItem toolbarItem)
+    {
+        var isSidebarItem = nsItem.Identifier.StartsWith(
+            SidebarItemIdPrefix,
+            StringComparison.Ordinal);
+        var prefixLength = isSidebarItem
+            ? SidebarItemIdPrefix.Length
+            : ItemIdPrefix.Length;
+        if (!int.TryParse(nsItem.Identifier.AsSpan(prefixLength), out var index))
+            return;
+
+        var tag = isSidebarItem ? index + SidebarItemTagOffset : index;
+        var text = toolbarItem.Text ?? string.Empty;
+        nsItem.Label = text;
+        nsItem.PaletteLabel = text;
+        nsItem.ToolTip = MacOSToolbarItem.GetToolTip(toolbarItem) ?? text;
+        nsItem.Enabled = toolbarItem.IsEnabled;
+        nsItem.Tag = tag;
+
+        if (nsItem.View is NSButton button)
+        {
+            button.Title = text;
+            button.Enabled = toolbarItem.IsEnabled;
+            button.Tag = tag;
+        }
+    }
+
+    void SyncBackButton()
+    {
+        if (_toolbar?.Items.FirstOrDefault(item => item.Identifier == BackButtonId)
+            is not NSToolbarItem item)
+        {
+            return;
+        }
+
+        var title = GetBackButtonTitle() ?? "Back";
+        var isEnabled = IsBackButtonEnabled();
+        item.Label = title;
+        item.ToolTip = $"Back to {title}";
+        item.Enabled = isEnabled;
+        if (item.View is NSButton button)
+        {
+            button.Title = title;
+            button.Enabled = isEnabled;
         }
     }
 
     void OnToolbarItemPropertyChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs e)
     {
         if (_toolbar != null)
+        {
+            SyncItemVisibility();
             _toolbar.ValidateVisibleItems();
+        }
     }
 
     // INSToolbarDelegate
@@ -799,11 +902,13 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
         if (itemIdentifier == BackButtonId)
         {
             var backTitle = GetBackButtonTitle() ?? "Back";
+            var isEnabled = IsBackButtonEnabled();
             var nsItem = new NSToolbarItem(BackButtonId)
             {
                 Label = backTitle,
                 PaletteLabel = "Back",
                 ToolTip = $"Back to {backTitle}",
+                Enabled = isEnabled,
                 Target = this,
                 Action = new ObjCRuntime.Selector("backButtonClicked:"),
             };
@@ -811,6 +916,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
             var button = new NSButton
             {
                 BezelStyle = NSBezelStyle.TexturedRounded,
+                Enabled = isEnabled,
                 Target = this,
                 Action = new ObjCRuntime.Selector("backButtonClicked:"),
             };
@@ -986,12 +1092,8 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
             };
             button.SetButtonType(NSButtonType.MomentaryPushIn);
 
-            var capturedMauiItem = mauiItem;
-            button.Activated += (s, e) =>
-            {
-                if (capturedMauiItem.IsEnabled)
-                    ((IMenuItemController)capturedMauiItem).Activate();
-            };
+            button.Tag = effectiveTag;
+            button.Activated += OnToolbarButtonActivated;
 
             nsItem.View = button;
         }
@@ -1053,6 +1155,12 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
             ((IMenuItemController)mauiItem).Activate();
     }
 
+    void OnToolbarButtonActivated(object? sender, EventArgs e)
+    {
+        if (sender is NSObject nativeSender)
+            OnToolbarItemClicked(nativeSender);
+    }
+
     [Export("sidebarToggleClicked:")]
     void OnSidebarToggleClicked(NSObject sender)
     {
@@ -1063,6 +1171,16 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
     [Export("backButtonClicked:")]
     void OnBackButtonClicked(NSObject sender)
     {
+        var behavior = GetEffectiveBackButtonBehavior();
+        if (behavior is { IsEnabled: false })
+            return;
+        if (behavior?.Command is { } command)
+        {
+            if (command.CanExecute(behavior.CommandParameter))
+                command.Execute(behavior.CommandParameter);
+            return;
+        }
+
         if (_navigationPage != null && _navigationPage.Navigation.NavigationStack.Count > 1)
         {
             _navigationPage.PopAsync();

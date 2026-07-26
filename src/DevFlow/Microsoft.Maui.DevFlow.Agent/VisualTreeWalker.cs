@@ -271,10 +271,21 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                 if (contentView is not null)
                 {
                     var bounds = nsView.ConvertRectToView(nsView.Bounds, contentView);
+                    var windowX = bounds.X;
+                    var windowY = contentView.Bounds.Height - bounds.Y - bounds.Height;
+                    if (nsView.Window is { } nativeWindow
+                        && FindAppKitOwnerWindow(registration.Owner, nativeWindow)
+                            is { } ownerWindow)
+                    {
+                        windowX += nativeWindow.Frame.X - ownerWindow.Frame.X;
+                        windowY += ownerWindow.Frame.Y + ownerWindow.Frame.Height
+                            - nativeWindow.Frame.Y - nativeWindow.Frame.Height;
+                    }
+
                     info.WindowBounds = new BoundsInfo
                     {
-                        X = bounds.X,
-                        Y = contentView.Bounds.Height - bounds.Y - bounds.Height,
+                        X = windowX,
+                        Y = windowY,
                         Width = bounds.Width,
                         Height = bounds.Height
                     };
@@ -427,6 +438,46 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
         }
 
         return true;
+    }
+
+    private static AppKit.NSWindow? FindAppKitOwnerWindow(
+        object owner,
+        AppKit.NSWindow nativeWindow)
+    {
+        static AppKit.NSWindow? FromPlatformView(object? platformView) => platformView switch
+        {
+            AppKit.NSWindow window => window,
+            AppKit.NSView view => view.Window,
+            AppKit.NSWindowController controller => controller.Window,
+            AppKit.NSViewController viewController => viewController.View?.Window,
+            _ => null
+        };
+
+        static bool IsDifferentWindow(
+            AppKit.NSWindow? candidate,
+            AppKit.NSWindow nativeWindow)
+            => candidate != null && candidate.Handle != nativeWindow.Handle;
+
+        static Window? FindMauiWindow(object owner)
+        {
+            for (var element = owner as Element; element is not null; element = element.Parent)
+            {
+                if (element is Page page && page.Window is not null)
+                    return page.Window;
+            }
+
+            return null;
+        }
+
+        if (nativeWindow.SheetParent is { } sheetParent)
+            return sheetParent;
+
+        var ownerWindow = FromPlatformView(
+            FindMauiWindow(owner)?.Handler?.PlatformView);
+        if (IsDifferentWindow(ownerWindow, nativeWindow))
+            return ownerWindow;
+
+        return null;
     }
 #endif
 

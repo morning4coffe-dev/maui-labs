@@ -939,10 +939,32 @@ public class PlatformAgentService : DevFlowAgentService
             // NSApplication.KeyWindow is null when the app is not the active application,
             // so prefer the NSWindow that actually owns the element being captured.
             var window = ResolveCaptureWindow(rootElement);
+            var mauiWindow = rootElement.Window
+                ?? Microsoft.Maui.Controls.Application.Current?.Windows
+                    .FirstOrDefault(candidate => ReferenceEquals(candidate.Page, rootElement));
+            var ownerWindow = NSWindowFromPlatformView(mauiWindow?.Handler?.PlatformView);
+            var parentWindow = window is { IsSheet: true, SheetParent: { } sheetParent }
+                ? sheetParent
+                : ownerWindow ?? window;
 
-            // If a modal sheet is attached, capture it instead of the main window
-            if (window?.AttachedSheet is NSWindow sheet)
-                window = sheet;
+            // Capture the parent and its attached sheet as one WindowServer image.
+            // The private alert content may be layer-backed and cannot be reproduced
+            // reliably by rendering either NSView hierarchy in isolation.
+            var attachedSheet = parentWindow?.AttachedSheet
+                ?? parentWindow?.Sheets.LastOrDefault()
+                ?? FindRegisteredDialogWindow(parentWindow);
+            if (parentWindow != null && attachedSheet != null)
+            {
+                var composited = CaptureWindowsViaCG(parentWindow, attachedSheet);
+                if (composited != null)
+                    return composited;
+
+                window = attachedSheet;
+            }
+            else
+            {
+                window = parentWindow;
+            }
 
             if (window != null)
             {
@@ -988,6 +1010,51 @@ public class PlatformAgentService : DevFlowAgentService
         catch { }
 
         return await base.CaptureScreenshotAsync(rootElement);
+    }
+
+    NSWindow? FindRegisteredDialogWindow(NSWindow? parentWindow)
+    {
+        if (NativeElementRegistry == null)
+            return null;
+
+        foreach (var registration in NativeElementRegistry.GetSnapshot().Reverse())
+        {
+            if (!registration.Role.Equals("Dialog", StringComparison.Ordinal))
+                continue;
+
+            var candidate = registration.NativeElement switch
+            {
+                NSWindow nativeWindow => nativeWindow,
+                NSView nativeView => nativeView.Window,
+                _ => null
+            };
+            var registrationOwnerWindow = FindAppKitRegistrationOwnerWindow(
+                registration.Owner);
+            if (candidate != null
+                && candidate.WindowNumber > 0
+                && candidate.IsVisible
+                && candidate.Handle != parentWindow?.Handle
+                && (parentWindow == null
+                    || registrationOwnerWindow?.Handle == parentWindow.Handle)
+                && (candidate.SheetParent == null
+                    || candidate.SheetParent.Handle == parentWindow?.Handle))
+            {
+                return candidate;
+            }
+        }
+
+        return null;
+    }
+
+    private static NSWindow? FindAppKitRegistrationOwnerWindow(object owner)
+    {
+        for (var element = owner as Element; element is not null; element = element.Parent)
+        {
+            if (element is Page page)
+                return NSWindowFromPlatformView(page.Window?.Handler?.PlatformView);
+        }
+
+        return null;
     }
 
     /// <summary>
@@ -1174,31 +1241,164 @@ public class PlatformAgentService : DevFlowAgentService
         uint windowID,
         uint imageOption);
 
+    [System.Runtime.InteropServices.DllImport("/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics")]
+    static extern IntPtr CGWindowListCreateImageFromArray(
+        CoreGraphics.CGRect screenBounds,
+        IntPtr windowArray,
+        uint imageOption);
+
     private static byte[]? CaptureWindowViaCG(NSWindow window)
     {
         try
         {
-            // kCGWindowListOptionIncludingWindow = 0x08, kCGWindowImageBoundsIgnoreFraming = 0x01
-            var cgImagePtr = CGWindowListCreateImage(
-                CoreGraphics.CGRect.Null, 0x08, (uint)window.WindowNumber, 0x01);
-
-            if (cgImagePtr == IntPtr.Zero)
-                return null;
-
-            var cgImage = ObjCRuntime.Runtime.GetINativeObject<CoreGraphics.CGImage>(
-                cgImagePtr, owns: true);
-            if (cgImage == null)
-                return null;
-
-            var bitmapRep = new NSBitmapImageRep(cgImage);
-            var pngData = bitmapRep.RepresentationUsingTypeProperties(
-                NSBitmapImageFileType.Png, new NSDictionary());
-            return pngData?.ToArray();
+            using var bitmapRep = CaptureWindowBitmapViaCG(window);
+            return EncodeBitmapRepresentation(bitmapRep);
         }
         catch
         {
             return null;
         }
+    }
+
+    private static byte[]? CaptureWindowsViaCG(
+        NSWindow parentWindow,
+        NSWindow sheetWindow)
+    {
+        try
+        {
+            var windows = new[] { sheetWindow, parentWindow };
+            var windowNumbers = windows
+                .Where(window => window.WindowNumber > 0)
+                .Select(window => new NSNumber((uint)window.WindowNumber))
+                .ToArray();
+            if (windowNumbers.Length == 0)
+                return null;
+
+            using var windowArray = NSArray.FromNSObjects(windowNumbers);
+            foreach (var windowNumber in windowNumbers)
+                windowNumber.Dispose();
+
+            // kCGWindowImageBoundsIgnoreFraming = 0x01,
+            // kCGWindowImageBestResolution = 0x08.
+            var cgImagePtr = CGWindowListCreateImageFromArray(
+                CoreGraphics.CGRect.Null,
+                windowArray.Handle,
+                0x09);
+            if (cgImagePtr != IntPtr.Zero)
+            {
+                using var cgImage = ObjCRuntime.Runtime.GetINativeObject<CoreGraphics.CGImage>(
+                    cgImagePtr,
+                    owns: true);
+                if (cgImage != null)
+                {
+                    using var bitmapRep = new NSBitmapImageRep(cgImage);
+                    return EncodeBitmapRepresentation(bitmapRep);
+                }
+            }
+
+            return CaptureWindowPairViaCG(parentWindow, sheetWindow);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static NSBitmapImageRep? CaptureWindowBitmapViaCG(NSWindow window)
+    {
+        // kCGWindowListOptionIncludingWindow = 0x08,
+        // kCGWindowImageBoundsIgnoreFraming = 0x01,
+        // kCGWindowImageBestResolution = 0x08.
+        var cgImagePtr = CGWindowListCreateImage(
+            CoreGraphics.CGRect.Null,
+            0x08,
+            (uint)window.WindowNumber,
+            0x09);
+        if (cgImagePtr == IntPtr.Zero)
+            return null;
+
+        using var cgImage = ObjCRuntime.Runtime.GetINativeObject<CoreGraphics.CGImage>(
+            cgImagePtr,
+            owns: true);
+        return cgImage == null
+            ? null
+            : new NSBitmapImageRep(cgImage);
+    }
+
+    private static byte[]? CaptureWindowPairViaCG(
+        NSWindow parentWindow,
+        NSWindow sheetWindow)
+    {
+        using var parentRep = CaptureWindowBitmapViaCG(parentWindow);
+        using var sheetRep = CaptureWindowBitmapViaCG(sheetWindow);
+        if (parentRep == null || sheetRep == null)
+            return null;
+
+        var logicalSize = parentWindow.Frame.Size;
+        using var compositedRep = new NSBitmapImageRep(
+            IntPtr.Zero,
+            (int)parentRep.PixelsWide,
+            (int)parentRep.PixelsHigh,
+            8,
+            4,
+            true,
+            false,
+            NSColorSpace.DeviceRGB,
+            0,
+            0);
+        compositedRep.Size = logicalSize;
+
+        using var parentImage = new NSImage(logicalSize);
+        parentImage.AddRepresentation(parentRep);
+        using var sheetImage = new NSImage(sheetWindow.Frame.Size);
+        sheetImage.AddRepresentation(sheetRep);
+
+        NSGraphicsContext.GlobalSaveGraphicsState();
+        try
+        {
+            var context = NSGraphicsContext.FromBitmap(compositedRep);
+            if (context == null)
+                return null;
+
+            NSGraphicsContext.CurrentContext = context;
+            parentImage.Draw(
+                new CoreGraphics.CGRect(CoreGraphics.CGPoint.Empty, logicalSize),
+                new CoreGraphics.CGRect(CoreGraphics.CGPoint.Empty, parentImage.Size),
+                NSCompositingOperation.SourceOver,
+                1,
+                respectContextIsFlipped: false,
+                hints: null);
+
+            var sheetDestination = new CoreGraphics.CGRect(
+                sheetWindow.Frame.X - parentWindow.Frame.X,
+                sheetWindow.Frame.Y - parentWindow.Frame.Y,
+                sheetWindow.Frame.Width,
+                sheetWindow.Frame.Height);
+            sheetImage.Draw(
+                sheetDestination,
+                new CoreGraphics.CGRect(CoreGraphics.CGPoint.Empty, sheetImage.Size),
+                NSCompositingOperation.SourceOver,
+                1,
+                respectContextIsFlipped: false,
+                hints: null);
+        }
+        finally
+        {
+            NSGraphicsContext.GlobalRestoreGraphicsState();
+        }
+
+        return EncodeBitmapRepresentation(compositedRep);
+    }
+
+    private static byte[]? EncodeBitmapRepresentation(NSBitmapImageRep? bitmapRep)
+    {
+        if (bitmapRep == null)
+            return null;
+
+        var pngData = bitmapRep.RepresentationUsingTypeProperties(
+            NSBitmapImageFileType.Png,
+            new NSDictionary());
+        return pngData?.ToArray();
     }
 #elif IOS || MACCATALYST
     protected override async Task<byte[]?> CaptureScreenshotAsync(VisualElement rootElement)

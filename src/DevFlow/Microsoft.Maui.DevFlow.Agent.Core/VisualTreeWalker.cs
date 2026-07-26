@@ -155,6 +155,7 @@ public class VisualTreeWalker
                     var bounds = info.WindowBounds ?? info.Bounds;
                     return bounds is null ? double.MaxValue : bounds.Width * bounds.Height;
                 })
+                .ThenByDescending(info => info.Capabilities?.Count ?? 0)
                 .ToList();
         }
     }
@@ -689,6 +690,7 @@ public class VisualTreeWalker
         if (registration.Owner is SearchHandler searchHandler)
         {
             searchHandler.Query = value;
+            _ = TrySetValueRegisteredNativeElement(elementId, registration.NativeElement, value);
             return "ok";
         }
 

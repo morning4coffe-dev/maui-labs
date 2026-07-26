@@ -315,6 +315,28 @@ public class NativeElementRegistrationRegistryTests
     }
 
     [Fact]
+    public void HitTestRegisteredNativeElements_EqualBoundsPreferRicherCapabilities()
+    {
+        var registry = new NativeElementRegistrationRegistry();
+        var toolbarOwner = new ToolbarItem { Text = "Toolbar" };
+        var searchOwner = new SearchHandler();
+        registry.Register(toolbarOwner, new object(), "ToolbarItem");
+        var searchId = registry.Register(searchOwner, new object(), "SearchHandler");
+        var page = new ContentPage();
+        page.ToolbarItems.Add(toolbarOwner);
+        Shell.SetSearchHandler(page, searchOwner);
+        var app = new Application();
+        typeof(Application)
+            .GetMethod("AddWindow", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .Invoke(app, [new Window(page)]);
+        var walker = new BoundsVisualTreeWalker(registry);
+
+        walker.WalkTree(app);
+
+        Assert.Equal(searchId, walker.HitTestRegisteredNativeElements(20, 30)[0].Id);
+    }
+
+    [Fact]
     public void WalkTree_SearchHandlerOwner_AttachesToSyntheticNode()
     {
         var registry = new NativeElementRegistrationRegistry();
@@ -350,13 +372,36 @@ public class NativeElementRegistrationRegistryTests
     {
         var registry = new NativeElementRegistrationRegistry();
         var owner = new SearchHandler();
-        var id = registry.Register(owner, new object(), "SearchHandler");
-        var walker = new VisualTreeWalker(registry);
+        var nativeElement = new object();
+        var id = registry.Register(owner, nativeElement, "SearchHandler");
+        var walker = new SetValueVisualTreeWalker(registry);
 
         var result = walker.TryNativeElementSetValue(id, "renewal");
 
         Assert.Equal("ok", result);
         Assert.Equal("renewal", owner.Query);
+        Assert.Same(nativeElement, walker.NativeElement);
+        Assert.Equal("renewal", walker.Value);
+    }
+
+    [Fact]
+    public void TryNativeElementSetValue_SearchHandler_PreservesSuccessWhenNativeSyncFails()
+    {
+        var registry = new NativeElementRegistrationRegistry();
+        var owner = new SearchHandler();
+        var nativeElement = new object();
+        var id = registry.Register(owner, nativeElement, "SearchHandler");
+        var walker = new SetValueVisualTreeWalker(registry)
+        {
+            NativeResult = "Native search control is not enabled"
+        };
+
+        var result = walker.TryNativeElementSetValue(id, "renewal");
+
+        Assert.Equal("ok", result);
+        Assert.Equal("renewal", owner.Query);
+        Assert.Same(nativeElement, walker.NativeElement);
+        Assert.Equal("renewal", walker.Value);
     }
 
     [Fact]
@@ -734,6 +779,28 @@ public class NativeElementRegistrationRegistryTests
         {
             FallbackInvoked = true;
             return "ok";
+        }
+    }
+
+    private sealed class SetValueVisualTreeWalker : VisualTreeWalker
+    {
+        public SetValueVisualTreeWalker(NativeElementRegistrationRegistry registry)
+            : base(registry)
+        {
+        }
+
+        public object? NativeElement { get; private set; }
+        public string? Value { get; private set; }
+        public string? NativeResult { get; set; } = "ok";
+
+        protected override string? TrySetValueRegisteredNativeElement(
+            string elementId,
+            object nativeElement,
+            string value)
+        {
+            NativeElement = nativeElement;
+            Value = value;
+            return NativeResult;
         }
     }
 }

@@ -124,6 +124,12 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                 }
             }
 #elif IOS || MACCATALYST
+            if (registration.NativeElement is MenuItem)
+            {
+                info.Framework = "maui-logical";
+                return info;
+            }
+
             info.Framework = "apple-native";
             info.IsVisible = false;
             if (registration.NativeElement is UIKit.UIView uiView)
@@ -144,7 +150,8 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                     info.NativeProperties["displayDensity"] = window.Screen.Scale.ToString(
                         System.Globalization.CultureInfo.InvariantCulture);
                 }
-                info.IsVisible = IsAppleViewVisible(uiView);
+                info.IsVisible = IsAppleViewVisible(uiView)
+                    || IsAttachedAppleDialogSurfaceVisible(registration, uiView);
                 info.IsEnabled = uiView is not UIKit.UIControl control || control.Enabled;
                 info.IsFocused = uiView.IsFirstResponder;
                 info.AutomationId = uiView.AccessibilityIdentifier;
@@ -275,8 +282,11 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
                 }
                 info.IsVisible = IsAppKitViewVisible(nsView);
                 info.IsEnabled = nsView is not AppKit.NSControl control || control.Enabled;
-                info.IsFocused = nsView.Window?.FirstResponder == nsView;
-                info.AutomationId = nsView.AccessibilityIdentifier;
+                info.IsFocused = nsView is AppKit.NSTextField textField
+                    ? textField.CurrentEditor is not null
+                    : nsView.Window?.FirstResponder == nsView;
+                info.AutomationId = nsView.AccessibilityIdentifier
+                    ?? (registration.Owner as Element)?.AutomationId;
                 if (nsView is AppKit.NSButton nsButton)
                 {
                     info.Text = string.IsNullOrEmpty(nsButton.Title)
@@ -441,6 +451,47 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
         }
 
         return true;
+    }
+
+    private static bool IsAttachedAppleDialogSurfaceVisible(
+        NativeElementRegistrationSnapshot registration,
+        UIKit.UIView view)
+    {
+        if (registration.Discriminator?.Equals("RealizedView", StringComparison.Ordinal) != true
+            || !(registration.Role.Equals("Dialog", StringComparison.Ordinal)
+                || registration.Role.Equals("DialogAction", StringComparison.Ordinal))
+            || view.Window is not { } window
+            || view.Hidden
+            || view.Alpha <= 0
+            || view.Bounds.Width <= 0
+            || view.Bounds.Height <= 0)
+        {
+            return false;
+        }
+
+        var bounds = view.ConvertRectToView(view.Bounds, window);
+        var visibleMinX = Math.Max(window.Bounds.X, bounds.X);
+        var visibleMinY = Math.Max(window.Bounds.Y, bounds.Y);
+        var visibleMaxX = Math.Min(
+            window.Bounds.X + window.Bounds.Width,
+            bounds.X + bounds.Width);
+        var visibleMaxY = Math.Min(
+            window.Bounds.Y + window.Bounds.Height,
+            bounds.Y + bounds.Height);
+
+        for (var ancestor = view.Superview; ancestor is not null; ancestor = ancestor.Superview)
+        {
+            if (!ancestor.ClipsToBounds)
+                continue;
+
+            var clipBounds = ancestor.ConvertRectToView(ancestor.Bounds, window);
+            visibleMinX = Math.Max(visibleMinX, clipBounds.X);
+            visibleMinY = Math.Max(visibleMinY, clipBounds.Y);
+            visibleMaxX = Math.Min(visibleMaxX, clipBounds.X + clipBounds.Width);
+            visibleMaxY = Math.Min(visibleMaxY, clipBounds.Y + clipBounds.Height);
+        }
+
+        return visibleMaxX > visibleMinX && visibleMaxY > visibleMinY;
     }
 
     private static UIKit.UITableView? FindAppleTableView(UIKit.UIView view)

@@ -490,6 +490,33 @@ public class NativeElementRegistrationRegistryTests
     }
 
     [Fact]
+    public void RegisteredLogicalDialogAction_AdvertisesAndExecutesInvoke()
+    {
+        var registry = new NativeElementRegistrationRegistry();
+        var invoked = false;
+        var logicalAction = new MenuItem
+        {
+            Text = "Accept",
+            Command = new Command(() => invoked = true)
+        };
+        var id = registry.Register(
+            new ContentPage(),
+            logicalAction,
+            "DialogAction",
+            "LogicalModel");
+        var walker = new VisualTreeWalker(registry);
+
+        var info = walker.GetNativeElementInfoById(id);
+        var result = walker.TryNativeElementTap(id);
+
+        Assert.Equal("DialogAction", info?.Type);
+        Assert.Equal("Accept", info?.Text);
+        Assert.Equal(["select", "invoke"], info?.Capabilities);
+        Assert.Equal("ok", result);
+        Assert.True(invoked);
+    }
+
+    [Fact]
     public void TryNativeElementTap_DialogOwnedByTabbedPage_UsesNativeFallback()
     {
         var registry = new NativeElementRegistrationRegistry();

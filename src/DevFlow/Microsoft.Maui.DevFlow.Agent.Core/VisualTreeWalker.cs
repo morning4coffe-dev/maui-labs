@@ -619,6 +619,11 @@ public class VisualTreeWalker
             SearchHandler => TryNativeElementFocus(elementId),
             _ => null
         };
+        if (semanticResult is null
+            && registration.NativeElement is MenuItem logicalAction)
+        {
+            semanticResult = ActivateMenuItem(logicalAction);
+        }
 
         if (semanticResult is not null)
             return semanticResult;
@@ -782,7 +787,7 @@ public class VisualTreeWalker
         string? ownerId)
     {
         var nativeType = registration.NativeElement.GetType();
-        return new ElementInfo
+        var info = new ElementInfo
         {
             Id = registration.Id,
             IdentityToken = registration.Id,
@@ -805,6 +810,15 @@ public class VisualTreeWalker
                 ["registrationRole"] = registration.Role
             }
         };
+        if (registration.NativeElement is MenuItem logicalAction)
+        {
+            info.Type = "DialogAction";
+            info.Text = logicalAction.Text;
+            info.AutomationId = logicalAction.AutomationId;
+            info.IsEnabled = logicalAction.IsEnabled;
+        }
+
+        return info;
     }
 
     private List<string> GetRegisteredNativeCapabilities(
@@ -817,6 +831,7 @@ public class VisualTreeWalker
             capabilities.Add("invoke");
         }
         else if (registration.Owner is MenuItem
+            || registration.NativeElement is MenuItem
             || registration.Owner is ShellSection or ShellContent
                 && (!registration.Role.Equals("ShellTabOverflow", StringComparison.Ordinal)
                     || IsOverflowRow(registration))

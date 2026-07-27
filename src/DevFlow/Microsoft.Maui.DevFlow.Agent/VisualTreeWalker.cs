@@ -1615,7 +1615,11 @@ public class PlatformVisualTreeWalker : VisualTreeWalker
         _nativeProbe.AppendNativeWindows(roots, nativeObjects, knownWindowHandles, maxDepth);
 
         lock (_nativeObjectsLock)
+        {
             _nativeObjects = nativeObjects;
+            _nativeHitObjects.Clear();
+            _nativeHitInfos.Clear();
+        }
 
         return roots;
     }

@@ -1481,7 +1481,7 @@ public sealed class NativeWindowProbe
             && depth >= 0;
     }
 
-    private static IntPtr? TryGetTopLevelWindowHandle(AutomationElement element)
+    internal static IntPtr? TryGetTopLevelWindowHandle(AutomationElement element)
     {
         AutomationElement? current = element;
         IntPtr hwnd = IntPtr.Zero;

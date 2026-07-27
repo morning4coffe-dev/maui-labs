@@ -3061,8 +3061,10 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var reservedCapture = GetReservedCapture(request);
         if (IsNativeElementId(body.ElementId))
         {
-            var nativeResult = IsRegisteredNativeElementId(body.ElementId)
-                ? await DispatchAsync<string>(
+            string nativeResult;
+            if (IsRegisteredNativeElementId(body.ElementId))
+            {
+                nativeResult = await DispatchAsync<string>(
                     async () =>
                     {
                         var nativeElement = ResolveCapturedNativeElement(reservedCapture, body.ElementId!);
@@ -3070,14 +3072,22 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                             ? $"Native element '{body.ElementId}' is stale"
                             : await _treeWalker.TryRegisteredNativeElementTapAsync(body.ElementId!, nativeElement);
                     })
-                    ?? $"Native element '{body.ElementId}' could not be invoked"
-                : await Task.Run(() =>
+                    ?? $"Native element '{body.ElementId}' could not be invoked";
+            }
+            else
+            {
+                var nativeElement = ResolveCapturedNativeElement(reservedCapture, body.ElementId!);
+                if (nativeElement is null)
                 {
-                    var nativeElement = ResolveCapturedNativeElement(reservedCapture, body.ElementId!);
-                    return nativeElement is null
-                        ? $"Native element '{body.ElementId}' is stale"
-                        : _treeWalker.TryNativeElementTap(body.ElementId!, nativeElement);
-                });
+                    nativeResult = $"Native element '{body.ElementId}' is stale";
+                }
+                else
+                {
+                    nativeResult = await TryNativeElementTapAsync(body.ElementId!, nativeElement)
+                        ?? await Task.Run(() => _treeWalker.TryNativeElementTap(body.ElementId!, nativeElement));
+                }
+            }
+
             PublishUiOperationSpan(
                 "action.tap",
                 startedAtUtc,
@@ -3320,6 +3330,9 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     /// </remarks>
     protected virtual Task<bool> TryNativeTapFirstAsync(VisualElement ve)
         => Task.FromResult(false);
+
+    protected virtual Task<string?> TryNativeElementTapAsync(string elementId, object nativeElement)
+        => Task.FromResult<string?>(null);
 
     /// <summary>
     /// Attempts to tap a native platform view via handler for non-VisualElement IView types (e.g. Comet views).

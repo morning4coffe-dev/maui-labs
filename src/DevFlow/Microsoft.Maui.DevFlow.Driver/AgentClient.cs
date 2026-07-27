@@ -112,37 +112,30 @@ public class AgentClient : IDisposable
         var candidates = await ResolveLoopbackCandidatesAsync(context.DnsEndPoint.Host, cancellationToken)
             .ConfigureAwait(false);
 
+        using var raceCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var attempts = candidates
+            .Select(address => ConnectLoopbackAddressAsync(address, port, raceCts.Token))
+            .ToList();
         List<Exception>? failures = null;
-        foreach (var address in candidates)
+        while (attempts.Count > 0)
         {
-            var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp)
-            {
-                NoDelay = true
-            };
+            var completed = await Task.WhenAny(attempts).ConfigureAwait(false);
+            attempts.Remove(completed);
             try
             {
-                using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-                attemptCts.CancelAfter(LoopbackConnectAttemptTimeout);
-                await socket.ConnectAsync(address, port, attemptCts.Token).ConfigureAwait(false);
+                var socket = await completed.ConfigureAwait(false);
+                raceCts.Cancel();
+                await DisposeSuccessfulConnectionsAsync(attempts).ConfigureAwait(false);
                 return new NetworkStream(socket, ownsSocket: true);
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                socket.Dispose();
+                raceCts.Cancel();
+                await DisposeSuccessfulConnectionsAsync(attempts).ConfigureAwait(false);
                 throw;
-            }
-            catch (OperationCanceledException)
-            {
-                // The per-attempt timeout fired while the caller's token is still valid. Record a
-                // descriptive reason (rather than a bare "operation canceled", which reads like a
-                // user-initiated cancellation) before falling through to the next loopback family.
-                socket.Dispose();
-                (failures ??= new List<Exception>()).Add(new TimeoutException(
-                    $"Connect to [{address}]:{port} timed out after {LoopbackConnectAttemptTimeout.TotalSeconds:0}s."));
             }
             catch (Exception ex)
             {
-                socket.Dispose();
                 (failures ??= new List<Exception>()).Add(ex);
             }
         }
@@ -150,6 +143,53 @@ public class AgentClient : IDisposable
         throw failures is { Count: > 0 }
             ? new SocketException((int)SocketError.ConnectionRefused, BuildLoopbackFailureMessage(failures))
             : new SocketException((int)SocketError.ConnectionRefused);
+    }
+
+    private static async Task<Socket> ConnectLoopbackAddressAsync(
+        IPAddress address, int port, CancellationToken cancellationToken)
+    {
+        var socket = new Socket(address.AddressFamily, SocketType.Stream, ProtocolType.Tcp)
+        {
+            NoDelay = true
+        };
+        try
+        {
+            using var attemptCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+            attemptCts.CancelAfter(LoopbackConnectAttemptTimeout);
+            await socket.ConnectAsync(address, port, attemptCts.Token).ConfigureAwait(false);
+            return socket;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            socket.Dispose();
+            throw;
+        }
+        catch (OperationCanceledException)
+        {
+            socket.Dispose();
+            throw new TimeoutException(
+                $"Connect to [{address}]:{port} timed out after {LoopbackConnectAttemptTimeout.TotalSeconds:0}s.");
+        }
+        catch
+        {
+            socket.Dispose();
+            throw;
+        }
+    }
+
+    private static async Task DisposeSuccessfulConnectionsAsync(List<Task<Socket>> attempts)
+    {
+        foreach (var attempt in attempts)
+        {
+            try
+            {
+                (await attempt.ConfigureAwait(false)).Dispose();
+            }
+            catch
+            {
+                // Losing connection attempts are expected to fail or be canceled.
+            }
+        }
     }
 
     private static async Task<List<IPAddress>> ResolveLoopbackCandidatesAsync(string host, CancellationToken cancellationToken)

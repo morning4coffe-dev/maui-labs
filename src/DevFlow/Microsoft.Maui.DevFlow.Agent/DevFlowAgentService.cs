@@ -288,6 +288,92 @@ public class PlatformAgentService : DevFlowAgentService
         }
         return null;
     }
+
+    private static void FindWinUIElementsByAutomationId(
+        Microsoft.UI.Xaml.DependencyObject? parent,
+        string automationId,
+        ICollection<Microsoft.UI.Xaml.FrameworkElement> matches)
+    {
+        if (parent is null)
+            return;
+
+        if (parent is Microsoft.UI.Xaml.FrameworkElement element
+            && string.Equals(
+                Microsoft.UI.Xaml.Automation.AutomationProperties.GetAutomationId(element),
+                automationId,
+                StringComparison.Ordinal))
+        {
+            matches.Add(element);
+        }
+
+        var count = Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChildrenCount(parent);
+        for (var i = 0; i < count; i++)
+        {
+            FindWinUIElementsByAutomationId(
+                Microsoft.UI.Xaml.Media.VisualTreeHelper.GetChild(parent, i),
+                automationId,
+                matches);
+        }
+    }
+
+    private static Microsoft.UI.Xaml.FrameworkElement? FindWinUIRoot(IntPtr targetHwnd)
+    {
+        var app = Application.Current;
+        if (app is null)
+            return null;
+
+        foreach (var window in app.Windows)
+        {
+            if (window.Handler?.PlatformView is not Microsoft.UI.Xaml.Window nativeWindow
+                || nativeWindow.Content is not Microsoft.UI.Xaml.FrameworkElement root
+                || WinRT.Interop.WindowNative.GetWindowHandle(nativeWindow) != targetHwnd)
+            {
+                continue;
+            }
+
+            return root;
+        }
+
+        return null;
+    }
+
+    private static bool TryInvokeWinUIElement(
+        Microsoft.UI.Xaml.FrameworkElement root,
+        string automationId)
+    {
+        var matches = new List<Microsoft.UI.Xaml.FrameworkElement>();
+        if (root.XamlRoot is not null)
+        {
+            foreach (var popup in Microsoft.UI.Xaml.Media.VisualTreeHelper
+                .GetOpenPopupsForXamlRoot(root.XamlRoot))
+            {
+                FindWinUIElementsByAutomationId(popup.Child, automationId, matches);
+            }
+        }
+
+        FindWinUIElementsByAutomationId(root, automationId, matches);
+        var uniqueMatches = new List<Microsoft.UI.Xaml.FrameworkElement>();
+        foreach (var match in matches)
+        {
+            if (!uniqueMatches.Any(existing => ReferenceEquals(existing, match)))
+                uniqueMatches.Add(match);
+        }
+        if (uniqueMatches.Count != 1)
+            return false;
+
+        var target = uniqueMatches[0];
+        var peer =
+            Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.FromElement(target)
+            ?? Microsoft.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer.CreatePeerForElement(target);
+        if (peer?.GetPattern(Microsoft.UI.Xaml.Automation.Peers.PatternInterface.Invoke)
+            is not Microsoft.UI.Xaml.Automation.Provider.IInvokeProvider invokeProvider)
+        {
+            return false;
+        }
+
+        invokeProvider.Invoke();
+        return true;
+    }
 #endif
 
     protected override IProfilerCollector CreateProfilerCollector()
@@ -600,6 +686,81 @@ public class PlatformAgentService : DevFlowAgentService
         catch { }
 
         return false;
+    }
+
+    protected override async Task<string?> TryNativeElementTapAsync(string elementId, object nativeElement)
+    {
+#if WINDOWS
+        if (nativeElement is System.Windows.Automation.AutomationElement automationElement)
+        {
+            try
+            {
+                var automationId = automationElement.Current.AutomationId;
+                var targetHwnd = Windows.NativeWindowProbe.TryGetTopLevelWindowHandle(
+                    automationElement);
+                if (!string.IsNullOrEmpty(automationId) && targetHwnd is { } hwnd)
+                {
+                    var root = await DispatchAsync(() => FindWinUIRoot(hwnd));
+                    if (root is not null)
+                    {
+                        var completion = new TaskCompletionSource<bool>(
+                            TaskCreationOptions.RunContinuationsAsynchronously);
+                        var invocationState = 0;
+                        if (root.DispatcherQueue.TryEnqueue(() =>
+                        {
+                            if (Interlocked.CompareExchange(ref invocationState, 1, 0) != 0)
+                            {
+                                completion.TrySetResult(false);
+                                return;
+                            }
+
+                            try
+                            {
+                                completion.TrySetResult(
+                                    TryInvokeWinUIElement(root, automationId));
+                            }
+                            catch (Exception ex) when (ex is
+                                InvalidOperationException
+                                or System.Runtime.InteropServices.COMException)
+                            {
+                                System.Diagnostics.Debug.WriteLine(
+                                    $"[Microsoft.Maui.DevFlow] WinUI native element invocation skipped: {ex.Message}");
+                                completion.TrySetResult(false);
+                            }
+                            catch (Exception ex)
+                            {
+                                completion.TrySetException(ex);
+                            }
+                        }))
+                        {
+                            var winner = await Task.WhenAny(
+                                completion.Task,
+                                Task.Delay(TimeSpan.FromSeconds(5)));
+                            if (winner == completion.Task)
+                            {
+                                if (await completion.Task)
+                                    return "ok";
+                            }
+                            else if (Interlocked.CompareExchange(ref invocationState, 2, 0) != 0)
+                            {
+                                return "ok";
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex) when (ex is
+                System.Windows.Automation.ElementNotAvailableException
+                or InvalidOperationException
+                or System.Runtime.InteropServices.COMException)
+            {
+                System.Diagnostics.Debug.WriteLine(
+                    $"[Microsoft.Maui.DevFlow] WinUI native element lookup skipped: {ex.Message}");
+            }
+        }
+#endif
+
+        return await base.TryNativeElementTapAsync(elementId, nativeElement);
     }
 
 #if ANDROID || IOS || MACCATALYST

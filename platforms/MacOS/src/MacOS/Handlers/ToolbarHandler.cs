@@ -1289,7 +1289,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
         _nativeSearchField = searchField;
         RegisterNativeElement(
             _shellSearchHandler ?? (object?)_currentPage,
-            searchField,
+            _shellSearchHandler != null ? searchField : nsSearchItem,
             "SearchHandler");
         if (_searchItem != null)
         {
@@ -1393,8 +1393,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
         var currentItems = _toolbar.Items
             .Cast<NSObject>()
             .ToHashSet(ReferenceEqualityComparer.Instance);
-        if ((_searchItem != null || _shellSearchHandler != null)
-            && _nativeSearchField != null)
+        if (_shellSearchHandler != null && _nativeSearchField != null)
             currentItems.Add(_nativeSearchField);
         foreach (var nativeElement in _registeredNativeElements.ToArray())
         {
@@ -1412,7 +1411,7 @@ public class MacOSToolbarManager : NSObject, INSToolbarDelegate
                 RegisterNativeElement(
                     owner,
                     nativeItem.Identifier is SearchId or ShellSearchId
-                        && (_searchItem != null || _shellSearchHandler != null)
+                        && _shellSearchHandler != null
                         && _nativeSearchField != null
                         ? _nativeSearchField
                         : nativeItem,

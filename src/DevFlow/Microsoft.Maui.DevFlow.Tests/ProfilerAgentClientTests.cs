@@ -3,7 +3,9 @@ using System.Net.Sockets;
 using System.Reflection;
 using System.Text;
 using Microsoft.Maui.DevFlow.Agent.Core;
+using Microsoft.Maui.DevFlow.Agent.Core.Network;
 using Microsoft.Maui.DevFlow.Agent.Core.Profiling;
+using Microsoft.Maui.DevFlow.Driver;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -91,6 +93,24 @@ public class ProfilerAgentClientTests
                       "sampleCursor": 1,
                       "markerCursor": 1,
                       "spanCursor": 1,
+                      "sampleMetadata": {
+                        "oldestCursor": 1,
+                        "latestCursor": 3,
+                        "lostCount": 0,
+                        "availableCount": 3
+                      },
+                      "markerMetadata": {
+                        "oldestCursor": 1,
+                        "latestCursor": 1,
+                        "lostCount": 0,
+                        "availableCount": 1
+                      },
+                      "spanMetadata": {
+                        "oldestCursor": 1,
+                        "latestCursor": 1,
+                        "lostCount": 0,
+                        "availableCount": 1
+                      },
                       "isActive": true
                     }
                     """;
@@ -141,6 +161,9 @@ public class ProfilerAgentClientTests
         Assert.Equal(1, batch.SampleCursor);
         Assert.Equal(1, batch.MarkerCursor);
         Assert.Equal(1, batch.SpanCursor);
+        Assert.Equal(1, batch.SampleMetadata.OldestCursor);
+        Assert.Equal(3, batch.SampleMetadata.LatestCursor);
+        Assert.Equal(3, batch.SampleMetadata.AvailableCount);
 
         var stopped = await client.StopProfilerAsync(started.SessionId);
         Assert.NotNull(stopped);
@@ -181,7 +204,65 @@ public class ProfilerAgentClientTests
 
         var currentSessionResponse = await ((Task<HttpResponse>)method.Invoke(service, [currentSessionRequest])!);
         Assert.Equal(200, currentSessionResponse.StatusCode);
-        Assert.Contains(session.SessionId, currentSessionResponse.Body);
+        var currentSessionBody = currentSessionResponse.Body
+            ?? throw new InvalidOperationException("Profiler samples response did not include a body.");
+        Assert.Contains(session.SessionId, currentSessionBody);
+        Assert.Contains("\"sampleMetadata\"", currentSessionBody);
+        Assert.Contains("\"oldestCursor\"", currentSessionBody);
+        var batch = DriverJson.Deserialize<Microsoft.Maui.DevFlow.Driver.ProfilerBatch>(currentSessionBody);
+        Assert.NotNull(batch);
+        Assert.Equal(session.SessionId, batch.SessionId);
+        Assert.Equal(0, batch.SampleMetadata.LatestCursor);
+    }
+
+    [Fact]
+    public async Task ProfilerCapabilities_UseCompatibleCamelCaseContract()
+    {
+        using var service = new DevFlowAgentService(new AgentOptions { Enabled = false, EnableProfiler = true });
+        var method = typeof(DevFlowAgentService).GetMethod(
+            "HandleProfilerCapabilities",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+
+        var response = await ((Task<HttpResponse>)method.Invoke(service, [new HttpRequest()])!);
+
+        Assert.Equal(200, response.StatusCode);
+        Assert.Contains("\"available\"", response.Body);
+        Assert.Contains("\"fpsSupported\"", response.Body);
+        Assert.DoesNotContain("\"Available\"", response.Body);
+        Assert.DoesNotContain("\"FpsSupported\"", response.Body);
+    }
+
+    [Fact]
+    public void CapturedNetworkRequest_UsesRequestTimestampAsProfilerSpanStart()
+    {
+        using var service = new DevFlowAgentService(new AgentOptions { Enabled = false, EnableProfiler = true });
+        var storeField = typeof(DevFlowAgentService).GetField("_profilerSessions", BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(storeField);
+        var store = Assert.IsType<ProfilerSessionStore>(storeField.GetValue(service));
+        store.Start(250);
+
+        var timestamp = new DateTimeOffset(2026, 1, 1, 12, 0, 0, TimeSpan.Zero);
+        var entry = new NetworkRequestEntry
+        {
+            Timestamp = timestamp,
+            Method = "GET",
+            Url = "https://example.test/api",
+            Path = "/api",
+            DurationMs = 125
+        };
+        var handler = typeof(DevFlowAgentService).GetMethod(
+            "HandleCapturedNetworkRequest",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(handler);
+
+        handler.Invoke(service, [entry]);
+
+        var batch = store.GetBatch(sampleCursor: 0, markerCursor: 0, spanCursor: 0, limit: 10);
+        var span = Assert.Single(batch.Spans);
+        Assert.Equal(timestamp.UtcDateTime, span.StartTsUtc);
+        Assert.Equal(timestamp.UtcDateTime.AddMilliseconds(125), span.EndTsUtc);
+        Assert.Equal(125, span.DurationMs);
     }
 
     private static async Task<string> ReadRequestAsync(NetworkStream stream)

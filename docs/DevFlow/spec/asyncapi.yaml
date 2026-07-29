@@ -404,7 +404,7 @@ channels:
         contentType: application/json
         payload:
           type: object
-          description: Batch of profiler data with updated cursors.
+          description: Batch of profiler data with next cursors and stream loss metadata.
           required: [type, timestamp, data]
           properties:
             type:
@@ -418,7 +418,7 @@ channels:
               $ref: './schemas/profiler.json#/$defs/ProfilerBatch'
               description: >
                 Profiler batch containing samples, markers, spans, and
-                updated cursor positions for pagination.
+                next cursors and retained-range/loss metadata for pagination.
 
       profilerStopped:
         name: profilerStopped
@@ -451,7 +451,9 @@ channels:
     description: |
       Real-time UI state change notifications including navigation, lifecycle
       changes, visual tree mutations, system alerts, and unhandled exceptions.
-      Clients subscribe to the event types they are interested in.
+      Clients subscribe to the event types they are interested in. Each
+      subscription retains a bounded queue; a loss notification precedes
+      retained events when older events were discarded.
     servers:
       - $ref: '#/servers/agent'
     messages:
@@ -636,6 +638,40 @@ channels:
                   $ref: './schemas/common.json#/$defs/Timestamp'
                   description: Timestamp when the error occurred.
 
+      uiLoss:
+        name: uiLoss
+        title: UI Event Loss
+        summary: Older UI events were dropped because this subscriber's queue was full.
+        contentType: application/json
+        payload:
+          type: object
+          description: Bounded UI event subscription queue overflow notification.
+          required: [type, timestamp, data]
+          properties:
+            type:
+              type: string
+              const: loss
+            timestamp:
+              $ref: './schemas/common.json#/$defs/Timestamp'
+            data:
+              type: object
+              required: [stream, reason, droppedCount, totalDroppedCount]
+              properties:
+                stream:
+                  type: string
+                  const: ui-events
+                reason:
+                  type: string
+                  const: queue-overflow
+                droppedCount:
+                  type: integer
+                  minimum: 1
+                  description: Events dropped since the preceding loss notification.
+                totalDroppedCount:
+                  type: integer
+                  minimum: 1
+                  description: Total events dropped for this subscription.
+
       # ── client → server ──
       uiSubscribe:
         name: uiSubscribe
@@ -775,13 +811,15 @@ operations:
     summary: Server streams UI lifecycle events to the client.
     description: |
       Sends real-time notifications for navigation, lifecycle changes,
-      visual tree mutations, system alerts, and unhandled exceptions.
+      visual tree mutations, system alerts, unhandled exceptions, and queue
+      loss notifications when a subscriber falls behind.
     messages:
       - $ref: '#/channels/uiEvents/messages/uiNavigation'
       - $ref: '#/channels/uiEvents/messages/uiLifecycle'
       - $ref: '#/channels/uiEvents/messages/uiTreeChange'
       - $ref: '#/channels/uiEvents/messages/uiAlert'
       - $ref: '#/channels/uiEvents/messages/uiError'
+      - $ref: '#/channels/uiEvents/messages/uiLoss'
 
   receiveUICommands:
     action: receive

@@ -1880,8 +1880,26 @@ public class ProfilerBatch
     public long MarkerCursor { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("spanCursor")]
     public long SpanCursor { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("sampleMetadata")]
+    public ProfilerStreamReadMetadata SampleMetadata { get; set; } = new();
+    [System.Text.Json.Serialization.JsonPropertyName("markerMetadata")]
+    public ProfilerStreamReadMetadata MarkerMetadata { get; set; } = new();
+    [System.Text.Json.Serialization.JsonPropertyName("spanMetadata")]
+    public ProfilerStreamReadMetadata SpanMetadata { get; set; } = new();
     [System.Text.Json.Serialization.JsonPropertyName("isActive")]
     public bool IsActive { get; set; }
+}
+
+public class ProfilerStreamReadMetadata
+{
+    [System.Text.Json.Serialization.JsonPropertyName("oldestCursor")]
+    public long OldestCursor { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("latestCursor")]
+    public long LatestCursor { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("lostCount")]
+    public long LostCount { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("availableCount")]
+    public int AvailableCount { get; set; }
 }
 
 public class ProfilerSpan

@@ -19,6 +19,13 @@ public class ProfilerCoreTests
             SampleCursor = 2,
             MarkerCursor = 3,
             SpanCursor = 4,
+            SampleMetadata = new()
+            {
+                OldestCursor = 1,
+                LatestCursor = 4,
+                LostCount = 0,
+                AvailableCount = 3
+            },
             Samples = new()
             {
                 new ProfilerSample
@@ -78,6 +85,8 @@ public class ProfilerCoreTests
         Assert.Single(parsed.Spans);
         Assert.Equal("navigation.start", parsed.Markers[0].Type);
         Assert.Equal(4, parsed.SpanCursor);
+        Assert.Equal(1, parsed.SampleMetadata.OldestCursor);
+        Assert.Equal(4, parsed.SampleMetadata.LatestCursor);
         Assert.Equal(123_456, parsed.Samples[0].ManagedBytes);
         Assert.Equal(654_321, parsed.Samples[0].NativeMemoryBytes);
         Assert.Equal("android.native-heap-allocated", parsed.Samples[0].NativeMemoryKind);
@@ -94,13 +103,34 @@ public class ProfilerCoreTests
         ring.Add(new ProfilerMarker { Name = "m3", Type = "t", TsUtc = DateTime.UtcNow.AddMilliseconds(2) });
         ring.Add(new ProfilerMarker { Name = "m4", Type = "t", TsUtc = DateTime.UtcNow.AddMilliseconds(3) });
 
-        var items = ring.ReadAfter(0, 10, out var latestCursor);
+        var result = ring.ReadAfter(0, 10);
 
-        Assert.Equal(4, latestCursor);
-        Assert.Equal(3, items.Count);
-        Assert.Equal("m2", items[0].Name);
-        Assert.Equal("m3", items[1].Name);
-        Assert.Equal("m4", items[2].Name);
+        Assert.Equal(4, result.NextCursor);
+        Assert.Equal(2, result.OldestCursor);
+        Assert.Equal(4, result.LatestCursor);
+        Assert.Equal(1, result.LostCount);
+        Assert.Equal(3, result.AvailableCount);
+        Assert.Equal(3, result.Items.Count);
+        Assert.Equal("m2", result.Items[0].Name);
+        Assert.Equal("m3", result.Items[1].Name);
+        Assert.Equal("m4", result.Items[2].Name);
+    }
+
+    [Fact]
+    public void ProfilerRingBuffer_LimitedReadAdvancesCursorOnlyToLastReturnedItem()
+    {
+        var ring = new ProfilerRingBuffer<ProfilerMarker>(5);
+        for (var i = 1; i <= 4; i++)
+            ring.Add(new ProfilerMarker { Name = $"m{i}", Type = "t", TsUtc = DateTime.UtcNow });
+
+        var firstPage = ring.ReadAfter(0, 2);
+        var secondPage = ring.ReadAfter(firstPage.NextCursor, 2);
+
+        Assert.Equal(2, firstPage.NextCursor);
+        Assert.Equal(4, firstPage.LatestCursor);
+        Assert.Equal(["m1", "m2"], firstPage.Items.Select(item => item.Name));
+        Assert.Equal(4, secondPage.NextCursor);
+        Assert.Equal(["m3", "m4"], secondPage.Items.Select(item => item.Name));
     }
 
     [Fact]
@@ -118,6 +148,37 @@ public class ProfilerCoreTests
         Assert.Equal(2, batch.Markers.Count);
         Assert.True(batch.Markers[1].TsUtc > batch.Markers[0].TsUtc);
         Assert.Equal("second", batch.Markers[1].Name);
+    }
+
+    [Fact]
+    public void ProfilerSessionStore_ReportsOverwriteLossForEachStream()
+    {
+        var store = new ProfilerSessionStore(maxSamples: 2, maxMarkers: 2, maxSpans: 2);
+        store.Start(500);
+        var now = DateTime.UtcNow;
+
+        for (var i = 0; i < 3; i++)
+        {
+            store.AddSample(new ProfilerSample { TsUtc = now.AddMilliseconds(i) });
+            store.AddMarker(new ProfilerMarker { TsUtc = now.AddMilliseconds(i), Type = "test", Name = $"m{i}" });
+            store.AddSpan(new ProfilerSpan
+            {
+                StartTsUtc = now.AddMilliseconds(i),
+                EndTsUtc = now.AddMilliseconds(i + 1),
+                Name = $"s{i}"
+            });
+        }
+
+        var batch = store.GetBatch(sampleCursor: 0, markerCursor: 0, spanCursor: 0, limit: 1);
+
+        Assert.Equal(2, batch.SampleCursor);
+        Assert.Equal(2, batch.MarkerCursor);
+        Assert.Equal(2, batch.SpanCursor);
+        Assert.Equal(1, batch.SampleMetadata.LostCount);
+        Assert.Equal(1, batch.MarkerMetadata.LostCount);
+        Assert.Equal(1, batch.SpanMetadata.LostCount);
+        Assert.Equal(2, batch.SampleMetadata.AvailableCount);
+        Assert.Equal(3, batch.SampleMetadata.LatestCursor);
     }
 
     [Fact]
@@ -173,31 +234,25 @@ public class ProfilerCoreTests
         Assert.True(second);
         Assert.True(sample1.ManagedBytes >= 0);
         Assert.True(sample1.Gc0 >= 0);
-        Assert.StartsWith("managed.", sample1.FrameSource);
-        Assert.StartsWith("estimated", sample1.FrameQuality);
-        Assert.True(sample1.Fps > 0);
-        Assert.True(sample1.FrameTimeMsP95 > 0);
+        Assert.Equal("unavailable", sample1.FrameSource);
+        Assert.Equal("unavailable", sample1.FrameQuality);
+        Assert.Null(sample1.Fps);
+        Assert.Null(sample1.FrameTimeMsP50);
+        Assert.Null(sample1.FrameTimeMsP95);
+        Assert.Null(sample1.WorstFrameTimeMs);
+        Assert.Equal(0, sample1.JankFrameCount);
+        Assert.Equal(0, sample1.UiThreadStallCount);
+        var capabilities = collector.GetCapabilities();
+        Assert.False(capabilities.FpsSupported);
+        Assert.False(capabilities.FrameTimingsEstimated);
+        Assert.False(capabilities.NativeFrameTimingsSupported);
+        Assert.False(capabilities.JankEventsSupported);
+        Assert.False(capabilities.UiThreadStallSupported);
         if (sample1.NativeMemoryBytes.HasValue)
             Assert.Equal("process.working-set-minus-managed", sample1.NativeMemoryKind);
         else
             Assert.Null(sample1.NativeMemoryKind);
         Assert.True(sample2.TsUtc > sample1.TsUtc);
-    }
-
-    [Fact]
-    public void RuntimeProfilerCollector_InvalidFrameEstimate_UsesDefaultFrameEstimate()
-    {
-        var collector = new RuntimeProfilerCollector();
-        collector.Start(100);
-        SetPrivateField(collector, "_estimatedFrameTimeMs", 0d);
-
-        var collected = collector.TryCollect(out var sample);
-        collector.Stop();
-
-        Assert.True(collected);
-        Assert.True(sample.Fps > 0, $"Fps was {sample.Fps}, expected > 0");
-        Assert.True(sample.FrameTimeMsP95 > 0, $"FrameTimeMsP95 was {sample.FrameTimeMsP95}, expected > 0");
-        Assert.StartsWith("estimated.default-60hz", sample.FrameQuality);
     }
 
     [Fact]
@@ -214,7 +269,7 @@ public class ProfilerCoreTests
     }
 
     [Fact]
-    public void RuntimeProfilerCollector_WhenNativeProviderStartFails_CleansUpAndFallsBackToEstimated()
+    public void RuntimeProfilerCollector_WhenNativeProviderStartFails_ReportsFrameMetricsAsUnavailable()
     {
         var provider = new ThrowingNativeProvider();
         var collector = new RuntimeProfilerCollector(provider);
@@ -228,8 +283,14 @@ public class ProfilerCoreTests
         Assert.Equal(1, provider.StartCalls);
         Assert.True(provider.StopCalls >= 1);
         Assert.True(collected);
-        Assert.StartsWith("managed.", sample.FrameSource);
-        Assert.True(capabilities.FrameTimingsEstimated);
+        Assert.Equal("unavailable", sample.FrameSource);
+        Assert.Equal("unavailable", sample.FrameQuality);
+        Assert.Null(sample.Fps);
+        Assert.Null(sample.FrameTimeMsP95);
+        Assert.Equal(0, sample.JankFrameCount);
+        Assert.Equal(0, sample.UiThreadStallCount);
+        Assert.False(capabilities.FpsSupported);
+        Assert.False(capabilities.FrameTimingsEstimated);
         Assert.False(capabilities.NativeFrameTimingsSupported);
         Assert.False(capabilities.JankEventsSupported);
         Assert.False(capabilities.UiThreadStallSupported);
@@ -267,8 +328,9 @@ public class ProfilerCoreTests
         AssertCorePropertiesExistInDriver<ProfilerMarker, Microsoft.Maui.DevFlow.Driver.ProfilerMarker>();
         AssertCorePropertiesExistInDriver<ProfilerSpan, Microsoft.Maui.DevFlow.Driver.ProfilerSpan>();
         AssertCorePropertiesExistInDriver<ProfilerBatch, Microsoft.Maui.DevFlow.Driver.ProfilerBatch>();
+        AssertCorePropertiesExistInDriver<ProfilerStreamReadMetadata, Microsoft.Maui.DevFlow.Driver.ProfilerStreamReadMetadata>();
         AssertCorePropertiesExistInDriver<ProfilerHotspot, Microsoft.Maui.DevFlow.Driver.ProfilerHotspot>();
-        AssertCorePropertiesExistInDriver<ProfilerCapabilities, Microsoft.Maui.DevFlow.Driver.ProfilerCapabilities>("Available");
+        AssertCorePropertiesExistInDriver<ProfilerCapabilities, Microsoft.Maui.DevFlow.Driver.ProfilerCapabilities>();
     }
 
     [Fact]
@@ -369,13 +431,6 @@ public class ProfilerCoreTests
         Assert.True(
             missingInDriver.Length == 0,
             $"Driver contract {typeof(TDriver).Name} is missing properties: {string.Join(", ", missingInDriver)}");
-    }
-
-    private static void SetPrivateField<TValue>(object instance, string fieldName, TValue value)
-    {
-        var field = instance.GetType().GetField(fieldName, BindingFlags.Instance | BindingFlags.NonPublic);
-        Assert.NotNull(field);
-        field.SetValue(instance, value);
     }
 
     private sealed class ThrowingNativeProvider : INativeFrameStatsProvider

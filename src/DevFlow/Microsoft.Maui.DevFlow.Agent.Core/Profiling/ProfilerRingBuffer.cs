@@ -1,5 +1,15 @@
 namespace Microsoft.Maui.DevFlow.Agent.Core.Profiling;
 
+public sealed class ProfilerRingBufferReadResult<T> where T : class
+{
+    public List<T> Items { get; init; } = new();
+    public long NextCursor { get; init; }
+    public long OldestCursor { get; init; }
+    public long LatestCursor { get; init; }
+    public long LostCount { get; init; }
+    public int AvailableCount { get; init; }
+}
+
 public class ProfilerRingBuffer<T> where T : class
 {
     private readonly (long Sequence, T Value)[] _buffer;
@@ -29,34 +39,52 @@ public class ProfilerRingBuffer<T> where T : class
         }
     }
 
-    public List<T> ReadAfter(long afterSequence, int limit, out long latestSequence)
+    public ProfilerRingBufferReadResult<T> ReadAfter(long afterSequence, int limit)
     {
-        if (limit <= 0)
-        {
-            latestSequence = _latestSequence;
-            return new List<T>();
-        }
-
         lock (_gate)
         {
-            latestSequence = _latestSequence;
-            if (_count == 0 || afterSequence >= _latestSequence)
-                return new List<T>();
-
-            var oldestSequence = _latestSequence - _count + 1;
-            var firstSequence = Math.Max(afterSequence + 1, oldestSequence);
-            var remaining = _latestSequence - firstSequence + 1;
-            var take = (int)Math.Min(limit, remaining);
+            var requestedCursor = Math.Max(0, afterSequence);
+            var latestCursor = _latestSequence;
+            var oldestCursor = _count == 0 ? 0 : latestCursor - _count + 1;
+            var lostCount = _count == 0
+                ? 0
+                : Math.Max(0, oldestCursor - requestedCursor - 1);
+            var firstAvailableCursor = _count == 0
+                ? 0
+                : Math.Max(requestedCursor + 1, oldestCursor);
+            var availableCount = _count == 0 || firstAvailableCursor > latestCursor
+                ? 0
+                : (int)(latestCursor - firstAvailableCursor + 1);
+            var take = Math.Min(Math.Max(0, limit), availableCount);
             var results = new List<T>(take);
 
-            for (var sequence = firstSequence; sequence < firstSequence + take; sequence++)
+            for (var sequence = firstAvailableCursor; sequence < firstAvailableCursor + take; sequence++)
             {
                 var index = (int)((sequence - 1) % _buffer.Length);
                 results.Add(_buffer[index].Value);
             }
 
-            return results;
+            return new ProfilerRingBufferReadResult<T>
+            {
+                Items = results,
+                NextCursor = take == 0 ? requestedCursor : firstAvailableCursor + take - 1,
+                OldestCursor = oldestCursor,
+                LatestCursor = latestCursor,
+                LostCount = lostCount,
+                AvailableCount = availableCount
+            };
         }
+    }
+
+    /// <summary>
+    /// Compatibility overload. The returned cursor is the last item actually returned, so callers
+    /// can continue paging without skipping unread entries.
+    /// </summary>
+    public List<T> ReadAfter(long afterSequence, int limit, out long nextCursor)
+    {
+        var result = ReadAfter(afterSequence, limit);
+        nextCursor = result.NextCursor;
+        return result.Items;
     }
 
     public void Clear()

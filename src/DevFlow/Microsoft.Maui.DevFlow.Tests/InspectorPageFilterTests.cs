@@ -145,4 +145,21 @@ public class InspectorPageFilterTests
         Assert.Contains("data-id=\"sheet\"", html);
         Assert.DoesNotContain("top:-", html);
     }
+
+    [Fact]
+    public void InspectorLiveEventHandler_OnlyRefreshesFramesForVisualEventTypes()
+    {
+        var assembly = typeof(InspectorServer).Assembly;
+        using var stream = assembly.GetManifestResourceStream(
+            "Microsoft.Maui.Cli.DevFlow.Inspector.Web.devflow.js");
+        Assert.NotNull(stream);
+        using var reader = new StreamReader(stream);
+        var script = reader.ReadToEnd();
+
+        Assert.Contains("JSON.parse(event.data).type || null", script);
+        Assert.Contains(
+            "['treeChange', 'navigation', 'lifecycle', 'themeChange', 'alert'].includes(type)",
+            script);
+        Assert.DoesNotContain("if (!document.hidden && !replaying) scheduleRefresh(150);", script);
+    }
 }

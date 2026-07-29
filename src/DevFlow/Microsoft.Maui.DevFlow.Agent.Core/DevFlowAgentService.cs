@@ -56,13 +56,10 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     private CancellationTokenSource? _profilerLoopCts;
     private Task? _profilerLoopTask;
     private DateTime _lastAutoJankSpanTsUtc = DateTime.MinValue;
-    private const int UiHookScanIntervalMs = 3000;
     private readonly ConditionalWeakTable<BindableObject, UiHookState> _uiHookStates = new();
     private readonly List<Action> _uiHookUnsubscribers = new();
     private readonly object _uiHookGate = new();
     private int _uiHookGeneration = 1;
-    private int _uiHookScanInFlight;
-    private DateTime _lastUiHookScanTsUtc = DateTime.MinValue;
     private const int NativeUiProbeTimeoutMs = 1500;
     // Tracks a previously-dispatched UI capture task that timed out. If still
     // pending when a new CaptureUiOrNativeAsync arrives we skip enqueuing another
@@ -124,8 +121,13 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
     private sealed class UiEventSubscription
     {
-        public System.Collections.Concurrent.ConcurrentQueue<string> Queue { get; } = new();
+        public UiEventSubscriptionQueue Queue { get; }
         public HashSet<string> Events { get; } = new(StringComparer.OrdinalIgnoreCase) { "all" };
+
+        public UiEventSubscription(int queueCapacity)
+        {
+            Queue = new UiEventSubscriptionQueue(queueCapacity);
+        }
     }
 
     /// <summary>
@@ -3815,25 +3817,25 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     protected virtual Task<T?> DispatchViaMainThreadAsync<T>(Func<Task<T?>> func) where T : class
         => MainThread.InvokeOnMainThreadAsync(func);
 
-    private object BuildProfilerCapabilitiesPayload()
+    private ProfilerCapabilities BuildProfilerCapabilitiesPayload()
     {
         var capabilities = _profilerCollector.GetCapabilities();
-        return new
+        return new ProfilerCapabilities
         {
-            available = IsProfilerFeatureAvailable,
-            supportedInBuild = true,
-            featureEnabled = _options.EnableProfiler,
-            platform = capabilities.Platform,
-            managedMemorySupported = capabilities.ManagedMemorySupported,
-            nativeMemorySupported = capabilities.NativeMemorySupported,
-            gcSupported = capabilities.GcSupported,
-            cpuPercentSupported = capabilities.CpuPercentSupported,
-            fpsSupported = capabilities.FpsSupported,
-            frameTimingsEstimated = capabilities.FrameTimingsEstimated,
-            nativeFrameTimingsSupported = capabilities.NativeFrameTimingsSupported,
-            jankEventsSupported = capabilities.JankEventsSupported,
-            uiThreadStallSupported = capabilities.UiThreadStallSupported,
-            threadCountSupported = capabilities.ThreadCountSupported
+            Available = IsProfilerFeatureAvailable,
+            SupportedInBuild = true,
+            FeatureEnabled = _options.EnableProfiler,
+            Platform = capabilities.Platform,
+            ManagedMemorySupported = capabilities.ManagedMemorySupported,
+            NativeMemorySupported = capabilities.NativeMemorySupported,
+            GcSupported = capabilities.GcSupported,
+            CpuPercentSupported = capabilities.CpuPercentSupported,
+            FpsSupported = capabilities.FpsSupported,
+            FrameTimingsEstimated = capabilities.FrameTimingsEstimated,
+            NativeFrameTimingsSupported = capabilities.NativeFrameTimingsSupported,
+            JankEventsSupported = capabilities.JankEventsSupported,
+            UiThreadStallSupported = capabilities.UiThreadStallSupported,
+            ThreadCountSupported = capabilities.ThreadCountSupported
         };
     }
 
@@ -4038,7 +4040,6 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     {
         while (!ct.IsCancellationRequested)
         {
-            EnsureAutoUiHooks();
             if (_profilerCollector.TryCollect(out var sample))
             {
                 _profilerSessions.AddSample(sample);
@@ -4140,14 +4141,6 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         if (!IsProfilerFeatureAvailable || !_profilerSessions.IsActive || _dispatcher == null || !_options.EnableHighLevelUiHooks)
             return;
 
-        var now = DateTime.UtcNow;
-        if ((now - _lastUiHookScanTsUtc).TotalMilliseconds < UiHookScanIntervalMs)
-            return;
-        if (Interlocked.CompareExchange(ref _uiHookScanInFlight, 1, 0) != 0)
-            return;
-
-        _lastUiHookScanTsUtc = now;
-
         void Scan()
         {
             try
@@ -4164,10 +4157,6 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     Name = "ui-hook-scan",
                     PayloadJson = JsonSerializer.Serialize(new { error = ex.GetBaseException().Message })
                 });
-            }
-            finally
-            {
-                Interlocked.Exchange(ref _uiHookScanInFlight, 0);
             }
         }
 
@@ -5097,8 +5086,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         if (!IsProfilerFeatureAvailable || !_profilerSessions.IsActive)
             return;
 
-        var endTimestampUtc = entry.Timestamp.UtcDateTime;
-        var startTimestampUtc = endTimestampUtc - TimeSpan.FromMilliseconds(Math.Max(0, entry.DurationMs));
+        var startTimestampUtc = entry.Timestamp.UtcDateTime;
+        var endTimestampUtc = startTimestampUtc + TimeSpan.FromMilliseconds(Math.Max(0, entry.DurationMs));
         var markerName = $"{entry.Method} {entry.Path ?? entry.Url}";
 
         Publish(new ProfilerMarker
@@ -5568,7 +5557,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         CancellationToken ct)
     {
         using var cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-        var subscription = new UiEventSubscription();
+        var subscription = new UiEventSubscription(Math.Max(1, _options.MaxUiEventSubscriptionQueueSize));
 
         lock (_uiEventSubscriptionGate)
         {

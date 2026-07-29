@@ -14,6 +14,7 @@ namespace Microsoft.Maui.DevFlow.Driver;
 [JsonSerializable(typeof(ProfilerCapabilities))]
 [JsonSerializable(typeof(ProfilerSessionInfo))]
 [JsonSerializable(typeof(ProfilerBatch))]
+[JsonSerializable(typeof(ProfilerStreamReadMetadata))]
 [JsonSerializable(typeof(List<ProfilerHotspot>))]
 [JsonSerializable(typeof(RecordingState))]
 [JsonSerializable(typeof(ThemeResult))]

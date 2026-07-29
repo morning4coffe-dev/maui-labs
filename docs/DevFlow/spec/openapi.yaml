@@ -990,7 +990,8 @@ paths:
       description: >
         Returns profiling samples, markers, and spans collected since the given
         cursors. Use cursor values from the previous response to poll for new
-        data.
+        data. Each cursor is the last item returned; stream metadata reports
+        retained ranges and overwrite loss.
       parameters:
         - name: id
           in: path

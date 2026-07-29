@@ -105,6 +105,12 @@ public class AgentOptions
     public int MaxProfilerSpans { get; set; } = 20_000;
 
     /// <summary>
+    /// Maximum pending UI events retained for each WebSocket subscription. When full, the oldest
+    /// events are discarded and the subscriber receives a loss notification. Default: 256.
+    /// </summary>
+    public int MaxUiEventSubscriptionQueueSize { get; set; } = 256;
+
+    /// <summary>
     /// Enables high-level MAUI UI correlation hooks (navigation/page/scroll markers).
     /// Default: true.
     /// </summary>

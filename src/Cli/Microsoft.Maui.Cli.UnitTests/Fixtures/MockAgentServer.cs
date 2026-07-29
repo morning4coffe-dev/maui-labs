@@ -199,6 +199,8 @@ public sealed class MockAgentServer : IAsyncDisposable
         app.MapGet("/api/v1/network/requests/{id}", (string id) => Results.Content($$"""{"id":"{{id}}"}""", "application/json"));
         app.MapDelete("/api/v1/network/requests", () => Results.Content(MockAgentResponses.ActionSuccess, "application/json"));
         app.MapGet("/api/v1/logs", () => Results.Content("""[{"level":"info","message":"ok"}]""", "application/json"));
+        app.MapGet("/api/v1/diagnostics/problems", () => Results.Content(
+            """{"enabled":true,"revision":1,"count":0,"evicted":0,"problems":[]}""", "application/json"));
     }
 }
 

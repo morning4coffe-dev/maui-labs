@@ -1346,6 +1346,16 @@ public class DevFlowCommands
 
         devflowCommand.Add(mauiCommand);
 
+        // ===== evidence commands (shareable .mauitrace bundles) =====
+        devflowCommand.Add(Evidence.EvidenceCommands.Create(
+            jsonOption,
+            noJsonOption,
+            agentHostOption,
+            agentPortOption,
+            output,
+            CreateAgentClientAsync,
+            static () => _errorOccurred = true));
+
         // ===== init / skills commands =====
         var initCommand = DevFlowSkillCommands.CreateInitCommand(jsonOption, noJsonOption, output);
         initCommand.Aliases.Add("onboard");

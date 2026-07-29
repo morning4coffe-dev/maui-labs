@@ -37,6 +37,9 @@ DevFlow Inspector in GitHub Copilot Canvas.
   files, replaying them, and reviewing per-step results;
 - an **Add to Copilot** context menu for the selected element, loaded workflow, both together, or
   the current bounded and redacted Data snapshot, including alert metadata;
+- an **Evidence** action that previews exactly what a `.mauitrace` bundle would contain, then
+  downloads it after explicit confirmation (screenshots stay opt-in) — see
+  [evidence.md](evidence.md);
 - responsive light, dark, and high-contrast host theming.
 
 ## Architecture

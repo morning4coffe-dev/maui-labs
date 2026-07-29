@@ -74,6 +74,7 @@ A comprehensive MAUI testing, automation, and debugging toolkit. The DevFlow CLI
 - **Real-time streaming** — WebSocket channels for logs, network requests, sensor data, profiler samples, and UI events
 - **Storage access** — read/write app preferences and secure storage
 - **Device introspection** — battery, connectivity, geolocation, display info, and permissions
+- **Evidence bundles** — on-demand, redacted `.mauitrace` snapshots for bug reports, with a preview before anything is shared (`maui devflow evidence`)
 
 | Package | Description |
 |---------|-------------|

@@ -221,7 +221,7 @@ Each product requires source setup **and** CI/CD configuration across two system
 
 ## DevFlow MCP Tools
 
-DevFlow exposes 67 MCP tools for AI agent integration (in `src/Cli/Microsoft.Maui.Cli/DevFlow/Mcp/Tools/`):
+DevFlow exposes 69 MCP tools for AI agent integration (in `src/Cli/Microsoft.Maui.Cli/DevFlow/Mcp/Tools/`):
 
 | Tool | Purpose |
 |------|---------|
@@ -240,6 +240,8 @@ DevFlow exposes 67 MCP tools for AI agent integration (in `src/Cli/Microsoft.Mau
 | `maui_device_info` | Device manufacturer, model, OS |
 | `maui_display_info` | Screen density, size, orientation |
 | `maui_element` | Get full element details |
+| `maui_evidence_capture` | Write a redacted `.mauitrace` evidence bundle for the running app |
+| `maui_evidence_preview` | Preview exactly what an evidence bundle would contain, without writing it |
 | `maui_extension_call` | Call an extension tool on the connected DevFlow agent |
 | `maui_extension_list` | List all extensions registered on the connected DevFlow agent |
 | `maui_files_delete` | Delete a file from an advertised app storage root |

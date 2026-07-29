@@ -3,6 +3,7 @@
 import { createInspectorApi } from './inspector-api.js';
 import { confirmModal } from './inspector-dialog.js';
 import { createDataSnapshot, isSecretContextKey, supportsDataContextScope } from './inspector-data-context.js';
+import { createEvidenceController } from './inspector-evidence.js';
 import { createPropertyGridController } from './inspector-properties.js';
 import { createElementTreeController } from './inspector-tree.js';
 
@@ -809,6 +810,7 @@ import { createElementTreeController } from './inspector-tree.js';
     ['df-toggle-replay', 60],
     ['df-load-flow', 70],
     ['df-send-copilot', 80],
+    ['df-evidence', 85],
     ['df-toggle-dock', 90],
   ]);
   toolbarActions.forEach((button, index) => {
@@ -2010,6 +2012,25 @@ import { createElementTreeController } from './inspector-tree.js';
   }
 
   if (sourceBtn) sourceBtn.addEventListener('click', openSource);
+
+  // ── Evidence: preview-then-download a redacted .mauitrace bundle ──
+  // The toolbar action is an ACTION, not another host: it reuses the same broker routes the CLI
+  // and MCP tools use, so a bundle downloaded here is byte-identical in policy to `maui devflow
+  // evidence capture`.
+  const evidenceBtn = document.getElementById('df-evidence');
+  const evidence = createEvidenceController({
+    basePath,
+    inspectorToken,
+    api: inspectorApi,
+    setStatus,
+    getSelectedId: () => selectedId,
+    getWorkflow: () => lastMarkdown,
+  });
+  if (evidenceBtn) evidenceBtn.addEventListener('click', () => {
+    setMoreOpen(false);
+    evidence.open();
+  });
+
   if (copilotBtn) copilotBtn.addEventListener('click', () => {
     if (copilotMenu && !copilotMenu.classList.contains('df-hidden')) closeCopilotMenu(true);
     else openCopilotMenu();

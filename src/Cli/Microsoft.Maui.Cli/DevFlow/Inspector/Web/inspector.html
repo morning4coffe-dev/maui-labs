@@ -40,6 +40,7 @@
     <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 6a2 2 0 0 1 2-2h5l2 3h7a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
     <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></symbol>
     <symbol id="i-attach" viewBox="0 0 24 24"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></symbol>
+    <symbol id="i-evidence" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"/><path d="m9 12 2 2 4-4"/></symbol>
     <!-- Element-type icons for the visual tree (mapped by type in devflow.js). -->
     <symbol id="i-window" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 8h20"/><path d="M6 6h.01"/></symbol>
     <symbol id="i-layout" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></symbol>
@@ -73,6 +74,7 @@
         <button id="df-goto-checkpoint" class="df-tool-btn" aria-disabled="true" title="Return to the route captured when recording started (navigation only; data is not reset). Enabled after a recording captures a start route."><svg class="df-ic"><use href="#i-route"/></svg><span class="df-btn-label">Start route</span></button>
         <button id="df-open-source" class="df-tool-btn" aria-disabled="true" title="Open the selected element's XAML source in your editor. Enabled when the selected element is defined in XAML with source mapping available."><svg class="df-ic"><use href="#i-source"/></svg><span class="df-btn-label">Source</span></button>
         <button id="df-send-copilot" class="df-tool-btn" aria-disabled="true" aria-haspopup="menu" aria-expanded="false" aria-controls="df-copilot-menu" title="Choose specific Inspector context to add to Copilot"><svg class="df-ic"><use href="#i-copilot"/></svg><span class="df-btn-label">Copilot</span><svg class="df-ic-xs df-menu-chevron"><use href="#i-chevron"/></svg></button>
+        <button id="df-evidence" class="df-tool-btn" title="Capture a shareable, redacted evidence bundle (.mauitrace). You review exactly what it contains before it downloads."><svg class="df-ic"><use href="#i-evidence"/></svg><span class="df-btn-label">Evidence</span></button>
         <button id="df-toggle-dock" class="df-tool-btn" title="Show app data: Logs, Network, Preferences, Device, Sensors, Files" aria-pressed="false"><svg class="df-ic"><use href="#i-data"/></svg><span class="df-btn-label">Data</span></button>
       </div>
       <button id="df-more" class="df-tool-btn df-more-btn df-hidden" title="More inspector actions" aria-haspopup="menu" aria-expanded="false" aria-controls="df-toolbar-overflow"><svg class="df-ic"><use href="#i-more"/></svg><span class="df-btn-label">More</span></button>

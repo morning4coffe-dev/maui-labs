@@ -591,6 +591,7 @@ public sealed class InspectorServer : IDisposable
                     "/inspector-api.js" => HandleEmbeddedFile("inspector-api.js", "application/javascript"),
                     "/inspector-dialog.js" => HandleEmbeddedFile("inspector-dialog.js", "application/javascript"),
                     "/inspector-data-context.js" => HandleEmbeddedFile("inspector-data-context.js", "application/javascript"),
+                    "/inspector-evidence.js" => HandleEmbeddedFile("inspector-evidence.js", "application/javascript"),
                     "/inspector-properties.js" => HandleEmbeddedFile("inspector-properties.js", "application/javascript"),
                     "/inspector-tree.js" => HandleEmbeddedFile("inspector-tree.js", "application/javascript"),
                     "/devflow.css" => HandleEmbeddedFile("devflow.css", "text/css"),
@@ -624,6 +625,8 @@ public sealed class InspectorServer : IDisposable
                     "/api/network" => await HandleNetworkAsync(request.Body),
                     "/api/network/detail" => await HandleNetworkDetailAsync(request.Body),
                     "/api/problems" => await HandleProblemsAsync(request.Body),
+                    "/api/evidence/preview" => await HandleEvidencePreviewAsync(request.Body),
+                    "/api/evidence/capture" => await HandleEvidenceCaptureAsync(request.Body),
                     "/api/preferences" => await HandlePreferencesAsync(request.Body),
                     "/api/device" => await HandleDeviceAsync(request.Body),
                     "/api/sensors" => await HandleSensorsAsync(request.Body),
@@ -2026,6 +2029,7 @@ public sealed class InspectorServer : IDisposable
             or "/api/files/roots" or "/api/files/list"
             or "/api/flows/files/list" or "/api/flows/files/load"
             or "/api/alerts" or "/api/alerts/dismiss"
+            or "/api/evidence/preview" or "/api/evidence/capture"
             or "/api/cdp/webviews" or "/api/cdp/source" or "/api/cdp/eval" => true,
         _ => false,
     };
@@ -2110,6 +2114,59 @@ public sealed class InspectorServer : IDisposable
         {
             return Ok("{\"ok\":false,\"error\":\"diagnostic Problems unavailable\"}");
         }
+    }
+
+    // ── Evidence bundle (.mauitrace) ────────────────────────────────────────────────────────
+    // Two-step by design: /preview returns the plan the browser must show and the user must
+    // confirm; /capture then streams the bundle bytes for download. Both are token-gated reads —
+    // the capture is a read of the app, never a mutation, and both go through the same shared
+    // EvidenceCapture used by the CLI and MCP tools, so redaction cannot diverge per surface.
+
+    private async Task<(int, string, byte[])> HandleEvidencePreviewAsync(string? body)
+    {
+        try
+        {
+            var plan = await Evidence.EvidenceCapture.PreviewAsync(_client, ReadEvidenceRequest(body, includeWorkflow: false));
+            return Ok(Evidence.EvidenceJson.Serialize(new Evidence.EvidencePreviewResponse { Ok = true, Plan = plan }));
+        }
+        catch (Exception ex) when (IsAgentUnavailableException(ex))
+        {
+            return Ok("{\"ok\":false,\"error\":\"The DevFlow agent is unavailable.\"}");
+        }
+    }
+
+    private async Task<(int, string, byte[])> HandleEvidenceCaptureAsync(string? body)
+    {
+        try
+        {
+            var (_, bytes) = await Evidence.EvidenceCapture.CaptureToBytesAsync(
+                _client, ReadEvidenceRequest(body, includeWorkflow: true));
+            return (200, "application/zip", bytes);
+        }
+        catch (Exception ex) when (IsAgentUnavailableException(ex))
+        {
+            return (503, "application/json", Encoding.UTF8.GetBytes(
+                "{\"ok\":false,\"error\":\"The DevFlow agent is unavailable.\"}"));
+        }
+    }
+
+    private Evidence.EvidenceRequest ReadEvidenceRequest(string? body, bool includeWorkflow)
+    {
+        // The workflow is user-supplied text: the request-body cap bounds it in transit and the
+        // builder re-checks it, excluding it (with a reason in the manifest) when it is too large.
+        var workflow = includeWorkflow ? ReadStringField(body, "workflow") : null;
+
+        return new Evidence.EvidenceRequest
+        {
+            // Screenshots stay opt-in: only an explicit `true` from the confirmed dialog enables it.
+            IncludeScreenshot = ReadBoolField(body, "includeScreenshot"),
+            SelectedElementId = ReadStringField(body, "elementId"),
+            LogLimit = ReadIntField(body, "logLimit", Evidence.EvidenceFormat.DefaultLogLimit, 1, Evidence.EvidenceFormat.MaxLogLimit),
+            NetworkLimit = ReadIntField(body, "networkLimit", Evidence.EvidenceFormat.DefaultNetworkLimit, 1, Evidence.EvidenceFormat.MaxNetworkLimit),
+            WorkflowMarkdown = workflow,
+            Source = "inspector",
+            ProjectHint = _project,
+        };
     }
 
     private async Task<(int, string, byte[])> HandlePreferencesAsync(string? body)
@@ -2256,13 +2313,6 @@ public sealed class InspectorServer : IDisposable
         return null;
     }
 
-    private static readonly HashSet<string> SensitiveHeaders = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token",
-    };
-
-    private static readonly string[] SensitiveHeaderFragments = { "token", "secret", "auth", "cookie", "apikey", "api-key", "api_key" };
-
     // Structural redaction of a captured HTTP request: mask sensitive headers, drop bodies, and strip
     // secret query-string values from the URL/path.
     private static void RedactNetwork(NetworkRequest r)
@@ -2275,44 +2325,16 @@ public sealed class InspectorServer : IDisposable
         if (r.Path is not null) r.Path = MaskUrlSecrets(r.Path);
     }
 
+    // The rules live in Evidence/EvidenceRedaction.cs so the inspector data tabs and the evidence
+    // bundle share one ruleset and can never drift apart. These stay as the inspector's entry points.
     internal static void RedactHeaders(Dictionary<string, string[]>? headers)
-    {
-        if (headers is null) return;
-        foreach (var key in headers.Keys.ToList())
-        {
-            var lower = key.ToLowerInvariant();
-            if (SensitiveHeaders.Contains(key) || SensitiveHeaderFragments.Any(f => lower.Contains(f)))
-                headers[key] = new[] { "<redacted>" };
-        }
-    }
-
-    private static readonly System.Text.RegularExpressions.Regex UrlSecretRegex = new(
-        @"(?i)([?&](?:access_token|refresh_token|id_token|token|api[_-]?key|apikey|key|secret|password|code|sig|signature)=)[^&#\s]+",
-        System.Text.RegularExpressions.RegexOptions.Compiled);
+        => Evidence.EvidenceRedaction.RedactHeaders(headers);
 
     internal static string MaskUrlSecrets(string url)
-        => string.IsNullOrEmpty(url) ? url : UrlSecretRegex.Replace(url, "$1<redacted>");
-
-    // Mask JWTs, Bearer tokens, and "secretKey":"value" pairs in free-form JSON text without
-    // unbalancing quotes (replacements never introduce a double-quote).
-    private static readonly System.Text.RegularExpressions.Regex JwtRegex = new(
-        @"eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}",
-        System.Text.RegularExpressions.RegexOptions.Compiled);
-    private static readonly System.Text.RegularExpressions.Regex BearerRegex = new(
-        @"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}",
-        System.Text.RegularExpressions.RegexOptions.Compiled);
-    private static readonly System.Text.RegularExpressions.Regex SecretKvRegex = new(
-        "(?i)(\"(?:[a-z0-9_-]*(?:token|secret|password|apikey|api[_-]?key|authorization)[a-z0-9_-]*)\"\\s*:\\s*)\"[^\"]*\"",
-        System.Text.RegularExpressions.RegexOptions.Compiled);
+        => Evidence.EvidenceRedaction.MaskUrlSecrets(url);
 
     internal static string MaskSecrets(string text)
-    {
-        if (string.IsNullOrEmpty(text)) return text;
-        text = JwtRegex.Replace(text, "<jwt>");
-        text = BearerRegex.Replace(text, "$1<redacted>");
-        text = SecretKvRegex.Replace(text, "$1\"<redacted>\"");
-        return text;
-    }
+        => Evidence.EvidenceRedaction.MaskSecrets(text);
 
     internal static bool IsMutation(string path) => path switch
     {

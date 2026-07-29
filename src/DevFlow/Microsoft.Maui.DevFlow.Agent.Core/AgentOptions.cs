@@ -19,6 +19,15 @@ public class AgentOptions
     /// </summary>
     public bool Enabled { get; set; } = true;
 
+    /// <summary>Build/runtime mode reported by the agent: debug, profile, or custom.</summary>
+    public string Mode { get; set; } = "debug";
+
+    /// <summary>
+    /// When true, every mutating endpoint is rejected before lease coordination. Used by explicit
+    /// optimized diagnostics builds. Default: false.
+    /// </summary>
+    public bool ReadOnly { get; set; }
+
     /// <summary>
     /// Maximum tree walk depth. 0 = unlimited. Default: 0.
     /// </summary>

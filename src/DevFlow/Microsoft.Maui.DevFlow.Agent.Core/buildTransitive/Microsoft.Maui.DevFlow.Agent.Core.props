@@ -10,8 +10,13 @@
     DevFlowXamlSourceMapsEnabled explicitly in your project to force it on or off.
   -->
   <PropertyGroup>
-    <DevFlowXamlSourceMapsEnabled Condition="'$(DevFlowXamlSourceMapsEnabled)' == '' and '$(Configuration)' == 'Debug'">true</DevFlowXamlSourceMapsEnabled>
+    <MauiDevFlowProfileMode Condition="'$(MauiDevFlowProfileMode)' == ''">false</MauiDevFlowProfileMode>
+    <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == '' and '$(MauiDevFlowProfileMode)' == 'true'">true</MauiDevFlowEnabled>
+    <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == '' and '$(Configuration)' == 'Debug'">true</MauiDevFlowEnabled>
+    <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == ''">false</MauiDevFlowEnabled>
+    <DevFlowXamlSourceMapsEnabled Condition="'$(DevFlowXamlSourceMapsEnabled)' == '' and '$(MauiDevFlowEnabled)' == 'true' and '$(MauiDevFlowProfileMode)' != 'true' and '$(Configuration)' == 'Debug'">true</DevFlowXamlSourceMapsEnabled>
     <DevFlowXamlSourceMapsEnabled Condition="'$(DevFlowXamlSourceMapsEnabled)' == ''">false</DevFlowXamlSourceMapsEnabled>
+    <EnableMauiDiagnostics Condition="'$(EnableMauiDiagnostics)' == '' and '$(MauiDevFlowEnabled)' == 'true' and '$(MauiDevFlowProfileMode)' != 'true'">true</EnableMauiDiagnostics>
   </PropertyGroup>
 
 </Project>

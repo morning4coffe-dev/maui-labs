@@ -142,6 +142,51 @@ public class AgentHttpServerTests : IDisposable
     }
 
     [Fact]
+    public async Task MutationGuard_BlocksBeforeLeaseValidationAndHandler()
+    {
+        using var server = new AgentHttpServer(_port);
+        var leaseValidations = 0;
+        var handlerCalls = 0;
+        server.MutationGuard = _ => HttpResponse.Error(
+            "Read-only diagnostics mode.",
+            statusCode: 403,
+            reason: "read-only");
+        server.MutationLeaseValidator = _ =>
+        {
+            leaseValidations++;
+            return Task.FromResult(new MutationLeaseStatus
+            {
+                Ok = true,
+                Allowed = true,
+                YouHold = true,
+            });
+        };
+        server.MapPost("/api/v1/ui/mutate", _ =>
+        {
+            handlerCalls++;
+            return Task.FromResult(HttpResponse.Json(new { ok = true }));
+        });
+        server.Start();
+        try
+        {
+            using var client = new HttpClient();
+            var response = await client.PostAsync(
+                $"http://localhost:{_port}/api/v1/ui/mutate",
+                new StringContent("{}", Encoding.UTF8, "application/json"));
+            var body = await response.Content.ReadAsStringAsync();
+
+            Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+            Assert.Contains("\"reason\":\"read-only\"", body);
+            Assert.Equal(0, leaseValidations);
+            Assert.Equal(0, handlerCalls);
+        }
+        finally
+        {
+            await server.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task StopAsync_CancelsMutationQueuedBehindAdmissionGate()
     {
         using var server = new AgentHttpServer(_port);

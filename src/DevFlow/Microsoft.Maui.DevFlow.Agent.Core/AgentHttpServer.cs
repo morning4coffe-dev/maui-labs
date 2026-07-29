@@ -30,6 +30,7 @@ public class AgentHttpServer : IDisposable
     public bool IsRunning => _listenTask != null && !_listenTask.IsCompleted;
     internal Func<HttpRequest, Task<MutationLeaseStatus>>? MutationLeaseValidator { get; set; }
     internal Func<HttpRequest, HttpResponse, Task>? MutationObserver { get; set; }
+    internal Func<HttpRequest, HttpResponse?>? MutationGuard { get; set; }
 
     public AgentHttpServer(int port = 9223)
     {
@@ -344,6 +345,9 @@ public class AgentHttpServer : IDisposable
             await _mutationAdmissionGate.WaitAsync(ct).ConfigureAwait(false);
         try
         {
+            if (requiresMutationLease && MutationGuard?.Invoke(request) is { } blocked)
+                return blocked;
+
             if (requiresMutationLease && MutationLeaseValidator is not null)
             {
                 var status = await MutationLeaseValidator(request).ConfigureAwait(false);

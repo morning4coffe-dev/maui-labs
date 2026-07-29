@@ -23,6 +23,35 @@ public static class AgentServiceExtensions
     {
         var options = new AgentOptions();
         configure?.Invoke(options);
+        var enabledMetadata = ReadAssemblyMetadata("Microsoft.Maui.DevFlowEnabled");
+        var buildMode = ReadAssemblyMetadata("Microsoft.Maui.DevFlowMode");
+        if (string.Equals(enabledMetadata, bool.FalseString, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "DevFlow Agent registration is disabled for this build. Remove AddMauiDevFlowAgent() "
+                + "or set MauiDevFlowEnabled=true in a Debug build. For optimized diagnostics, also set MauiDevFlowProfileMode=true.");
+        }
+
+        if (string.Equals(buildMode, "profile", StringComparison.OrdinalIgnoreCase))
+        {
+            options.Mode = "profile";
+            options.ReadOnly = true;
+            options.EnableProfiler = true;
+            options.EnableFileLogging = false;
+            options.CaptureILogger = false;
+            options.CaptureConsole = false;
+            options.CaptureTrace = false;
+            options.MaxNetworkBodySize = 0;
+            options.EnableMauiDiagnostics = false;
+            options.EnableBindingProblems = false;
+            options.AllowPropertyReflection = false;
+            options.EnableHighLevelUiHooks = false;
+            options.EnableDetailedUiHooks = false;
+        }
+        else if (!string.IsNullOrWhiteSpace(buildMode))
+        {
+            options.Mode = buildMode;
+        }
 
         // Read project identity from assembly metadata (injected by .targets)
         var project = ReadAssemblyMetadataProject() ?? "unknown";

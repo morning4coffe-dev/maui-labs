@@ -158,6 +158,69 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
         var contents = File.ReadAllText(GetGeneratedFilePath("Release"));
         var expectedSessionId = ComputeExpectedSessionId(ProjectFilePath);
         Assert.Contains($"\"Microsoft.Maui.DevFlowSessionId\", \"{expectedSessionId}\"", contents);
+        Assert.Contains("\"Microsoft.Maui.DevFlowEnabled\", \"false\"", contents);
+        Assert.Contains("\"Microsoft.Maui.DevFlowMode\", \"disabled\"", contents);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void SetMauiDevFlowPort_EmitsEnabledDebugMode_ByDefault(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        RunSetMauiDevFlowPortTarget();
+
+        var contents = File.ReadAllText(GeneratedFilePath);
+        Assert.Contains("\"Microsoft.Maui.DevFlowEnabled\", \"true\"", contents);
+        Assert.Contains("\"Microsoft.Maui.DevFlowMode\", \"debug\"", contents);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void ValidateBuildSafety_RejectsImplicitOptimizedAgent(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        var result = RunTarget(
+            "_ValidateMauiDevFlowBuildSafety",
+            "/p:Configuration=Release",
+            "/p:MauiDevFlowEnabled=true");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("MauiDevFlowProfileMode=true", result.Output + result.Error);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void ValidateBuildSafety_AllowsExplicitProfileMode(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        var result = RunTarget(
+            "_ValidateMauiDevFlowBuildSafety",
+            "/p:Configuration=Release",
+            "/p:MauiDevFlowProfileMode=true");
+
+        Assert.Equal(0, result.ExitCode);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void ValidateBuildSafety_RejectsNativeAot(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        var result = RunTarget(
+            "_ValidateMauiDevFlowBuildSafety",
+            "/p:MauiDevFlowProfileMode=true",
+            "/p:PublishAot=true");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("not supported in NativeAOT builds", result.Output + result.Error);
     }
 
     [Theory]
@@ -228,6 +291,16 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
 
     private void RunSetMauiDevFlowPortTarget(params string[] properties)
     {
+        var result = RunTarget("_SetMauiDevFlowPort", properties);
+        Assert.True(
+            result.ExitCode == 0,
+            $"dotnet msbuild failed with exit code {result.ExitCode}.{Environment.NewLine}{result.Output}{result.Error}");
+    }
+
+    private (int ExitCode, string Output, string Error) RunTarget(
+        string target,
+        params string[] properties)
+    {
         var startInfo = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = _projectDirectory,
@@ -238,7 +311,7 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
 
         startInfo.ArgumentList.Add("msbuild");
         startInfo.ArgumentList.Add(ProjectFilePath);
-        startInfo.ArgumentList.Add("/t:_SetMauiDevFlowPort");
+        startInfo.ArgumentList.Add($"/t:{target}");
         startInfo.ArgumentList.Add("/nologo");
         startInfo.ArgumentList.Add("/v:minimal");
 
@@ -253,9 +326,7 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
 
         process.WaitForExit();
 
-        Assert.True(
-            process.ExitCode == 0,
-            $"dotnet msbuild failed with exit code {process.ExitCode}.{Environment.NewLine}{output}{error}");
+        return (process.ExitCode, output, error);
     }
 
     private static string FindRepoRoot()

@@ -10,6 +10,24 @@
       -p:MauiDevFlowSessionId=yourId
     The session identity is metadata-only — it never modifies ApplicationId.
   -->
+  <PropertyGroup>
+    <MauiDevFlowProfileMode Condition="'$(MauiDevFlowProfileMode)' == ''">false</MauiDevFlowProfileMode>
+    <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == '' and '$(MauiDevFlowProfileMode)' == 'true'">true</MauiDevFlowEnabled>
+    <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == '' and '$(Configuration)' == 'Debug'">true</MauiDevFlowEnabled>
+    <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == ''">false</MauiDevFlowEnabled>
+    <_MauiDevFlowMode Condition="'$(MauiDevFlowProfileMode)' == 'true'">profile</_MauiDevFlowMode>
+    <_MauiDevFlowMode Condition="'$(_MauiDevFlowMode)' == '' and '$(MauiDevFlowEnabled)' == 'true'">debug</_MauiDevFlowMode>
+    <_MauiDevFlowMode Condition="'$(_MauiDevFlowMode)' == ''">disabled</_MauiDevFlowMode>
+  </PropertyGroup>
+
+  <Target Name="_ValidateMauiDevFlowBuildSafety" BeforeTargets="PrepareForBuild"
+          Condition="'$(MauiDevFlowEnabled)' == 'true'">
+    <Error Condition="'$(Configuration)' != 'Debug' and '$(MauiDevFlowProfileMode)' != 'true'"
+           Text="MauiDevFlowEnabled is true for an optimized build. Set MauiDevFlowProfileMode=true for an explicit read-only diagnostics build, or disable DevFlow." />
+    <Error Condition="'$(PublishAot)' == 'true' or '$(RunAOTCompilation)' == 'true'"
+           Text="DevFlow Agent is not supported in NativeAOT builds. Disable MauiDevFlowEnabled for this build." />
+  </Target>
+
   <Target Name="_ReadMauiDevFlowConfig" BeforeTargets="_SetMauiDevFlowPort"
           Condition="'$(MauiDevFlowPort)' == '' AND Exists('$(MSBuildProjectDirectory)/.mauidevflow')">
     <PropertyGroup>
@@ -36,6 +54,8 @@
       <!-- Pre-compute platform identifier for use in downstream target conditions -->
       <_DevFlowTargetPlatform>$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)'))</_DevFlowTargetPlatform>
       <_MauiDevFlowMetadata></_MauiDevFlowMetadata>
+      <_MauiDevFlowMetadata>$(_MauiDevFlowMetadata)[assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowEnabled", "$(MauiDevFlowEnabled)")]
+[assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowMode", "$(_MauiDevFlowMode)")]</_MauiDevFlowMetadata>
       <_MauiDevFlowMetadata Condition="'$(MauiDevFlowPort)' != ''">$(_MauiDevFlowMetadata)[assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowPort", "$(MauiDevFlowPort)")]
 </_MauiDevFlowMetadata>
       <!-- Avoid embedding developer-machine paths in app binaries by default. Full paths remain

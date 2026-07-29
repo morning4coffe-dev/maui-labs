@@ -397,6 +397,13 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         _server = new AgentHttpServer(_options.Port);
         _server.MutationLeaseValidator = ValidateMutationLeaseAsync;
         _server.MutationObserver = ObserveMutationAsync;
+        _server.MutationGuard = request => _options.ReadOnly
+            ? HttpResponse.Error(
+                $"DevFlow is running in {_options.Mode} read-only mode; mutating endpoints are disabled.",
+                statusCode: 403,
+                reason: "read-only",
+                details: new { mode = _options.Mode })
+            : null;
         _treeWalker = CreateTreeWalker();
         // Attach the process-wide XAML source-map registry (populated by the build-time generator's
         // module initializers). No-op when nothing is registered — GetMap returns null.
@@ -782,6 +789,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     framework = ".NET MAUI",
                     frameworkVersion = Environment.Version.ToString(),
                     sessionId = _sessionId,
+                    mode = _options.Mode,
+                    readOnly = _options.ReadOnly,
                 },
                 device = new
                 {
@@ -814,6 +823,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     jobs = IsJobsSupported,
                     theme = true,
                     mutationLease = _options.RequireMutationLease,
+                    mutations = !_options.ReadOnly,
                 },
                 running = _app != null,
                 // Current Shell route (null for non-Shell apps). Powers the inspector's
@@ -854,7 +864,14 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var capabilities = new Dictionary<string, object>();
 
         capabilities["ui.tree"] = new { version = 1, features = new[] { "css-selector", "type", "text", "accessibility-id" } };
-        capabilities["ui.actions"] = new { version = 1, features = new[] { "tap", "fill", "clear", "focus", "scroll", "navigate", "resize", "back", "key", "gesture", "batch", "properties", "property-descriptors", "property-source", "safe-property-mutations" } };
+        capabilities["ui.actions"] = new
+        {
+            version = 1,
+            readOnly = _options.ReadOnly,
+            features = _options.ReadOnly
+                ? new[] { "properties", "property-descriptors", "property-source" }
+                : new[] { "tap", "fill", "clear", "focus", "scroll", "navigate", "resize", "back", "key", "gesture", "batch", "properties", "property-descriptors", "property-source", "safe-property-mutations" }
+        };
         capabilities["ui.events"] = new { version = 1, features = new[] { "stream", "subscribe" } };
         capabilities["ui.screenshot"] = new { version = 1, features = new[] { "element", "fullscreen", "selector" } };
         capabilities["diagnostics.problems"] = new
@@ -904,6 +921,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                 name = "Microsoft.Maui.DevFlow.Agent",
                 version,
                 framework = "maui",
+                mode = _options.Mode,
+                readOnly = _options.ReadOnly,
                 frameworkVersion = typeof(Microsoft.Maui.Controls.Application).Assembly
                     .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ?? "unknown"
             },
@@ -2034,8 +2053,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     Name = property.Name,
                     Kind = kind,
                     Value = FormatPropertyValue(rawValue),
-                    Writable = runtimeWritable && diagnostic.CanWriteSafely,
-                    ForceWritable = runtimeWritable,
+                    Writable = !_options.ReadOnly && runtimeWritable && diagnostic.CanWriteSafely,
+                    ForceWritable = !_options.ReadOnly && runtimeWritable,
                     Choices = propertyType.IsEnum ? Enum.GetNames(propertyType) : null,
                     Min = constraints.Min,
                     Max = constraints.Max,

@@ -1696,6 +1696,10 @@ public class AgentDescriptor
     public string? Framework { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("frameworkVersion")]
     public string? FrameworkVersion { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("mode")]
+    public string? Mode { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("readOnly")]
+    public bool ReadOnly { get; set; }
 }
 
 public class DeviceDescriptor
@@ -1752,6 +1756,8 @@ public class AgentCapabilities
     public bool Jobs { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("theme")]
     public bool Theme { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("mutations")]
+    public bool Mutations { get; set; }
 }
 
 public class NetworkRequest

@@ -112,7 +112,11 @@ public sealed class FlowRecordTools
         FlowRecorder recorder, string action,
         string? automationId, string? text, string? type, int? index, string? id,
         string? value, string? name, double? dx, double? dy, int? itemIndex, string? position,
-        string? page, bool navigated, string? assertsJson)
+        string? page, bool navigated, string? assertsJson,
+        int? matchCount = null,
+        string? quality = null,
+        IReadOnlyList<string>? fragilityReasons = null,
+        string? valueSource = null)
     {
         if (string.IsNullOrWhiteSpace(action) || !FlowActions.All.Contains(action))
             return (false, -1, recorder.StepCount, false, $"Unknown action '{action}'. Use one of: {string.Join(", ", FlowActions.All)}.");
@@ -129,14 +133,27 @@ public sealed class FlowRecordTools
         position = Clean(position);
         text = string.IsNullOrWhiteSpace(text) ? null : text;
 
-        var target = BuildSelector(automationId, text, type, index, id);
+        var target = BuildSelector(
+            automationId,
+            text,
+            type,
+            index,
+            id,
+            matchCount,
+            quality,
+            fragilityReasons);
 
         var args = new FlowStepArgs();
         string? stepValue = null;
         switch (action)
         {
             case FlowActions.Fill: stepValue = value; args.Text = value; break;
-            case FlowActions.SetProperty: stepValue = value; args.Value = value; args.Name = name; break;
+            case FlowActions.SetProperty:
+                stepValue = value;
+                args.Value = value;
+                args.Name = name;
+                args.ValueSource = valueSource;
+                break;
             case FlowActions.Navigate: stepValue = Clean(value); args.Route = stepValue; break;
             case FlowActions.SetTheme: stepValue = value; args.Theme = value; break;
             case FlowActions.Scroll:
@@ -209,7 +226,7 @@ public sealed class FlowRecordTools
         if (seq < 0)
             return (false, -1, recorder.StepCount, false, $"Recording is full (max {FlowRecorder.MaxSteps} steps).");
 
-        var fragile = target is not null && string.IsNullOrEmpty(target.AutomationId) && !target.IsEmpty;
+        var fragile = IsFragileSelector(target);
         return (true, seq, recorder.StepCount, fragile, null);
     }
 
@@ -452,18 +469,58 @@ public sealed class FlowRecordTools
 
     /// <summary>Builds a canonical selector keeping ONLY the highest-precedence form provided
     /// (AutomationId &gt; Text &gt; Type+Index &gt; Id), so the JSON is never ambiguous.</summary>
-    internal static FlowSelector? BuildSelector(string? automationId, string? text, string? type, int? index, string? id)
+    internal static FlowSelector? BuildSelector(
+        string? automationId,
+        string? text,
+        string? type,
+        int? index,
+        string? id,
+        int? matchCount = null,
+        string? quality = null,
+        IReadOnlyList<string>? fragilityReasons = null)
     {
         if (!string.IsNullOrEmpty(automationId))
-            return new FlowSelector { AutomationId = automationId };
+            return new FlowSelector
+            {
+                AutomationId = automationId,
+                MatchCount = matchCount,
+                Quality = quality ?? (matchCount == 1 ? "durable" : null),
+                FragilityReasons = fragilityReasons?.ToList()
+            };
         if (!string.IsNullOrEmpty(text))
-            return new FlowSelector { Text = text };
+            return new FlowSelector
+            {
+                Text = text,
+                MatchCount = matchCount,
+                Quality = quality ?? (matchCount == 1 ? "text" : null),
+                FragilityReasons = fragilityReasons?.ToList()
+            };
         if (!string.IsNullOrEmpty(type))
-            return new FlowSelector { TypeIndex = new FlowTypeIndex { Type = type, Index = index ?? 0 } };
+            return new FlowSelector
+            {
+                TypeIndex = new FlowTypeIndex { Type = type, Index = index ?? 0 },
+                MatchCount = matchCount,
+                Quality = quality ?? "fragile",
+                FragilityReasons = fragilityReasons?.ToList()
+                    ?? ["type-index selector can change when the visual tree changes"]
+            };
         if (!string.IsNullOrEmpty(id))
-            return new FlowSelector { Id = id };
+            return new FlowSelector
+            {
+                Id = id,
+                Quality = "fragile",
+                FragilityReasons = ["runtime element id is not stable across rebuilds"]
+            };
         return null;
     }
+
+    internal static bool IsFragileSelector(FlowSelector? selector)
+        => selector is not null
+            && !selector.IsEmpty
+            && (string.IsNullOrEmpty(selector.AutomationId)
+                || selector.MatchCount is > 1
+                || string.Equals(selector.Quality, "ambiguous", StringComparison.OrdinalIgnoreCase)
+                || selector.FragilityReasons is { Count: > 0 });
 
     private static List<FlowAssert>? ParseAsserts(string? assertsJson)
     {

@@ -16,6 +16,9 @@ internal sealed record EvidenceCaptureOptions
     public bool PreviewOnly { get; init; }
 
     public string? WorkflowMarkdown { get; init; }
+    public string? CheckpointRoute { get; init; }
+    public DateTimeOffset? CheckpointSavedUtc { get; init; }
+    public string? CheckpointLastRestoreKind { get; init; }
     public string? SelectedElementId { get; init; }
     public int LogLimit { get; init; } = EvidenceFormat.DefaultLogLimit;
     public int NetworkLimit { get; init; } = EvidenceFormat.DefaultNetworkLimit;
@@ -118,6 +121,13 @@ internal static class EvidenceBuilder
             Display = display,
             Capabilities = capabilities,
             Route = EvidenceRedaction.ScrubRoute(status?.Route),
+            Checkpoint = options.CheckpointRoute is null ? null : new EvidenceCheckpointInfo
+            {
+                Saved = true,
+                Route = EvidenceRedaction.ScrubRoute(options.CheckpointRoute),
+                SavedUtc = options.CheckpointSavedUtc?.ToString("O"),
+                LastRestoreKind = EvidenceRedaction.SafeIdentifier(options.CheckpointLastRestoreKind)
+            }
         };
         AddEntry(entries, entryInfos, EvidenceFormat.EnvironmentEntry,
             "App, platform, device, display, and agent capability metadata", null,
@@ -279,6 +289,7 @@ internal static class EvidenceBuilder
             Counts = counts,
             Limits = limits,
             Screenshot = screenshot,
+            Checkpoint = environment.Checkpoint,
             SelectedElementId = EvidenceRedaction.SafeIdentifier(options.SelectedElementId),
             Warnings = warnings,
         };

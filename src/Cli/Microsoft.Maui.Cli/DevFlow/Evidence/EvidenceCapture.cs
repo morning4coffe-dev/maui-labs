@@ -152,6 +152,9 @@ internal static class EvidenceCapture
             IncludeScreenshot = request.IncludeScreenshot,
             PreviewOnly = previewOnly,
             WorkflowMarkdown = request.WorkflowMarkdown,
+            CheckpointRoute = request.CheckpointRoute,
+            CheckpointSavedUtc = request.CheckpointSavedUtc,
+            CheckpointLastRestoreKind = request.CheckpointLastRestoreKind,
             SelectedElementId = request.SelectedElementId,
             LogLimit = request.LogLimit,
             NetworkLimit = request.NetworkLimit,
@@ -169,6 +172,9 @@ internal sealed class EvidenceRequest
     public bool Overwrite { get; init; }
     public string? OutputPath { get; init; }
     public string? WorkflowMarkdown { get; init; }
+    public string? CheckpointRoute { get; init; }
+    public DateTimeOffset? CheckpointSavedUtc { get; init; }
+    public string? CheckpointLastRestoreKind { get; init; }
     public string? SelectedElementId { get; init; }
     public int LogLimit { get; init; } = EvidenceFormat.DefaultLogLimit;
     public int NetworkLimit { get; init; } = EvidenceFormat.DefaultNetworkLimit;

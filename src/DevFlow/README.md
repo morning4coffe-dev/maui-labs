@@ -75,6 +75,39 @@ maui devflow mcp
 maui devflow broker start
 ```
 
+### Resume after a rebuild
+
+DevFlow can save an explicit, broker-owned **Shell route** checkpoint. It stores only route and
+connection metadata under `~/.mauidevflow/`; it does not serialize ViewModels, app values, or
+navigation parameters beyond the route. Reconnects never navigate automatically.
+
+```bash
+maui devflow resume save
+# rebuild or reconnect the app
+maui devflow resume status
+maui devflow resume restore
+maui devflow resume clear
+```
+
+The Web Inspector exposes the same Save route, Resume, and Clear route controls in its existing
+toolbar. Route query values are redacted when checkpoint metadata is included in evidence.
+
+### Reliable workflow replay
+
+Workflow selectors using `AutomationId` or exact text must resolve to exactly one element. A
+duplicate is reported as an ambiguity rather than replaying against an arbitrary first match.
+Before tap, fill, and safe property changes, replay waits for a visible and enabled element; taps
+also wait for stable, positive bounds. Type/index and runtime-id selectors remain explicitly
+fragile. Replay stops at the first divergence by default.
+
+```bash
+maui devflow flow replay maui-tests/login.md --evidence-on-failure
+```
+
+Failure evidence uses the normal redaction policy and leaves screenshots off unless separately
+requested. Active workflow recordings are spooled under `~/.mauidevflow/recordings/` so an agent
+disconnect or broker restart does not discard them; stop or cancel deletes the spool.
+
 ### Session identity
 
 When `Microsoft.Maui.DevFlow.Agent` is referenced, builds are tagged with a **session identity**

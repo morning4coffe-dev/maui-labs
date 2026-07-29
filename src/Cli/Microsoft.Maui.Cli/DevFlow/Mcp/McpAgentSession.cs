@@ -62,6 +62,20 @@ public class McpAgentSession
 		return await BrokerClient.ListAgentsAsync(brokerPort);
 	}
 
+	/// <summary>Resolves the broker registration selected by an MCP tool without using its port as state.</summary>
+	public async Task<AgentRegistration> GetSelectedBrokerAgentAsync(int? agentPort = null)
+	{
+		var brokerPort = await GetBrokerPortAsync();
+		var agents = await BrokerClient.ListAgentsAsync(brokerPort);
+		var selectedPort = agentPort ?? DefaultAgentPort;
+		var agent = selectedPort.HasValue
+			? agents?.FirstOrDefault(candidate => candidate.Port == selectedPort.Value)
+			: agents is null ? null : BrokerClient.ResolveAgent(agents);
+		if (agent is null)
+			throw new McpException("Select exactly one connected agent with agentPort before using resume checkpoints.");
+		return agent;
+	}
+
 	private async Task<int> ResolveAgentPortAsync()
 	{
 		var agent = await BrokerClient.ResolveAgentForProjectAsync();

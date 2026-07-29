@@ -7,8 +7,10 @@ using System.Text.Json;
 using Microsoft.Maui;
 using Microsoft.Maui.Controls;
 using Microsoft.Maui.DevFlow.Agent.Core;
+using Microsoft.Maui.DevFlow.Agent.Core.Properties;
 using Microsoft.Maui.DevFlow.Driver;
 using Microsoft.Maui.Dispatching;
+using CorePropertyMutationResponse = Microsoft.Maui.DevFlow.Agent.Core.Properties.PropertyMutationResponse;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -233,6 +235,49 @@ public class SetPropertyBindableTests
 
         Assert.NotNull(observation);
         Assert.Equal("10", observation.Value);
+    }
+
+    [Fact]
+    public async Task MutationObservation_RecordsMeasuredSelectorQualityAndPropertySource()
+    {
+        var first = new Button { AutomationId = "duplicate-action", Text = "First" };
+        var second = new Button { AutomationId = "duplicate-action", Text = "Second" };
+        using var harness = await SetPropertyTestHarness.CreateAsync(first, second);
+        var firstId = (await harness.Client.QueryAsync(automationId: "duplicate-action"))[0].Id;
+
+        var tapObservation = await harness.Service.CreateMutationObservationAsync(new HttpRequest
+        {
+            Method = "POST",
+            Path = "/api/v1/ui/actions/tap",
+            Body = JsonSerializer.Serialize(new { elementId = firstId })
+        });
+
+        Assert.NotNull(tapObservation);
+        Assert.Equal(2, tapObservation.MatchCount);
+        Assert.Equal("ambiguous", tapObservation.Quality);
+        Assert.NotEmpty(tapObservation.FragilityReasons!);
+
+        var propertyObservation = await harness.Service.CreateMutationObservationAsync(
+            new HttpRequest
+            {
+                Method = "PUT",
+                Path = $"/api/v1/ui/elements/{firstId}/properties/{nameof(Button.Text)}",
+                RouteParams =
+                {
+                    ["id"] = firstId,
+                    ["name"] = nameof(Button.Text)
+                },
+                Body = "{\"value\":\"Updated\"}"
+            },
+            HttpResponse.Json(new CorePropertyMutationResponse
+            {
+                Success = true,
+                ValueSource = PropertyValueSources.Local,
+                MutationSafety = PropertyMutationSafetyKinds.Safe
+            }));
+
+        Assert.NotNull(propertyObservation);
+        Assert.Equal(PropertyValueSources.Local, propertyObservation.ValueSource);
     }
 
     private sealed class SetPropertyTestHarness : IDisposable

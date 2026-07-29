@@ -96,6 +96,40 @@ public class FlowFormatTests
     }
 
     [Fact]
+    public void Schema2_SelectorDiagnostics_RoundTripWhileSchema1RemainsReadable()
+    {
+        var flow = new MauiFlow
+        {
+            Schema = 2,
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Tap,
+                    Args = new FlowStepArgs
+                    {
+                        Selector = new FlowSelector
+                        {
+                            AutomationId = "save",
+                            MatchCount = 1,
+                            Quality = "durable"
+                        }
+                    }
+                }
+            }
+        };
+
+        var parsed = FlowMarkdown.Parse(FlowMarkdown.Serialize(flow));
+
+        Assert.True(parsed.Ok, parsed.Error);
+        Assert.Equal(2, parsed.Flow!.Schema);
+        Assert.Equal(1, parsed.Flow.Steps[0].Args!.Selector!.MatchCount);
+        Assert.Equal("durable", parsed.Flow.Steps[0].Args!.Selector!.Quality);
+        Assert.True(FlowValidator.Validate(FlowMarkdown.Parse(SampleMd).Flow!).Ok);
+    }
+
+    [Fact]
     public void Validate_ValidFlow_HasNoErrors()
     {
         var flow = FlowMarkdown.Parse(SampleMd).Flow!;
@@ -165,7 +199,7 @@ public class FlowFormatTests
 
     [Theory]
     [InlineData("customCheck", "unknown assert kind")]
-    [InlineData("routeIs", "report-only")]
+    [InlineData("routeIs", "requires an expected route")]
     [InlineData("pageChanged", "report-only")]
     public void Validate_UnsupportedHardAssert_IsError(string kind, string expectedError)
     {

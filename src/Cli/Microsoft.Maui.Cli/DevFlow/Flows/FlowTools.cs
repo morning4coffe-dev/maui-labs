@@ -23,7 +23,9 @@ public sealed class FlowTools
     public static async Task<string> Replay(
         McpAgentSession session,
         [Description("Absolute path to the .md flow test file to replay")] string file,
-        [Description("Agent HTTP port (optional if only one agent connected)")] int? agentPort = null)
+        [Description("Agent HTTP port (optional if only one agent connected)")] int? agentPort = null,
+        [Description("Capture a redacted evidence bundle only when replay fails (screenshots remain off)")] bool evidenceOnFailure = false,
+        [Description("Optional output .mauitrace path for failure evidence; default is the safe Evidence output path")] string? evidenceOutput = null)
     {
         var read = ReadFlowFile(file);
         if (read.Error is not null) return Error(read.Error);
@@ -36,8 +38,12 @@ public sealed class FlowTools
             return Error("Flow failed validation: " + string.Join("; ", validation.Errors));
 
         using var agent = await session.GetAgentClientAsync(agentPort);
-        var replayer = new FlowReplayer(agent);
+        Evidence.FlowReplayEvidenceCapture? capture = evidenceOnFailure
+            ? new Evidence.FlowReplayEvidenceCapture(agent, evidenceOutput, Path.GetDirectoryName(read.Path!), "mcp")
+            : null;
+        var replayer = new FlowReplayer(agent, evidenceCapture: capture);
         var report = await replayer.ReplayAsync(parsed.Flow!, read.Path);
+        report.EvidencePath = capture?.CapturedPath;
         return Json(report);
     }
 

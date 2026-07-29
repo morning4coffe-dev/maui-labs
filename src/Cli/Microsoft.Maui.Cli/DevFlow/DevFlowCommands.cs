@@ -1356,6 +1356,75 @@ public class DevFlowCommands
             CreateAgentClientAsync,
             static () => _errorOccurred = true));
 
+        // ===== replayable workflow commands =====
+        var flowCommand = new Command("flow", "Validate and replay recorded Markdown workflow tests");
+        var flowReplayFile = new Argument<string>("file") { Description = "Path to a .md workflow test containing a maui-test block" };
+        var evidenceOnFailure = new Option<string?>("--evidence-on-failure")
+        {
+            Description = "Capture a redacted .mauitrace only after the first replay failure; optionally provide its output path",
+            Arity = ArgumentArity.ZeroOrOne
+        };
+        var continueOnFailure = new Option<bool>("--continue-on-failure")
+        {
+            Description = "Continue driving later steps after a failure (default stops at the first divergence)"
+        };
+        var flowReplay = new Command("replay", "Replay a workflow against the selected live app")
+        {
+            flowReplayFile, evidenceOnFailure, continueOnFailure
+        };
+        flowReplay.SetAction(async (ctx, ct) =>
+        {
+            var json = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+            var file = ctx.GetValue(flowReplayFile)!;
+            if (!File.Exists(file) || !file.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+            {
+                Output.WriteError("Workflow replay requires an existing .md file.", json, "InvalidArgument");
+                _errorOccurred = true;
+                return;
+            }
+            var parsed = Flows.FlowMarkdown.Parse(await File.ReadAllTextAsync(file, ct), file);
+            var validation = parsed.Ok && parsed.Flow is not null ? Flows.FlowValidator.Validate(parsed.Flow) : null;
+            if (!parsed.Ok || validation is null || !validation.Ok)
+            {
+                Output.WriteError(parsed.Error ?? "Flow failed validation: " + string.Join("; ", validation?.Errors ?? []), json, "InvalidFlow");
+                _errorOccurred = true;
+                return;
+            }
+            try
+            {
+                using var client = await CreateAgentClientAsync(ctx.GetValue(agentHostOption)!, ctx.GetValue(agentPortOption));
+                var evidenceRequested = ctx.GetResult(evidenceOnFailure)?.Tokens.Count > 0;
+                var capture = evidenceRequested
+                    ? new Evidence.FlowReplayEvidenceCapture(client, ctx.GetValue(evidenceOnFailure), Path.GetDirectoryName(Path.GetFullPath(file)), "cli")
+                    : null;
+                var replay = new Flows.FlowReplayer(
+                    client,
+                    continueOnFailure: ctx.GetValue(continueOnFailure),
+                    evidenceCapture: capture);
+                var result = await replay.ReplayAsync(parsed.Flow!, file, ct);
+                Output.WriteResult(new
+                {
+                    result.Ok,
+                    result.Name,
+                    result.Total,
+                    result.Passed,
+                    result.Failed,
+                    result.DivergencePoint,
+                    result.StoppedEarly,
+                    results = result.Results,
+                    evidencePath = capture?.CapturedPath
+                }, json);
+                if (!result.Ok) _errorOccurred = true;
+            }
+            catch (Exception ex)
+            {
+                Output.WriteError($"Workflow replay failed: {ex.Message}", json);
+                _errorOccurred = true;
+            }
+        });
+        flowCommand.Add(flowReplay);
+        devflowCommand.Add(flowCommand);
+
         // ===== init / skills commands =====
         var initCommand = DevFlowSkillCommands.CreateInitCommand(jsonOption, noJsonOption, output);
         initCommand.Aliases.Add("onboard");
@@ -1364,6 +1433,47 @@ public class DevFlowCommands
 
         // Hidden compatibility alias for the old standalone skill updater.
         devflowCommand.Add(DevFlowSkillCommands.CreateUpdateCommand("update-skill", hidden: true, jsonOption, noJsonOption, output));
+
+        // ===== explicit route resume commands (broker-owned local checkpoints) =====
+        var resumeCommand = new Command("resume", "Save, inspect, restore, or clear a broker-owned Shell route checkpoint");
+        foreach (var action in new[] { "status", "save", "restore", "clear" })
+        {
+            var resumeAction = action;
+            var command = new Command(resumeAction, $"{char.ToUpperInvariant(resumeAction[0])}{resumeAction[1..]} the selected app's route checkpoint");
+            command.SetAction(async (ctx, ct) =>
+            {
+                var json = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+                var brokerPort = await ResolveRunningBrokerPortAsync();
+                if (brokerPort is null)
+                {
+                    Output.WriteError("No running DevFlow broker was found.", json, "BrokerUnavailable");
+                    _errorOccurred = true;
+                    return;
+                }
+                var agents = await ListBrokerAgentsAsync(brokerPort.Value);
+                var requestedPort = ctx.GetValue(agentPortOption);
+                var agent = agents?.FirstOrDefault(candidate => candidate.Port == requestedPort)
+                    ?? (agents is null ? null : Broker.BrokerClient.ResolveAgent(agents));
+                if (agent is null)
+                {
+                    Output.WriteError("Select one connected agent with --agent-port; route checkpoints are never keyed by a transient port.", json, "AgentAmbiguous");
+                    _errorOccurred = true;
+                    return;
+                }
+                var result = await Broker.BrokerClient.ControlCheckpointAsync(brokerPort.Value, agent.Id, resumeAction);
+                Output.WriteResult(result, json, static status =>
+                {
+                    if (!status.Ok) Console.WriteLine(status.Warning ?? "Checkpoint operation failed.");
+                    else if (!status.HasCheckpoint) Console.WriteLine("No saved route checkpoint.");
+                    else Console.WriteLine(status.Checkpoint?.LastRestore?.Success == true
+                        ? "Route checkpoint restored."
+                        : $"Route checkpoint saved: {status.Checkpoint?.SavedUtc:u}");
+                });
+                if (!result.Ok) _errorOccurred = true;
+            });
+            resumeCommand.Add(command);
+        }
+        devflowCommand.Add(resumeCommand);
 
         // ===== broker commands =====
         var brokerCommand = new Command("broker", "Manage the Microsoft.Maui.DevFlow broker daemon");

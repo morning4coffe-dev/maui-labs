@@ -109,6 +109,7 @@ import { createElementTreeController } from './inspector-tree.js';
   let checkpointRoute = null;
   let checkpointLabel = null;
   let replaying = false;
+  let resumeCheckpoint = null;
 
   // Convert browser (client) coordinates to app logical coordinates. The viewport may be fit-scaled
   // by a CSS transform (see applyScale), so getBoundingClientRect() returns the on-screen (scaled)
@@ -134,7 +135,9 @@ import { createElementTreeController } from './inspector-tree.js';
       const resp = await fetch(`${basePath}/api/state`);
       if (!resp.ok) { markConnected(false); return; }
       const state = await resp.json();
+      const reconnecting = !connected;
       markConnected(true);
+      if (reconnecting) refreshResumeCheckpoint();
 
       // Update screenshot without flash
       if (screenshot && state.screenshotUrl) {
@@ -1599,6 +1602,42 @@ import { createElementTreeController } from './inspector-tree.js';
   // ── Replay the recorded test + return-to-start-route (checkpoint) ──
   const replayBtn = document.getElementById('df-toggle-replay');
   const checkpointBtn = document.getElementById('df-goto-checkpoint');
+  const resumeSaveBtn = document.getElementById('df-resume-save');
+  const resumeRestoreBtn = document.getElementById('df-resume-restore');
+  const resumeClearBtn = document.getElementById('df-resume-clear');
+  const resumeStatusEl = document.getElementById('df-resume-status');
+
+  function renderResumeCheckpoint(status) {
+    resumeCheckpoint = status && status.checkpoint ? status.checkpoint : null;
+    if (resumeStatusEl) {
+      if (!status || status.ok === false) resumeStatusEl.textContent = (status && status.warning) || 'Resume checkpoint unavailable.';
+      else if (!resumeCheckpoint) resumeStatusEl.textContent = status.connected === false ? 'App disconnected; no saved resume checkpoint.' : 'No saved resume checkpoint.';
+      else if (resumeCheckpoint.lastRestore && resumeCheckpoint.lastRestore.success === false) resumeStatusEl.textContent = `Resume restore failed: ${resumeCheckpoint.lastRestore.message || 'unknown failure'}`;
+      else if (resumeCheckpoint.lastRestore && resumeCheckpoint.lastRestore.success) resumeStatusEl.textContent = 'Route restored.';
+      else resumeStatusEl.textContent = status.connected === false ? 'Saved route; app disconnected.' : 'Saved route ready to resume.';
+    }
+    updateFlowButtons();
+  }
+
+  async function refreshResumeCheckpoint() {
+    try {
+      const response = await fetch(`${basePath}/api/checkpoint/status`, { headers: { 'X-DevFlow-Inspector-Token': inspectorToken } });
+      renderResumeCheckpoint(response.ok ? await response.json().catch(() => null) : { ok: false, warning: 'Resume checkpoint unavailable.' });
+    } catch { renderResumeCheckpoint({ ok: false, warning: 'Resume checkpoint unavailable.' }); }
+  }
+
+  async function resumeCheckpointAction(action) {
+    if (action === 'restore' && !resumeCheckpoint) return;
+    if (action === 'restore' && !(await confirmModal('Resume navigates the live app to the saved route. App data is not restored. Continue?', 'Resume'))) return;
+    try {
+      const result = await apiPost(`/api/checkpoint/${action}`, {});
+      renderResumeCheckpoint(result);
+      if (result && result.ok) {
+        setStatus(action === 'save' ? 'Current route saved for resume.' : action === 'clear' ? 'Saved resume route cleared.' : 'Route restore requested and verified.');
+        if (action === 'restore') scheduleRefresh(500);
+      } else setStatus((result && result.warning) || `Could not ${action} the resume checkpoint.`);
+    } catch { setStatus(`Could not ${action} the resume checkpoint.`); }
+  }
 
   function updateFlowButtons() {
     // canDrive: this session holds the writer lease AND a live app is connected. The drive-actions
@@ -1611,6 +1650,9 @@ import { createElementTreeController } from './inspector-tree.js';
     setExplainedDisabled(assertBtn, !recordingId || !selectedId || replaying || !canDrive);
     setExplainedDisabled(replayBtn, !lastMarkdown || !!recordingId || replaying || !canDrive);
     setExplainedDisabled(checkpointBtn, !checkpointRoute || replaying || !canDrive);
+    if (resumeSaveBtn) resumeSaveBtn.disabled = !connected || replaying;
+    if (resumeRestoreBtn) resumeRestoreBtn.disabled = !connected || !resumeCheckpoint || replaying || !canDrive;
+    if (resumeClearBtn) resumeClearBtn.disabled = !resumeCheckpoint || replaying;
     if (loadFlowBtn) loadFlowBtn.disabled = !!recordingId || replaying;
     if (workflowSelect) workflowSelect.disabled = !!recordingId || replaying;
     if (workflowFileBtn) workflowFileBtn.disabled = !!recordingId || replaying;
@@ -1638,6 +1680,9 @@ import { createElementTreeController } from './inspector-tree.js';
     setStatus(assert.kind === 'propEquals' ? `Asserted Text == "${assert.expected}"` : 'Asserted element is present');
   }
   if (assertBtn) assertBtn.addEventListener('click', recordAssert);
+  if (resumeSaveBtn) resumeSaveBtn.addEventListener('click', () => resumeCheckpointAction('save'));
+  if (resumeRestoreBtn) resumeRestoreBtn.addEventListener('click', () => resumeCheckpointAction('restore'));
+  if (resumeClearBtn) resumeClearBtn.addEventListener('click', () => resumeCheckpointAction('clear'));
 
   function setReplayUi(on) {
     replaying = on;
@@ -1727,6 +1772,27 @@ import { createElementTreeController } from './inspector-tree.js';
       if (s.error) chip.title = s.error;
       timelineStepsEl?.append(chip);
     }
+    if (rep.evidenceAvailable && timelineStepsEl) {
+      const download = document.createElement('button');
+      download.type = 'button';
+      download.className = 'df-tool-btn';
+      download.textContent = 'Download failure evidence';
+      download.setAttribute('aria-label', 'Download redacted workflow replay failure evidence');
+      download.addEventListener('click', async () => {
+        try {
+          const response = await fetch(`${basePath}/api/flows/replay/evidence`, {
+            headers: { 'X-DevFlow-Inspector-Token': inspectorToken },
+          });
+          if (!response.ok) throw new Error();
+          const link = document.createElement('a');
+          link.href = URL.createObjectURL(await response.blob());
+          link.download = 'devflow-replay-failure.mauitrace';
+          link.click();
+          URL.revokeObjectURL(link.href);
+        } catch { setStatus('Failure evidence is no longer available.'); }
+      });
+      timelineStepsEl.append(download);
+    }
     setStatus(rep.ok ? `Replay passed ${rep.passed}/${rep.total}.` : `Replay: ${rep.failed} step(s) did not pass.`);
   }
 
@@ -1734,6 +1800,7 @@ import { createElementTreeController } from './inspector-tree.js';
   if (workflowReplayBtn) workflowReplayBtn.addEventListener('click', replay);
   if (checkpointBtn) checkpointBtn.addEventListener('click', gotoCheckpoint);
   updateFlowButtons();
+  refreshResumeCheckpoint();
 
   // ── Host bridge: send-to-Copilot + open-XAML-source over a nonce-authenticated
   // iframe->host channel. The host (VS Code webview / canvas shell) advertises capabilities; a plain

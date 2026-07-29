@@ -80,6 +80,14 @@ internal sealed class MutationObservation
     public bool Navigated { get; set; }
     [JsonPropertyName("assertsJson")]
     public string? AssertsJson { get; set; }
+    [JsonPropertyName("matchCount")]
+    public int? MatchCount { get; set; }
+    [JsonPropertyName("quality")]
+    public string? Quality { get; set; }
+    [JsonPropertyName("fragilityReasons")]
+    public string[]? FragilityReasons { get; set; }
+    [JsonPropertyName("valueSource")]
+    public string? ValueSource { get; set; }
 }
 
 internal sealed class MutationRecordingTracker

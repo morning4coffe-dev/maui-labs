@@ -7,6 +7,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Web;
+using Microsoft.Maui.Cli.DevFlow.Flows;
 using Microsoft.Maui.Cli.DevFlow.Inspector;
 
 namespace Microsoft.Maui.Cli.DevFlow.Broker;
@@ -30,6 +31,7 @@ public class BrokerServer : IDisposable
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _agentStateGates = new(StringComparer.Ordinal);
     private readonly MutationLeaseRegistry _mutationLeases;
     private readonly BrokerFlowCoordinator _flows;
+    private readonly RouteCheckpointCoordinator _checkpoints;
     private readonly HashSet<int> _assignedPorts = new();
     private readonly object _portLock = new();
     private DateTime _lastActivity = DateTime.UtcNow;
@@ -41,12 +43,21 @@ public class BrokerServer : IDisposable
     public int AgentCount => _agents.Count;
     public bool IsRunning => _listener?.IsListening ?? false;
 
-    public BrokerServer(int port = DefaultPort, TimeSpan? idleTimeout = null, Action<string>? log = null)
+    public BrokerServer(
+        int port = DefaultPort,
+        TimeSpan? idleTimeout = null,
+        Action<string>? log = null,
+        RouteCheckpointStore? checkpointStore = null,
+        string? recordingStorageRoot = null,
+        TimeProvider? clock = null)
     {
         _port = port;
         _idleTimeout = idleTimeout ?? TimeSpan.FromMinutes(5);
         _log = log;
-        _flows = new BrokerFlowCoordinator();
+        _flows = new BrokerFlowCoordinator(
+            new FlowRecordingStore(clock),
+            new FlowRecordingSpoolStore(recordingStorageRoot, clock, warning => Log("Warning: " + warning)));
+        _checkpoints = new RouteCheckpointCoordinator(checkpointStore);
         _mutationLeases = new MutationLeaseRegistry();
     }
 
@@ -178,6 +189,11 @@ public class BrokerServer : IDisposable
             if (path.StartsWith("/api/recordings/", StringComparison.OrdinalIgnoreCase))
             {
                 await HandleRecordingRoute(context, method, path);
+                return;
+            }
+            if (path.StartsWith("/api/checkpoints/", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleCheckpointRoute(context, method, path);
                 return;
             }
 
@@ -414,7 +430,7 @@ public class BrokerServer : IDisposable
                 {
                     ReleasePort(connection.Registration.Port);
                     _mutationLeases.Remove(connection.Registration.Id);
-                    _flows.RemoveAgent(connection.Registration.Id);
+                    _flows.RemoveAgent(RouteCheckpointCoordinator.StableAgentId(connection.Registration));
                     if (_inspectors.TryRemove(connection.Registration.Id, out var inspector))
                         inspector.Dispose();
                     Log($"Agent disconnected: {connection.Registration.AppName}|{connection.Registration.Tfm}");
@@ -753,19 +769,21 @@ public class BrokerServer : IDisposable
                 await WriteJsonResponseAsync(context, 404, new JsonObject { ["error"] = $"Agent '{agentId}' not found" });
                 return;
             }
+            var flowAgentId = RouteCheckpointCoordinator.StableAgentId(connection.Registration);
 
             switch (action)
             {
                 case "start":
                     result = _flows.Start(
-                        agentId,
+                        flowAgentId,
                         body["name"]?.GetValue<string>() ?? "scenario",
                         body["app"]?.GetValue<string>() ?? connection.Registration.AppName,
                         body["platform"]?.GetValue<string>() ?? connection.Registration.Platform,
-                        body["preconditions"]?.GetValue<string>());
+                        body["preconditions"]?.GetValue<string>(),
+                        connection.Registration.SessionId);
                     break;
                 case "status":
-                    result = _flows.Status(agentId);
+                    result = _flows.Status(flowAgentId);
                     break;
                 case "observe":
                     var observationNode = body["observation"];
@@ -773,16 +791,16 @@ public class BrokerServer : IDisposable
                         new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
                     result = observation is null
                         ? BrokerFlowResult.Failure("observation is required")
-                        : _flows.Observe(agentId, observation, recordingId);
+                        : _flows.Observe(flowAgentId, observation, recordingId);
                     break;
                 case "stop":
-                    result = _flows.Stop(agentId, recordingId);
+                    result = _flows.Stop(flowAgentId, recordingId);
                     break;
                 case "cancel":
-                    result = _flows.Cancel(agentId, recordingId);
+                    result = _flows.Cancel(flowAgentId, recordingId);
                     break;
                 case "cancel-if-empty":
-                    result = _flows.CancelIfEmpty(agentId, recordingId);
+                    result = _flows.CancelIfEmpty(flowAgentId, recordingId);
                     break;
                 default:
                     result = BrokerFlowResult.Failure($"Unknown recording action '{action}'.");
@@ -800,6 +818,105 @@ public class BrokerServer : IDisposable
             DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
         })?.AsObject() ?? new JsonObject();
         await WriteJsonResponseAsync(context, result.Ok ? 200 : 400, resultNode);
+    }
+
+    /// <summary>
+    /// Broker-owned local route checkpoint API. Unlike workflow recording this deliberately does
+    /// not require a mutation lease: save/restore/clear are explicit user commands, and restore is
+    /// never performed by connection lifecycle code.
+    /// </summary>
+    private async Task HandleCheckpointRoute(HttpListenerContext context, string method, string path)
+    {
+        var segments = path.Trim('/').Split('/');
+        if (segments.Length != 3 ||
+            !segments[0].Equals("api", StringComparison.OrdinalIgnoreCase) ||
+            !segments[1].Equals("checkpoints", StringComparison.OrdinalIgnoreCase))
+        {
+            await WriteJsonResponseAsync(context, 404, new JsonObject { ["error"] = "Not found" });
+            return;
+        }
+
+        var agentId = Uri.UnescapeDataString(segments[2]);
+        var action = method.Equals("GET", StringComparison.OrdinalIgnoreCase) ? "status" : null;
+        if (method.Equals("POST", StringComparison.OrdinalIgnoreCase))
+        {
+            if (context.Request.ContentLength64 > 16 * 1024)
+            {
+                await WriteJsonResponseAsync(context, 413, new JsonObject { ["error"] = "Request body too large" });
+                return;
+            }
+            try
+            {
+                var text = await ReadBoundedBodyAsync(
+                    context.Request.InputStream,
+                    context.Request.ContentEncoding ?? Encoding.UTF8,
+                    16 * 1024);
+                action = string.IsNullOrWhiteSpace(text)
+                    ? "status"
+                    : JsonNode.Parse(text)?["action"]?.GetValue<string>()?.Trim().ToLowerInvariant();
+            }
+            catch
+            {
+                await WriteJsonResponseAsync(context, 400, new JsonObject { ["error"] = "Invalid JSON body" });
+                return;
+            }
+        }
+        else if (!method.Equals("GET", StringComparison.OrdinalIgnoreCase))
+        {
+            await WriteJsonResponseAsync(context, 405, new JsonObject { ["error"] = "Method not allowed" });
+            return;
+        }
+
+        if (!_agents.TryGetValue(agentId, out var connection))
+        {
+            await WriteJsonResponseAsync(context, 404, new JsonObject
+            {
+                ["ok"] = false,
+                ["error"] = $"Agent '{agentId}' is not connected. Checkpoints are retained until explicitly cleared or expired."
+            });
+            return;
+        }
+
+        RouteCheckpointStatus status;
+        try
+        {
+            status = action switch
+            {
+                "status" => _checkpoints.Status(connection.Registration),
+                "save" => await _checkpoints.SaveAsync(connection.Registration, _cts?.Token ?? CancellationToken.None),
+                "restore" => await _checkpoints.RestoreAsync(connection.Registration, _cts?.Token ?? CancellationToken.None),
+                "clear" => ClearCheckpoint(connection.Registration),
+                _ => new RouteCheckpointStatus
+                {
+                    Ok = false,
+                    Connected = true,
+                    Warning = $"Unknown checkpoint action '{action}'."
+                }
+            };
+        }
+        catch (Exception ex)
+        {
+            Log($"Warning: checkpoint {action} failed for {agentId}: {ex.Message}");
+            status = new RouteCheckpointStatus
+            {
+                Ok = false,
+                Connected = true,
+                Warning = "Checkpoint operation failed."
+            };
+        }
+
+        var node = JsonSerializer.SerializeToNode(status, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+            DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull
+        })?.AsObject() ?? new JsonObject();
+        await WriteJsonResponseAsync(context, status.Ok ? 200 : 400, node);
+    }
+
+    private RouteCheckpointStatus ClearCheckpoint(AgentRegistration registration)
+    {
+        _checkpoints.Clear(registration);
+        return new RouteCheckpointStatus { Connected = true, HasCheckpoint = false };
     }
 
     internal static async Task<string> ReadBoundedBodyAsync(
@@ -983,7 +1100,9 @@ public class BrokerServer : IDisposable
                 registration.AppName,
                 registration.Platform,
                 registration.Project,
-                registration.SessionId);
+                registration.SessionId,
+                _checkpoints,
+                registration);
             inspector = _inspectors.GetOrAdd(connection.Registration.Id, created);
             if (!ReferenceEquals(inspector, created))
             {

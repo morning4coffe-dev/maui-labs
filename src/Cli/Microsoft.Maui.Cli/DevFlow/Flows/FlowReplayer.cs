@@ -21,6 +21,9 @@ public sealed class FlowStepResult
     public string Label { get; set; } = "";
     public bool Ok { get; set; }
     public string? Error { get; set; }
+    public string? FailureKind { get; set; }
+    public int? MatchCount { get; set; }
+    public string? SelectorQuality { get; set; }
     public List<FlowAssertResult> Asserts { get; set; } = new();
 }
 
@@ -32,6 +35,10 @@ public sealed class FlowReplayReport
     public int Total { get; set; }
     public int Passed { get; set; }
     public int Failed { get; set; }
+    public int? DivergencePoint { get; set; }
+    public bool StoppedEarly { get; set; }
+    public bool EvidenceAvailable { get; set; }
+    public string? EvidencePath { get; set; }
     public List<FlowStepResult> Results { get; set; } = new();
 }
 
@@ -46,12 +53,23 @@ public sealed class FlowReplayer
     private readonly AgentClient _agent;
     private readonly int _pollTries;
     private readonly int _pollGapMs;
+    private readonly FlowActionabilityEngine _actionability;
+    private readonly bool _continueOnFailure;
+    private readonly IFlowReplayEvidenceCapture? _evidenceCapture;
 
-    public FlowReplayer(AgentClient agent, int pollTries = 4, int pollGapMs = 300)
+    public FlowReplayer(
+        AgentClient agent,
+        int pollTries = 4,
+        int pollGapMs = 300,
+        bool continueOnFailure = false,
+        IFlowReplayEvidenceCapture? evidenceCapture = null)
     {
         _agent = agent;
         _pollTries = Math.Max(1, pollTries);
         _pollGapMs = Math.Max(0, pollGapMs);
+        _actionability = new FlowActionabilityEngine(agent, _pollTries, _pollGapMs);
+        _continueOnFailure = continueOnFailure;
+        _evidenceCapture = evidenceCapture;
     }
 
     public async Task<FlowReplayReport> ReplayAsync(MauiFlow flow, string? file = null, CancellationToken ct = default)
@@ -63,12 +81,15 @@ public sealed class FlowReplayer
             ct.ThrowIfCancellationRequested();
             var res = new FlowStepResult { Seq = step.Seq, Action = step.Action, Label = FlowMarkdown.Label(step) };
 
-            var (driveOk, driveError) = await DriveAsync(step, ct);
-            if (!driveOk)
+            var drive = await DriveAsync(step, ct);
+            res.MatchCount = drive.MatchCount;
+            res.SelectorQuality = drive.SelectorQuality;
+            if (!drive.Ok)
             {
                 // Causality: don't run assertions when the action itself didn't happen.
                 res.Ok = false;
-                res.Error = driveError;
+                res.Error = drive.Error;
+                res.FailureKind = drive.Kind;
                 foreach (var a in step.Asserts ?? Enumerable.Empty<FlowAssert>())
                     res.Asserts.Add(new FlowAssertResult { Kind = a.Kind, Skipped = true, Name = a.Name, Expected = a.Expected });
             }
@@ -84,20 +105,39 @@ public sealed class FlowReplayer
                     }
                     var ar = await VerifyAsync(a, ct);
                     res.Asserts.Add(ar);
-                    if (ar.Ok == false) res.Ok = false;
+                    if (ar.Ok == false)
+                    {
+                        res.Ok = false;
+                        res.FailureKind ??= FlowFailureKinds.Assertion;
+                        res.Error ??= $"{a.Kind} assertion failed.";
+                    }
                 }
             }
 
             if (res.Ok) report.Passed++;
             else report.Failed++;
             report.Results.Add(res);
+            if (!res.Ok)
+            {
+                report.DivergencePoint ??= step.Seq;
+                if (_evidenceCapture is not null)
+                {
+                    try { await _evidenceCapture.CaptureOnFailureAsync(flow, step, res, ct); }
+                    catch { /* evidence must never mask the replay failure */ }
+                }
+                if (!_continueOnFailure)
+                {
+                    report.StoppedEarly = true;
+                    break;
+                }
+            }
         }
 
         report.Ok = report.Failed == 0;
         return report;
     }
 
-    private async Task<(bool Ok, string? Error)> DriveAsync(FlowStep step, CancellationToken ct)
+    private async Task<DriveResult> DriveAsync(FlowStep step, CancellationToken ct)
     {
         try
         {
@@ -106,23 +146,25 @@ public sealed class FlowReplayer
             {
                 case FlowActions.Tap:
                 {
-                    var id = await ResolveDriveTargetAsync(FlowValidator.EffectiveSelector(step), ct);
-                    if (id is null) return (false, "tap target could not be resolved");
-                    return await _agent.TapAsync(id) ? (true, null) : (false, "tap reported failure");
+                    var target = await _actionability.WaitForActionableAsync(FlowValidator.EffectiveSelector(step), true, ct);
+                    if (!target.Ok) return DriveResult.FromTarget("tap", target);
+                    return await _agent.TapAsync(target.Element!.Id) ? DriveResult.Success(target) : DriveResult.Failure(FlowFailureKinds.Drive, "tap reported failure", target);
                 }
                 case FlowActions.Fill:
                 {
-                    var id = await ResolveDriveTargetAsync(FlowValidator.EffectiveSelector(step), ct);
-                    if (id is null) return (false, "fill target could not be resolved");
-                    return await _agent.FillAsync(id, args?.Text ?? step.Value ?? "") ? (true, null) : (false, "fill reported failure");
+                    var target = await _actionability.WaitForActionableAsync(FlowValidator.EffectiveSelector(step), false, ct);
+                    if (!target.Ok) return DriveResult.FromTarget("fill", target);
+                    return await _agent.FillAsync(target.Element!.Id, args?.Text ?? step.Value ?? "") ? DriveResult.Success(target) : DriveResult.Failure(FlowFailureKinds.Drive, "fill reported failure", target);
                 }
                 case FlowActions.SetProperty:
                 {
-                    var id = await ResolveDriveTargetAsync(FlowValidator.EffectiveSelector(step), ct);
-                    if (id is null) return (false, "setProperty target could not be resolved");
+                    var target = await _actionability.WaitForActionableAsync(FlowValidator.EffectiveSelector(step), false, ct);
+                    if (!target.Ok) return DriveResult.FromTarget("setProperty", target);
+                    if (IsUnsafeValueSource(args?.ValueSource))
+                        return DriveResult.Failure(FlowFailureKinds.UnsafeValue, "setProperty value came from an unsafe binding/resource source and cannot be replayed.", target);
                     var name = string.IsNullOrEmpty(args?.Name) ? "Text" : args!.Name!;
-                    return await _agent.SetPropertyAsync(id, name, args?.Value ?? step.Value ?? "")
-                        ? (true, null) : (false, "setProperty reported failure");
+                    return await _agent.SetPropertyAsync(target.Element!.Id, name, args?.Value ?? step.Value ?? "")
+                        ? DriveResult.Success(target) : DriveResult.Failure(FlowFailureKinds.Drive, "setProperty reported failure", target);
                 }
                 case FlowActions.Scroll:
                 {
@@ -130,8 +172,9 @@ public sealed class FlowReplayer
                     var sel = FlowValidator.EffectiveSelector(step);
                     if (sel is not null && !sel.IsEmpty)
                     {
-                        id = await ResolveDriveTargetAsync(sel, ct);
-                        if (id is null) return (false, "scroll target could not be resolved");
+                        var target = await _actionability.WaitForActionableAsync(sel, false, ct);
+                        if (!target.Ok) return DriveResult.FromTarget("scroll", target);
+                        id = target.Element!.Id;
                     }
                     var ok = await _agent.ScrollAsync(
                         elementId: id,
@@ -140,29 +183,29 @@ public sealed class FlowReplayer
                         animated: args?.Animated ?? false,
                         itemIndex: args?.ItemIndex,
                         scrollToPosition: args?.Position);
-                    return ok ? (true, null) : (false, "scroll reported failure");
+                    return ok ? DriveResult.Success() : DriveResult.Failure(FlowFailureKinds.Drive, "scroll reported failure");
                 }
                 case FlowActions.Navigate:
                 {
                     var route = args?.Route ?? step.Value;
-                    if (string.IsNullOrEmpty(route)) return (false, "navigate requires a route");
-                    return await _agent.NavigateAsync(route) ? (true, null) : (false, "navigate reported failure");
+                    if (string.IsNullOrEmpty(route)) return DriveResult.Failure(FlowFailureKinds.Drive, "navigate requires a route");
+                    return await _agent.NavigateAsync(route) ? DriveResult.Success() : DriveResult.Failure(FlowFailureKinds.Drive, "navigate reported failure");
                 }
                 case FlowActions.Back:
-                    return await _agent.BackAsync() ? (true, null) : (false, "back reported failure");
+                    return await _agent.BackAsync() ? DriveResult.Success() : DriveResult.Failure(FlowFailureKinds.Drive, "back reported failure");
                 case FlowActions.Assert:
                     // Validation-only step: nothing to drive, so the step's assertions run next.
-                    return (true, null);
+                    return DriveResult.Success();
                 case FlowActions.SetTheme:
                 {
                     var themeStr = args?.Theme ?? step.Value;
                     if (!TryParseTheme(themeStr, out var theme))
-                        return (false, $"setTheme requires light|dark|system (got '{themeStr ?? "(none)"}')");
+                        return DriveResult.Failure(FlowFailureKinds.Drive, $"setTheme requires light|dark|system (got '{themeStr ?? "(none)"}')");
                     var r = await _agent.SetThemeAsync(theme);
-                    return (r?.Success ?? true) ? (true, null) : (false, r?.Message ?? "setTheme reported failure");
+                    return (r?.Success ?? true) ? DriveResult.Success() : DriveResult.Failure(FlowFailureKinds.Drive, r?.Message ?? "setTheme reported failure");
                 }
                 default:
-                    return (false, $"unknown action: {step.Action}");
+                    return DriveResult.Failure(FlowFailureKinds.Drive, $"unknown action: {step.Action}");
             }
         }
         catch (OperationCanceledException)
@@ -171,7 +214,7 @@ public sealed class FlowReplayer
         }
         catch (Exception ex)
         {
-            return (false, $"drive failed: {ex.Message}");
+            return DriveResult.Failure(FlowFailureKinds.Drive, $"drive failed: {ex.Message}");
         }
     }
 
@@ -202,6 +245,16 @@ public sealed class FlowReplayer
                 {
                     var id = await ResolveToIdAsync(a.Selector, ct);
                     if (id is not null)
+                    {
+                        r.Ok = true;
+                        return r;
+                    }
+                }
+                else if (a.Kind == "routeIs")
+                {
+                    var route = (await _agent.GetStatusAsync())?.Route;
+                    r.Actual = route;
+                    if (string.Equals(route, a.Expected, StringComparison.Ordinal))
                     {
                         r.Ok = true;
                         return r;
@@ -297,35 +350,8 @@ public sealed class FlowReplayer
 
     private async Task<string?> ResolveToIdAsync(FlowSelector? selector, CancellationToken ct)
     {
-        if (selector is null || selector.IsEmpty) return null;
-        ct.ThrowIfCancellationRequested();
-
-        // Documented precedence: AutomationId > Text > TypeIndex (fragile) > raw Id (fragile).
-        if (!string.IsNullOrEmpty(selector.AutomationId))
-        {
-            var r = await _agent.QueryAsync(automationId: selector.AutomationId);
-            return r.Count > 0 ? r[0].Id : null;
-        }
-        if (!string.IsNullOrEmpty(selector.Text))
-        {
-            var r = await _agent.QueryAsync(text: selector.Text);
-            return r.Count > 0 ? r[0].Id : null;
-        }
-        var typeIndex = selector.TypeIndex
-            ?? (selector.SelectorKind == "typeIndex" && !string.IsNullOrEmpty(selector.Type) && selector.Index is not null
-                ? new FlowTypeIndex { Type = selector.Type, Index = selector.Index.Value }
-                : null);
-        if (typeIndex is not null && !string.IsNullOrEmpty(typeIndex.Type))
-        {
-            var byType = await _agent.QueryAsync(type: typeIndex.Type);
-            return typeIndex.Index >= 0 && typeIndex.Index < byType.Count ? byType[typeIndex.Index].Id : null;
-        }
-        if (!string.IsNullOrEmpty(selector.Id))
-        {
-            var el = await _agent.GetElementAsync(selector.Id);
-            return el is not null ? selector.Id : null;
-        }
-        return null;
+        var resolution = await _actionability.ResolveAsync(selector, ct);
+        return resolution.Ok ? resolution.Element!.Id : null;
     }
 
     private static bool TryParseTheme(string? s, out DevFlowTheme theme)
@@ -340,4 +366,37 @@ public sealed class FlowReplayer
             default: return false;
         }
     }
+
+    private static bool IsUnsafeValueSource(string? source)
+        => source is not null &&
+           (source.Contains("binding", StringComparison.OrdinalIgnoreCase) ||
+            source.Contains("resource", StringComparison.OrdinalIgnoreCase) ||
+            source.Contains("trigger", StringComparison.OrdinalIgnoreCase) ||
+            source.Contains("unsafe", StringComparison.OrdinalIgnoreCase));
+
+    private sealed record DriveResult(
+        bool Ok,
+        string? Kind = null,
+        string? Error = null,
+        int? MatchCount = null,
+        string? SelectorQuality = null)
+    {
+        public static DriveResult Success(FlowTargetResolution? target = null)
+            => new(true, MatchCount: target?.MatchCount, SelectorQuality: target?.Quality);
+
+        public static DriveResult Failure(string kind, string error, FlowTargetResolution? target = null)
+            => new(false, kind, error, target?.MatchCount, target?.Quality);
+
+        public static DriveResult FromTarget(string action, FlowTargetResolution target)
+            => Failure(
+                target.Kind,
+                $"{action} target could not be resolved: {target.Error}",
+                target);
+    }
+}
+
+/// <summary>Optional callback that callers can use to collect privacy-safe evidence after failure.</summary>
+public interface IFlowReplayEvidenceCapture
+{
+    Task CaptureOnFailureAsync(MauiFlow flow, FlowStep failedStep, FlowStepResult result, CancellationToken cancellationToken);
 }

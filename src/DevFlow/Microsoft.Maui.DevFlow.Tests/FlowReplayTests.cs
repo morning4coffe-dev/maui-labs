@@ -216,6 +216,110 @@ public class FlowReplayTests
         Assert.Contains("scroll target could not be resolved", report.Results[0].Error);
     }
 
+    [Fact]
+    public async Task Replay_AutomationIdMatchesMultipleElements_FailsAmbiguouslyWithoutDriving()
+    {
+        await using var agentSrv = new RoutingAgent();
+        agentSrv.AddElement("duplicate", "submit", "Button", "Other");
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep { Seq = 1, Action = FlowActions.Tap, Args = new FlowStepArgs { Selector = new FlowSelector { AutomationId = "submit" } } }
+            }
+        };
+
+        var report = await new FlowReplayer(client, pollTries: 1, pollGapMs: 0).ReplayAsync(flow);
+
+        Assert.False(report.Ok);
+        Assert.Equal(FlowFailureKinds.Ambiguous, report.Results[0].FailureKind);
+        Assert.Empty(agentSrv.Taps);
+    }
+
+    [Fact]
+    public async Task Replay_TextSelector_RequiresExactUniqueText()
+    {
+        await using var agentSrv = new RoutingAgent();
+        agentSrv.AddElement("partial", "other", "Button", "Go now");
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        var exact = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Tap,
+                    Args = new FlowStepArgs { Selector = new FlowSelector { Text = "Go" } }
+                }
+            }
+        };
+
+        var report = await new FlowReplayer(client, pollTries: 1, pollGapMs: 0).ReplayAsync(exact);
+
+        Assert.True(report.Ok, JsonSerializer.Serialize(report));
+        Assert.Equal(["btn"], agentSrv.Taps);
+    }
+
+    [Fact]
+    public async Task Replay_FailureStopsAtDivergence_AndInvokesEvidenceCallbackOnce()
+    {
+        await using var agentSrv = new RoutingAgent();
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        var evidence = new CountingEvidenceCapture();
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep { Seq = 1, Action = FlowActions.Tap, Args = new FlowStepArgs { Selector = new FlowSelector { AutomationId = "missing" } } },
+                new FlowStep { Seq = 2, Action = FlowActions.Tap, Args = new FlowStepArgs { Selector = new FlowSelector { AutomationId = "submit" } } }
+            }
+        };
+
+        var report = await new FlowReplayer(client, pollTries: 1, pollGapMs: 0, evidenceCapture: evidence).ReplayAsync(flow);
+
+        Assert.True(report.StoppedEarly);
+        Assert.Equal(1, report.DivergencePoint);
+        Assert.Single(report.Results);
+        Assert.Equal(1, evidence.Count);
+    }
+
+    [Fact]
+    public async Task Replay_RouteIsAssertion_UsesAgentStatusRoute()
+    {
+        await using var agentSrv = new RoutingAgent();
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Assert,
+                    Asserts = new() { new FlowAssert { Kind = "routeIs", Expected = "/home", Verify = true } }
+                }
+            }
+        };
+
+        var report = await new FlowReplayer(client, pollTries: 1, pollGapMs: 0).ReplayAsync(flow);
+
+        Assert.True(report.Ok);
+        Assert.True(report.Results[0].Asserts[0].Ok);
+    }
+
+    private sealed class CountingEvidenceCapture : IFlowReplayEvidenceCapture
+    {
+        public int Count { get; private set; }
+
+        public Task CaptureOnFailureAsync(MauiFlow flow, FlowStep failedStep, FlowStepResult result, CancellationToken cancellationToken)
+        {
+            Count++;
+            return Task.CompletedTask;
+        }
+    }
+
     // ── Stateful fake agent ──────────────────────────────────────────────────────
     private sealed class Element
     {
@@ -240,6 +344,8 @@ public class FlowReplayTests
 
         public List<string> Taps { get; } = new();
         public string? TextOf(string id) => _els.FirstOrDefault(e => e.Id == id)?.Text;
+        public void AddElement(string id, string automationId, string type, string text)
+            => _els.Add(new Element { Id = id, AutomationId = automationId, Type = type, Text = text });
 
         public RoutingAgent()
         {
@@ -322,7 +428,7 @@ public class FlowReplayTests
             var query = ParseQuery(qIdx >= 0 ? rawPath[(qIdx + 1)..] : "");
 
             if (method == "GET" && path == "/api/v1/agent/status")
-                return "{\"running\":true}";
+                return "{\"running\":true,\"route\":\"/home\"}";
 
             if (method == "GET" && path == "/api/v1/ui/elements")
             {
@@ -380,7 +486,17 @@ public class FlowReplayTests
             return null;
         }
 
-        private static object ToJson(Element e) => new { id = e.Id, type = e.Type, fullType = e.Type, automationId = e.AutomationId, text = e.Text };
+        private static object ToJson(Element e) => new
+        {
+            id = e.Id,
+            type = e.Type,
+            fullType = e.Type,
+            automationId = e.AutomationId,
+            text = e.Text,
+            isVisible = true,
+            isEnabled = true,
+            bounds = new { x = 0, y = 0, width = 100, height = 40 }
+        };
 
         private static (string Id, string Name) PropPath(string path)
         {

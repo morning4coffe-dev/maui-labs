@@ -16,9 +16,10 @@ public static class FlowValidator
     private static readonly IReadOnlySet<string> AssertKinds =
         new HashSet<string>(StringComparer.Ordinal) { "propEquals", "exists", "routeIs", "pageChanged" };
 
-    // These have executable replay checks; routeIs/pageChanged remain descriptive recording notes.
+    // routeIs has an authoritative AgentStatus.Route value. pageChanged is report-only because a
+    // generic flow does not retain authoritative before/after page identity.
     private static readonly IReadOnlySet<string> VerifiableAssertKinds =
-        new HashSet<string>(StringComparer.Ordinal) { "propEquals", "exists" };
+        new HashSet<string>(StringComparer.Ordinal) { "propEquals", "exists", "routeIs" };
 
     private static readonly IReadOnlySet<string> Themes =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "light", "dark", "system" };
@@ -94,10 +95,12 @@ public static class FlowValidator
                 // just poll until a misleading failure.
                 if (a.Verify)
                 {
-                    if (a.Selector is null || a.Selector.IsEmpty)
+                    if (a.Kind is "propEquals" or "exists" && (a.Selector is null || a.Selector.IsEmpty))
                         v.Errors.Add($"{where}: {a.Kind} assertion requires a selector.");
                     if (a.Kind == "propEquals" && string.IsNullOrEmpty(a.Name))
                         v.Errors.Add($"{where}: propEquals assertion requires a property name.");
+                    if (a.Kind == "routeIs" && string.IsNullOrWhiteSpace(a.Expected))
+                        v.Errors.Add($"{where}: routeIs assertion requires an expected route.");
                 }
             }
             if (s.Fragile)

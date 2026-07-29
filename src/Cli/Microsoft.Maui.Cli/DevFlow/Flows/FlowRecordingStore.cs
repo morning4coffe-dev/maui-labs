@@ -20,8 +20,9 @@ public sealed class FlowRecordingStore
     public static FlowRecordingStore Instance { get; } = new();
 
     private readonly ConcurrentDictionary<string, FlowRecorder> _sessions = new(StringComparer.Ordinal);
+    private readonly TimeProvider _clock;
 
-    private FlowRecordingStore() { }
+    public FlowRecordingStore(TimeProvider? clock = null) => _clock = clock ?? TimeProvider.System;
 
     /// <summary>Starts a recording and returns its id, or null if the active-recording cap is hit.</summary>
     public string? Start(string name, string? app, string? platform, string? preconditions)
@@ -30,7 +31,7 @@ public sealed class FlowRecordingStore
         if (_sessions.Count >= MaxActive)
             return null;
 
-        var recorder = new FlowRecorder(name, app, platform, preconditions);
+        var recorder = new FlowRecorder(name, app, platform, preconditions, _clock);
         for (var attempt = 0; attempt < 5; attempt++)
         {
             var id = NewId();
@@ -56,6 +57,10 @@ public sealed class FlowRecordingStore
     public FlowRecorder? Remove(string id) =>
         !string.IsNullOrEmpty(id) && _sessions.TryRemove(id, out var recorder) ? recorder : null;
 
+    /// <summary>Restores a persisted broker recording with its original unguessable identifier.</summary>
+    public bool TryRestore(string id, FlowRecorder recorder)
+        => !string.IsNullOrWhiteSpace(id) && recorder is not null && _sessions.TryAdd(id, recorder);
+
     public IReadOnlyList<(string Id, string Name, int Steps)> List()
     {
         EvictIdle();
@@ -64,7 +69,7 @@ public sealed class FlowRecordingStore
 
     private void EvictIdle()
     {
-        var cutoff = DateTimeOffset.UtcNow - IdleTtl;
+        var cutoff = _clock.GetUtcNow() - IdleTtl;
         foreach (var kv in _sessions)
         {
             if (kv.Value.LastTouchedUtc < cutoff)

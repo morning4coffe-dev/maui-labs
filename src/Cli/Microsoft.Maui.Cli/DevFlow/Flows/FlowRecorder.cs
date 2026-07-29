@@ -13,20 +13,31 @@ public sealed class FlowRecorder
 
     private readonly object _gate = new();
     private readonly MauiFlow _flow;
+    private readonly TimeProvider _clock;
     private int _seq;
     private bool _closed;
 
-    public FlowRecorder(string name, string? app, string? platform, string? preconditions)
+    public FlowRecorder(
+        string name,
+        string? app,
+        string? platform,
+        string? preconditions,
+        TimeProvider? clock = null,
+        DateTimeOffset? createdAtUtc = null,
+        DateTimeOffset? lastTouchedUtc = null,
+        MauiFlow? restoredFlow = null)
     {
-        _flow = new MauiFlow
+        _clock = clock ?? TimeProvider.System;
+        _flow = restoredFlow is null ? new MauiFlow
         {
             Name = string.IsNullOrWhiteSpace(name) ? "scenario" : name.Trim(),
             App = app,
             Platform = platform,
             Preconditions = preconditions,
-        };
-        CreatedAtUtc = DateTimeOffset.UtcNow;
-        LastTouchedUtc = CreatedAtUtc;
+        } : Clone(restoredFlow);
+        _seq = _flow.Steps.Count == 0 ? 0 : _flow.Steps.Max(static step => step.Seq);
+        CreatedAtUtc = createdAtUtc ?? _clock.GetUtcNow();
+        LastTouchedUtc = lastTouchedUtc ?? CreatedAtUtc;
     }
 
     public string Name => _flow.Name;
@@ -39,7 +50,7 @@ public sealed class FlowRecorder
     /// <summary>Marks the recording as recently used (called when it is looked up).</summary>
     public void Touch()
     {
-        lock (_gate) LastTouchedUtc = DateTimeOffset.UtcNow;
+        lock (_gate) LastTouchedUtc = _clock.GetUtcNow();
     }
 
     public int StepCount
@@ -59,7 +70,7 @@ public sealed class FlowRecorder
             if (_closed || _flow.Steps.Count >= MaxSteps)
                 return -1;
 
-            LastTouchedUtc = DateTimeOffset.UtcNow;
+            LastTouchedUtc = _clock.GetUtcNow();
             var seq = ++_seq;
             _flow.Steps.Add(new FlowStep
             {
@@ -70,7 +81,7 @@ public sealed class FlowRecorder
                 Args = args,
                 Page = page,
                 Navigated = navigated,
-                Fragile = target is not null && string.IsNullOrEmpty(target.AutomationId) && !target.IsEmpty,
+                Fragile = FlowRecordTools.IsFragileSelector(target),
                 Asserts = asserts is { Count: > 0 } ? asserts : null,
             });
             return seq;
@@ -99,7 +110,7 @@ public sealed class FlowRecorder
                 return (null, validation, empty);
 
             _closed = true;
-            _flow.RecordedAt ??= DateTimeOffset.UtcNow.ToString("o");
+            _flow.RecordedAt ??= _clock.GetUtcNow().ToString("o");
             return (CopyLocked(), validation, false);
         }
     }
@@ -113,19 +124,76 @@ public sealed class FlowRecorder
         lock (_gate)
         {
             _closed = true;
-            _flow.RecordedAt ??= DateTimeOffset.UtcNow.ToString("o");
+            _flow.RecordedAt ??= _clock.GetUtcNow().ToString("o");
             return CopyLocked();
         }
     }
 
-    private MauiFlow CopyLocked() => new()
+    private MauiFlow CopyLocked() => Clone(_flow);
+
+    private static MauiFlow Clone(MauiFlow source) => new()
     {
-        Schema = _flow.Schema,
-        Name = _flow.Name,
-        App = _flow.App,
-        Platform = _flow.Platform,
-        RecordedAt = _flow.RecordedAt,
-        Preconditions = _flow.Preconditions,
-        Steps = new List<FlowStep>(_flow.Steps),
+        Schema = source.Schema,
+        Name = source.Name,
+        App = source.App,
+        Platform = source.Platform,
+        RecordedAt = source.RecordedAt,
+        Preconditions = source.Preconditions,
+        Steps = source.Steps.Select(CloneStep).ToList(),
+    };
+
+    private static FlowStep CloneStep(FlowStep step) => new()
+    {
+        Seq = step.Seq,
+        Action = step.Action,
+        Target = CloneSelector(step.Target),
+        Value = step.Value,
+        Args = step.Args is null ? null : new FlowStepArgs
+        {
+            Selector = CloneSelector(step.Args.Selector),
+            Text = step.Args.Text,
+            Name = step.Args.Name,
+            Value = step.Args.Value,
+            Route = step.Args.Route,
+            Theme = step.Args.Theme,
+            ValueSource = step.Args.ValueSource,
+            Element = step.Args.Element,
+            Dx = step.Args.Dx,
+            Dy = step.Args.Dy,
+            ItemIndex = step.Args.ItemIndex,
+            Position = step.Args.Position,
+            Animated = step.Args.Animated
+        },
+        Page = step.Page,
+        Navigated = step.Navigated,
+        Fragile = step.Fragile,
+        Screenshot = step.Screenshot,
+        Asserts = step.Asserts?.Select(assertion => new FlowAssert
+        {
+            Kind = assertion.Kind,
+            Selector = CloneSelector(assertion.Selector),
+            Name = assertion.Name,
+            Expected = assertion.Expected,
+            Verify = assertion.Verify,
+            Note = assertion.Note
+        }).ToList()
+    };
+
+    private static FlowSelector? CloneSelector(FlowSelector? selector) => selector is null ? null : new FlowSelector
+    {
+        AutomationId = selector.AutomationId,
+        Text = selector.Text,
+        Id = selector.Id,
+        Type = selector.Type,
+        Index = selector.Index,
+        SelectorKind = selector.SelectorKind,
+        MatchCount = selector.MatchCount,
+        Quality = selector.Quality,
+        FragilityReasons = selector.FragilityReasons is null ? null : new List<string>(selector.FragilityReasons),
+        TypeIndex = selector.TypeIndex is null ? null : new FlowTypeIndex
+        {
+            Type = selector.TypeIndex.Type,
+            Index = selector.TypeIndex.Index
+        }
     };
 }

@@ -7,16 +7,28 @@ internal sealed class BrokerFlowCoordinator
 {
     private readonly ConcurrentDictionary<string, ActiveRecording> _active = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, object> _gates = new(StringComparer.Ordinal);
+    private readonly FlowRecordingStore _recordings;
+    private readonly FlowRecordingSpoolStore _spools;
+
+    public BrokerFlowCoordinator(
+        FlowRecordingStore? recordings = null,
+        FlowRecordingSpoolStore? spools = null)
+    {
+        _recordings = recordings ?? FlowRecordingStore.Instance;
+        _spools = spools ?? new FlowRecordingSpoolStore();
+        RestoreSpools();
+    }
 
     public BrokerFlowResult Start(
         string agentId,
         string name,
         string? app,
         string? platform,
-        string? preconditions)
+        string? preconditions,
+        string? sessionId = null)
     {
         lock (Gate(agentId))
-            return StartCore(agentId, name, app, platform, preconditions);
+            return StartCore(agentId, name, app, platform, preconditions, sessionId);
     }
 
     private BrokerFlowResult StartCore(
@@ -24,11 +36,12 @@ internal sealed class BrokerFlowCoordinator
         string name,
         string? app,
         string? platform,
-        string? preconditions)
+        string? preconditions,
+        string? sessionId)
     {
         if (_active.TryGetValue(agentId, out var existing))
         {
-            if (FlowRecordingStore.Instance.TryGet(existing.RecordingId, out var existingRecorder))
+            if (_recordings.TryGet(existing.RecordingId, out var existingRecorder))
             {
                 return new BrokerFlowResult
                 {
@@ -42,16 +55,18 @@ internal sealed class BrokerFlowCoordinator
             _active.TryRemove(agentId, out _);
         }
 
-        var recordingId = FlowRecordingStore.Instance.Start(name, app, platform, preconditions);
+        var recordingId = _recordings.Start(name, app, platform, preconditions);
         if (recordingId is null)
             return BrokerFlowResult.Failure($"Too many active recordings (max {FlowRecordingStore.MaxActive}).");
 
-        var active = new ActiveRecording(recordingId);
+        var active = new ActiveRecording(recordingId, sessionId);
         if (!_active.TryAdd(agentId, active))
         {
-            FlowRecordingStore.Instance.Remove(recordingId);
+            _recordings.Remove(recordingId);
             return BrokerFlowResult.Failure("A recording is already active for this app.");
         }
+        if (_recordings.TryGet(recordingId, out var started))
+            Persist(agentId, active, started);
 
         return new BrokerFlowResult
         {
@@ -73,11 +88,12 @@ internal sealed class BrokerFlowCoordinator
     {
         if (!_active.TryGetValue(agentId, out var active))
             return new BrokerFlowResult { Ok = true, Recording = false, Steps = 0 };
-        if (!FlowRecordingStore.Instance.TryGet(active.RecordingId, out var recorder))
+        if (!_recordings.TryGet(active.RecordingId, out var recorder))
         {
             _active.TryRemove(agentId, out _);
             return new BrokerFlowResult { Ok = true, Recording = false, Steps = 0 };
         }
+        Persist(agentId, active, recorder);
 
         return new BrokerFlowResult
         {
@@ -101,7 +117,7 @@ internal sealed class BrokerFlowCoordinator
             return new BrokerFlowResult { Ok = true, Recording = false, Steps = 0 };
         if (!MatchesExpected(active, expectedRecordingId))
             return BrokerFlowResult.Failure($"Unknown recordingId '{expectedRecordingId}'.");
-        if (!FlowRecordingStore.Instance.TryGet(active.RecordingId, out var recorder))
+        if (!_recordings.TryGet(active.RecordingId, out var recorder))
             return BrokerFlowResult.Failure("The active recording no longer exists.");
 
         var added = FlowRecordTools.AddStepCore(
@@ -120,7 +136,13 @@ internal sealed class BrokerFlowCoordinator
             observation.Position,
             observation.Page,
             observation.Navigated,
-            observation.AssertsJson);
+            observation.AssertsJson,
+            observation.MatchCount,
+            observation.Quality,
+            observation.FragilityReasons,
+            observation.ValueSource);
+        if (added.ok)
+            Persist(agentId, active, recorder);
         return added.ok
             ? new BrokerFlowResult
             {
@@ -149,7 +171,7 @@ internal sealed class BrokerFlowCoordinator
         }
         if (!MatchesExpected(active, expectedRecordingId))
             return BrokerFlowResult.Failure($"Unknown recordingId '{expectedRecordingId}'.");
-        if (!FlowRecordingStore.Instance.TryGet(active.RecordingId, out var recorder))
+        if (!_recordings.TryGet(active.RecordingId, out var recorder))
         {
             _active.TryRemove(agentId, out _);
             return BrokerFlowResult.Failure("The active recording no longer exists.");
@@ -175,7 +197,8 @@ internal sealed class BrokerFlowCoordinator
         if (!finished.ok)
             return BrokerFlowResult.Failure(finished.error ?? "Could not serialize recording.");
 
-        FlowRecordingStore.Instance.Remove(active.RecordingId);
+        _recordings.Remove(active.RecordingId);
+        _spools.Delete(active.RecordingId);
         _active.TryRemove(agentId, out _);
         return new BrokerFlowResult
         {
@@ -203,12 +226,13 @@ internal sealed class BrokerFlowCoordinator
                 return BrokerFlowResult.Failure("No recording is active for this app.");
             if (!MatchesExpected(active, expectedRecordingId))
                 return BrokerFlowResult.Failure($"Unknown recordingId '{expectedRecordingId}'.");
-            if (!FlowRecordingStore.Instance.TryGet(active.RecordingId, out var recorder))
+            if (!_recordings.TryGet(active.RecordingId, out var recorder))
                 return BrokerFlowResult.Failure("The active recording no longer exists.");
             if (recorder.StepCount != 0)
                 return BrokerFlowResult.Failure("Recording is no longer empty.");
 
-            FlowRecordingStore.Instance.Remove(active.RecordingId);
+            _recordings.Remove(active.RecordingId);
+            _spools.Delete(active.RecordingId);
             _active.TryRemove(agentId, out _);
             return new BrokerFlowResult { Ok = true, Recording = false, RecordingId = active.RecordingId, Empty = true };
         }
@@ -222,25 +246,51 @@ internal sealed class BrokerFlowCoordinator
         }
         if (!MatchesExpected(active, expectedRecordingId))
             return BrokerFlowResult.Failure($"Unknown recordingId '{expectedRecordingId}'.");
-        FlowRecordingStore.Instance.Remove(active.RecordingId);
+        _recordings.Remove(active.RecordingId);
+        _spools.Delete(active.RecordingId);
         _active.TryRemove(agentId, out _);
         return new BrokerFlowResult { Ok = true, Recording = false };
     }
 
     public void RemoveAgent(string agentId)
     {
-        lock (Gate(agentId))
-        {
-            if (_active.TryRemove(agentId, out var active))
-                FlowRecordingStore.Instance.Remove(active.RecordingId);
-        }
+        // A disconnect is routinely caused by a rebuild. Keep the spool and in-memory registration
+        // so the same stable broker agent id can resume recording on reconnect.
     }
 
     public void Clear()
     {
-        foreach (var agentId in _active.Keys)
-            RemoveAgent(agentId);
+        // Broker shutdown must not erase recoverable recordings. Their snapshots have already been
+        // persisted after every mutation; release only in-memory indexes for process restart.
+        _active.Clear();
         _gates.Clear();
+    }
+
+    private void Persist(string agentId, ActiveRecording active, FlowRecorder recorder)
+    {
+        try { _spools.Save(agentId, active.SessionId, active.RecordingId, recorder); }
+        catch (Exception ex)
+        {
+            _spools.ReportWarning(
+                $"Could not persist workflow recording '{active.RecordingId}': {ex.GetBaseException().Message}");
+        }
+    }
+
+    private void RestoreSpools()
+    {
+        foreach (var spool in _spools.Restore())
+        {
+            var recorder = new FlowRecorder(
+                spool.Flow.Name,
+                spool.Flow.App,
+                spool.Flow.Platform,
+                spool.Flow.Preconditions,
+                createdAtUtc: spool.CreatedUtc,
+                lastTouchedUtc: spool.LastTouchedUtc,
+                restoredFlow: spool.Flow);
+            if (_recordings.TryRestore(spool.RecordingId, recorder))
+                _active.TryAdd(spool.AgentId, new ActiveRecording(spool.RecordingId, spool.SessionId));
+        }
     }
 
     private object Gate(string agentId) => _gates.GetOrAdd(agentId, static _ => new object());
@@ -249,7 +299,7 @@ internal sealed class BrokerFlowCoordinator
         => string.IsNullOrWhiteSpace(expectedRecordingId) ||
             string.Equals(active.RecordingId, expectedRecordingId, StringComparison.Ordinal);
 
-    private sealed record ActiveRecording(string RecordingId);
+    private sealed record ActiveRecording(string RecordingId, string? SessionId);
 }
 
 internal sealed class FlowObservation
@@ -269,6 +319,10 @@ internal sealed class FlowObservation
     public string? Page { get; set; }
     public bool Navigated { get; set; }
     public string? AssertsJson { get; set; }
+    public int? MatchCount { get; set; }
+    public string? Quality { get; set; }
+    public string[]? FragilityReasons { get; set; }
+    public string? ValueSource { get; set; }
 }
 
 internal sealed class BrokerFlowResult

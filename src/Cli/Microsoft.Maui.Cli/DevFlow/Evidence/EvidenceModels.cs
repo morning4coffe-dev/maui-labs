@@ -27,6 +27,7 @@ internal sealed class EvidenceManifest
     public EvidenceCounts Counts { get; set; } = new();
     public EvidenceLimits Limits { get; set; } = new();
     public EvidenceScreenshotStatus Screenshot { get; set; } = new();
+    public EvidenceCheckpointInfo? Checkpoint { get; set; }
     public string? SelectedElementId { get; set; }
     public List<string> Warnings { get; set; } = [];
 }
@@ -119,6 +120,16 @@ internal sealed class EvidenceEnvironment
     public EvidenceDisplayInfo? Display { get; set; }
     public List<string> Capabilities { get; set; } = [];
     public string? Route { get; set; }
+    public EvidenceCheckpointInfo? Checkpoint { get; set; }
+}
+
+/// <summary>Privacy-projected resume metadata; route query values are always scrubbed.</summary>
+internal sealed class EvidenceCheckpointInfo
+{
+    public bool Saved { get; set; }
+    public string? Route { get; set; }
+    public string? SavedUtc { get; set; }
+    public string? LastRestoreKind { get; set; }
 }
 
 /// <summary>

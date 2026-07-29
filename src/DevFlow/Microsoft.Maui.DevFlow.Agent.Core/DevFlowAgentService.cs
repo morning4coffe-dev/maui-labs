@@ -1023,7 +1023,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             !_mutationRecording.IsActive)
             return;
 
-        var observation = await CreateMutationObservationAsync(request).ConfigureAwait(false);
+        var observation = await CreateMutationObservationAsync(request, response).ConfigureAwait(false);
         if (observation is null)
             return;
 
@@ -1040,7 +1040,9 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     private void UpdateMutationRecordingState(MutationRecordingStatus? status)
         => _mutationRecording.Update(status);
 
-    internal async Task<MutationObservation?> CreateMutationObservationAsync(HttpRequest request)
+    internal async Task<MutationObservation?> CreateMutationObservationAsync(
+        HttpRequest request,
+        HttpResponse? response = null)
     {
         string? action = null;
         string? targetId = null;
@@ -1116,12 +1118,14 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             return null;
 
         ElementInfo? target = null;
+        List<ElementInfo>? observedElements = null;
         if (!string.IsNullOrWhiteSpace(targetId) && _app is not null)
         {
             target = await DispatchAsync(() =>
             {
                 var tree = _treeWalker.WalkTree(_app, _options.MaxTreeDepth);
-                return VisualTreeWalker.FlattenElementInfos(tree)
+                observedElements = VisualTreeWalker.FlattenElementInfos(tree).ToList();
+                return observedElements
                     .FirstOrDefault(element => string.Equals(element.Id, targetId, StringComparison.Ordinal));
             });
         }
@@ -1139,23 +1143,79 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var avoidText = action == "fill" ||
             (action == "setProperty" && string.Equals(name, "Text", StringComparison.OrdinalIgnoreCase));
         var automationId = request.MutationTargetAutomationId ?? target?.AutomationId;
+        var selectorText = !avoidText && string.IsNullOrWhiteSpace(automationId) ? target?.Text : null;
+        var selectorType = string.IsNullOrWhiteSpace(automationId) && string.IsNullOrWhiteSpace(selectorText)
+            ? target?.Type
+            : null;
+        int? selectorIndex = null;
+        int? matchCount = null;
+        string? quality = null;
+        List<string>? fragilityReasons = null;
+        if (!string.IsNullOrWhiteSpace(automationId))
+        {
+            matchCount = observedElements?.Count(element =>
+                string.Equals(element.AutomationId, automationId, StringComparison.OrdinalIgnoreCase));
+            quality = matchCount == 1 ? "durable" : "ambiguous";
+            if (matchCount != 1)
+                fragilityReasons = [$"AutomationId matched {matchCount ?? 0} elements at record time"];
+        }
+        else if (!string.IsNullOrWhiteSpace(selectorText))
+        {
+            matchCount = observedElements?.Count(element =>
+                string.Equals(element.Text, selectorText, StringComparison.Ordinal));
+            quality = matchCount == 1 ? "text" : "ambiguous";
+            if (matchCount != 1)
+                fragilityReasons = [$"exact text matched {matchCount ?? 0} elements at record time"];
+        }
+        else if (!string.IsNullOrWhiteSpace(selectorType) && observedElements is not null)
+        {
+            var sameType = observedElements
+                .Where(element => string.Equals(element.Type, selectorType, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            matchCount = sameType.Count;
+            selectorIndex = sameType.FindIndex(element =>
+                string.Equals(element.Id, targetId, StringComparison.Ordinal));
+            quality = "fragile";
+            fragilityReasons = ["type-index selector can change when the visual tree changes"];
+        }
+
+        string? valueSource = null;
+        if (action == "setProperty" && !string.IsNullOrWhiteSpace(response?.Body))
+        {
+            try
+            {
+                using var responseDocument = JsonDocument.Parse(response.Body);
+                valueSource = ReadJsonString(responseDocument.RootElement, "valueSource");
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
         var route = await DispatchAsync(() => Shell.Current?.CurrentState?.Location?.ToString());
         return new MutationObservation
         {
             Action = action,
             AutomationId = automationId,
-            Text = !avoidText && string.IsNullOrWhiteSpace(automationId) ? target?.Text : null,
-            Type = null,
-            Id = string.IsNullOrWhiteSpace(automationId) && (avoidText || string.IsNullOrWhiteSpace(target?.Text))
-                ? targetId
-                : null,
+            Text = selectorText,
+            Type = selectorType,
+            Index = selectorIndex,
+            Id = string.IsNullOrWhiteSpace(automationId)
+                && string.IsNullOrWhiteSpace(selectorText)
+                && string.IsNullOrWhiteSpace(selectorType)
+                    ? targetId
+                    : null,
             Value = value,
             Name = name,
             Dx = dx,
             Dy = dy,
             ItemIndex = itemIndex,
             Position = position,
-            Page = route
+            Page = route,
+            MatchCount = matchCount,
+            Quality = quality,
+            FragilityReasons = fragilityReasons?.ToArray(),
+            ValueSource = valueSource
         };
     }
 

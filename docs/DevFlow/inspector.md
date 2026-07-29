@@ -35,6 +35,8 @@ DevFlow Inspector in GitHub Copilot Canvas.
 - click-to-XAML source navigation for Debug source maps;
 - one integrated Workflow panel for recording, loading project `maui-tests` files or local Markdown
   files, replaying them, and reviewing per-step results;
+- compact **Save route**, **Resume**, and **Clear route** controls in that existing toolbar. They
+  save only an explicit Shell route checkpoint, refresh after reconnect, and never auto-navigate;
 - an **Add to Copilot** context menu for the selected element, loaded workflow, both together, or
   the current bounded and redacted Data snapshot, including alert metadata;
 - an **Evidence** action that previews exactly what a `.mauitrace` bundle would contain, then
@@ -122,6 +124,18 @@ Replay results stay in the same Workflow panel instead of opening a separate rep
 Currently normalized actions include tap, fill, scroll, navigate, back, theme changes, and property
 changes. The result is a Markdown file with an authoritative `json maui-test` block for replay.
 Replay is blocked while recording is active.
+
+Active recordings are atomically spooled under `~/.mauidevflow/recordings/` with a schema version,
+bounded size/steps, expiry, and per-user permissions. A temporary agent disconnect or broker
+restart therefore preserves the active recording; explicit stop, cancel, or expiry deletes it.
+Corrupt spools are quarantined and reported in the broker log.
+
+Schema 2 adds selector diagnostics (`matchCount`, `quality`, and `fragilityReasons`) while preserving
+schema 1 parsing and replay. AutomationId and exact-text selectors must resolve exactly one element;
+duplicate matches fail loudly. Replay waits for visible/enabled targets and for positive stable tap
+bounds, stops at the first divergence by default, and can keep a redacted in-memory evidence bundle
+for download after a failed Inspector replay. It does not claim to detect platform-specific
+occlusion.
 
 ## Click-to-XAML
 

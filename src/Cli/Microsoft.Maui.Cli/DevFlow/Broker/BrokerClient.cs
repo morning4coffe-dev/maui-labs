@@ -119,6 +119,41 @@ public static class BrokerClient
         return ResolveAgent(agents, projectPath, tfm);
     }
 
+    /// <summary>Reads or explicitly changes a broker-owned route checkpoint for a selected agent.</summary>
+    public static async Task<RouteCheckpointStatus> ControlCheckpointAsync(
+        int brokerPort,
+        string agentId,
+        string action = "status")
+    {
+        try
+        {
+            var url = $"http://localhost:{brokerPort}/api/checkpoints/{Uri.EscapeDataString(agentId)}";
+            using var response = string.Equals(action, "status", StringComparison.OrdinalIgnoreCase)
+                ? await _http.GetAsync(url)
+                : await _http.PostAsync(
+                    url,
+                    new StringContent(CliJson.SerializeUntyped(new { action }, indented: false), Encoding.UTF8, "application/json"));
+            var body = await response.Content.ReadAsStringAsync();
+            var result = CliJson.Deserialize<RouteCheckpointStatus>(body) ?? new RouteCheckpointStatus
+            {
+                Ok = false,
+                Warning = "Broker returned an invalid checkpoint response."
+            };
+            if (!response.IsSuccessStatusCode)
+                result.Ok = false;
+            return result;
+        }
+        catch
+        {
+            return new RouteCheckpointStatus
+            {
+                Ok = false,
+                Connected = false,
+                Warning = "The DevFlow broker is unavailable."
+            };
+        }
+    }
+
     internal static AgentRegistration? ResolveAgent(AgentRegistration[] agents, string? projectPath = null, string? tfm = null)
     {
         // If project+TFM provided, look for exact match

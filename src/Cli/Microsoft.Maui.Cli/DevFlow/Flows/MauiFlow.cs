@@ -19,6 +19,10 @@ public sealed class FlowSelector
     [JsonPropertyName("type")] public string? Type { get; set; }
     [JsonPropertyName("index")] public int? Index { get; set; }
     [JsonPropertyName("selectorKind")] public string? SelectorKind { get; set; }
+    // Schema v2 recording diagnostics. They are additive so schema v1 flows remain readable.
+    [JsonPropertyName("matchCount")] public int? MatchCount { get; set; }
+    [JsonPropertyName("quality")] public string? Quality { get; set; }
+    [JsonPropertyName("fragilityReasons")] public List<string>? FragilityReasons { get; set; }
 
     [JsonIgnore]
     public bool IsEmpty =>
@@ -33,8 +37,8 @@ public sealed class FlowTypeIndex
 }
 
 /// <summary>
-/// A recorded assertion. Only <c>Verify == true</c> kinds (<c>propEquals</c>, <c>exists</c>) can
-/// fail a step; <c>routeIs</c>/<c>pageChanged</c> are report-only.
+/// A recorded assertion. <c>propEquals</c>, <c>exists</c>, and <c>routeIs</c> can be verified;
+/// <c>pageChanged</c> remains report-only without authoritative before/after page data.
 /// </summary>
 public sealed class FlowAssert
 {
@@ -57,6 +61,7 @@ public sealed class FlowStepArgs
     [JsonPropertyName("value")] public string? Value { get; set; }
     [JsonPropertyName("route")] public string? Route { get; set; }
     [JsonPropertyName("theme")] public string? Theme { get; set; }
+    [JsonPropertyName("valueSource")] public string? ValueSource { get; set; }
 
     // scroll args
     [JsonPropertyName("element")] public string? Element { get; set; }
@@ -87,7 +92,7 @@ public sealed class FlowStep
 /// </summary>
 public sealed class MauiFlow
 {
-    public const int CurrentSchema = 1;
+    public const int CurrentSchema = 2;
 
     [JsonPropertyName("schema")] public int Schema { get; set; } = CurrentSchema;
     [JsonPropertyName("name")] public string Name { get; set; } = "scenario";

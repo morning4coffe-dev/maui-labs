@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Maui.Cli.DevFlow.Broker;
 using Microsoft.Maui.DevFlow.Driver;
 
 namespace Microsoft.Maui.Cli.DevFlow.Inspector;
@@ -29,6 +30,8 @@ public sealed class InspectorServer : IDisposable
     private readonly string? _platform;
     private readonly string? _project;
     private readonly string? _sessionId;
+    private readonly AgentRegistration _checkpointRegistration;
+    private readonly RouteCheckpointCoordinator _checkpoints;
     private readonly XamlSourcePropertyEditor _sourcePropertyEditor;
     private readonly InspectorAlertController _alertController;
     // Per-inspector read token gating the data tabs (Logs/Network/Preferences/Device/Sensors/
@@ -59,6 +62,8 @@ public sealed class InspectorServer : IDisposable
     private InspectorFrame? _latestFrame;
     private long _cacheGeneration;
     private readonly Dictionary<string, InspectorFrame> _frames = new(StringComparer.Ordinal);
+    private readonly object _replayEvidenceGate = new();
+    private byte[]? _lastReplayEvidence;
     private static readonly TimeSpan ScreenshotCacheDuration = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan FrameReuseDuration = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan FrameCacheDuration = TimeSpan.FromSeconds(10);
@@ -94,7 +99,9 @@ public sealed class InspectorServer : IDisposable
         string? appName,
         string? platform,
         string? project,
-        string? sessionId)
+        string? sessionId,
+        RouteCheckpointCoordinator? checkpoints = null,
+        AgentRegistration? checkpointRegistration = null)
     {
         _port = port;
         _agentHost = agentHost;
@@ -105,6 +112,17 @@ public sealed class InspectorServer : IDisposable
         _platform = platform;
         _project = string.IsNullOrWhiteSpace(project) ? null : project;
         _sessionId = string.IsNullOrWhiteSpace(sessionId) ? null : sessionId;
+        _checkpointRegistration = checkpointRegistration ?? new AgentRegistration
+        {
+            Id = agentId ?? $"inspector-{agentPort}",
+            Project = project ?? $"inspector:{agentHost}:{agentPort}",
+            Tfm = "unknown",
+            AppName = appName ?? "",
+            Platform = platform ?? "",
+            Port = agentPort,
+            SessionId = sessionId
+        };
+        _checkpoints = checkpoints ?? new RouteCheckpointCoordinator();
         _sourcePropertyEditor = new XamlSourcePropertyEditor(project, sessionId);
         _alertController = new InspectorAlertController(agentHost, agentPort, appName, platform);
         _client = new AgentClient(agentHost, agentPort)
@@ -586,6 +604,8 @@ public sealed class InspectorServer : IDisposable
                     "/" or "" => await HandleRootAsync(),
                     "/api/state" => await HandleStateAsync(),
                     "/api/eventSupport" => await HandleEventSupportAsync(),
+                    "/api/checkpoint/status" => HandleResumeCheckpointStatus(),
+                    "/api/flows/replay/evidence" => HandleReplayEvidenceDownload(),
                     "/screenshot.png" => await HandleScreenshotAsync(request.Query.GetValueOrDefault("frame")),
                     "/devflow.js" => HandleEmbeddedFile("devflow.js", "application/javascript"),
                     "/inspector-api.js" => HandleEmbeddedFile("inspector-api.js", "application/javascript"),
@@ -612,6 +632,9 @@ public sealed class InspectorServer : IDisposable
                     "/api/persistProperty" => await HandlePersistPropertyAsync(request.Body),
                     "/api/navigate" => await HandleProxyNavigateAsync(request.Body),
                     "/api/checkpoint" => await HandleCheckpointAsync(request.Body),
+                    "/api/checkpoint/save" => await HandleResumeCheckpointAsync("save"),
+                    "/api/checkpoint/restore" => await HandleResumeCheckpointAsync("restore"),
+                    "/api/checkpoint/clear" => HandleResumeCheckpointClear(),
                     "/api/source" => await HandleSourceAsync(request.Body),
                     "/api/flows/record/start" => await HandleFlowRecordStartAsync(request.Body),
                     "/api/flows/record/step" => await HandleFlowRecordStepAsync(request.Body),
@@ -1935,8 +1958,14 @@ public sealed class InspectorServer : IDisposable
         try
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
-            var replayer = new Flows.FlowReplayer(_client);
+            lock (_replayEvidenceGate) _lastReplayEvidence = null;
+            var capture = new InspectorReplayEvidenceCapture(_client, parsed.Flow, bytes =>
+            {
+                lock (_replayEvidenceGate) _lastReplayEvidence = bytes;
+            });
+            var replayer = new Flows.FlowReplayer(_client, evidenceCapture: capture);
             var report = await replayer.ReplayAsync(parsed.Flow, null, cts.Token);
+            lock (_replayEvidenceGate) report.EvidenceAvailable = _lastReplayEvidence is { Length: > 0 };
             return (200, "application/json", Encoding.UTF8.GetBytes(JsonSerializer.Serialize(report, CamelCase)));
         }
         catch (OperationCanceledException)
@@ -1952,6 +1981,45 @@ public sealed class InspectorServer : IDisposable
     }
 
     private const int MaxReplaySteps = 2000;
+
+    private (int, string, byte[]) HandleReplayEvidenceDownload()
+    {
+        lock (_replayEvidenceGate)
+        {
+            return _lastReplayEvidence is { Length: > 0 } bytes
+                ? (200, "application/vnd.maui.evidence+zip", bytes)
+                : (404, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"No replay failure evidence is available.\"}"));
+        }
+    }
+
+    private sealed class InspectorReplayEvidenceCapture : Flows.IFlowReplayEvidenceCapture
+    {
+        private readonly AgentClient _client;
+        private readonly Flows.MauiFlow _flow;
+        private readonly Action<byte[]> _capture;
+
+        public InspectorReplayEvidenceCapture(AgentClient client, Flows.MauiFlow flow, Action<byte[]> capture)
+        {
+            _client = client;
+            _flow = flow;
+            _capture = capture;
+        }
+
+        public async Task CaptureOnFailureAsync(
+            Flows.MauiFlow flow,
+            Flows.FlowStep failedStep,
+            Flows.FlowStepResult result,
+            CancellationToken cancellationToken)
+        {
+            var bundle = await Evidence.EvidenceCapture.CaptureToBytesAsync(_client, new Evidence.EvidenceRequest
+            {
+                Source = "inspector",
+                IncludeScreenshot = false,
+                WorkflowMarkdown = Flows.FlowMarkdown.Serialize(_flow)
+            }, cancellationToken);
+            _capture(bundle.Bytes);
+        }
+    }
 
     // POST paths rejected (409) while a replay is driving the app.
     internal static bool IsBlockedDuringReplay(string path) => path switch
@@ -1986,6 +2054,27 @@ public sealed class InspectorServer : IDisposable
         try { route = (await _client.GetStatusAsync())?.Route; } catch { /* best-effort */ }
         var payload = JsonSerializer.Serialize(new { ok = true, route });
         return (200, "application/json", Encoding.UTF8.GetBytes(payload));
+    }
+
+    // Resume checkpoints are broker-owned and explicit. Reconnection merely refreshes this status;
+    // it never calls restore, which could otherwise mutate a freshly rebuilt app unexpectedly.
+    private (int, string, byte[]) HandleResumeCheckpointStatus()
+        => JsonResponse(200, _checkpoints.Status(_checkpointRegistration));
+
+    private async Task<(int, string, byte[])> HandleResumeCheckpointAsync(string action)
+    {
+        var status = action == "save"
+            ? await _checkpoints.SaveAsync(_checkpointRegistration, _client, _lifetimeCts.Token)
+            : await _checkpoints.RestoreAsync(_checkpointRegistration, _client, _lifetimeCts.Token);
+        if (status.Ok && action == "restore")
+            InvalidateScreenshotCache();
+        return JsonResponse(status.Ok ? 200 : 400, status);
+    }
+
+    private (int, string, byte[]) HandleResumeCheckpointClear()
+    {
+        _checkpoints.Clear(_checkpointRegistration);
+        return JsonResponse(200, new RouteCheckpointStatus { Connected = true, HasCheckpoint = false });
     }
 
     // Returns the XAML source location for an element on demand, so absolute paths are
@@ -2024,10 +2113,12 @@ public sealed class InspectorServer : IDisposable
     // Paths whose responses expose more than the visible tree and therefore require the read token.
     internal static bool IsTokenGatedPath(string path) => path switch
     {
+        "/api/checkpoint/status" or "/api/checkpoint/save" or "/api/checkpoint/restore" or "/api/checkpoint/clear"
+            or
         "/api/source" or "/api/persistProperty" or "/api/logs" or "/api/network" or "/api/network/detail" or "/api/problems" or "/api/preferences"
             or "/api/device" or "/api/sensors" or "/api/geolocation"
             or "/api/files/roots" or "/api/files/list"
-            or "/api/flows/files/list" or "/api/flows/files/load"
+            or "/api/flows/files/list" or "/api/flows/files/load" or "/api/flows/replay/evidence"
             or "/api/alerts" or "/api/alerts/dismiss"
             or "/api/evidence/preview" or "/api/evidence/capture"
             or "/api/cdp/webviews" or "/api/cdp/source" or "/api/cdp/eval" => true,
@@ -2341,6 +2432,7 @@ public sealed class InspectorServer : IDisposable
         "/api/tap" or "/api/scroll" or "/api/gesture" or "/api/back" or "/api/fill" or "/api/key"
             or "/api/setProperty" or "/api/persistProperty" or "/api/navigate" or "/api/cdp/eval"
             or "/api/alerts/dismiss"
+            or "/api/checkpoint/restore"
             or "/api/flows/record/start" or "/api/flows/record/step" or "/api/flows/replay" => true,
         _ => false,
     };

@@ -511,6 +511,102 @@ public class FlowRecordingTests : System.IDisposable
         Assert.True(assertion.Verify);
     }
 
+    [Fact]
+    public void SensitiveFill_StoresOnlyAnEnvironmentReference()
+    {
+        var recorder = new FlowRecorder("login", "App", "Windows", null);
+        const string secret = "do-not-persist-this-password";
+
+        var added = FlowRecordTools.AddStepCore(
+            recorder,
+            FlowActions.Fill,
+            automationId: "PasswordEntry",
+            text: null,
+            type: "Entry",
+            index: null,
+            id: null,
+            value: secret,
+            name: null,
+            dx: null,
+            dy: null,
+            itemIndex: null,
+            position: null,
+            page: null,
+            navigated: false,
+            assertsJson: null);
+
+        Assert.True(added.ok, added.error);
+        var flow = recorder.Snapshot();
+        var step = Assert.Single(flow.Steps);
+        Assert.Null(step.Value);
+        Assert.Null(step.Args!.Text);
+        Assert.StartsWith(FlowSecretReference.EnvironmentPrefix, step.Args.SecretEnvironmentVariable);
+        Assert.Null(step.Asserts);
+
+        var serialized = FlowMarkdown.Serialize(flow);
+        Assert.DoesNotContain(secret, serialized, StringComparison.Ordinal);
+        Assert.Contains(step.Args.SecretEnvironmentVariable!, serialized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SensitiveAssertion_IsRetainedOnlyAsANonVerifyingRedactedNote()
+    {
+        var recorder = new FlowRecorder("login", "App", "Windows", null);
+        const string secret = "assertion-secret";
+        var asserts = JsonSerializer.Serialize(new[]
+        {
+            new FlowAssert
+            {
+                Kind = "propEquals",
+                Selector = new FlowSelector { AutomationId = "PasswordEntry" },
+                Name = "Text",
+                Expected = secret,
+                Verify = true
+            }
+        });
+
+        var added = FlowRecordTools.AddStepCore(
+            recorder, FlowActions.Assert,
+            null, null, null, null, null, null, null,
+            null, null, null, null, null, false, asserts);
+
+        Assert.True(added.ok, added.error);
+        var assertion = Assert.Single(Assert.Single(recorder.Snapshot().Steps).Asserts!);
+        Assert.Equal("<redacted>", assertion.Expected);
+        Assert.False(assertion.Verify);
+        Assert.DoesNotContain(secret, FlowMarkdown.Serialize(recorder.Snapshot()), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void NonTextPropertyOnPasswordControl_RemainsANormalLiteral()
+    {
+        var recorder = new FlowRecorder("login", "App", "Windows", null);
+
+        var added = FlowRecordTools.AddStepCore(
+            recorder,
+            FlowActions.SetProperty,
+            automationId: "PasswordEntry",
+            text: null,
+            type: "Entry",
+            index: null,
+            id: null,
+            value: "False",
+            name: "IsEnabled",
+            dx: null,
+            dy: null,
+            itemIndex: null,
+            position: null,
+            page: null,
+            navigated: false,
+            assertsJson: null);
+
+        Assert.True(added.ok, added.error);
+        var step = Assert.Single(recorder.Snapshot().Steps);
+        Assert.Equal("False", step.Value);
+        Assert.Equal("False", step.Args!.Value);
+        Assert.Null(step.Args.SecretEnvironmentVariable);
+    }
+
     [Theory]
     [InlineData("True", "true")]
     [InlineData("1", "1.0")]

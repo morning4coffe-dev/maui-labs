@@ -22,7 +22,7 @@ public sealed class FlowRecordingSpoolStoreTests : IDisposable
         Assert.Equal("stable-agent", spool.AgentId);
         Assert.Equal(id, spool.RecordingId);
         Assert.Single(spool.Flow.Steps);
-        store.Delete(id);
+        Assert.True(store.Delete(id));
         Assert.Empty(store.Restore());
     }
 
@@ -70,7 +70,7 @@ public sealed class FlowRecordingSpoolStoreTests : IDisposable
     }
 
     [Fact]
-    public void Coordinator_ReportsSpoolPersistenceFailureWithoutDroppingRecording()
+    public void Coordinator_RejectsRecordingWhenInitialSpoolCannotBePersisted()
     {
         var warnings = new List<string>();
         Directory.CreateDirectory(Path.GetDirectoryName(_root)!);
@@ -81,9 +81,51 @@ public sealed class FlowRecordingSpoolStoreTests : IDisposable
 
         var result = coordinator.Start("agent", "flow", "Demo", "Windows", null);
 
-        Assert.True(result.Ok);
-        Assert.True(coordinator.Status("agent").Recording);
+        Assert.False(result.Ok);
+        Assert.False(coordinator.Status("agent").Recording);
+        Assert.Contains("durable", result.Error!, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(warnings, warning => warning.Contains("Could not persist", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Coordinator_RollsBackStepWhenSnapshotExceedsSpoolLimit()
+    {
+        var spools = new FlowRecordingSpoolStore(_root);
+        var recordings = new FlowRecordingStore();
+        var coordinator = new BrokerFlowCoordinator(recordings, spools);
+        Assert.True(coordinator.Start("agent", "flow", "Demo", "Windows", null).Ok);
+
+        BrokerFlowResult? failure = null;
+        for (var index = 0; index < 500; index++)
+        {
+            var result = coordinator.Observe("agent", new FlowObservation
+            {
+                Action = FlowActions.Fill,
+                AutomationId = $"field-{index}",
+                Value = new string('x', 8 * 1024),
+            });
+            if (!result.Ok)
+            {
+                failure = result;
+                break;
+            }
+        }
+
+        Assert.NotNull(failure);
+        Assert.Contains("durably recorded", failure!.Error!, StringComparison.OrdinalIgnoreCase);
+        var status = coordinator.Status("agent");
+        Assert.False(status.Ok);
+        Assert.True(status.Recording);
+        Assert.Equal(failure.Steps, status.Steps);
+        Assert.Contains("Cancel this recording", status.Error!, StringComparison.OrdinalIgnoreCase);
+
+        var restarted = new BrokerFlowCoordinator(
+            new FlowRecordingStore(),
+            new FlowRecordingSpoolStore(_root));
+        var restoredStatus = restarted.Status("agent");
+        Assert.False(restoredStatus.Ok);
+        Assert.True(restoredStatus.Recording);
+        Assert.Contains("not durable", restoredStatus.Error!, StringComparison.OrdinalIgnoreCase);
     }
 
     public void Dispose()

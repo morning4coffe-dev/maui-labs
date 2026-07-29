@@ -73,6 +73,26 @@ public sealed class FlowActionabilityEngine
         return last ?? FlowTargetResolution.Failure(FlowFailureKinds.NotFound, "No target selector was supplied.");
     }
 
+    public async Task<FlowTargetResolution> WaitForResolvedAsync(
+        FlowSelector? selector,
+        CancellationToken cancellationToken = default)
+    {
+        FlowTargetResolution? last = null;
+        for (var attempt = 0; attempt < _tries; attempt++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var resolution = await ResolveAsync(selector, cancellationToken);
+            last = resolution;
+            if (resolution.Ok || resolution.Kind == FlowFailureKinds.Ambiguous)
+                return resolution;
+            if (attempt < _tries - 1)
+                await Task.Delay(_gapMs, cancellationToken);
+        }
+        return last ?? FlowTargetResolution.Failure(
+            FlowFailureKinds.NotFound,
+            "No target selector was supplied.");
+    }
+
     public async Task<FlowTargetResolution> ResolveAsync(FlowSelector? selector, CancellationToken cancellationToken = default)
     {
         if (selector is null || selector.IsEmpty)
@@ -145,6 +165,7 @@ public static class FlowFailureKinds
     public const string Disabled = "disabled";
     public const string Unstable = "unstable";
     public const string UnsafeValue = "unsafe-value";
+    public const string SecretRequired = "secret-required";
     public const string Drive = "drive";
     public const string Assertion = "assertion";
 }

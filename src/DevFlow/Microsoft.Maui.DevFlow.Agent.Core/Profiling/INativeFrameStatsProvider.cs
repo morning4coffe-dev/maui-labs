@@ -10,6 +10,7 @@ public sealed class NativeFrameStatsSnapshot
     public double? WorstFrameTimeMs { get; set; }
     public int JankFrameCount { get; set; }
     public int UiThreadStallCount { get; set; }
+    public int FrameDataLossCount { get; set; }
     public long? NativeMemoryBytes { get; set; }
     public string? NativeMemoryKind { get; set; }
 }
@@ -22,4 +23,10 @@ public interface INativeFrameStatsProvider : IDisposable
     void Start();
     void Stop();
     bool TryCollect(out NativeFrameStatsSnapshot snapshot);
+    bool TryReadNativeMemory(out long bytes, out string kind)
+    {
+        bytes = 0;
+        kind = "";
+        return false;
+    }
 }

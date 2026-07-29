@@ -234,6 +234,34 @@ public class ProfilerAgentClientTests
     }
 
     [Fact]
+    public async Task ProfilerStop_RevalidatesExpectedSessionInsideLifecycleGate()
+    {
+        using var service = new DevFlowAgentService(
+            new AgentOptions { Enabled = false, EnableProfiler = true });
+        var storeField = typeof(DevFlowAgentService).GetField(
+            "_profilerSessions",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(storeField);
+        var store = Assert.IsType<ProfilerSessionStore>(storeField.GetValue(service));
+        var first = store.Start(250);
+        store.Stop();
+        var replacement = store.Start(250);
+
+        var method = typeof(DevFlowAgentService).GetMethod(
+            "StopProfilerAsync",
+            BindingFlags.Instance | BindingFlags.NonPublic);
+        Assert.NotNull(method);
+        var task = Assert.IsAssignableFrom<Task>(
+            method.Invoke(service, [first.SessionId, 100, 10]));
+        await task;
+        var result = task.GetType().GetProperty("Result")!.GetValue(task);
+
+        Assert.Null(result);
+        Assert.True(store.IsActive);
+        Assert.Equal(replacement.SessionId, store.CurrentSession!.SessionId);
+    }
+
+    [Fact]
     public void CapturedNetworkRequest_UsesRequestTimestampAsProfilerSpanStart()
     {
         using var service = new DevFlowAgentService(new AgentOptions { Enabled = false, EnableProfiler = true });

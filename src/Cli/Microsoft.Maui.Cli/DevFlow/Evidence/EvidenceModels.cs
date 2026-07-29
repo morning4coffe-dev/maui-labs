@@ -86,6 +86,8 @@ internal sealed class EvidenceCounts
     public int Problems { get; set; }
     public int Logs { get; set; }
     public int NetworkRequests { get; set; }
+    public int LayoutFindings { get; set; }
+    public int LayoutViolations { get; set; }
     public long WorkflowBytes { get; set; }
     public long ScreenshotBytes { get; set; }
 }
@@ -97,6 +99,8 @@ internal sealed class EvidenceLimits
     public int Logs { get; set; } = EvidenceFormat.DefaultLogLimit;
     public int Network { get; set; } = EvidenceFormat.DefaultNetworkLimit;
     public int Problems { get; set; } = EvidenceFormat.MaxProblems;
+    public int LayoutElements { get; set; } = EvidenceFormat.MaxLayoutElements;
+    public int LayoutFindings { get; set; } = EvidenceFormat.MaxLayoutFindings;
     public int LogMessageChars { get; set; } = EvidenceFormat.MaxLogMessageChars;
     public long WorkflowBytes { get; set; } = EvidenceFormat.MaxWorkflowBytes;
 }
@@ -197,6 +201,60 @@ internal sealed class EvidenceBounds
     public double Y { get; set; }
     public double Width { get; set; }
     public double Height { get; set; }
+}
+
+// ── layout.json ──────────────────────────────────────────────────────────────────────────────
+
+/// <summary>
+/// The evidence-safe projection of a layout diagnostics report: rule outcomes, coverage, and
+/// element identity/geometry. Findings reference elements by id, type, automation id, and
+/// project-relative source location — never by text, value, or property dictionary.
+/// </summary>
+internal sealed class EvidenceLayoutDocument
+{
+    public string SchemaVersion { get; set; } = "";
+    public string RuleSetVersion { get; set; } = "";
+    public string? CapturedUtc { get; set; }
+    public string? Platform { get; set; }
+    public int ElementsExamined { get; set; }
+    public bool Truncated { get; set; }
+    public int Violations { get; set; }
+    public int Observations { get; set; }
+    public int Incomplete { get; set; }
+    public string Coverage { get; set; } = "unavailable";
+    public int FindingCount { get; set; }
+    public bool FindingsTruncated { get; set; }
+    public List<EvidenceLayoutRule> Rules { get; set; } = [];
+    public List<EvidenceLayoutFinding> Findings { get; set; } = [];
+    public List<string> Limitations { get; set; } = [];
+    public List<string> NeverCaptured { get; set; } = [];
+}
+
+internal sealed class EvidenceLayoutRule
+{
+    public string RuleId { get; set; } = "";
+    public string Support { get; set; } = "unavailable";
+    public string Confidence { get; set; } = "medium";
+    public int Evaluated { get; set; }
+    public int Skipped { get; set; }
+}
+
+internal sealed class EvidenceLayoutFinding
+{
+    public string Id { get; set; } = "";
+    public string RuleId { get; set; } = "";
+    public string Outcome { get; set; } = "observation";
+    public string Confidence { get; set; } = "medium";
+    public string Message { get; set; } = "";
+    public string Explanation { get; set; } = "";
+    public string? ElementId { get; set; }
+    public string? ElementType { get; set; }
+    public string? AutomationId { get; set; }
+    public string? SourceFile { get; set; }
+    public int? SourceLine { get; set; }
+    public int? SourceColumn { get; set; }
+    public EvidenceBounds? Bounds { get; set; }
+    public List<string> Limitations { get; set; } = [];
 }
 
 // ── problems.json ────────────────────────────────────────────────────────────────────────────
@@ -355,6 +413,7 @@ internal sealed class EvidencePreviewResponse
 [JsonSerializable(typeof(EvidenceManifest))]
 [JsonSerializable(typeof(EvidenceEnvironment))]
 [JsonSerializable(typeof(EvidenceTreeDocument))]
+[JsonSerializable(typeof(EvidenceLayoutDocument))]
 [JsonSerializable(typeof(EvidenceProblemDocument))]
 [JsonSerializable(typeof(EvidenceLogDocument))]
 [JsonSerializable(typeof(EvidenceNetworkDocument))]

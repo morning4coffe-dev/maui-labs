@@ -126,6 +126,7 @@ maui apple simulator delete "iPhone 16 Pro"
 | `maui devflow webview` | Blazor WebView automation via Chrome DevTools Protocol |
 | `maui devflow logs` | Fetch and stream application logs |
 | `maui devflow network` | Monitor HTTP network requests |
+| `maui devflow diagnostics` | On-demand layout scan and bounded performance triage |
 | `maui devflow storage` | Access app preferences, secure storage, discover file storage roots, and manage sandboxed app files |
 | `maui devflow agent` | Discover and inspect connected DevFlow agents |
 | `maui devflow broker` | Manage the DevFlow agent broker (start, stop, status, log) |

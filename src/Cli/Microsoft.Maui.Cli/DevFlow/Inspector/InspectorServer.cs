@@ -63,6 +63,10 @@ public sealed class InspectorServer : IDisposable
     private long _cacheGeneration;
     private readonly Dictionary<string, InspectorFrame> _frames = new(StringComparer.Ordinal);
     private readonly object _replayEvidenceGate = new();
+    private string? _performanceSessionId;
+    private string? _performanceLeaseId;
+    private string? _performanceHolderKind;
+    private string? _performanceHolderLabel;
     private byte[]? _lastReplayEvidence;
     private static readonly TimeSpan ScreenshotCacheDuration = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan FrameReuseDuration = TimeSpan.FromMilliseconds(200);
@@ -141,6 +145,13 @@ public sealed class InspectorServer : IDisposable
             _latestFrame = null;
             _cacheGeneration++;
         }
+    }
+
+    private void ClearPerformanceLease()
+    {
+        Volatile.Write(ref _performanceLeaseId, null);
+        Volatile.Write(ref _performanceHolderKind, null);
+        Volatile.Write(ref _performanceHolderLabel, null);
     }
 
     /// <summary>
@@ -446,6 +457,7 @@ public sealed class InspectorServer : IDisposable
 
     public async Task StopAsync()
     {
+        await StopOwnedPerformanceSessionAsync().ConfigureAwait(false);
         _cts?.Cancel();
         _listener?.Stop();
         if (_listenTask != null)
@@ -463,6 +475,12 @@ public sealed class InspectorServer : IDisposable
         // member.
         if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
 
+        try
+        {
+            Task.Run(StopOwnedPerformanceSessionAsync)
+                .Wait(TimeSpan.FromSeconds(2));
+        }
+        catch { }
         try { _lifetimeCts.Cancel(); } catch { }
         try { _cts?.Cancel(); } catch { }
         try { _listener?.Stop(); } catch { }
@@ -471,6 +489,32 @@ public sealed class InspectorServer : IDisposable
         try { _flowAdmissionGate.Dispose(); } catch { }
         try { _frameCreationGate.Dispose(); } catch { }
         try { _client.Dispose(); } catch { }
+    }
+
+    private async Task StopOwnedPerformanceSessionAsync()
+    {
+        var sessionId = Volatile.Read(ref _performanceSessionId);
+        if (sessionId is null)
+            return;
+        try
+        {
+            using var leaseScope = _client.UseMutationLease(
+                Volatile.Read(ref _performanceLeaseId) ?? _fallbackMutationLeaseId,
+                Volatile.Read(ref _performanceHolderKind) ?? "web-inspector",
+                Volatile.Read(ref _performanceHolderLabel) ?? "DevFlow Web Inspector");
+            var stopped = await _client.StopProfilerAsync(sessionId)
+                .WaitAsync(TimeSpan.FromSeconds(2))
+                .ConfigureAwait(false);
+            if (stopped?.IsActive == false)
+            {
+                Interlocked.CompareExchange(ref _performanceSessionId, null, sessionId);
+                ClearPerformanceLease();
+            }
+        }
+        catch
+        {
+            // Teardown is best-effort, but the exact id prevents touching an external session.
+        }
     }
 
     private async Task AcceptLoop(CancellationToken ct)
@@ -611,6 +655,7 @@ public sealed class InspectorServer : IDisposable
                     "/inspector-api.js" => HandleEmbeddedFile("inspector-api.js", "application/javascript"),
                     "/inspector-dialog.js" => HandleEmbeddedFile("inspector-dialog.js", "application/javascript"),
                     "/inspector-data-context.js" => HandleEmbeddedFile("inspector-data-context.js", "application/javascript"),
+                    "/inspector-diagnostics.js" => HandleEmbeddedFile("inspector-diagnostics.js", "application/javascript"),
                     "/inspector-evidence.js" => HandleEmbeddedFile("inspector-evidence.js", "application/javascript"),
                     "/inspector-properties.js" => HandleEmbeddedFile("inspector-properties.js", "application/javascript"),
                     "/inspector-tree.js" => HandleEmbeddedFile("inspector-tree.js", "application/javascript"),
@@ -648,6 +693,14 @@ public sealed class InspectorServer : IDisposable
                     "/api/network" => await HandleNetworkAsync(request.Body),
                     "/api/network/detail" => await HandleNetworkDetailAsync(request.Body),
                     "/api/problems" => await HandleProblemsAsync(request.Body),
+                    "/api/diagnostics/layout" => await HandleLayoutDiagnosticsAsync(request.Body),
+                    "/api/performance/start" => await HandlePerformanceStartAsync(
+                        request.Body,
+                        leaseId,
+                        holderKind,
+                        holderLabel),
+                    "/api/performance/snapshot" => await HandlePerformanceSnapshotAsync(),
+                    "/api/performance/stop" => await HandlePerformanceStopAsync(),
                     "/api/evidence/preview" => await HandleEvidencePreviewAsync(request.Body),
                     "/api/evidence/capture" => await HandleEvidenceCaptureAsync(request.Body),
                     "/api/preferences" => await HandlePreferencesAsync(request.Body),
@@ -2027,6 +2080,8 @@ public sealed class InspectorServer : IDisposable
         "/api/tap" or "/api/scroll" or "/api/gesture" or "/api/back" or "/api/fill" or "/api/key"
             or "/api/setProperty" or "/api/persistProperty" or "/api/navigate" or "/api/cdp/eval"
             or "/api/alerts/dismiss" or "/api/flows/record/start" or "/api/flows/record/step" => true,
+        // A profiler session started from the inspector would perturb the run being replayed.
+        "/api/performance/start" or "/api/performance/stop" => true,
         _ => false,
     };
 
@@ -2117,6 +2172,8 @@ public sealed class InspectorServer : IDisposable
             or
         "/api/source" or "/api/persistProperty" or "/api/logs" or "/api/network" or "/api/network/detail" or "/api/problems" or "/api/preferences"
             or "/api/device" or "/api/sensors" or "/api/geolocation"
+            or "/api/diagnostics/layout"
+            or "/api/performance/start" or "/api/performance/snapshot" or "/api/performance/stop"
             or "/api/files/roots" or "/api/files/list"
             or "/api/flows/files/list" or "/api/flows/files/load" or "/api/flows/replay/evidence"
             or "/api/alerts" or "/api/alerts/dismiss"
@@ -2204,6 +2261,109 @@ public sealed class InspectorServer : IDisposable
         catch
         {
             return Ok("{\"ok\":false,\"error\":\"diagnostic Problems unavailable\"}");
+        }
+    }
+
+    // ── On-demand diagnostics (layout scan, performance triage) ─────────────────────────────
+    // Both are token-gated POST reads that proxy the shared AgentClient/Driver analysis, so the
+    // Inspector, the CLI, and the MCP tools present identical results. Neither one refreshes the
+    // frame or takes a screenshot: a diagnostic must not change what the user is looking at.
+
+    private async Task<(int, string, byte[])> HandleLayoutDiagnosticsAsync(string? body)
+    {
+        var elementId = ReadStringField(body, "elementId");
+        var maxElements = ReadIntField(body, "maxElements", 2000, 1, 5000);
+        try
+        {
+            var report = await _client.GetLayoutDiagnosticsAsync(
+                string.IsNullOrWhiteSpace(elementId) ? null : elementId,
+                window: null,
+                maxElements: maxElements);
+            return report is null
+                ? Ok("{\"ok\":false,\"error\":\"Layout diagnostics are not supported by the connected agent.\"}")
+                : Ok(JsonSerializer.Serialize(new { ok = true, report }, CamelCase));
+        }
+        catch
+        {
+            return Ok("{\"ok\":false,\"error\":\"layout diagnostics unavailable\"}");
+        }
+    }
+
+    private async Task<(int, string, byte[])> HandlePerformanceStartAsync(
+        string? body,
+        string leaseId,
+        string holderKind,
+        string holderLabel)
+    {
+        var sampleIntervalMs = ReadIntField(body, "sampleIntervalMs", 0, 0, 60_000);
+        try
+        {
+            var summary = await _client.StartPerformanceSessionAsync(
+                sampleIntervalMs >= 50 ? sampleIntervalMs : null);
+            if (summary.Session.Active && !string.IsNullOrWhiteSpace(summary.Session.SessionId))
+            {
+                Volatile.Write(ref _performanceLeaseId, leaseId);
+                Volatile.Write(ref _performanceHolderKind, holderKind);
+                Volatile.Write(ref _performanceHolderLabel, holderLabel);
+                Volatile.Write(ref _performanceSessionId, summary.Session.SessionId);
+            }
+            return Ok(JsonSerializer.Serialize(new { ok = true, owned = true, summary }, CamelCase));
+        }
+        catch
+        {
+            return Ok("{\"ok\":false,\"error\":\"performance triage unavailable\"}");
+        }
+    }
+
+    private async Task<(int, string, byte[])> HandlePerformanceSnapshotAsync()
+    {
+        var sessionId = Volatile.Read(ref _performanceSessionId);
+        try
+        {
+            var summary = await _client.GetPerformanceSummaryAsync(sessionId);
+            var owned = sessionId is not null &&
+                string.Equals(summary.Session.SessionId, sessionId, StringComparison.Ordinal);
+            return Ok(JsonSerializer.Serialize(new { ok = true, owned, summary }, CamelCase));
+        }
+        catch (ProfilerSessionMismatchException) when (sessionId is not null)
+        {
+            Interlocked.CompareExchange(ref _performanceSessionId, null, sessionId);
+            return Ok("{\"ok\":false,\"error\":\"The recorded performance session was replaced or disconnected. Refresh to inspect the current session.\"}");
+        }
+        catch
+        {
+            return Ok("{\"ok\":false,\"error\":\"performance triage unavailable\"}");
+        }
+    }
+
+    private async Task<(int, string, byte[])> HandlePerformanceStopAsync()
+    {
+        try
+        {
+            var sessionId = Volatile.Read(ref _performanceSessionId);
+            if (sessionId is null)
+                return Ok("{\"ok\":false,\"error\":\"This Inspector did not start the active performance session and will not stop it.\"}");
+            using var leaseScope = _client.UseMutationLease(
+                Volatile.Read(ref _performanceLeaseId) ?? _fallbackMutationLeaseId,
+                Volatile.Read(ref _performanceHolderKind) ?? "web-inspector",
+                Volatile.Read(ref _performanceHolderLabel) ?? "DevFlow Web Inspector");
+            var summary = await _client.StopPerformanceSessionAsync(sessionId);
+            if (!summary.Session.Active)
+            {
+                Interlocked.CompareExchange(ref _performanceSessionId, null, sessionId);
+                ClearPerformanceLease();
+            }
+            return Ok(JsonSerializer.Serialize(new { ok = true, owned = false, summary }, CamelCase));
+        }
+        catch (ProfilerSessionMismatchException)
+        {
+            Volatile.Write(ref _performanceSessionId, null);
+            ClearPerformanceLease();
+            return Ok("{\"ok\":false,\"error\":\"The recorded performance session was replaced or disconnected and was not stopped.\"}");
+        }
+        catch
+        {
+            return Ok("{\"ok\":false,\"error\":\"performance triage unavailable\"}");
         }
     }
 

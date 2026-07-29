@@ -279,6 +279,8 @@ public class EvidenceInspectorRouteTests
                             """{"capabilities":{"ui.actions":{"version":1}}}""",
                         var p when p.StartsWith("/api/v1/ui/tree", StringComparison.Ordinal) =>
                             """[{"id":"e1","type":"Label","text":"secret-label-text","automationId":"Title"}]""",
+                        var p when p.StartsWith("/api/v1/ui/diagnostics/layout", StringComparison.Ordinal) =>
+                            """{"schemaVersion":"1.0","ruleSetVersion":"1.0","capturedUtc":"2026-07-29T10:00:00.000Z","platform":"Windows","scope":{"maxElements":2000,"elementsExamined":1,"truncated":false},"coverage":{"overall":"partial","rules":[{"ruleId":"layout.visible-zero-area","support":"full","confidence":"high","evaluated":1,"skipped":0,"limitations":[]}],"limitations":["Managed layout state only."],"neverCaptured":["Element Text/Value content"]},"summary":{"violations":1,"observations":0,"incomplete":0},"findings":[{"id":"layout.visible-zero-area:e1:area","ruleId":"layout.visible-zero-area","outcome":"violation","confidence":"high","message":"Label was arranged with no area.","explanation":"A realized element with no area cannot draw.","element":{"id":"e1","type":"Label","automationId":"Title"},"limitations":[]}]}""",
                         var p when p.StartsWith("/api/v1/diagnostics/problems", StringComparison.Ordinal) =>
                             """{"enabled":true,"revision":1,"count":0,"evicted":0,"problems":[]}""",
                         var p when p.StartsWith("/api/v1/logs", StringComparison.Ordinal) =>

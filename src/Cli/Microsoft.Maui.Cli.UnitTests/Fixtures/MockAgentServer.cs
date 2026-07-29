@@ -64,6 +64,7 @@ public sealed class MockAgentServer : IAsyncDisposable
         RegisterStorageEndpoints(_app);
         RegisterWebViewEndpoints(_app);
         RegisterNetworkEndpoints(_app);
+        RegisterDiagnosticsEndpoints(_app);
         RegisterExtensionEndpoints(_app);
 
         await _app.StartAsync();
@@ -201,6 +202,28 @@ public sealed class MockAgentServer : IAsyncDisposable
         app.MapGet("/api/v1/logs", () => Results.Content("""[{"level":"info","message":"ok"}]""", "application/json"));
         app.MapGet("/api/v1/diagnostics/problems", () => Results.Content(
             """{"enabled":true,"revision":1,"count":0,"evicted":0,"problems":[]}""", "application/json"));
+    }
+
+    /// <summary>
+    /// On-demand layout diagnostics and the profiler streams the performance triage layer reads.
+    /// </summary>
+    private static void RegisterDiagnosticsEndpoints(WebApplication app)
+    {
+        app.MapGet("/api/v1/ui/diagnostics/layout", () =>
+            Results.Content(MockAgentResponses.LayoutDiagnostics, "application/json"));
+        app.MapPost("/api/v1/ui/diagnostics/layout", () =>
+            Results.Content(MockAgentResponses.LayoutDiagnostics, "application/json"));
+
+        app.MapGet("/api/v1/profiler/capabilities", () =>
+            Results.Content(MockAgentResponses.ProfilerCapabilities, "application/json"));
+        app.MapPost("/api/v1/profiler/sessions", () =>
+            Results.Content(MockAgentResponses.ProfilerSessionEnvelope, "application/json"));
+        app.MapDelete("/api/v1/profiler/sessions/{id}", () =>
+            Results.Content(MockAgentResponses.ProfilerStoppedSessionEnvelope, "application/json"));
+        app.MapGet("/api/v1/profiler/sessions/{id}/samples", () =>
+            Results.Content(MockAgentResponses.ProfilerBatch, "application/json"));
+        app.MapGet("/api/v1/profiler/hotspots", () =>
+            Results.Content(MockAgentResponses.ProfilerHotspots, "application/json"));
     }
 }
 

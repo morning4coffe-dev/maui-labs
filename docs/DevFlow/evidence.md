@@ -24,6 +24,7 @@ Format version 1 is a ZIP with a fixed, allow-listed set of entries:
 | `manifest.json` | Schema and redaction ruleset versions, tool/app/platform/capability metadata, per-entry sizes and SHA-256 hashes, counts, limits, exclusions, warnings |
 | `environment.json` | App, platform, device, display, agent capabilities, current route |
 | `tree.json` | Element **structure**: type, safe automation id, role, bounds, state, child counts, source hash, project-relative or file-name-only source location |
+| `layout.json` | Layout diagnostics: rule outcomes, per-rule coverage, and element identity/geometry for each finding — included only when the connected agent supports `diagnostics.layout` |
 | `problems.json` | Binding/property diagnostics (metadata only, messages re-redacted, paths normalized) |
 | `logs.json` | Bounded, scrubbed log entries |
 | `network.json` | HTTP **summaries**: method, host, path, query parameter *names*, status, duration, sizes, content types, scrubbed error |
@@ -51,7 +52,11 @@ Bounded and scrubbed:
 - logs are capped (default 200, max 500) and each message is secret-masked, path-stripped and
   truncated;
 - network summaries are capped (default 100, max 500);
-- the visual tree is capped at 5,000 elements and 64 levels deep.
+- the visual tree is capped at 5,000 elements and 64 levels deep;
+- the bundled layout scan examines at most 2,000 elements and retains at most 500 findings; each
+  finding's message, explanation, and limitations are scrubbed and truncated, and source paths are
+  made project-relative. Findings carry element identity and geometry only — never text or values.
+  An agent without `diagnostics.layout` produces an explicit exclusion instead of an empty entry.
 
 Screenshots are **opt-in everywhere** (`--include-screenshot`, the MCP `includeScreenshot`
 parameter, or the checkbox in the Inspector dialog). The manifest always records whether a
@@ -91,6 +96,12 @@ Bundles are treated as hostile input. Before any content is decompressed the rea
 - duplicate entries;
 - entry count, per-entry size, total uncompressed size, and per-entry compression ratio;
 - the manifest schema id, format version, and JSON shape.
+
+Each allow-listed entry retains its capture-side limit on import (for example, workflow Markdown is
+at most 1 MB and screenshots at most 16 MB). Parsed JSON sections are also semantically bounded
+before rendering: null required collections, oversized arrays/strings, non-finite geometry, or
+trees beyond the capture depth/count are ignored with a warning rather than reaching the report
+renderer.
 
 `evidence view` never renders or executes anything from the bundle. It parses the trusted entries
 and **regenerates** a self-contained static HTML report: every value is HTML-encoded, the document

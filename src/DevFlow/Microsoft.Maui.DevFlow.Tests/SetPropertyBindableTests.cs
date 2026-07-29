@@ -280,6 +280,30 @@ public class SetPropertyBindableTests
         Assert.Equal(PropertyValueSources.Local, propertyObservation.ValueSource);
     }
 
+    [Fact]
+    public async Task MutationObservation_NeverCarriesPasswordEntryText()
+    {
+        var entry = new Entry
+        {
+            AutomationId = "PasswordEntry",
+            IsPassword = true,
+            Text = "super-secret-value"
+        };
+        using var harness = await SetPropertyTestHarness.CreateAsync(entry);
+        var entryId = await harness.GetElementIdAsync(entry.AutomationId);
+
+        var observation = await harness.Service.CreateMutationObservationAsync(new HttpRequest
+        {
+            Method = "POST",
+            Path = "/api/v1/ui/actions/fill",
+            Body = JsonSerializer.Serialize(new { elementId = entryId, text = "super-secret-value" })
+        });
+
+        Assert.NotNull(observation);
+        Assert.True(observation.Sensitive);
+        Assert.Null(observation.Value);
+    }
+
     private sealed class SetPropertyTestHarness : IDisposable
     {
         private readonly DevFlowAgentService _service;

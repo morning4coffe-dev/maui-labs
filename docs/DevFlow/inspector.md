@@ -32,6 +32,8 @@ DevFlow Inspector in GitHub Copilot Canvas.
   editor metadata;
 - logs, live-updating network, preferences, device, sensor, native Alerts, read-only file browsing,
   and WebView/CDP data docks;
+- **Layout** and **Performance** data docks for the on-demand diagnostics (see
+  [On-demand diagnostics](#on-demand-diagnostics));
 - click-to-XAML source navigation for Debug source maps;
 - one integrated Workflow panel for recording, loading project `maui-tests` files or local Markdown
   files, replaying them, and reviewing per-step results;
@@ -200,6 +202,37 @@ maui devflow ui alert dismiss "OK" --device <simulator-udid>
 DevFlow Action request bodies are passed to the registered action. A generic
 `include: ["screenshot", "tree"]` field does not add post-action captures; use the CLI/MCP
 post-action options or request the screenshot and tree explicitly.
+
+## On-demand diagnostics
+
+Two data docks expose the read-only diagnostics described in
+[src/DevFlow/README.md](../../src/DevFlow/README.md). Both are token-gated `POST` reads that proxy
+the shared driver analysis, so the Inspector, the CLI, and the MCP tools cannot diverge.
+
+**Layout** runs one explicit scan when the tab is opened or refreshed. It renders the summary, the
+per-rule coverage table, the findings, and the report's limitations; clicking a finding selects the
+affected element and opens its property grid. There is no automatic re-scan, no watch mode, and no
+screenshot or frame refresh triggered by a diagnostic — a diagnostic must never change what you are
+looking at. A scan with no findings is presented next to its coverage, never as a clean pass:
+unevaluated geometry is `incomplete`.
+
+**Performance** requires an explicit **Start recording**. While a session is active the tab polls
+its own panel every three seconds and nothing else; stopping ends the polling. Buffer loss is
+promoted above the metrics, and display-cadence estimates are never rendered as a frame rate. In a
+normal Debug build the panel shows a warning that Hot Reload, the debugger, and DevFlow diagnostics
+perturb the measurement; in an explicit read-only profile build it reports the low-perturbation
+state instead. Starting or stopping a session is blocked while workflow replay is driving the app,
+because a profiler session would perturb the run being replayed.
+
+Profiler sessions are single-owner. If another CLI/MCP/Inspector client already started one, this
+Inspector shows it as a read-only attachment: **Stop** remains disabled and starting a replacement
+returns a conflict. A creator stop captures one final boundary sample before returning the final
+summary.
+
+Neither tab participates in **Add to Copilot**. The Copilot data-context scopes are limited to the
+bounded, redacted snapshot shapes that module already sanitizes; layout and performance payloads are
+not in that set, so the attach button stays disabled on these tabs. Use `maui_layout_diagnostics`
+and `maui_performance_snapshot` when an agent needs the data.
 
 ## Compatibility
 

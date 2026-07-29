@@ -3,6 +3,7 @@
 import { createInspectorApi } from './inspector-api.js';
 import { confirmModal } from './inspector-dialog.js';
 import { createDataSnapshot, isSecretContextKey, supportsDataContextScope } from './inspector-data-context.js';
+import { formatLayoutReport, formatPerformanceSummary } from './inspector-diagnostics.js';
 import { createEvidenceController } from './inspector-evidence.js';
 import { createPropertyGridController } from './inspector-properties.js';
 import { createElementTreeController } from './inspector-tree.js';
@@ -2163,6 +2164,12 @@ import { createElementTreeController } from './inspector-tree.js';
   let networkPollInFlight = false;
   let networkRequestEpoch = 0;
   const NETWORK_AUTO_REFRESH_MS = 2000;
+  // Performance polling is deliberately slow and only runs while a session is recording, so the
+  // tab never becomes a background load on the app it is measuring.
+  const PERFORMANCE_POLL_MS = 3000;
+  let performanceRecording = false;
+  let performanceOwned = false;
+  let performanceBusy = false;
 
   function elh(tag, attrs, ...children) {
     const e = document.createElement(tag);
@@ -2741,10 +2748,204 @@ import { createElementTreeController } from './inspector-tree.js';
     return dockActiveTab === name && dockViewGeneration === generation;
   }
 
+  // ── Layout diagnostics tab ──
+  // Explicit one-shot scan. No auto-scan on tab open beyond the first load, no polling, and no
+  // screenshot refresh: a diagnostic must never change what the user is looking at. Layout results
+  // are NOT offered as Copilot data context (see clearDockSnapshot below) — they are not in the
+  // bounded, redacted set of data-context scopes.
+  function renderLayoutDiagnostics(j) {
+    clearDockSnapshot();
+    if (!j || j.ok === false || !j.report) {
+      dockEmpty((j && j.error) || 'Layout diagnostics are unavailable for this agent.');
+      return;
+    }
+
+    const view = formatLayoutReport(j.report);
+    const fragment = document.createDocumentFragment();
+
+    const header = elh('div', { class: 'df-diag-header' });
+    header.append(
+      elh('div', { class: 'df-section-title', text: view.title }),
+      elh('div', { class: 'df-diag-meta', text: `${view.summary} · ${view.scope}` }),
+      elh('div', { class: 'df-diag-meta', text: `${view.coverage} · ${view.version}` }));
+    fragment.append(header);
+
+    if (view.rules.length) {
+      const table = elh('table', { class: 'df-diag-rules' });
+      table.append(elh('tr', null,
+        elh('th', { text: 'Rule' }), elh('th', { text: 'Coverage' }), elh('th', { text: 'Elements' })));
+      for (const rule of view.rules) {
+        table.append(elh('tr', null,
+          elh('td', { text: rule.ruleId }),
+          elh('td', { text: rule.support }),
+          elh('td', { text: rule.detail })));
+      }
+      fragment.append(table);
+    }
+
+    if (!view.findings.length) {
+      fragment.append(elh('div', { class: 'df-empty', text: 'No findings. Read the coverage table above — unevaluated elements are incomplete, not passing.' }));
+    }
+    for (const finding of view.findings) {
+      const row = elh('button', { class: `df-diag-finding df-diag-${finding.outcome}`, type: 'button' });
+      const heading = elh('div', { class: 'df-problem-heading' });
+      heading.append(
+        elh('span', { class: 'df-problem-code', text: `${finding.outcomeLabel} · ${finding.ruleId}` }),
+        elh('span', { class: 'df-problem-count', text: finding.confidence }));
+      row.append(heading, elh('div', { class: 'df-problem-message', text: finding.message }));
+      if (finding.context) row.append(elh('div', { class: 'df-problem-context', text: finding.context }));
+      row.append(elh('div', { class: 'df-diag-explanation', text: finding.explanation }));
+      for (const limitation of finding.limitations)
+        row.append(elh('div', { class: 'df-diag-limitation', text: `! ${limitation}` }));
+
+      if (finding.elementId) {
+        row.title = 'Select the affected element';
+        row.addEventListener('click', () => {
+          const target = elById(finding.elementId);
+          if (!target) {
+            setStatus('The affected element is no longer present in the current frame.');
+            return;
+          }
+          selectElement(finding.elementId);
+          propertyGrid.open(target);
+        });
+      } else {
+        row.disabled = true;
+      }
+      fragment.append(row);
+    }
+
+    if (view.findingsTruncated) {
+      fragment.append(elh('div', { class: 'df-diag-limitation', text: 'The finding list was truncated for display. Use `maui devflow diagnostics layout --json` for the full report.' }));
+    }
+
+    const limits = elh('div', { class: 'df-diag-footer' });
+    limits.append(elh('div', { class: 'df-diag-subtitle', text: 'Limitations' }));
+    for (const limitation of view.limitations)
+      limits.append(elh('div', { class: 'df-diag-limitation', text: `! ${limitation}` }));
+    if (view.neverCaptured.length)
+      limits.append(elh('div', { class: 'df-diag-meta', text: `Never captured: ${view.neverCaptured.join(', ')}` }));
+    fragment.append(limits);
+
+    dockBodyEl.replaceChildren(fragment);
+  }
+
+  // ── Performance triage tab ──
+  // Start/Stop are explicit. While recording, a slow poll refreshes only this panel — never the
+  // frame, never a screenshot. Performance results are NOT offered as Copilot data context.
+  function renderPerformance(j) {
+    clearDockSnapshot();
+    if (!j || j.ok === false || !j.summary) {
+      performanceRecording = false;
+      performanceOwned = false;
+      dockEmpty((j && j.error) || 'Performance triage is unavailable for this agent.');
+      return;
+    }
+
+    const view = formatPerformanceSummary(j.summary);
+    performanceRecording = view.active;
+    performanceOwned = !!j.owned;
+
+    const fragment = document.createDocumentFragment();
+    const header = elh('div', { class: 'df-diag-header' });
+    header.append(
+      elh('div', { class: 'df-section-title', text: view.title }),
+      elh('div', { class: 'df-diag-meta', text: view.session }),
+      elh('div', { class: 'df-diag-meta', text: view.mode }));
+
+    const controls = elh('div', { class: 'df-diag-controls' });
+    const startBtn = elh('button', { type: 'button', text: view.active ? 'Recording…' : 'Start recording' });
+    startBtn.disabled = view.active || performanceBusy;
+    startBtn.addEventListener('click', () => controlPerformance('start'));
+    const stopBtn = elh('button', { type: 'button', text: 'Stop' });
+    stopBtn.disabled = !view.active || !performanceOwned || performanceBusy;
+    stopBtn.addEventListener('click', () => controlPerformance('stop'));
+    controls.append(startBtn, stopBtn);
+    header.append(controls);
+    if (view.active && !performanceOwned)
+      header.append(elh('div', { class: 'df-diag-meta', text: 'Attached read-only: another client owns this session.' }));
+    fragment.append(header);
+
+    fragment.append(elh('div', {
+      class: view.perturbed ? 'df-diag-warning' : 'df-diag-meta',
+      text: view.perturbationNote,
+    }));
+
+    const table = elh('table', { class: 'df-diag-metrics' });
+    for (const metric of view.metrics) {
+      table.append(elh('tr', null,
+        elh('td', { class: 'df-kv-key', text: metric.label }),
+        elh('td', null,
+          elh('div', { text: metric.value }),
+          metric.detail ? elh('div', { class: 'df-diag-meta', text: metric.detail }) : null)));
+    }
+    fragment.append(table);
+
+    if (view.hotspots.length) {
+      fragment.append(elh('div', { class: 'df-diag-subtitle', text: 'Top hotspots (p95)' }));
+      const hot = elh('table', { class: 'df-diag-hotspots' });
+      hot.append(elh('tr', null,
+        elh('th', { text: 'Operation' }), elh('th', { text: 'p95' }), elh('th', { text: 'max' }), elh('th', { text: 'n' }), elh('th', { text: 'errors' })));
+      for (const hotspot of view.hotspots) {
+        hot.append(elh('tr', null,
+          elh('td', { text: hotspot.screen ? `${hotspot.name} @ ${hotspot.screen}` : hotspot.name }),
+          elh('td', { text: hotspot.p95 }),
+          elh('td', { text: hotspot.max }),
+          elh('td', { text: String(hotspot.count) }),
+          elh('td', { text: String(hotspot.errorCount) })));
+      }
+      fragment.append(hot);
+    }
+
+    for (const warning of view.warnings)
+      fragment.append(elh('div', { class: 'df-diag-warning', text: `! ${warning}` }));
+
+    const limits = elh('div', { class: 'df-diag-footer' });
+    limits.append(elh('div', { class: 'df-diag-subtitle', text: 'Limitations' }));
+    for (const limitation of view.limitations)
+      limits.append(elh('div', { class: 'df-diag-limitation', text: `- ${limitation}` }));
+    limits.append(elh('div', { class: 'df-diag-meta', text: 'Hand off to a native profiler (dotnet-trace, Instruments, Android Studio Profiler) for call-stack attribution.' }));
+    fragment.append(limits);
+
+    dockBodyEl.replaceChildren(fragment);
+  }
+
+  async function controlPerformance(action) {
+    if (performanceBusy) return;
+    performanceBusy = true;
+    setStatus(action === 'start' ? 'Starting performance triage…' : 'Stopping performance triage…');
+    try {
+      const j = await apiPost(`/api/performance/${action}`, {});
+      if (dockActiveTab === 'performance') renderPerformance(j);
+      setStatus(j && j.ok === false
+        ? (j.error || 'Performance triage is unavailable.')
+        : (action === 'start' ? 'Recording performance triage.' : 'Performance triage stopped.'));
+    } finally {
+      performanceBusy = false;
+    }
+  }
+
+  function performancePollIsActive() {
+    return performanceRecording
+      && !performanceBusy
+      && dockActiveTab === 'performance'
+      && !dockEl.classList.contains('df-hidden')
+      && !document.body.classList.contains('df-dock-collapsed')
+      && !document.hidden;
+  }
+
   const tabLoaders = {
     problems: async (generation) => {
       const j = await apiPost('/api/problems', { limit: 200 });
       if (dockLoadIsCurrent('problems', generation)) renderProblems(j);
+    },
+    layout: async (generation) => {
+      const j = await apiPost('/api/diagnostics/layout', { maxElements: 2000 });
+      if (dockLoadIsCurrent('layout', generation)) renderLayoutDiagnostics(j);
+    },
+    performance: async (generation) => {
+      const j = await apiPost('/api/performance/snapshot', {});
+      if (dockLoadIsCurrent('performance', generation)) renderPerformance(j);
     },
     logs: async (generation) => {
       const j = await apiPost('/api/logs', { limit: 200 });
@@ -2984,6 +3185,13 @@ import { createElementTreeController } from './inspector-tree.js';
   setInterval(() => {
     if (networkPollIsActive()) loadNetworkList({ automatic: true, generation: dockViewGeneration });
   }, NETWORK_AUTO_REFRESH_MS);
+
+  setInterval(async () => {
+    if (!performancePollIsActive()) return;
+    const generation = dockViewGeneration;
+    const j = await apiPost('/api/performance/snapshot', {});
+    if (dockLoadIsCurrent('performance', generation)) renderPerformance(j);
+  }, PERFORMANCE_POLL_MS);
 
   // ── Presence / single-writer coordination ──
   function renderWriterPresence() {

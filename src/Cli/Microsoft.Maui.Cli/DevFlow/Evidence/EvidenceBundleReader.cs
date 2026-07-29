@@ -1,4 +1,5 @@
 using System.IO.Compression;
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -14,6 +15,7 @@ internal sealed class EvidenceReadResult
     public EvidenceManifest? Manifest { get; init; }
     public EvidenceEnvironment? Environment { get; init; }
     public EvidenceTreeDocument? Tree { get; init; }
+    public EvidenceLayoutDocument? Layout { get; init; }
     public EvidenceProblemDocument? Problems { get; init; }
     public EvidenceLogDocument? Logs { get; init; }
     public EvidenceNetworkDocument? Network { get; init; }
@@ -37,9 +39,10 @@ internal sealed class EvidenceReadResult
 /// </summary>
 internal static class EvidenceBundleReader
 {
-    public static EvidenceReadResult Read(string path)
+    public static EvidenceReadResult Read(string path, CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        cancellationToken.ThrowIfCancellationRequested();
 
         FileInfo info;
         try
@@ -58,7 +61,7 @@ internal static class EvidenceBundleReader
         try
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
-            return Read(stream, path);
+            return Read(stream, path, cancellationToken);
         }
         catch (InvalidDataException)
         {
@@ -70,9 +73,13 @@ internal static class EvidenceBundleReader
         }
     }
 
-    public static EvidenceReadResult Read(Stream stream, string? path = null)
+    public static EvidenceReadResult Read(
+        Stream stream,
+        string? path = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(stream);
+        cancellationToken.ThrowIfCancellationRequested();
 
         ZipArchive archive;
         try
@@ -88,7 +95,7 @@ internal static class EvidenceBundleReader
         {
             try
             {
-                return ReadArchive(archive, path);
+                return ReadArchive(archive, path, cancellationToken);
             }
             catch (EvidenceReadException ex)
             {
@@ -102,7 +109,10 @@ internal static class EvidenceBundleReader
         }
     }
 
-    private static EvidenceReadResult ReadArchive(ZipArchive archive, string? path)
+    private static EvidenceReadResult ReadArchive(
+        ZipArchive archive,
+        string? path,
+        CancellationToken cancellationToken)
     {
         {
             if (archive.Entries.Count == 0)
@@ -117,12 +127,14 @@ internal static class EvidenceBundleReader
             // the real limits are enforced against the actual decompressed bytes in ReadBounded.
             foreach (var entry in archive.Entries)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var nameError = ValidateEntryName(entry.FullName);
                 if (nameError is not null) return EvidenceReadResult.Fail(nameError, path);
                 if (!seen.Add(entry.FullName))
                     return EvidenceReadResult.Fail($"Bundle contains duplicate entry '{entry.FullName}'.", path);
 
-                if (entry.Length < 0 || entry.Length > EvidenceFormat.MaxEntryUncompressedBytes)
+                var entryLimit = EntryLimit(entry.FullName);
+                if (entry.Length < 0 || entry.Length > entryLimit)
                     return EvidenceReadResult.Fail($"Entry '{entry.FullName}' is larger than the supported maximum.", path);
 
                 declaredTotal += entry.Length;
@@ -136,7 +148,11 @@ internal static class EvidenceBundleReader
             if (manifestEntry is null)
                 return EvidenceReadResult.Fail("Bundle is missing manifest.json.", path);
 
-            var manifestJson = DecodeUtf8(ReadBounded(manifestEntry, budget));
+            var manifestJson = DecodeUtf8(ReadBounded(
+                manifestEntry,
+                budget,
+                EntryLimit(EvidenceFormat.ManifestEntry),
+                cancellationToken));
             if (manifestJson is null) return EvidenceReadResult.Fail("manifest.json is not valid UTF-8 text.", path);
 
             var manifestError = ValidateManifestShape(manifestJson);
@@ -151,9 +167,14 @@ internal static class EvidenceBundleReader
             var contents = new Dictionary<string, byte[]>(StringComparer.Ordinal);
             foreach (var entry in archive.Entries)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 if (entry.FullName == EvidenceFormat.ManifestEntry)
                     continue;
-                contents[entry.FullName] = ReadBounded(entry, budget);
+                contents[entry.FullName] = ReadBounded(
+                    entry,
+                    budget,
+                    EntryLimit(entry.FullName),
+                    cancellationToken);
             }
 
             var integrityError = ValidateManifestEntries(manifest, contents);
@@ -162,6 +183,7 @@ internal static class EvidenceBundleReader
 
             var environment = ReadJsonEntry<EvidenceEnvironment>(contents, EvidenceFormat.EnvironmentEntry, warnings);
             var tree = ReadJsonEntry<EvidenceTreeDocument>(contents, EvidenceFormat.TreeEntry, warnings);
+            var layout = ReadJsonEntry<EvidenceLayoutDocument>(contents, EvidenceFormat.LayoutEntry, warnings);
             var problems = ReadJsonEntry<EvidenceProblemDocument>(contents, EvidenceFormat.ProblemsEntry, warnings);
             var logs = ReadJsonEntry<EvidenceLogDocument>(contents, EvidenceFormat.LogsEntry, warnings);
             var network = ReadJsonEntry<EvidenceNetworkDocument>(contents, EvidenceFormat.NetworkEntry, warnings);
@@ -169,14 +191,23 @@ internal static class EvidenceBundleReader
             string? workflow = null;
             if (contents.TryGetValue(EvidenceFormat.WorkflowEntry, out var workflowBytes))
             {
-                workflow = DecodeUtf8(workflowBytes);
-                if (workflow is null) warnings.Add("workflow.md was ignored: it is not valid UTF-8 text.");
+                if (workflowBytes.LongLength > EvidenceFormat.MaxWorkflowBytes)
+                {
+                    warnings.Add("workflow.md was ignored: it exceeds the workflow size limit.");
+                }
+                else
+                {
+                    workflow = DecodeUtf8(workflowBytes);
+                    if (workflow is null) warnings.Add("workflow.md was ignored: it is not valid UTF-8 text.");
+                }
             }
 
             byte[]? screenshot = null;
             if (contents.TryGetValue(EvidenceFormat.ScreenshotEntry, out var screenshotBytes))
             {
-                if (!IsPng(screenshotBytes)) warnings.Add("screenshot.png was ignored: it is not a PNG image.");
+                if (screenshotBytes.LongLength > EvidenceFormat.MaxScreenshotBytes)
+                    warnings.Add("screenshot.png was ignored: it exceeds the screenshot size limit.");
+                else if (!IsPng(screenshotBytes)) warnings.Add("screenshot.png was ignored: it is not a PNG image.");
                 else screenshot = screenshotBytes;
             }
 
@@ -187,6 +218,7 @@ internal static class EvidenceBundleReader
                 Manifest = manifest,
                 Environment = environment,
                 Tree = tree,
+                Layout = layout,
                 Problems = problems,
                 Logs = logs,
                 Network = network,
@@ -264,10 +296,43 @@ internal static class EvidenceBundleReader
     {
         if (manifest.Entries is null)
             return "manifest.json entries are missing.";
+        if (manifest.Capabilities is null || manifest.Excluded is null ||
+            manifest.NeverIncluded is null || manifest.Warnings is null)
+        {
+            return "manifest.json contains null collections.";
+        }
+        if (manifest.Capabilities.Count > 64 || manifest.Excluded.Count > EvidenceFormat.MaxBundleEntries ||
+            manifest.NeverIncluded.Count > 64 || manifest.Warnings.Count > 256)
+        {
+            return "manifest.json contains an oversized collection.";
+        }
+        if (InvalidText(manifest.CapturedUtc, 64) ||
+            !DateTimeOffset.TryParse(
+                manifest.CapturedUtc,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out _) ||
+            manifest.Source is not ("cli" or "mcp" or "inspector") ||
+            InvalidText(manifest.SelectedElementId, EvidenceFormat.MaxIdentifierChars))
+        {
+            return "manifest.json contains invalid source, timestamp, or text metadata.";
+        }
+        if (manifest.Excluded.Any(static exclusion =>
+                exclusion is null ||
+                InvalidText(exclusion.Name, 128) ||
+                InvalidText(exclusion.Reason, 1_000)) ||
+            manifest.Capabilities.Any(static value => InvalidText(value, 128)) ||
+            manifest.NeverIncluded.Any(static value => InvalidText(value, 256)) ||
+            manifest.Warnings.Any(static value => InvalidText(value, 2_000)))
+        {
+            return "manifest.json contains oversized metadata.";
+        }
 
         var manifestEntries = new Dictionary<string, EvidenceEntryInfo>(StringComparer.Ordinal);
         foreach (var entry in manifest.Entries)
         {
+            if (entry is null)
+                return "manifest.json describes a null evidence entry.";
             if (string.IsNullOrWhiteSpace(entry.Name)
                 || !EvidenceFormat.AllowedEntries.Contains(entry.Name, StringComparer.Ordinal)
                 || entry.Name == EvidenceFormat.ManifestEntry)
@@ -276,6 +341,12 @@ internal static class EvidenceBundleReader
             }
             if (!manifestEntries.TryAdd(entry.Name, entry))
                 return $"manifest.json describes duplicate entry '{entry.Name}'.";
+            if (entry.Bytes < 0 || entry.Bytes > EntryLimit(entry.Name))
+                return $"manifest.json describes an oversized entry '{entry.Name}'.";
+            if (entry.Count is < 0)
+                return $"manifest.json describes an invalid count for '{entry.Name}'.";
+            if (entry.Description?.Length > 1_000)
+                return $"manifest.json describes an entry with an oversized description.";
         }
 
         if (manifestEntries.Count != contents.Count
@@ -289,8 +360,9 @@ internal static class EvidenceBundleReader
             var declared = manifestEntries[pair.Key];
             if (declared.Bytes != pair.Value.LongLength)
                 return $"Entry '{pair.Key}' size does not match manifest.json.";
-            if (string.IsNullOrWhiteSpace(declared.Sha256))
-                return $"Entry '{pair.Key}' is missing its integrity hash.";
+            if (declared.Sha256 is not { Length: 64 } ||
+                declared.Sha256.Any(static character => !Uri.IsHexDigit(character)))
+                return $"Entry '{pair.Key}' has an invalid integrity hash.";
 
             var actualHash = Convert.ToHexString(SHA256.HashData(pair.Value)).ToLowerInvariant();
             if (!string.Equals(actualHash, declared.Sha256, StringComparison.OrdinalIgnoreCase))
@@ -299,6 +371,240 @@ internal static class EvidenceBundleReader
 
         return null;
     }
+
+    private static string? ValidateSection(object? value) => value switch
+    {
+        null => "it could not be deserialized.",
+        EvidenceEnvironment environment => ValidateEnvironment(environment),
+        EvidenceTreeDocument tree => ValidateTree(tree),
+        EvidenceLayoutDocument layout => ValidateLayout(layout),
+        EvidenceProblemDocument problems => ValidateProblems(problems),
+        EvidenceLogDocument logs => ValidateLogs(logs),
+        EvidenceNetworkDocument network => ValidateNetwork(network),
+        _ => null,
+    };
+
+    private static string? ValidateEnvironment(EvidenceEnvironment environment)
+    {
+        if (environment.Capabilities is null)
+            return "capabilities must be an array.";
+        if (environment.Capabilities.Count > 64 ||
+            environment.Capabilities.Any(static value => TooLong(value, 128)))
+        {
+            return "capabilities exceed the supported bounds.";
+        }
+        if (TooLong(environment.CapturedUtc, 64) || TooLong(environment.Route, 512) ||
+            TooLong(environment.Checkpoint?.Route, 512))
+        {
+            return "a string exceeds the supported bounds.";
+        }
+        var display = environment.Display;
+        if (display is not null &&
+            (!IsFinite(display.Width) || !IsFinite(display.Height) || !IsFinite(display.Density) ||
+             !IsFinite(display.RefreshRate)))
+        {
+            return "display metrics must be finite.";
+        }
+        return null;
+    }
+
+    private static string? ValidateTree(EvidenceTreeDocument tree)
+    {
+        if (tree.Roots is null)
+            return "roots must be an array.";
+        if (tree.Count < 0 || tree.Count > EvidenceFormat.MaxTreeElements ||
+            tree.MaxDepth < 0 || tree.MaxDepth > EvidenceFormat.MaxTreeDepth)
+        {
+            return "tree counts exceed the supported bounds.";
+        }
+
+        var count = 0;
+        var stack = new Stack<(EvidenceTreeNode Node, int Depth)>();
+        for (var index = tree.Roots.Count - 1; index >= 0; index--)
+        {
+            var root = tree.Roots[index];
+            if (root is null) return "roots contains a null element.";
+            stack.Push((root, 1));
+        }
+
+        while (stack.Count > 0)
+        {
+            var (node, depth) = stack.Pop();
+            count++;
+            if (count > EvidenceFormat.MaxTreeElements || depth > EvidenceFormat.MaxTreeDepth)
+                return "tree depth or element count exceeds the supported bounds.";
+            if (TooLong(node.Id, EvidenceFormat.MaxIdentifierChars) ||
+                TooLong(node.Type, EvidenceFormat.MaxIdentifierChars) ||
+                TooLong(node.Framework, EvidenceFormat.MaxIdentifierChars) ||
+                TooLong(node.AutomationId, EvidenceFormat.MaxIdentifierChars) ||
+                TooLong(node.Role, EvidenceFormat.MaxIdentifierChars) ||
+                TooLong(node.SourceFile, 512) ||
+                TooLong(node.SourceHash, 128) ||
+                !ValidBounds(node.Bounds))
+            {
+                return "a tree node exceeds the supported bounds.";
+            }
+            if (node.Children is null)
+                continue;
+            for (var index = node.Children.Count - 1; index >= 0; index--)
+            {
+                var child = node.Children[index];
+                if (child is null) return "a tree node contains a null child.";
+                stack.Push((child, depth + 1));
+            }
+        }
+        return null;
+    }
+
+    private static string? ValidateLayout(EvidenceLayoutDocument layout)
+    {
+        if (layout.Rules is null || layout.Findings is null ||
+            layout.Limitations is null || layout.NeverCaptured is null)
+        {
+            return "required collections must be arrays.";
+        }
+        if (layout.Rules.Count > 64 || layout.Findings.Count > EvidenceFormat.MaxLayoutFindings ||
+            layout.Limitations.Count > 256 || layout.NeverCaptured.Count > 128)
+        {
+            return "a collection exceeds the supported bounds.";
+        }
+        if (layout.ElementsExamined < 0 || layout.ElementsExamined > EvidenceFormat.MaxLayoutElements ||
+            layout.Violations < 0 || layout.Observations < 0 || layout.Incomplete < 0 ||
+            layout.FindingCount < 0 || layout.FindingCount > EvidenceFormat.MaxLayoutFindings)
+        {
+            return "layout counts exceed the supported bounds.";
+        }
+        if (layout.Rules.Any(static rule =>
+                rule is null ||
+                TooLong(rule.RuleId, 128) ||
+                TooLong(rule.Support, 32) ||
+                TooLong(rule.Confidence, 32) ||
+                rule.Evaluated < 0 ||
+                rule.Skipped < 0))
+        {
+            return "a layout rule is invalid.";
+        }
+        foreach (var finding in layout.Findings)
+        {
+            if (finding is null || finding.Limitations is null ||
+                finding.Limitations.Count > 64 ||
+                TooLong(finding.Id, 256) ||
+                TooLong(finding.RuleId, 128) ||
+                TooLong(finding.Outcome, 32) ||
+                TooLong(finding.Confidence, 32) ||
+                TooLong(finding.Message, EvidenceFormat.MaxLayoutTextChars) ||
+                TooLong(finding.Explanation, EvidenceFormat.MaxLayoutTextChars) ||
+                TooLong(finding.ElementId, EvidenceFormat.MaxIdentifierChars) ||
+                TooLong(finding.ElementType, EvidenceFormat.MaxIdentifierChars) ||
+                TooLong(finding.AutomationId, EvidenceFormat.MaxIdentifierChars) ||
+                TooLong(finding.SourceFile, 512) ||
+                !ValidBounds(finding.Bounds) ||
+                finding.Limitations.Any(static text => TooLong(text, EvidenceFormat.MaxLayoutTextChars)))
+            {
+                return "a layout finding exceeds the supported bounds.";
+            }
+        }
+        if (layout.Limitations.Any(static text => TooLong(text, EvidenceFormat.MaxLayoutTextChars)) ||
+            layout.NeverCaptured.Any(static text => TooLong(text, 256)))
+        {
+            return "layout metadata exceeds the supported bounds.";
+        }
+        return null;
+    }
+
+    private static string? ValidateProblems(EvidenceProblemDocument document)
+    {
+        if (document.Problems is null)
+            return "problems must be an array.";
+        if (document.Problems.Count > EvidenceFormat.MaxProblems)
+            return "problem count exceeds the supported bounds.";
+        foreach (var problem in document.Problems)
+        {
+            if (problem is null ||
+                TooLong(problem.Id, 256) ||
+                TooLong(problem.Kind, 128) ||
+                TooLong(problem.Severity, 32) ||
+                TooLong(problem.Code, 128) ||
+                TooLong(problem.Message, EvidenceFormat.MaxProblemMessageChars) ||
+                TooLong(problem.BindingPath, 512) ||
+                TooLong(problem.SourceFile, 512) ||
+                problem.Count < 0)
+            {
+                return "a problem exceeds the supported bounds.";
+            }
+        }
+        return null;
+    }
+
+    private static string? ValidateLogs(EvidenceLogDocument document)
+    {
+        if (document.Entries is null)
+            return "entries must be an array.";
+        if (document.Entries.Count > EvidenceFormat.MaxLogLimit)
+            return "log count exceeds the supported bounds.";
+        foreach (var entry in document.Entries)
+        {
+            if (entry is null ||
+                TooLong(entry.Timestamp, 64) ||
+                TooLong(entry.Level, 32) ||
+                TooLong(entry.Category, 256) ||
+                TooLong(entry.Message, EvidenceFormat.MaxLogMessageChars) ||
+                TooLong(entry.Exception, EvidenceFormat.MaxLogMessageChars) ||
+                TooLong(entry.Source, 128))
+            {
+                return "a log entry exceeds the supported bounds.";
+            }
+        }
+        return null;
+    }
+
+    private static string? ValidateNetwork(EvidenceNetworkDocument document)
+    {
+        if (document.Requests is null)
+            return "requests must be an array.";
+        if (document.Requests.Count > EvidenceFormat.MaxNetworkLimit)
+            return "network request count exceeds the supported bounds.";
+        foreach (var request in document.Requests)
+        {
+            if (request is null ||
+                TooLong(request.Timestamp, 64) ||
+                TooLong(request.Method, 32) ||
+                TooLong(request.Host, 256) ||
+                TooLong(request.Path, 2_048) ||
+                TooLong(request.StatusText, 256) ||
+                TooLong(request.RequestContentType, 256) ||
+                TooLong(request.ResponseContentType, 256) ||
+                TooLong(request.Error, EvidenceFormat.MaxErrorChars) ||
+                request.QueryKeys is { Count: > EvidenceFormat.MaxQueryKeys } ||
+                request.QueryKeys?.Any(static key => TooLong(key, 64)) == true ||
+                request.DurationMs < 0 ||
+                request.RequestBytes < 0 ||
+                request.ResponseBytes < 0)
+            {
+                return "a network request exceeds the supported bounds.";
+            }
+        }
+        return null;
+    }
+
+    private static bool ValidBounds(EvidenceBounds? bounds)
+        => bounds is null ||
+           (double.IsFinite(bounds.X) &&
+            double.IsFinite(bounds.Y) &&
+            double.IsFinite(bounds.Width) &&
+            double.IsFinite(bounds.Height));
+
+    private static bool IsFinite(double? value)
+        => value is null || double.IsFinite(value.Value);
+
+    private static bool TooLong(string? value, int max)
+        => value?.Length > max;
+
+    private static bool InvalidText(string? value, int max)
+        => TooLong(value, max) ||
+           value?.Any(static character =>
+               char.IsControl(character) ||
+               char.GetUnicodeCategory(character) == UnicodeCategory.Format) == true;
 
     private static T? ReadJsonEntry<T>(
         IReadOnlyDictionary<string, byte[]> contents,
@@ -324,7 +630,14 @@ internal static class EvidenceBundleReader
                 warnings.Add($"{name} was ignored: unexpected JSON shape.");
                 return null;
             }
-            return EvidenceJson.Deserialize<T>(json);
+            var value = EvidenceJson.Deserialize<T>(json);
+            var semanticError = ValidateSection(value);
+            if (semanticError is not null)
+            {
+                warnings.Add($"{name} was ignored: {semanticError}");
+                return null;
+            }
+            return value;
         }
         catch (JsonException)
         {
@@ -347,7 +660,11 @@ internal static class EvidenceBundleReader
     /// about its sizes cannot use the cheap pre-filter to smuggle a decompression bomb past the
     /// per-entry cap, the cumulative cap, or the ratio guard.
     /// </summary>
-    private static byte[] ReadBounded(ZipArchiveEntry entry, ReadBudget budget)
+    private static byte[] ReadBounded(
+        ZipArchiveEntry entry,
+        ReadBudget budget,
+        long maxBytes,
+        CancellationToken cancellationToken)
     {
         using var source = entry.Open();
         using var buffer = new MemoryStream();
@@ -357,9 +674,10 @@ internal static class EvidenceBundleReader
         int read;
         while ((read = source.Read(chunk, 0, chunk.Length)) > 0)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             actual += read;
             budget.TotalBytes += read;
-            if (actual > EvidenceFormat.MaxEntryUncompressedBytes)
+            if (actual > maxBytes)
                 throw new EvidenceReadException($"Entry '{entry.FullName}' is larger than the supported maximum.");
             if (budget.TotalBytes > EvidenceFormat.MaxTotalUncompressedBytes)
                 throw new EvidenceReadException("Bundle expands beyond the supported maximum size.");
@@ -374,6 +692,20 @@ internal static class EvidenceBundleReader
 
         return buffer.ToArray();
     }
+
+    private static long EntryLimit(string name) => name switch
+    {
+        EvidenceFormat.ManifestEntry => EvidenceFormat.MaxManifestBytes,
+        EvidenceFormat.EnvironmentEntry => EvidenceFormat.MaxEnvironmentBytes,
+        EvidenceFormat.TreeEntry => EvidenceFormat.MaxTreeBytes,
+        EvidenceFormat.LayoutEntry => EvidenceFormat.MaxLayoutBytes,
+        EvidenceFormat.ProblemsEntry => EvidenceFormat.MaxProblemsBytes,
+        EvidenceFormat.LogsEntry => EvidenceFormat.MaxLogsBytes,
+        EvidenceFormat.NetworkEntry => EvidenceFormat.MaxNetworkBytes,
+        EvidenceFormat.WorkflowEntry => EvidenceFormat.MaxWorkflowBytes,
+        EvidenceFormat.ScreenshotEntry => EvidenceFormat.MaxScreenshotBytes,
+        _ => EvidenceFormat.MaxEntryUncompressedBytes,
+    };
 
     private static string? DecodeUtf8(byte[] bytes)
     {

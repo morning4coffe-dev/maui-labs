@@ -1032,14 +1032,52 @@ public class AgentClient : IDisposable
         if (sampleIntervalMs.HasValue)
             payload["sampleIntervalMs"] = sampleIntervalMs.Value;
 
-        var response = await PostJsonAsync<ProfilerSessionEnvelope>($"{ProfilerApi}/sessions", payload);
-        return response?.Session;
+        using var response = await SendWithTransientRetriesAsync(HttpMethod.Post, async () =>
+        {
+            using var content = DriverJson.CreateJsonContent(payload);
+            return await _http.PostAsync($"{_baseUrl}{ProfilerApi}/sessions", content);
+        });
+        var responseBody = await response.Content.ReadAsStringAsync();
+        if (response.StatusCode == System.Net.HttpStatusCode.Conflict)
+            throw new InvalidOperationException("A profiler session is already active. Attach to it instead.");
+        if (!response.IsSuccessStatusCode || string.IsNullOrWhiteSpace(responseBody))
+            return null;
+        return DriverJson.Deserialize<ProfilerSessionEnvelope>(responseBody)?.Session;
     }
 
     public async Task<ProfilerSessionInfo?> StopProfilerAsync(string? sessionId = null)
     {
-        var response = await DeleteJsonAsync<ProfilerSessionEnvelope>($"{ProfilerApi}/sessions/{Uri.EscapeDataString(sessionId ?? "current")}");
+        var response = await StopProfilerEnvelopeAsync(sessionId, sampleLimit: 20_000, hotspotLimit: 20);
         return response?.Session;
+    }
+
+    private async Task<ProfilerSessionEnvelope?> StopProfilerEnvelopeAsync(
+        string? sessionId,
+        int sampleLimit,
+        int hotspotLimit)
+    {
+        var path =
+            $"{ProfilerApi}/sessions/{Uri.EscapeDataString(sessionId ?? "current")}" +
+            $"?sampleLimit={Math.Clamp(sampleLimit, 1, 20_000)}&hotspotLimit={Math.Clamp(hotspotLimit, 1, 200)}";
+        try
+        {
+            using var response = await SendWithTransientRetriesAsync(
+                HttpMethod.Delete,
+                () => _http.DeleteAsync($"{_baseUrl}{path}"));
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound &&
+                !string.IsNullOrWhiteSpace(sessionId))
+            {
+                throw new ProfilerSessionMismatchException(sessionId);
+            }
+            if (!response.IsSuccessStatusCode)
+                return null;
+            var responseBody = await response.Content.ReadAsStringAsync();
+            return DriverJson.Deserialize<ProfilerSessionEnvelope>(responseBody);
+        }
+        catch (Exception ex) when (IsExpectedClientException(ex))
+        {
+            return null;
+        }
     }
 
     public async Task<ProfilerBatch?> GetProfilerSamplesAsync(
@@ -1077,7 +1115,8 @@ public class AgentClient : IDisposable
     public async Task<List<ProfilerHotspot>> GetProfilerHotspotsAsync(
         int limit = 20,
         int minDurationMs = 16,
-        string? kind = null)
+        string? kind = null,
+        string? sessionId = null)
     {
         limit = Math.Clamp(limit, 1, 200);
         minDurationMs = Math.Clamp(minDurationMs, 0, 60_000);
@@ -1085,6 +1124,8 @@ public class AgentClient : IDisposable
         var path = $"{ProfilerApi}/hotspots?limit={limit}&minDurationMs={minDurationMs}";
         if (!string.IsNullOrWhiteSpace(kind))
             path += $"&kind={Uri.EscapeDataString(kind)}";
+        if (!string.IsNullOrWhiteSpace(sessionId))
+            path += $"&sessionId={Uri.EscapeDataString(sessionId)}";
         return await GetAsync<List<ProfilerHotspot>>(path) ?? new();
     }
 
@@ -1112,6 +1153,146 @@ public class AgentClient : IDisposable
         {
             return false;
         }
+    }
+
+    /// <summary>
+    /// Runs a single, explicit, read-only layout diagnostics scan against the running app.
+    /// </summary>
+    /// <param name="elementId">Restrict the scan to this element's subtree.</param>
+    /// <param name="window">0-based window index; defaults to every window.</param>
+    /// <param name="maxElements">Element budget (clamped by the agent to 5000).</param>
+    /// <remarks>
+    /// The report describes managed MAUI layout state only. It never asserts clipping, occlusion,
+    /// text truncation, or accessibility mismatches, and geometry the agent could not read is
+    /// reported as <c>incomplete</c> rather than as a pass. Returns <c>null</c> when the agent does
+    /// not support layout diagnostics or the requested element does not exist.
+    /// </remarks>
+    public async Task<LayoutDiagnosticsReport?> GetLayoutDiagnosticsAsync(
+        string? elementId = null,
+        int? window = null,
+        int? maxElements = null)
+    {
+        var query = new List<string>();
+        if (!string.IsNullOrWhiteSpace(elementId))
+            query.Add($"elementId={Uri.EscapeDataString(elementId!)}");
+        if (window.HasValue)
+            query.Add($"window={window.Value}");
+        if (maxElements.HasValue)
+            query.Add($"maxElements={Math.Clamp(maxElements.Value, 1, 5000)}");
+
+        var path = $"{UiApi}/diagnostics/layout";
+        if (query.Count > 0)
+            path += "?" + string.Join("&", query);
+        return await GetAsync<LayoutDiagnosticsReport>(path);
+    }
+
+    /// <summary>
+    /// Collects a performance triage summary from the agent's current profiler session.
+    /// </summary>
+    /// <remarks>
+    /// This is a triage read, not a profiler: it aggregates the bounded sampling the app is already
+    /// doing. Aggregation runs in <see cref="PerformanceAggregator"/> so the CLI, MCP tools, and the
+    /// Inspector all report identical analysis. Hand off to a native profiler for call-stack
+    /// attribution.
+    /// </remarks>
+    public async Task<PerformanceSummary> GetPerformanceSummaryAsync(
+        string? sessionId = null,
+        int sampleLimit = 2000,
+        int hotspotLimit = 10)
+    {
+        sampleLimit = Math.Clamp(sampleLimit, 1, 20_000);
+        hotspotLimit = Math.Clamp(hotspotLimit, 1, 200);
+
+        var capabilities = await GetProfilerCapabilitiesAsync();
+        var status = await GetStatusAsync();
+
+        if (capabilities is not null && !capabilities.Available)
+            return PerformanceAggregator.Aggregate(capabilities, null, null, null, status);
+
+        var batch = await GetProfilerSamplesAsync(sessionId, 0, 0, 0, sampleLimit);
+        var sessionStatus = await GetProfilerSessionStatusAsync();
+        var session = sessionStatus.Session;
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            if (!sessionStatus.Success)
+                throw new InvalidOperationException("The profiler session status could not be read.");
+            if (session is null || !string.Equals(session.SessionId, sessionId, StringComparison.Ordinal))
+                throw new ProfilerSessionMismatchException(sessionId);
+            if (batch is null)
+                throw new InvalidOperationException($"Profiler session '{sessionId}' could not be read.");
+        }
+        var hotspots = await GetProfilerHotspotsAsync(hotspotLimit, sessionId: sessionId);
+        if (!string.IsNullOrWhiteSpace(sessionId))
+        {
+            sessionStatus = await GetProfilerSessionStatusAsync();
+            session = sessionStatus.Session;
+            if (!sessionStatus.Success)
+                throw new InvalidOperationException("The profiler session status could not be read.");
+            if (session is null || !string.Equals(session.SessionId, sessionId, StringComparison.Ordinal))
+                throw new ProfilerSessionMismatchException(sessionId);
+        }
+        return PerformanceAggregator.Aggregate(capabilities, session, batch, hotspots, status);
+    }
+
+    /// <summary>Reads the agent's current profiler session descriptor, if any.</summary>
+    public async Task<ProfilerSessionInfo?> GetProfilerSessionAsync()
+        => (await GetProfilerSessionStatusAsync()).Session;
+
+    private async Task<(bool Success, ProfilerSessionInfo? Session)> GetProfilerSessionStatusAsync()
+    {
+        try
+        {
+            var response = await GetStringWithTransientRetriesAsync($"{_baseUrl}{AgentApi}/status");
+            var status = DriverJson.Deserialize<ProfilerSessionStatusEnvelope>(response);
+            return (true, status?.ProfilerSession);
+        }
+        catch (Exception ex) when (IsExpectedClientException(ex))
+        {
+            return (false, null);
+        }
+    }
+
+    /// <summary>Starts a profiler session and returns the triage view of the fresh session.</summary>
+    public async Task<PerformanceSummary> StartPerformanceSessionAsync(int? sampleIntervalMs = null)
+    {
+        var session = await StartProfilerAsync(sampleIntervalMs);
+        var capabilities = await GetProfilerCapabilitiesAsync();
+        var status = await GetStatusAsync();
+        if (session is null && capabilities?.Available == true)
+            throw new InvalidOperationException("The profiler is available, but the agent did not start a session.");
+        if (session is null && capabilities is null)
+            throw new InvalidOperationException("Could not start a profiler session or read profiler capabilities.");
+        return PerformanceAggregator.Aggregate(capabilities, session, null, null, status);
+    }
+
+    /// <summary>Stops the profiler session and returns the final triage summary for the window.</summary>
+    public async Task<PerformanceSummary> StopPerformanceSessionAsync(
+        string? sessionId = null,
+        int sampleLimit = 20_000,
+        int hotspotLimit = 10)
+    {
+        sampleLimit = Math.Clamp(sampleLimit, 1, 20_000);
+        hotspotLimit = Math.Clamp(hotspotLimit, 1, 200);
+
+        var stopped = await StopProfilerEnvelopeAsync(sessionId, sampleLimit, hotspotLimit);
+        var session = stopped?.Session;
+        if (!string.IsNullOrWhiteSpace(sessionId) && session is null)
+            throw new InvalidOperationException($"Profiler session '{sessionId}' could not be stopped.");
+        var capabilities = await GetProfilerCapabilitiesAsync();
+        var status = await GetStatusAsync();
+        return PerformanceAggregator.Aggregate(
+            capabilities,
+            session,
+            stopped?.Batch,
+            stopped?.Hotspots,
+            status);
+    }
+
+    /// <summary>Only the profiler session field of the status document is needed here.</summary>
+    internal sealed class ProfilerSessionStatusEnvelope
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("profilerSession")]
+        public ProfilerSessionInfo? ProfilerSession { get; set; }
     }
 
     private async Task<T?> GetAsync<T>(string path) where T : class
@@ -1590,6 +1771,10 @@ public class AgentClient : IDisposable
     {
         [System.Text.Json.Serialization.JsonPropertyName("session")]
         public ProfilerSessionInfo? Session { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("batch")]
+        public ProfilerBatch? Batch { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("hotspots")]
+        public List<ProfilerHotspot>? Hotspots { get; set; }
     }
 
     internal sealed class ActionResponse
@@ -1808,6 +1993,17 @@ public class NetworkRequest
     public bool ResponseBodyTruncated { get; set; }
 }
 
+public sealed class ProfilerSessionMismatchException : InvalidOperationException
+{
+    public ProfilerSessionMismatchException(string sessionId)
+        : base($"Profiler session '{sessionId}' is no longer current.")
+    {
+        SessionId = sessionId;
+    }
+
+    public string SessionId { get; }
+}
+
 public class ProfilerSessionInfo
 {
     [System.Text.Json.Serialization.JsonPropertyName("sessionId")]
@@ -1852,6 +2048,8 @@ public class ProfilerSample
     public int JankFrameCount { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("uiThreadStallCount")]
     public int UiThreadStallCount { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("frameDataLossCount")]
+    public int FrameDataLossCount { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("frameSource")]
     public string FrameSource { get; set; } = "";
     [System.Text.Json.Serialization.JsonPropertyName("frameQuality")]

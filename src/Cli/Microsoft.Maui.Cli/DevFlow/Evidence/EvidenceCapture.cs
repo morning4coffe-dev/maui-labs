@@ -27,6 +27,7 @@ internal static class EvidenceCapture
             new AgentEvidenceDataSource(client),
             BuildOptions(request, projectRoot, utcNow, previewOnly: true),
             ct);
+        ct.ThrowIfCancellationRequested();
 
         var destination = EvidencePaths.ValidateOutputPath(
             request.OutputPath, projectRoot, bundle.Manifest.App?.Name, utcNow);
@@ -50,6 +51,7 @@ internal static class EvidenceCapture
             new AgentEvidenceDataSource(client),
             BuildOptions(request, projectRoot, utcNow, previewOnly: false),
             ct);
+        ct.ThrowIfCancellationRequested();
 
         var destination = EvidencePaths.ValidateOutputPath(
             request.OutputPath, projectRoot, bundle.Manifest.App?.Name, utcNow);
@@ -58,7 +60,12 @@ internal static class EvidenceCapture
 
         bundle.Plan.OutputPath = destination.Path;
 
-        var write = EvidenceBundleWriter.Write(bundle, destination.Path!, request.Overwrite);
+        ct.ThrowIfCancellationRequested();
+        var write = EvidenceBundleWriter.Write(
+            bundle,
+            destination.Path!,
+            request.Overwrite,
+            ct);
         if (!write.Ok)
             return new EvidenceCaptureResult { Ok = false, Error = write.Error, Plan = bundle.Plan };
 
@@ -84,7 +91,8 @@ internal static class EvidenceCapture
             new AgentEvidenceDataSource(client),
             BuildOptions(request, projectRoot, utcNow, previewOnly: false),
             ct);
-        return (bundle, EvidenceBundleWriter.ToBytes(bundle));
+        ct.ThrowIfCancellationRequested();
+        return (bundle, EvidenceBundleWriter.ToBytes(bundle, ct));
     }
 
     /// <summary>

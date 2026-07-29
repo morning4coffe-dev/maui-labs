@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Maui.DevFlow.Driver;
+using Microsoft.Maui.Cli.DevFlow.Flows;
 
 namespace Microsoft.Maui.Cli.DevFlow.Evidence;
 
@@ -65,6 +66,7 @@ internal static class EvidenceBuilder
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(options);
+        ct.ThrowIfCancellationRequested();
 
         var utcNow = options.UtcNow ?? DateTime.UtcNow;
         var capturedUtc = utcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
@@ -80,7 +82,7 @@ internal static class EvidenceBuilder
         // ── environment ──────────────────────────────────────────────────────────────────────
         AgentStatus? status = null;
         try { status = await source.GetStatusAsync(ct); }
-        catch (Exception ex) { warnings.Add($"Agent status unavailable: {Describe(ex)}"); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add($"Agent status unavailable: {Describe(ex)}"); }
 
         var app = status?.App is null ? null : new EvidenceAppInfo
         {
@@ -102,15 +104,15 @@ internal static class EvidenceBuilder
 
         var capabilities = new List<string>();
         try { capabilities = ProjectCapabilities(await source.GetCapabilitiesAsync(ct)); }
-        catch (Exception ex) { warnings.Add($"Agent capabilities unavailable: {Describe(ex)}"); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add($"Agent capabilities unavailable: {Describe(ex)}"); }
 
         EvidenceDeviceInfo? device = null;
         try { device = ProjectDevice(await source.GetPlatformInfoAsync("device-info", ct)); }
-        catch (Exception ex) { warnings.Add($"Device info unavailable: {Describe(ex)}"); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add($"Device info unavailable: {Describe(ex)}"); }
 
         EvidenceDisplayInfo? display = null;
         try { display = ProjectDisplay(await source.GetPlatformInfoAsync("device-display", ct)); }
-        catch (Exception ex) { warnings.Add($"Display info unavailable: {Describe(ex)}"); }
+        catch (Exception ex) when (ex is not OperationCanceledException) { warnings.Add($"Display info unavailable: {Describe(ex)}"); }
 
         var environment = new EvidenceEnvironment
         {
@@ -145,7 +147,7 @@ internal static class EvidenceBuilder
                 "Element structure: type, automation id, bounds, state, and source location (no text or property values)",
                 projected.Count, EvidenceJson.SerializeToUtf8(projected));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             exclusions.Add(new EvidenceExclusion(EvidenceFormat.TreeEntry, $"Visual tree unavailable: {Describe(ex)}"));
         }
@@ -160,9 +162,37 @@ internal static class EvidenceBuilder
                 "Binding and property diagnostics (metadata only, messages re-redacted)",
                 projected.Count, EvidenceJson.SerializeToUtf8(projected));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             exclusions.Add(new EvidenceExclusion(EvidenceFormat.ProblemsEntry, $"Problems unavailable: {Describe(ex)}"));
+        }
+
+        // ── layout ───────────────────────────────────────────────────────────────────────────
+        // Additive and capability-gated: an agent that predates layout diagnostics returns null,
+        // which becomes an explicit exclusion instead of a failed capture.
+        try
+        {
+            var report = await source.GetLayoutDiagnosticsAsync(EvidenceFormat.MaxLayoutElements, ct);
+            if (report is null)
+            {
+                exclusions.Add(new EvidenceExclusion(EvidenceFormat.LayoutEntry,
+                    "The connected agent does not support layout diagnostics."));
+            }
+            else
+            {
+                var projected = ProjectLayout(report, options.ProjectRoot);
+                counts.LayoutFindings = projected.FindingCount;
+                counts.LayoutViolations = projected.Violations;
+                if (projected.FindingsTruncated)
+                    warnings.Add($"Layout findings truncated at {EvidenceFormat.MaxLayoutFindings}.");
+                AddEntry(entries, entryInfos, EvidenceFormat.LayoutEntry,
+                    "Layout diagnostics: rule outcomes, coverage, and element identity/geometry (no text or property values)",
+                    projected.FindingCount, EvidenceJson.SerializeToUtf8(projected));
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            exclusions.Add(new EvidenceExclusion(EvidenceFormat.LayoutEntry, $"Layout diagnostics unavailable: {Describe(ex)}"));
         }
 
         // ── logs ─────────────────────────────────────────────────────────────────────────────
@@ -175,7 +205,7 @@ internal static class EvidenceBuilder
                 $"Most recent {projected.Count} log entries (secrets and absolute paths scrubbed, messages truncated)",
                 projected.Count, EvidenceJson.SerializeToUtf8(projected));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             exclusions.Add(new EvidenceExclusion(EvidenceFormat.LogsEntry, $"Logs unavailable: {Describe(ex)}"));
         }
@@ -190,7 +220,7 @@ internal static class EvidenceBuilder
                 "HTTP request summaries: method, host, path, status, timing, sizes (no headers, bodies, or query values)",
                 projected.Count, EvidenceJson.SerializeToUtf8(projected));
         }
-        catch (Exception ex)
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
             exclusions.Add(new EvidenceExclusion(EvidenceFormat.NetworkEntry, $"Network capture unavailable: {Describe(ex)}"));
         }
@@ -198,7 +228,9 @@ internal static class EvidenceBuilder
         // ── workflow (caller-supplied markdown) ──────────────────────────────────────────────
         // Scrubbed like every other free-form payload: a recorded or hand-written repro can still
         // carry a token or a machine path even though a human chose to attach it.
-        var workflow = EvidenceRedaction.Scrub(options.WorkflowMarkdown, (int)EvidenceFormat.MaxWorkflowBytes);
+        var workflow = EvidenceRedaction.Scrub(
+            SanitizeWorkflow(options.WorkflowMarkdown),
+            (int)EvidenceFormat.MaxWorkflowBytes);
         if (!string.IsNullOrWhiteSpace(workflow))
         {
             var bytes = Encoding.UTF8.GetBytes(workflow!);
@@ -261,7 +293,7 @@ internal static class EvidenceBuilder
                     warnings.Add("This bundle contains a screenshot, which may show on-screen data.");
                 }
             }
-            catch (Exception ex)
+            catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 screenshot.OmittedReason = $"Screenshot unavailable: {Describe(ex)}";
                 exclusions.Add(new EvidenceExclusion(EvidenceFormat.ScreenshotEntry, screenshot.OmittedReason));
@@ -326,6 +358,7 @@ internal static class EvidenceBuilder
             SelectedElementId = manifest.SelectedElementId,
         };
 
+        ct.ThrowIfCancellationRequested();
         return new EvidenceBundle
         {
             Manifest = manifest,
@@ -345,6 +378,108 @@ internal static class EvidenceBuilder
     // Exception text can carry hosts, ports, and local paths — scrub before it reaches a manifest.
     private static string Describe(Exception ex)
         => EvidenceRedaction.Scrub(ex.Message, EvidenceFormat.MaxErrorChars) ?? ex.GetType().Name;
+
+    private static string? SanitizeWorkflow(string? markdown)
+    {
+        if (string.IsNullOrWhiteSpace(markdown))
+            return markdown;
+
+        var parsed = FlowMarkdown.Parse(markdown);
+        if (!parsed.Ok || parsed.Flow is null)
+        {
+            if (markdown.Contains("```json maui-test", StringComparison.Ordinal))
+                return null;
+            return markdown;
+        }
+
+        foreach (var step in parsed.Flow.Steps)
+        {
+            RedactSelectorText(step.Target);
+            var originalArgs = step.Args;
+            RedactSelectorText(originalArgs?.Selector);
+            step.Args = SanitizeStepArgs(step.Action, originalArgs);
+
+            if (step.Action == FlowActions.Navigate)
+            {
+                step.Value = EvidenceRedaction.ScrubRoute(step.Value);
+            }
+            else if (step.Action == FlowActions.SetTheme)
+            {
+                step.Value = SanitizeTheme(step.Value);
+            }
+            else
+            {
+                step.Value = step.Value is null ? null : "<redacted>";
+            }
+            step.Page = EvidenceRedaction.ScrubRoute(step.Page);
+            step.Screenshot = EvidenceRedaction.NormalizeSourcePath(step.Screenshot, projectRoot: null);
+
+            foreach (var assertion in step.Asserts ?? [])
+            {
+                RedactSelectorText(assertion.Selector);
+                if (assertion.Kind == "routeIs")
+                    assertion.Expected = EvidenceRedaction.ScrubRoute(assertion.Expected);
+                else
+                    assertion.Expected = assertion.Expected is null ? null : "<redacted>";
+            }
+        }
+
+        return FlowMarkdown.Serialize(parsed.Flow);
+    }
+
+    private static FlowStepArgs? SanitizeStepArgs(string action, FlowStepArgs? args)
+    {
+        if (args is null)
+            return null;
+
+        var safe = new FlowStepArgs
+        {
+            Selector = args.Selector,
+        };
+        switch (action)
+        {
+            case FlowActions.Fill:
+                safe.Text = args.Text is null ? null : "<redacted>";
+                safe.SecretEnvironmentVariable = EvidenceRedaction.SafeIdentifier(
+                    args.SecretEnvironmentVariable,
+                    96);
+                break;
+            case FlowActions.SetProperty:
+                safe.Name = EvidenceRedaction.SafeIdentifier(args.Name);
+                safe.Value = args.Value is null ? null : "<redacted>";
+                safe.SecretEnvironmentVariable = EvidenceRedaction.SafeIdentifier(
+                    args.SecretEnvironmentVariable,
+                    96);
+                break;
+            case FlowActions.Navigate:
+                safe.Route = EvidenceRedaction.ScrubRoute(args.Route);
+                break;
+            case FlowActions.SetTheme:
+                safe.Theme = SanitizeTheme(args.Theme);
+                break;
+            case FlowActions.Scroll:
+                safe.Element = EvidenceRedaction.SafeIdentifier(args.Element);
+                safe.Dx = args.Dx;
+                safe.Dy = args.Dy;
+                safe.ItemIndex = args.ItemIndex;
+                safe.Position = EvidenceRedaction.SafeIdentifier(args.Position, 32);
+                safe.Animated = args.Animated;
+                break;
+        }
+
+        return safe;
+    }
+
+    private static string? SanitizeTheme(string? value)
+        => value?.Trim().ToLowerInvariant() is "light" or "dark" or "system"
+            ? value.Trim().ToLowerInvariant()
+            : null;
+
+    private static void RedactSelectorText(FlowSelector? selector)
+    {
+        if (selector?.Text is not null)
+            selector.Text = "<redacted>";
+    }
 
     private static void AddEntry(
         List<EvidenceBundleEntry> entries,
@@ -550,6 +685,89 @@ internal static class EvidenceBuilder
 
     private static string? FormatUtc(DateTime value)
         => value == default ? null : value.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Projects a layout report into the bundle's safe shape.
+    ///
+    /// The agent's report already carries no text or property values, but this projection is still
+    /// default-deny: only the fields listed here are copied, identifiers are re-checked, source
+    /// paths are made project-relative (or reduced to a file name), and free-form strings are
+    /// scrubbed and truncated exactly like every other bundle payload.
+    /// </summary>
+    internal static EvidenceLayoutDocument ProjectLayout(LayoutDiagnosticsReport? report, string? projectRoot)
+    {
+        var document = new EvidenceLayoutDocument();
+        if (report is null) return document;
+
+        document.SchemaVersion = EvidenceRedaction.SafeIdentifier(report.SchemaVersion, 32) ?? "";
+        document.RuleSetVersion = EvidenceRedaction.SafeIdentifier(report.RuleSetVersion, 32) ?? "";
+        document.CapturedUtc = EvidenceRedaction.SafeIdentifier(report.CapturedUtc, 40);
+        document.Platform = EvidenceRedaction.SafeIdentifier(report.Platform, 64);
+        document.ElementsExamined = report.Scope?.ElementsExamined ?? 0;
+        document.Truncated = report.Scope?.Truncated ?? false;
+        document.Violations = report.Summary?.Violations ?? 0;
+        document.Observations = report.Summary?.Observations ?? 0;
+        document.Incomplete = report.Summary?.Incomplete ?? 0;
+        document.Coverage = EvidenceRedaction.SafeIdentifier(report.Coverage?.Overall, 32) ?? "unavailable";
+
+        foreach (var rule in report.Coverage?.Rules ?? [])
+        {
+            document.Rules.Add(new EvidenceLayoutRule
+            {
+                RuleId = EvidenceRedaction.SafeIdentifier(rule.RuleId, 64) ?? "",
+                Support = EvidenceRedaction.SafeIdentifier(rule.Support, 32) ?? "unavailable",
+                Confidence = EvidenceRedaction.SafeIdentifier(rule.Confidence, 32) ?? "medium",
+                Evaluated = rule.Evaluated,
+                Skipped = rule.Skipped,
+            });
+        }
+
+        var findings = report.Findings ?? [];
+        document.FindingsTruncated = findings.Count > EvidenceFormat.MaxLayoutFindings;
+        foreach (var finding in findings.Take(EvidenceFormat.MaxLayoutFindings))
+        {
+            document.Findings.Add(new EvidenceLayoutFinding
+            {
+                Id = EvidenceRedaction.SafeIdentifier(finding.Id, 160) ?? "",
+                RuleId = EvidenceRedaction.SafeIdentifier(finding.RuleId, 64) ?? "",
+                Outcome = EvidenceRedaction.SafeIdentifier(finding.Outcome, 32) ?? "observation",
+                Confidence = EvidenceRedaction.SafeIdentifier(finding.Confidence, 32) ?? "medium",
+                Message = EvidenceRedaction.Scrub(finding.Message, EvidenceFormat.MaxLayoutTextChars) ?? "",
+                Explanation = EvidenceRedaction.Scrub(finding.Explanation, EvidenceFormat.MaxLayoutTextChars) ?? "",
+                ElementId = EvidenceRedaction.SafeIdentifier(finding.Element?.Id),
+                ElementType = EvidenceRedaction.SafeIdentifier(finding.Element?.Type),
+                AutomationId = EvidenceRedaction.SafeIdentifier(finding.Element?.AutomationId),
+                SourceFile = EvidenceRedaction.NormalizeSourcePath(finding.Element?.SourceFile, projectRoot),
+                SourceLine = finding.Element?.SourceLine,
+                SourceColumn = finding.Element?.SourceColumn,
+                Bounds = ToEvidenceBounds(finding.Evidence?.WindowBounds ?? finding.Evidence?.Frame),
+                Limitations = [.. (finding.Limitations ?? [])
+                    .Select(limitation => EvidenceRedaction.Scrub(limitation, EvidenceFormat.MaxLayoutTextChars))
+                    .Where(limitation => !string.IsNullOrEmpty(limitation))
+                    .Select(limitation => limitation!)],
+            });
+        }
+
+        document.FindingCount = document.Findings.Count;
+        document.Limitations = [.. (report.Coverage?.Limitations ?? [])
+            .Select(limitation => EvidenceRedaction.Scrub(limitation, EvidenceFormat.MaxLayoutTextChars))
+            .Where(limitation => !string.IsNullOrEmpty(limitation))
+            .Select(limitation => limitation!)];
+        document.NeverCaptured = [.. (report.Coverage?.NeverCaptured ?? [])
+            .Select(item => EvidenceRedaction.SafeIdentifier(item, 128))
+            .Where(item => item is not null)
+            .Select(item => item!)];
+        return document;
+    }
+
+    private static EvidenceBounds? ToEvidenceBounds(LayoutRect? rect)
+        => rect is null ? null : new EvidenceBounds
+        {
+            X = rect.X,
+            Y = rect.Y,
+            Width = rect.Width,
+            Height = rect.Height,
+        };
 
     /// <summary>Parses the agent's compact log array (<c>{t,l,c,m,e,s}</c>) into bounded, scrubbed entries.</summary>
     internal static EvidenceLogDocument ProjectLogs(string? rawJson, int limit)

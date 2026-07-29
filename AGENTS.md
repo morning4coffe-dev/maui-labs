@@ -221,7 +221,7 @@ Each product requires source setup **and** CI/CD configuration across two system
 
 ## DevFlow MCP Tools
 
-DevFlow exposes 69 MCP tools for AI agent integration (in `src/Cli/Microsoft.Maui.Cli/DevFlow/Mcp/Tools/`):
+DevFlow exposes 79 MCP tools for AI agent integration (in `src/Cli/Microsoft.Maui.Cli/DevFlow/Mcp/Tools/`):
 
 | Tool | Purpose |
 |------|---------|
@@ -259,6 +259,7 @@ DevFlow exposes 69 MCP tools for AI agent integration (in `src/Cli/Microsoft.Mau
 | `maui_jobs_list` | List background jobs registered on the device |
 | `maui_jobs_run` | Trigger a supported background job by identifier |
 | `maui_key` | Send a key press to an element |
+| `maui_layout_diagnostics` | Run a one-shot, read-only layout scan and return typed findings with coverage |
 | `maui_list_actions` | List all registered DevFlow Actions |
 | `maui_list_agents` | List connected MAUI DevFlow agents (running apps) |
 | `maui_logs` | Retrieve app logs (ILogger + WebView console) |
@@ -266,17 +267,26 @@ DevFlow exposes 69 MCP tools for AI agent integration (in `src/Cli/Microsoft.Mau
 | `maui_network` | List captured HTTP requests |
 | `maui_network_clear` | Clear captured request buffer |
 | `maui_network_detail` | Full request/response details |
+| `maui_performance_snapshot` | Summarize the running performance triage session without stopping it |
+| `maui_performance_start` | Start a bounded performance triage session (triage, not a profiler) |
+| `maui_performance_stop` | Stop the performance triage session and return the final summary |
 | `maui_preferences_clear` | Clear all preferences |
 | `maui_preferences_delete` | Delete a preference |
 | `maui_preferences_get` | Read a preference value |
 | `maui_preferences_list` | List preference keys |
 | `maui_preferences_set` | Write a preference value |
+| `maui_problems` | List deduplicated runtime UI problems such as MAUI binding failures |
+| `maui_problems_clear` | Clear the agent's bounded diagnostic Problems list |
 | `maui_query` | Query elements by type, AutomationId, or text |
 | `maui_query_css` | Query elements by CSS selector |
 | `maui_recording_start` | Start screen recording |
 | `maui_recording_status` | Check recording status |
 | `maui_recording_stop` | Stop screen recording |
 | `maui_resize` | Resize the app window |
+| `maui_resume_clear` | Clear the broker-owned Shell route checkpoint |
+| `maui_resume_restore` | Restore the saved Shell route checkpoint |
+| `maui_resume_save` | Save a broker-owned Shell route checkpoint |
+| `maui_resume_status` | Inspect the saved Shell route checkpoint |
 | `maui_screenshot` | Capture screenshot (page, element, or fullscreen) |
 | `maui_scroll` | Scroll by delta, item index, or into view |
 | `maui_secure_storage_clear` | Clear all secure storage |

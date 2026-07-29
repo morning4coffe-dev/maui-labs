@@ -90,11 +90,11 @@ public partial class DevFlowAgentService
             SourceColumn = sourceInfo?.LinePosition
         };
 
-        var status = _problemStore.Add(problem);
-        ScheduleProblemsChanged(status.Revision, status.Count);
+        _problemStore.Add(problem);
+        ScheduleProblemsChanged();
     }
 
-    private void ScheduleProblemsChanged(long revision, int count)
+    private void ScheduleProblemsChanged()
     {
         if (Interlocked.Exchange(ref _problemsNotificationScheduled, 1) != 0)
             return;
@@ -104,14 +104,24 @@ public partial class DevFlowAgentService
             try
             {
                 await Task.Delay(100).ConfigureAwait(false);
+                var snapshot = _problemStore.Snapshot(
+                    _options.EnableBindingProblems,
+                    limit: 1);
                 PublishUiEvent("problemsChange", new
                 {
-                    revision,
-                    count,
+                    revision = snapshot.Revision,
+                    count = snapshot.Count,
                     timestamp = DateTimeOffset.UtcNow.ToString("O")
                 });
+                Interlocked.Exchange(ref _problemsNotificationScheduled, 0);
+
+                var latest = _problemStore.Snapshot(
+                    _options.EnableBindingProblems,
+                    limit: 1);
+                if (latest.Revision != snapshot.Revision)
+                    ScheduleProblemsChanged();
             }
-            finally
+            catch
             {
                 Interlocked.Exchange(ref _problemsNotificationScheduled, 0);
             }
@@ -131,7 +141,7 @@ public partial class DevFlowAgentService
     private Task<HttpResponse> HandleDiagnosticProblemsClear(HttpRequest request)
     {
         _problemStore.Clear();
-        ScheduleProblemsChanged(0, 0);
+        ScheduleProblemsChanged();
         return Task.FromResult(HttpResponse.Json(new { success = true }));
     }
 }

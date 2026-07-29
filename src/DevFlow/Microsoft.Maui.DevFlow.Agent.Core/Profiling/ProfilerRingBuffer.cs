@@ -76,6 +76,33 @@ public class ProfilerRingBuffer<T> where T : class
         }
     }
 
+    public ProfilerRingBufferReadResult<T> ReadLatest(int limit)
+    {
+        lock (_gate)
+        {
+            var latestCursor = _latestSequence;
+            var oldestCursor = _count == 0 ? 0 : latestCursor - _count + 1;
+            var take = Math.Min(Math.Max(0, limit), _count);
+            var firstCursor = take == 0 ? 0 : latestCursor - take + 1;
+            var results = new List<T>(take);
+            for (var sequence = firstCursor; sequence <= latestCursor && sequence > 0; sequence++)
+            {
+                var index = (int)((sequence - 1) % _buffer.Length);
+                results.Add(_buffer[index].Value);
+            }
+
+            return new ProfilerRingBufferReadResult<T>
+            {
+                Items = results,
+                NextCursor = take == 0 ? 0 : latestCursor,
+                OldestCursor = oldestCursor,
+                LatestCursor = latestCursor,
+                LostCount = _count == 0 ? 0 : Math.Max(0, oldestCursor - 1),
+                AvailableCount = _count
+            };
+        }
+    }
+
     /// <summary>
     /// Compatibility overload. The returned cursor is the last item actually returned, so callers
     /// can continue paging without skipping unread entries.

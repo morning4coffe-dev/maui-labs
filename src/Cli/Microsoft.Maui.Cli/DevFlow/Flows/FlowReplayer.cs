@@ -56,13 +56,15 @@ public sealed class FlowReplayer
     private readonly FlowActionabilityEngine _actionability;
     private readonly bool _continueOnFailure;
     private readonly IFlowReplayEvidenceCapture? _evidenceCapture;
+    private readonly Func<string, string?> _secretResolver;
 
     public FlowReplayer(
         AgentClient agent,
         int pollTries = 4,
         int pollGapMs = 300,
         bool continueOnFailure = false,
-        IFlowReplayEvidenceCapture? evidenceCapture = null)
+        IFlowReplayEvidenceCapture? evidenceCapture = null,
+        Func<string, string?>? secretResolver = null)
     {
         _agent = agent;
         _pollTries = Math.Max(1, pollTries);
@@ -70,6 +72,7 @@ public sealed class FlowReplayer
         _actionability = new FlowActionabilityEngine(agent, _pollTries, _pollGapMs);
         _continueOnFailure = continueOnFailure;
         _evidenceCapture = evidenceCapture;
+        _secretResolver = secretResolver ?? Environment.GetEnvironmentVariable;
     }
 
     public async Task<FlowReplayReport> ReplayAsync(MauiFlow flow, string? file = null, CancellationToken ct = default)
@@ -123,6 +126,7 @@ public sealed class FlowReplayer
                 if (_evidenceCapture is not null)
                 {
                     try { await _evidenceCapture.CaptureOnFailureAsync(flow, step, res, ct); }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     catch { /* evidence must never mask the replay failure */ }
                 }
                 if (!_continueOnFailure)
@@ -154,16 +158,24 @@ public sealed class FlowReplayer
                 {
                     var target = await _actionability.WaitForActionableAsync(FlowValidator.EffectiveSelector(step), false, ct);
                     if (!target.Ok) return DriveResult.FromTarget("fill", target);
-                    return await _agent.FillAsync(target.Element!.Id, args?.Text ?? step.Value ?? "") ? DriveResult.Success(target) : DriveResult.Failure(FlowFailureKinds.Drive, "fill reported failure", target);
+                    var value = ResolveStepValue(step, args?.Text ?? step.Value, out var secretError);
+                    if (secretError is not null)
+                        return DriveResult.Failure(FlowFailureKinds.SecretRequired, secretError, target);
+                    return await _agent.FillAsync(target.Element!.Id, value ?? "") ? DriveResult.Success(target) : DriveResult.Failure(FlowFailureKinds.Drive, "fill reported failure", target);
                 }
                 case FlowActions.SetProperty:
                 {
-                    var target = await _actionability.WaitForActionableAsync(FlowValidator.EffectiveSelector(step), false, ct);
+                    var target = await _actionability.WaitForResolvedAsync(
+                        FlowValidator.EffectiveSelector(step),
+                        ct);
                     if (!target.Ok) return DriveResult.FromTarget("setProperty", target);
                     if (IsUnsafeValueSource(args?.ValueSource))
                         return DriveResult.Failure(FlowFailureKinds.UnsafeValue, "setProperty value came from an unsafe binding/resource source and cannot be replayed.", target);
                     var name = string.IsNullOrEmpty(args?.Name) ? "Text" : args!.Name!;
-                    return await _agent.SetPropertyAsync(target.Element!.Id, name, args?.Value ?? step.Value ?? "")
+                    var value = ResolveStepValue(step, args?.Value ?? step.Value, out var secretError);
+                    if (secretError is not null)
+                        return DriveResult.Failure(FlowFailureKinds.SecretRequired, secretError, target);
+                    return await _agent.SetPropertyAsync(target.Element!.Id, name, value ?? "")
                         ? DriveResult.Success(target) : DriveResult.Failure(FlowFailureKinds.Drive, "setProperty reported failure", target);
                 }
                 case FlowActions.Scroll:
@@ -371,8 +383,28 @@ public sealed class FlowReplayer
         => source is not null &&
            (source.Contains("binding", StringComparison.OrdinalIgnoreCase) ||
             source.Contains("resource", StringComparison.OrdinalIgnoreCase) ||
-            source.Contains("trigger", StringComparison.OrdinalIgnoreCase) ||
             source.Contains("unsafe", StringComparison.OrdinalIgnoreCase));
+
+    private string? ResolveStepValue(FlowStep step, string? literal, out string? error)
+    {
+        error = null;
+        var variable = step.Args?.SecretEnvironmentVariable;
+        if (variable is null)
+            return literal;
+        if (!FlowSecretReference.IsValidEnvironmentVariable(variable))
+        {
+            error = $"Step {step.Seq} has an invalid secret environment variable reference.";
+            return null;
+        }
+
+        var value = _secretResolver(variable);
+        if (value is null)
+        {
+            error = $"Step {step.Seq} requires sensitive input from environment variable '{variable}', but it is not set.";
+            return null;
+        }
+        return value;
+    }
 
     private sealed record DriveResult(
         bool Ok,

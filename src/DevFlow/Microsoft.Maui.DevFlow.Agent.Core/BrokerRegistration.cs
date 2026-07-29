@@ -28,6 +28,7 @@ public class BrokerRegistration : IDisposable
     private readonly string _platform;
     private readonly string _appName;
     private readonly string? _sessionId;
+    private readonly string? _packageId;
     private string _agentId;
     private int _brokerPort;
     private int? _assignedPort;
@@ -79,20 +80,34 @@ public class BrokerRegistration : IDisposable
     /// Backward-compatible constructor preserving the old signature for external consumers.
     /// </summary>
     public BrokerRegistration(string project, string tfm, string platform, string appName, int brokerPort = DefaultBrokerPort, ILogger? logger = null)
-        : this(project, tfm, platform, appName, sessionId: null, brokerPort, logger)
+        : this(project, tfm, platform, appName, sessionId: null, packageId: null, brokerPort, logger)
     {
     }
 
     public BrokerRegistration(string project, string tfm, string platform, string appName, string? sessionId, int brokerPort = DefaultBrokerPort, ILogger? logger = null)
+        : this(project, tfm, platform, appName, sessionId, packageId: null, brokerPort, logger)
+    {
+    }
+
+    public BrokerRegistration(
+        string project,
+        string tfm,
+        string platform,
+        string appName,
+        string? sessionId,
+        string? packageId,
+        int brokerPort = DefaultBrokerPort,
+        ILogger? logger = null)
     {
         _project = project;
         _tfm = tfm;
         _platform = platform;
         _appName = appName;
         _sessionId = sessionId;
+        _packageId = packageId;
         _brokerPort = brokerPort;
         _logger = logger;
-        _agentId = ComputeId(project, tfm, sessionId, Environment.ProcessId);
+        _agentId = ComputeId(packageId ?? project, tfm, sessionId, Environment.ProcessId);
     }
 
     /// <summary>
@@ -430,6 +445,7 @@ public class BrokerRegistration : IDisposable
         tfm = _tfm,
         platform = _platform,
         appName = _appName,
+        packageId = _packageId,
         currentPort = CurrentPort,
         version = typeof(BrokerRegistration).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion,

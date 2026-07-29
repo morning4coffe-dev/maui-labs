@@ -62,6 +62,11 @@ public sealed class FlowStepArgs
     [JsonPropertyName("route")] public string? Route { get; set; }
     [JsonPropertyName("theme")] public string? Theme { get; set; }
     [JsonPropertyName("valueSource")] public string? ValueSource { get; set; }
+    /// <summary>
+    /// Environment variable supplying a sensitive value at replay time. Recorded secrets are
+    /// never written into the flow or broker spool.
+    /// </summary>
+    [JsonPropertyName("secretEnvironmentVariable")] public string? SecretEnvironmentVariable { get; set; }
 
     // scroll args
     [JsonPropertyName("element")] public string? Element { get; set; }
@@ -122,4 +127,56 @@ public static class FlowActions
     {
         Tap, Fill, Scroll, Navigate, Back, SetTheme, SetProperty, Assert,
     };
+}
+
+public static class FlowSecretReference
+{
+    public const string EnvironmentPrefix = "MAUI_DEVFLOW_SECRET_";
+
+    private static readonly string[] SensitiveFragments =
+    [
+        "password", "passcode", "secret", "token", "apikey", "api_key", "api-key",
+        "credential", "authorization"
+    ];
+
+    public static bool LooksSensitive(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                continue;
+            var normalized = value.Trim().ToLowerInvariant();
+            if (SensitiveFragments.Any(normalized.Contains) ||
+                normalized == "pin" ||
+                normalized.EndsWith("pin", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    public static string BuildEnvironmentVariable(
+        string? automationId,
+        string? propertyName,
+        string? type,
+        int sequence)
+    {
+        var hint = new[] { automationId, propertyName, type }
+            .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value));
+        var suffix = new string((hint ?? $"STEP_{sequence}")
+            .ToUpperInvariant()
+            .Select(static character => char.IsAsciiLetterOrDigit(character) ? character : '_')
+            .ToArray())
+            .Trim('_');
+        if (string.IsNullOrEmpty(suffix))
+            suffix = $"STEP_{sequence}";
+        suffix = suffix[..Math.Min(suffix.Length, 56)];
+        return $"{EnvironmentPrefix}{suffix}_STEP_{sequence}";
+    }
+
+    public static bool IsValidEnvironmentVariable(string? value)
+        => value is { Length: > 0 and <= 96 } &&
+           value.StartsWith(EnvironmentPrefix, StringComparison.Ordinal) &&
+           value.All(static character => character == '_' || char.IsAsciiLetterOrDigit(character));
 }

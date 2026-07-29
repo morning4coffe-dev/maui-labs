@@ -83,6 +83,8 @@ public sealed class MutationRecordingObservation
     public bool Navigated { get; set; }
     [JsonPropertyName("assertsJson")]
     public string? AssertsJson { get; set; }
+    [JsonPropertyName("sensitive")]
+    public bool Sensitive { get; set; }
 }
 
 public sealed class MutationRecordingStatus

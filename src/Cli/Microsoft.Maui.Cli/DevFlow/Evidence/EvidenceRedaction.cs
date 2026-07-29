@@ -48,7 +48,7 @@ internal static class EvidenceRedaction
         RegexOptions.Compiled);
 
     private static readonly Regex UnixPathRegex = new(
-        @"(?<![\w.])/(?:Users|home|root|var|private|Volumes|tmp|opt|data|storage|mnt|media|srv)/[^\s""'<>|]*",
+        @"(?<![\w.])/(?:Users|home|root|var|private|Volumes|tmp|opt|data|storage|mnt|media|srv|workspace|workspaces|builds|github/workspace|agent/_work|__w)/[^\s""'<>|]*",
         RegexOptions.Compiled);
 
     private static readonly Regex FileUriRegex = new(
@@ -154,8 +154,12 @@ internal static class EvidenceRedaction
 
     public static string Truncate(string value, int maxChars)
     {
-        if (maxChars <= 0 || value.Length <= maxChars) return value;
-        return string.Concat(value.AsSpan(0, maxChars), "…[truncated]");
+        if (maxChars <= 0) return string.Empty;
+        if (value.Length <= maxChars) return value;
+        const string marker = "…[truncated]";
+        if (maxChars <= marker.Length)
+            return marker[..maxChars];
+        return string.Concat(value.AsSpan(0, maxChars - marker.Length), marker);
     }
 
     /// <summary>

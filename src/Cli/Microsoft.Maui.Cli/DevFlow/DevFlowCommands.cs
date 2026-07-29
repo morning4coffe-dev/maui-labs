@@ -1356,6 +1356,16 @@ public class DevFlowCommands
             CreateAgentClientAsync,
             static () => _errorOccurred = true));
 
+        // ===== on-demand diagnostics (layout scan, performance triage) =====
+        devflowCommand.Add(Diagnostics.DiagnosticsCommands.Create(
+            jsonOption,
+            noJsonOption,
+            agentHostOption,
+            agentPortOption,
+            output,
+            CreateAgentClientAsync,
+            static () => _errorOccurred = true));
+
         // ===== replayable workflow commands =====
         var flowCommand = new Command("flow", "Validate and replay recorded Markdown workflow tests");
         var flowReplayFile = new Argument<string>("file") { Description = "Path to a .md workflow test containing a maui-test block" };
@@ -1393,7 +1403,7 @@ public class DevFlowCommands
             try
             {
                 using var client = await CreateAgentClientAsync(ctx.GetValue(agentHostOption)!, ctx.GetValue(agentPortOption));
-                var evidenceRequested = ctx.GetResult(evidenceOnFailure)?.Tokens.Count > 0;
+                var evidenceRequested = ctx.GetResult(evidenceOnFailure) is not null;
                 var capture = evidenceRequested
                     ? new Evidence.FlowReplayEvidenceCapture(client, ctx.GetValue(evidenceOnFailure), Path.GetDirectoryName(Path.GetFullPath(file)), "cli")
                     : null;
@@ -2712,6 +2722,8 @@ public class DevFlowCommands
         new("network list", "List recent network requests", false),
         new("network detail", "Show full network request details", false),
         new("network clear", "Clear network request buffer", true),
+        new("diagnostics layout", "Run a one-shot, read-only layout diagnostics scan", false),
+        new("diagnostics performance", "Record a bounded performance triage window", false),
         new("storage preferences list", "List all known preference keys", false),
         new("storage preferences get", "Get a preference value by key", false),
         new("storage preferences set", "Set a preference value", true),

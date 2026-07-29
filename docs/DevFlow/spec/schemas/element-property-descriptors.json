@@ -33,10 +33,15 @@
         "kind",
         "value",
         "writable",
+        "forceWritable",
         "choices",
         "min",
         "max",
-        "step"
+        "step",
+        "valueSource",
+        "valueSourceConfidence",
+        "mutationSafety",
+        "mutationWarning"
       ],
       "properties": {
         "name": {
@@ -63,7 +68,11 @@
         },
         "writable": {
           "type": "boolean",
-          "description": "Whether the runtime exposes a public setter."
+          "description": "Whether DevFlow can prove the property is safe to mutate without replacing a binding or dynamic resource."
+        },
+        "forceWritable": {
+          "type": "boolean",
+          "description": "Whether an explicit allowUnsafe session override may write the runtime property. False in read-only profile mode."
         },
         "choices": {
           "type": [
@@ -95,6 +104,109 @@
             "null"
           ],
           "description": "Optional recommended numeric editor step."
+        },
+        "valueSource": {
+          "type": "string",
+          "enum": [
+            "unknown",
+            "default",
+            "local",
+            "binding",
+            "dynamicResource",
+            "style",
+            "trigger",
+            "handler",
+            "clr"
+          ]
+        },
+        "valueSourceConfidence": {
+          "type": "string",
+          "enum": [
+            "runtime",
+            "heuristic",
+            "unknown"
+          ]
+        },
+        "mutationSafety": {
+          "type": "string",
+          "enum": [
+            "safe",
+            "bindingWouldBeReplaced",
+            "dynamicResourceWouldBeReplaced",
+            "unknown"
+          ]
+        },
+        "mutationWarning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "PropertyMutationRequest": {
+      "type": "object",
+      "required": [
+        "value"
+      ],
+      "properties": {
+        "value": {
+          "type": "string",
+          "description": "Invariant string representation of the value to set."
+        },
+        "allowUnsafe": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicitly replace an unsafe/unknown binding or resource source for this mutation. Unsafe overrides are not workflow-recorded."
+        }
+      }
+    },
+    "PropertyMutationResponse": {
+      "type": "object",
+      "required": [
+        "success",
+        "valueSource",
+        "mutationSafety"
+      ],
+      "properties": {
+        "success": {
+          "type": "boolean"
+        },
+        "id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "property": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "value": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "valueSource": {
+          "$ref": "#/$defs/PropertyDescriptor/properties/valueSource"
+        },
+        "mutationSafety": {
+          "$ref": "#/$defs/PropertyDescriptor/properties/mutationSafety"
+        },
+        "warning": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "error": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     }

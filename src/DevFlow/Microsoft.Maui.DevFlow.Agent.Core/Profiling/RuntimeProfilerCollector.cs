@@ -125,7 +125,13 @@ public class RuntimeProfilerCollector : IProfilerCollector, IDisposable
         sample.Gc0 = GC.CollectionCount(0);
         sample.Gc1 = GC.CollectionCount(1);
         sample.Gc2 = GC.CollectionCount(2);
-        if (!sample.NativeMemoryBytes.HasValue)
+        if (_nativeFrameProviderActive &&
+            _nativeFrameStatsProvider?.TryReadNativeMemory(out var providerBytes, out var providerKind) == true)
+        {
+            sample.NativeMemoryBytes = providerBytes;
+            sample.NativeMemoryKind = providerKind;
+        }
+        else if (!sample.NativeMemoryBytes.HasValue && !_nativeFrameProviderActive)
         {
             var nativeMemory = TryReadNativeMemory(processSnapshotAvailable, sample.ManagedBytes);
             sample.NativeMemoryBytes = nativeMemory.Bytes;
@@ -157,6 +163,7 @@ public class RuntimeProfilerCollector : IProfilerCollector, IDisposable
                         WorstFrameTimeMs = nativeSnapshot.WorstFrameTimeMs,
                         JankFrameCount = nativeSnapshot.JankFrameCount,
                         UiThreadStallCount = nativeSnapshot.UiThreadStallCount,
+                        FrameDataLossCount = nativeSnapshot.FrameDataLossCount,
                         NativeMemoryBytes = nativeSnapshot.NativeMemoryBytes,
                         NativeMemoryKind = nativeSnapshot.NativeMemoryKind,
                         FrameSource = nativeSnapshot.Source,

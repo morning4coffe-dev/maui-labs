@@ -330,36 +330,57 @@ internal static class EvidenceCommands
     internal static string FormatCapture(EvidenceCaptureResult result)
     {
         var text = new StringBuilder();
-        text.AppendLine($"Evidence bundle written: {result.Path} ({EvidenceReportRenderer.FormatBytes(result.Bytes)})");
+        text.AppendLine($"Evidence bundle written: {Terminal(result.Path)} ({EvidenceReportRenderer.FormatBytes(result.Bytes)})");
         var counts = result.Manifest?.Counts;
         if (counts is not null)
         {
             text.AppendLine($"  {counts.TreeElements} elements · {counts.Problems} problems · {counts.Logs} log entries · {counts.NetworkRequests} requests");
+            text.AppendLine($"  Layout findings: {counts.LayoutFindings} ({counts.LayoutViolations} violation(s))");
         }
         text.AppendLine($"  Screenshot: {(result.Manifest?.Screenshot.Included == true ? "included" : "omitted")}");
         text.AppendLine($"  Redaction ruleset v{result.Manifest?.RedactionVersion}");
         if (result.Manifest?.Warnings is { Count: > 0 })
         {
             foreach (var warning in result.Manifest.Warnings)
-                text.AppendLine($"  ! {warning}");
+                text.AppendLine($"  ! {Terminal(warning)}");
         }
-        text.Append($"  View it with: maui devflow evidence view \"{result.Path}\"");
+        text.Append($"  View it with: maui devflow evidence view \"{Terminal(result.Path)}\"");
         return text.ToString();
     }
 
     internal static string FormatView(EvidenceViewResult result)
     {
         var text = new StringBuilder();
-        text.AppendLine($"Report generated: {result.Report}");
-        text.AppendLine($"  Bundle: {result.Bundle}");
-        text.AppendLine($"  Entries: {string.Join(", ", result.Entries)}");
+        text.AppendLine($"Report generated: {Terminal(result.Report)}");
+        text.AppendLine($"  Bundle: {Terminal(result.Bundle)}");
+        text.AppendLine($"  Entries: {string.Join(", ", result.Entries.Select(Terminal))}");
         if (result.Manifest is not null)
         {
-            text.AppendLine($"  Captured {result.Manifest.CapturedUtc} by {result.Manifest.Source} · redaction ruleset v{result.Manifest.RedactionVersion}");
+            text.AppendLine($"  Captured {Terminal(result.Manifest.CapturedUtc)} by {Terminal(result.Manifest.Source)} · redaction ruleset v{result.Manifest.RedactionVersion}");
         }
         foreach (var warning in result.Warnings)
-            text.AppendLine($"  ! {warning}");
+            text.AppendLine($"  ! {Terminal(warning)}");
         text.Append(result.Opened ? "  Opened in your default browser." : "  Open it in a browser to read the report.");
         return text.ToString();
+    }
+
+    private static string Terminal(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return "";
+        var builder = new StringBuilder(value.Length);
+        foreach (var character in value)
+        {
+            if (char.IsControl(character) ||
+                char.GetUnicodeCategory(character) == System.Globalization.UnicodeCategory.Format)
+            {
+                builder.Append($"\\u{(int)character:X4}");
+            }
+            else
+            {
+                builder.Append(character);
+            }
+        }
+        return builder.ToString();
     }
 }

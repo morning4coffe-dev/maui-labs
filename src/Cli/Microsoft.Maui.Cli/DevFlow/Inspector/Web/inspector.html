@@ -79,7 +79,7 @@
         <button id="df-open-source" class="df-tool-btn" aria-disabled="true" title="Open the selected element's XAML source in your editor. Enabled when the selected element is defined in XAML with source mapping available."><svg class="df-ic"><use href="#i-source"/></svg><span class="df-btn-label">Source</span></button>
         <button id="df-send-copilot" class="df-tool-btn" aria-disabled="true" aria-haspopup="menu" aria-expanded="false" aria-controls="df-copilot-menu" title="Choose specific Inspector context to add to Copilot"><svg class="df-ic"><use href="#i-copilot"/></svg><span class="df-btn-label">Copilot</span><svg class="df-ic-xs df-menu-chevron"><use href="#i-chevron"/></svg></button>
         <button id="df-evidence" class="df-tool-btn" title="Capture a shareable, redacted evidence bundle (.mauitrace). You review exactly what it contains before it downloads."><svg class="df-ic"><use href="#i-evidence"/></svg><span class="df-btn-label">Evidence</span></button>
-        <button id="df-toggle-dock" class="df-tool-btn" title="Show app data: Logs, Network, Preferences, Device, Sensors, Files" aria-pressed="false"><svg class="df-ic"><use href="#i-data"/></svg><span class="df-btn-label">Data</span></button>
+        <button id="df-toggle-dock" class="df-tool-btn" title="Show app data: Problems, Layout, Performance, Logs, Network, Preferences, Device, Sensors, Files" aria-pressed="false"><svg class="df-ic"><use href="#i-data"/></svg><span class="df-btn-label">Data</span></button>
       </div>
       <button id="df-more" class="df-tool-btn df-more-btn df-hidden" title="More inspector actions" aria-haspopup="menu" aria-expanded="false" aria-controls="df-toolbar-overflow"><svg class="df-ic"><use href="#i-more"/></svg><span class="df-btn-label">More</span></button>
       <div id="df-toolbar-overflow" class="df-toolbar-overflow df-hidden" role="menu" aria-label="More inspector actions"></div>
@@ -142,6 +142,8 @@
       <div id="df-dock-tabs">
         <div class="df-dock-tab-list" role="tablist" aria-label="App data">
           <button id="df-tab-problems" class="df-dock-tab df-active" data-tab="problems" role="tab" aria-selected="true" aria-controls="df-dock-body" tabindex="0">Problems</button>
+          <button id="df-tab-layout" class="df-dock-tab" data-tab="layout" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Layout</button>
+          <button id="df-tab-performance" class="df-dock-tab" data-tab="performance" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Performance</button>
           <button id="df-tab-logs" class="df-dock-tab" data-tab="logs" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Logs</button>
           <button id="df-tab-network" class="df-dock-tab" data-tab="network" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Network</button>
           <button id="df-tab-preferences" class="df-dock-tab" data-tab="preferences" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Preferences</button>

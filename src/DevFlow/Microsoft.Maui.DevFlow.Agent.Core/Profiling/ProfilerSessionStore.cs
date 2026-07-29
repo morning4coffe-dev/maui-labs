@@ -222,6 +222,39 @@ public class ProfilerSessionStore
         }
     }
 
+    public ProfilerBatch GetFinalBatch(int limit)
+    {
+        lock (_gate)
+        {
+            if (_session == null)
+            {
+                return new ProfilerBatch
+                {
+                    SessionId = "",
+                    IsActive = false
+                };
+            }
+
+            var samples = _samples.ReadLatest(limit);
+            var markers = _markers.ReadLatest(limit);
+            var spans = _spans.ReadLatest(limit);
+            return new ProfilerBatch
+            {
+                SessionId = _session.SessionId,
+                IsActive = _session.IsActive,
+                Samples = samples.Items,
+                Markers = markers.Items,
+                Spans = spans.Items,
+                SampleCursor = samples.NextCursor,
+                MarkerCursor = markers.NextCursor,
+                SpanCursor = spans.NextCursor,
+                SampleMetadata = ToMetadata(samples),
+                MarkerMetadata = ToMetadata(markers),
+                SpanMetadata = ToMetadata(spans)
+            };
+        }
+    }
+
     private static ProfilerStreamReadMetadata ToMetadata<T>(ProfilerRingBufferReadResult<T> result) where T : class
         => new()
         {

@@ -18,7 +18,36 @@ public class VisualTreeWalker
     // Per-walk state — fully rebuilt on each WalkTree call
     private readonly HashSet<string> _usedIds = new();
     private readonly Dictionary<Guid, string> _elementIdToExternalId = new();
+    private readonly ConditionalWeakTable<IVisualTreeElement, GeneratedElementId> _objectToExternalId = new();
     private readonly ConcurrentDictionary<string, (BoundsInfo Bounds, object Marker)> _syntheticBounds = new();
+    private readonly Dictionary<string, object> _walkElements = new(StringComparer.Ordinal);
+    private int _walkMaxElements;
+    private int _walkElementCount;
+
+    /// <summary>
+    /// Opt-in capture of the <c>id → runtime object</c> map for the current walk. Off by default:
+    /// it holds strong references to live MAUI elements, so a caller must enable it, read
+    /// <see cref="WalkElements"/> on the same UI-thread pass, and call
+    /// <see cref="ClearWalkElements"/> when finished.
+    /// </summary>
+    /// <remarks>
+    /// The map exists so a diagnostic can read managed layout state for a whole tree from a single
+    /// walk instead of calling <see cref="GetElementById"/> once per element (which re-walks the
+    /// tree every time). It is never serialized and never leaves the agent process.
+    /// </remarks>
+    internal bool CaptureWalkElements { get; set; }
+
+    /// <summary>
+    /// Runtime objects recorded during the most recent walk, keyed by the id in the returned
+    /// <see cref="ElementInfo"/> tree. Empty unless <see cref="CaptureWalkElements"/> was set
+    /// before the walk. Cleared at the start of every walk.
+    /// </summary>
+    internal IReadOnlyDictionary<string, object> WalkElements => _walkElements;
+
+    /// <summary>Drops the captured runtime references so live elements are not retained.</summary>
+    internal void ClearWalkElements() => _walkElements.Clear();
+
+    internal bool WalkWasTruncated { get; private set; }
 
     /// <summary>
     /// Marker object representing the navigation back button in Shell or NavigationPage.
@@ -34,13 +63,30 @@ public class VisualTreeWalker
     /// Returns IVisualTreeElement, ToolbarItem, or other mapped objects.
     /// </summary>
     public object? GetElementById(string id, Application? app)
+        => GetElementById(id, app, windowIndex: null);
+
+    internal object? GetElementById(string id, Application? app, int? windowIndex)
     {
         if (app == null || string.IsNullOrEmpty(id)) return null;
 
         // Walk tree fresh, searching for matching ID
         _usedIds.Clear();
         _elementIdToExternalId.Clear();
+        _objectToExternalId.Clear();
         _syntheticBounds.Clear();
+        _walkElements.Clear();
+        _walkMaxElements = 0;
+        _walkElementCount = 0;
+        WalkWasTruncated = false;
+
+        if (windowIndex is not null)
+        {
+            if (windowIndex.Value < 0 || windowIndex.Value >= app.Windows.Count)
+                return null;
+            return app.Windows[windowIndex.Value] is IVisualTreeElement windowElement
+                ? FindByIdRecursive(windowElement, id, null)
+                : null;
+        }
 
         if (app is not IVisualTreeElement appElement) return null;
         foreach (var child in appElement.GetVisualChildren())
@@ -49,6 +95,50 @@ public class VisualTreeWalker
             if (result != null) return result;
         }
         return null;
+    }
+
+    internal List<ElementInfo> WalkSubtree(
+        Application app,
+        string rootElementId,
+        int maxDepth = 0,
+        int maxElements = 0,
+        int? windowIndex = null)
+    {
+        var runtime = GetElementById(rootElementId, app, windowIndex);
+        if (runtime is not IVisualTreeElement root)
+            return [];
+
+        _walkElements.Clear();
+        _walkMaxElements = Math.Max(0, maxElements);
+        _walkElementCount = 0;
+        WalkWasTruncated = false;
+        try
+        {
+            var info = WalkElement(root, null, 1, maxDepth);
+            if (info is null)
+                return [];
+            info.IsVisible &= AncestorsAreEffectivelyVisible(root);
+            var results = new List<ElementInfo> { info };
+            ApplySourceMap(results);
+            return results;
+        }
+        finally
+        {
+            _walkMaxElements = 0;
+        }
+    }
+
+    private static bool AncestorsAreEffectivelyVisible(IVisualTreeElement element)
+    {
+        for (var parent = element.GetVisualParent(); parent is not null; parent = parent.GetVisualParent())
+        {
+            if (parent is VisualElement visual &&
+                (!visual.IsVisible || (double.IsFinite(visual.Opacity) && visual.Opacity <= 0)))
+            {
+                return false;
+            }
+        }
+        return true;
     }
 
     /// <summary>
@@ -288,39 +378,57 @@ public class VisualTreeWalker
     /// Walks the visual tree starting from the application's windows.
     /// When windowIndex is null, walks all windows. Otherwise walks only the specified window.
     /// </summary>
-    public List<ElementInfo> WalkTree(Application app, int maxDepth = 0, int? windowIndex = null)
+    public List<ElementInfo> WalkTree(
+        Application app,
+        int maxDepth = 0,
+        int? windowIndex = null,
+        int maxElements = 0)
     {
         _usedIds.Clear();
         _elementIdToExternalId.Clear();
+        _objectToExternalId.Clear();
         _syntheticBounds.Clear();
-        var results = new List<ElementInfo>();
-        if (app is not IVisualTreeElement appElement)
-            return results;
-
-        if (windowIndex != null)
+        _walkElements.Clear();
+        _walkMaxElements = Math.Max(0, maxElements);
+        _walkElementCount = 0;
+        WalkWasTruncated = false;
+        try
         {
-            if (windowIndex.Value < 0 || windowIndex.Value >= app.Windows.Count)
+            var results = new List<ElementInfo>();
+            if (app is not IVisualTreeElement appElement)
                 return results;
-            var window = app.Windows[windowIndex.Value];
-            if (window is IVisualTreeElement windowElement)
+
+            if (windowIndex != null)
             {
-                var info = WalkElement(windowElement, null, 1, maxDepth);
+                if (windowIndex.Value < 0 || windowIndex.Value >= app.Windows.Count)
+                    return results;
+                var window = app.Windows[windowIndex.Value];
+                if (window is IVisualTreeElement windowElement)
+                {
+                    var info = WalkElement(windowElement, null, 1, maxDepth);
+                    if (info != null)
+                        results.Add(info);
+                }
+                ApplySourceMap(results);
+                return results;
+            }
+
+            foreach (var child in appElement.GetVisualChildren())
+            {
+                var info = WalkElement(child, null, 1, maxDepth);
                 if (info != null)
                     results.Add(info);
+                if (WalkWasTruncated)
+                    break;
             }
+
             ApplySourceMap(results);
             return results;
         }
-
-        foreach (var child in appElement.GetVisualChildren())
+        finally
         {
-            var info = WalkElement(child, null, 1, maxDepth);
-            if (info != null)
-                results.Add(info);
+            _walkMaxElements = 0;
         }
-
-        ApplySourceMap(results);
-        return results;
     }
 
     /// <summary>
@@ -750,8 +858,18 @@ public class VisualTreeWalker
     /// </summary>
     public ElementInfo? WalkElement(IVisualTreeElement element, string? parentId, int currentDepth, int maxDepth)
     {
+        if (_walkMaxElements > 0 && _walkElementCount >= _walkMaxElements)
+        {
+            WalkWasTruncated = true;
+            return null;
+        }
+        _walkElementCount++;
+
         var id = GenerateId(element);
         var info = CreateElementInfo(element, id, parentId);
+
+        if (CaptureWalkElements)
+            _walkElements[id] = element;
 
         if (maxDepth > 0 && currentDepth >= maxDepth)
             return info;
@@ -764,11 +882,14 @@ public class VisualTreeWalker
             var childInfo = WalkElement(child, id, currentDepth + 1, maxDepth);
             if (childInfo != null)
                 info.Children.Add(childInfo);
+            if (WalkWasTruncated)
+                break;
         }
 
         // ShellContent-specific: ensure content page is included even if
         // GetVisualChildren() doesn't expose it (common on GTK/Linux after navigation).
-        if (element is ShellContent sc && sc.Content is IVisualTreeElement scPage
+        if (!WalkWasTruncated &&
+            element is ShellContent sc && sc.Content is IVisualTreeElement scPage
             && !children.Contains(scPage))
         {
             var pageInfo = WalkElement(scPage, id, currentDepth + 1, maxDepth);
@@ -777,46 +898,52 @@ public class VisualTreeWalker
         }
 
         // Add ToolbarItems as synthetic children of Pages
-        if (element is Page page)
+        if (!WalkWasTruncated && element is Page page)
         {
             // NavBarTitle — inject page title as synthetic element
             AddNavBarTitle(page, id, info);
 
             foreach (var toolbarItem in page.ToolbarItems)
             {
+                if (!TryReserveSyntheticElement())
+                    break;
                 var tiInfo = CreateToolbarItemInfo(toolbarItem, id);
                 info.Children.Add(tiInfo);
             }
 
             // Add synthetic back button when there's a navigation stack
-            var backInfo = CreateBackButtonInfo(page, id);
-            if (backInfo != null)
-                info.Children.Add(backInfo);
+            if (!WalkWasTruncated)
+            {
+                var backInfo = CreateBackButtonInfo(page, id);
+                if (backInfo != null && TryReserveSyntheticElement())
+                    info.Children.Add(backInfo);
+            }
 
             // SearchHandler (Shell only)
-            AddSearchHandler(page, id, info);
+            if (!WalkWasTruncated)
+                AddSearchHandler(page, id, info);
         }
 
         // Shell-level synthetics: flyout button, flyout items, tab bar
-        if (element is Shell shell)
+        if (!WalkWasTruncated && element is Shell shell)
         {
             AddShellSynthetics(shell, id, info);
         }
 
         // NavigationPage-level synthetics
-        if (element is NavigationPage navPage2)
+        if (!WalkWasTruncated && element is NavigationPage navPage2)
         {
             AddNavigationPageSynthetics(navPage2, id, info);
         }
 
         // FlyoutPage-level synthetics
-        if (element is FlyoutPage flyoutPage)
+        if (!WalkWasTruncated && element is FlyoutPage flyoutPage)
         {
             AddFlyoutPageSynthetics(flyoutPage, id, info);
         }
 
         // TabbedPage-level synthetics
-        if (element is TabbedPage tabbedPage)
+        if (!WalkWasTruncated && element is TabbedPage tabbedPage)
         {
             AddTabbedPageSynthetics(tabbedPage, id, info);
         }
@@ -896,6 +1023,9 @@ public class VisualTreeWalker
     /// </summary>
     private string GenerateId(IVisualTreeElement element)
     {
+        if (_objectToExternalId.TryGetValue(element, out var objectCachedId))
+            return objectCachedId.Value;
+
         // Check if we've already generated an ID for this Element.Id in this walk
         if (element is Element el && _elementIdToExternalId.TryGetValue(el.Id, out var cachedId))
             return cachedId;
@@ -949,10 +1079,24 @@ public class VisualTreeWalker
         }
 
         _usedIds.Add(id);
+        _objectToExternalId.Add(element, new GeneratedElementId(id));
         if (element is Element elFinal)
             _elementIdToExternalId[elFinal.Id] = id;
         return id;
     }
+
+    private bool TryReserveSyntheticElement()
+    {
+        if (_walkMaxElements > 0 && _walkElementCount >= _walkMaxElements)
+        {
+            WalkWasTruncated = true;
+            return false;
+        }
+        _walkElementCount++;
+        return true;
+    }
+
+    private sealed record GeneratedElementId(string Value);
 
     /// <summary>
     /// Generates a stable ID for a synthetic/non-visual element.
@@ -1269,6 +1413,7 @@ public class VisualTreeWalker
 
         var title = page.Title;
         if (string.IsNullOrEmpty(title)) return;
+        if (!TryReserveSyntheticElement()) return;
 
         var marker = new NavBarTitleMarker { Title = title, Page = page };
         var id = GenerateObjectId(marker, $"NavBarTitle_{parentId}");
@@ -1293,6 +1438,7 @@ public class VisualTreeWalker
         {
             var handler = Shell.GetSearchHandler(page);
             if (handler == null) return;
+            if (!TryReserveSyntheticElement()) return;
 
             var marker = new SearchHandlerMarker { Handler = handler };
             var id = GenerateObjectId(marker, $"SearchHandler_{parentId}");
@@ -1326,6 +1472,7 @@ public class VisualTreeWalker
         // Flyout button
         if (shell.FlyoutBehavior != FlyoutBehavior.Disabled)
         {
+            if (!TryReserveSyntheticElement()) return;
             var flyoutMarker = new FlyoutButtonMarker { Shell = shell };
             var flyoutId = GenerateObjectId(flyoutMarker, "FlyoutButton");
             var flyoutBtnInfo = new ElementInfo
@@ -1350,6 +1497,8 @@ public class VisualTreeWalker
             {
                 if (item is BaseShellItem bsi && bsi.FlyoutItemIsVisible)
                 {
+                    if (!TryReserveSyntheticElement())
+                        break;
                     var isSelected = shell.CurrentItem == item;
                     var fiMarker = new ShellFlyoutItemMarker { Item = item, Shell = shell };
                     var fiId = GenerateObjectId(fiMarker, $"FlyoutItem_{bsi.Route ?? bsi.Title}");
@@ -1390,6 +1539,8 @@ public class VisualTreeWalker
                 {
                     foreach (var section in currentItem.Items)
                     {
+                        if (!TryReserveSyntheticElement())
+                            break;
                         var isSelected = currentItem.CurrentItem == section;
                         var tabMarker = new ShellTabMarker { Section = section, Shell = shell };
                         var tabId = GenerateObjectId(tabMarker, $"Tab_{section.Route ?? section.Title}");
@@ -1430,7 +1581,8 @@ public class VisualTreeWalker
                     parentInfo.Children.Add(headerInfo);
                 }
             }
-            if (shell.FlyoutFooter is View footerView && footerView is IVisualTreeElement footerVte)
+            if (!WalkWasTruncated &&
+                shell.FlyoutFooter is View footerView && footerView is IVisualTreeElement footerVte)
             {
                 var footerInfo = WalkElement(footerVte, parentId, 1, 3);
                 if (footerInfo != null)
@@ -1451,6 +1603,7 @@ public class VisualTreeWalker
             if (currentPage != null && !string.IsNullOrEmpty(currentPage.Title)
                 && NavigationPage.GetHasNavigationBar(currentPage))
             {
+                if (!TryReserveSyntheticElement()) return;
                 var marker = new NavBarTitleMarker { Title = currentPage.Title, Page = currentPage };
                 var id = GenerateObjectId(marker, $"NavBarTitle_{parentId}");
                 parentInfo.Children ??= new List<ElementInfo>();
@@ -1473,6 +1626,7 @@ public class VisualTreeWalker
 
     private void AddFlyoutPageSynthetics(FlyoutPage flyoutPage, string parentId, ElementInfo parentInfo)
     {
+        if (!TryReserveSyntheticElement()) return;
         var marker = new FlyoutToggleMarker { FlyoutPage = flyoutPage };
         var id = GenerateObjectId(marker, "FlyoutToggle");
         parentInfo.Children ??= new List<ElementInfo>();
@@ -1500,6 +1654,8 @@ public class VisualTreeWalker
             {
                 if (child is Page tabPage)
                 {
+                    if (!TryReserveSyntheticElement())
+                        break;
                     var isSelected = tabbedPage.CurrentPage == tabPage;
                     var marker = new TabbedPageTabMarker { Page = tabPage, TabbedPage = tabbedPage };
                     var tabId = GenerateObjectId(marker, $"Tab_{tabPage.AutomationId ?? tabPage.Title}");
@@ -1848,6 +2004,8 @@ public class VisualTreeWalker
     {
         _usedIds.Clear();
         _elementIdToExternalId.Clear();
+        _objectToExternalId.Clear();
         _syntheticBounds.Clear();
+        _walkElements.Clear();
     }
 }

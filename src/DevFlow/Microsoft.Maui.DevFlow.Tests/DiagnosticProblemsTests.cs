@@ -34,6 +34,20 @@ public class DiagnosticProblemsTests
     }
 
     [Fact]
+    public void ProblemStore_ClearAdvancesTheMonotonicRevision()
+    {
+        var store = new DiagnosticProblemStore(2);
+        var added = store.Add(Problem("one", DateTime.UtcNow));
+
+        store.Clear();
+        var cleared = store.Snapshot(enabled: true, limit: 10);
+
+        Assert.Equal(added.Revision + 1, cleared.Revision);
+        Assert.Equal(0, cleared.Count);
+        Assert.Empty(cleared.Problems);
+    }
+
+    [Fact]
     public async Task BindingFailure_IsCapturedWithoutRetainingSourceValues()
     {
         var label = new Label

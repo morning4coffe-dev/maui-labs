@@ -57,6 +57,7 @@ public static class AgentServiceExtensions
         var project = ReadAssemblyMetadataProject() ?? "unknown";
         var tfm = ReadAssemblyMetadataTfm() ?? "unknown";
         var sessionId = ReadAssemblyMetadataSessionId();
+        var packageId = ReadAssemblyMetadataPackageId();
 
         // Always register with the broker for discoverability (must run on thread pool
         // to avoid deadlock with SynchronizationContext — AddMauiDevFlowAgent runs on
@@ -73,6 +74,7 @@ public static class AgentServiceExtensions
             {
                 platform = DeviceInfo.Platform.ToString();
                 appName = AppInfo.Name ?? "unknown";
+                packageId ??= AppInfo.PackageName;
             }
             catch
             {
@@ -85,7 +87,7 @@ public static class AgentServiceExtensions
                     : "Unknown";
                 appName = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name ?? "unknown";
             }
-            brokerReg = new BrokerRegistration(project, tfm, platform, appName, sessionId);
+            brokerReg = new BrokerRegistration(project, tfm, platform, appName, sessionId, packageId);
             // If the user set a custom port, tell the broker upfront so it registers
             // with that port instead of assigning one from the pool.
             if (hasCustomPort)
@@ -329,6 +331,7 @@ public static class AgentServiceExtensions
     internal static string? ReadAssemblyMetadataProject() => ReadAssemblyMetadata("Microsoft.Maui.DevFlowProject");
     internal static string? ReadAssemblyMetadataTfm() => ReadAssemblyMetadata("Microsoft.Maui.DevFlowTfm");
     internal static string? ReadAssemblyMetadataSessionId() => ReadAssemblyMetadata("Microsoft.Maui.DevFlowSessionId");
+    internal static string? ReadAssemblyMetadataPackageId() => ReadAssemblyMetadata("Microsoft.Maui.DevFlowPackageId");
 
     private static string? FindMetadataInAssembly(System.Reflection.Assembly assembly, string key)
     {

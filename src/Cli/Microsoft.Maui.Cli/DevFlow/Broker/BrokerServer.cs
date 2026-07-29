@@ -291,7 +291,7 @@ public class BrokerServer : IDisposable
             }
 
             var id = AgentRegistration.ComputeId(
-                registration.Project,
+                registration.PackageId ?? registration.Project,
                 registration.Tfm,
                 registration.SessionId,
                 registration.ProcessId);
@@ -326,6 +326,7 @@ public class BrokerServer : IDisposable
                 Tfm = registration.Tfm,
                 Platform = registration.Platform,
                 AppName = registration.AppName,
+                PackageId = registration.PackageId,
                 Port = assignedPort,
                 Version = registration.Version,
                 SessionId = registration.SessionId,

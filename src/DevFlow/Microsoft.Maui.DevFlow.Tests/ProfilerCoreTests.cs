@@ -134,6 +134,23 @@ public class ProfilerCoreTests
     }
 
     [Fact]
+    public void ProfilerRingBuffer_ReadLatestAlwaysIncludesTheNewestItem()
+    {
+        var ring = new ProfilerRingBuffer<ProfilerMarker>(5);
+        for (var i = 1; i <= 8; i++)
+            ring.Add(new ProfilerMarker { Name = $"m{i}", Type = "t", TsUtc = DateTime.UtcNow });
+
+        var latest = ring.ReadLatest(3);
+
+        Assert.Equal(["m6", "m7", "m8"], latest.Items.Select(item => item.Name));
+        Assert.Equal(8, latest.LatestCursor);
+        Assert.Equal(8, latest.NextCursor);
+        Assert.Equal(4, latest.OldestCursor);
+        Assert.Equal(3, latest.LostCount);
+        Assert.Equal(5, latest.AvailableCount);
+    }
+
+    [Fact]
     public void ProfilerSessionStore_EnforcesMonotonicMarkerTimestamps()
     {
         var store = new ProfilerSessionStore(100, 100, 100);
@@ -321,6 +338,21 @@ public class ProfilerCoreTests
     }
 
     [Fact]
+    public void RuntimeProfilerCollector_ReadsProviderMemoryWithoutAFrameBatch()
+    {
+        var collector = new RuntimeProfilerCollector(new MemoryOnlyNativeProvider());
+
+        collector.Start(100);
+        var collected = collector.TryCollect(out var sample);
+        collector.Stop();
+
+        Assert.True(collected);
+        Assert.Equal(64_000, sample.NativeMemoryBytes);
+        Assert.Equal("native.test-memory", sample.NativeMemoryKind);
+        Assert.Equal("unavailable", sample.FrameSource);
+    }
+
+    [Fact]
     public void ProfilerContractModels_StayAlignedWithDriverModels()
     {
         AssertCorePropertiesExistInDriver<ProfilerSessionInfo, Microsoft.Maui.DevFlow.Driver.ProfilerSessionInfo>();
@@ -485,6 +517,7 @@ public class ProfilerCoreTests
                 WorstFrameTimeMs = snapshotToReturn.WorstFrameTimeMs,
                 JankFrameCount = snapshotToReturn.JankFrameCount,
                 UiThreadStallCount = snapshotToReturn.UiThreadStallCount,
+                FrameDataLossCount = snapshotToReturn.FrameDataLossCount,
                 NativeMemoryBytes = snapshotToReturn.NativeMemoryBytes,
                 NativeMemoryKind = snapshotToReturn.NativeMemoryKind
             };
@@ -494,5 +527,26 @@ public class ProfilerCoreTests
         public void Dispose()
         {
         }
+    }
+
+    private sealed class MemoryOnlyNativeProvider : INativeFrameStatsProvider
+    {
+        public bool IsSupported => true;
+        public bool ProvidesExactFrameTimings => true;
+        public string Source => "native.test";
+        public void Start() { }
+        public void Stop() { }
+        public bool TryCollect(out NativeFrameStatsSnapshot snapshot)
+        {
+            snapshot = new NativeFrameStatsSnapshot();
+            return false;
+        }
+        public bool TryReadNativeMemory(out long bytes, out string kind)
+        {
+            bytes = 64_000;
+            kind = "native.test-memory";
+            return true;
+        }
+        public void Dispose() { }
     }
 }

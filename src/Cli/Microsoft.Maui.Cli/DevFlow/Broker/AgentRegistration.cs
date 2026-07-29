@@ -25,6 +25,9 @@ public record AgentRegistration
     [JsonPropertyName("appName")]
     public string AppName { get; init; } = "";
 
+    [JsonPropertyName("packageId")]
+    public string? PackageId { get; init; }
+
     [JsonPropertyName("port")]
     public int Port { get; init; }
 
@@ -109,6 +112,9 @@ internal record RegistrationMessage
 
     [JsonPropertyName("appName")]
     public string AppName { get; init; } = "";
+
+    [JsonPropertyName("packageId")]
+    public string? PackageId { get; init; }
 
     [JsonPropertyName("currentPort")]
     public int? CurrentPort { get; init; }

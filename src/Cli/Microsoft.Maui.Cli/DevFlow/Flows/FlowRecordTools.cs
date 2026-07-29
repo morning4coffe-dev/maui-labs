@@ -116,10 +116,19 @@ public sealed class FlowRecordTools
         int? matchCount = null,
         string? quality = null,
         IReadOnlyList<string>? fragilityReasons = null,
-        string? valueSource = null)
+        string? valueSource = null,
+        bool sensitive = false)
     {
         if (string.IsNullOrWhiteSpace(action) || !FlowActions.All.Contains(action))
             return (false, -1, recorder.StepCount, false, $"Unknown action '{action}'. Use one of: {string.Join(", ", FlowActions.All)}.");
+
+        var targetValueMayBeSecret = action == FlowActions.Fill ||
+            (action == FlowActions.SetProperty &&
+             (string.Equals(name, "Text", StringComparison.OrdinalIgnoreCase) ||
+              string.Equals(name, "Value", StringComparison.OrdinalIgnoreCase)));
+        sensitive |= FlowSecretReference.LooksSensitive(name) ||
+            (targetValueMayBeSecret &&
+             FlowSecretReference.LooksSensitive(automationId, text, type, id));
 
         foreach (var s in new[] { automationId, text, type, id, value, name, position, page })
             if (TooLong(s, out var e)) return (false, -1, recorder.StepCount, false, e);
@@ -145,14 +154,24 @@ public sealed class FlowRecordTools
 
         var args = new FlowStepArgs();
         string? stepValue = null;
+        var secretEnvironmentVariable = sensitive && action is FlowActions.Fill or FlowActions.SetProperty
+            ? FlowSecretReference.BuildEnvironmentVariable(automationId, name, type, recorder.StepCount + 1)
+            : null;
         switch (action)
         {
-            case FlowActions.Fill: stepValue = value; args.Text = value; break;
+            case FlowActions.Fill:
+                if (secretEnvironmentVariable is not null)
+                    args.SecretEnvironmentVariable = secretEnvironmentVariable;
+                else
+                    stepValue = args.Text = value;
+                break;
             case FlowActions.SetProperty:
-                stepValue = value;
-                args.Value = value;
                 args.Name = name;
                 args.ValueSource = valueSource;
+                if (secretEnvironmentVariable is not null)
+                    args.SecretEnvironmentVariable = secretEnvironmentVariable;
+                else
+                    stepValue = args.Value = value;
                 break;
             case FlowActions.Navigate: stepValue = Clean(value); args.Route = stepValue; break;
             case FlowActions.SetTheme: stepValue = value; args.Theme = value; break;
@@ -172,9 +191,39 @@ public sealed class FlowRecordTools
         {
             return (false, -1, recorder.StepCount, false, $"Invalid assertsJson: {ex.Message}");
         }
+        if (asserts is not null)
+        {
+            foreach (var assertion in asserts)
+            {
+                var assertionTargetMayBeSecret =
+                    string.Equals(assertion.Name, "Text", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(assertion.Name, "Value", StringComparison.OrdinalIgnoreCase);
+                if (assertion.Kind == "propEquals" &&
+                    (FlowSecretReference.LooksSensitive(assertion.Name) ||
+                     (assertionTargetMayBeSecret && FlowSecretReference.LooksSensitive(
+                         assertion.Selector?.AutomationId,
+                         assertion.Selector?.Text,
+                         assertion.Selector?.Type,
+                         assertion.Selector?.Id))))
+                {
+                    assertion.Expected = "<redacted>";
+                    assertion.Verify = false;
+                    assertion.Note = "Sensitive values are not persisted or asserted.";
+                }
+            }
+        }
+        if (secretEnvironmentVariable is not null && asserts is not null)
+        {
+            foreach (var assertion in asserts.Where(static assertion => assertion.Kind == "propEquals"))
+            {
+                assertion.Expected = "<redacted>";
+                assertion.Verify = false;
+                assertion.Note = "Sensitive values are supplied at replay time and are not persisted or asserted.";
+            }
+        }
         if (asserts is null && target is not null && !target.IsEmpty)
         {
-            if (action == FlowActions.Fill)
+            if (action == FlowActions.Fill && secretEnvironmentVariable is null)
             {
                 asserts =
                 [
@@ -188,7 +237,9 @@ public sealed class FlowRecordTools
                     },
                 ];
             }
-            else if (action == FlowActions.SetProperty && !string.IsNullOrEmpty(name))
+            else if (action == FlowActions.SetProperty &&
+                     secretEnvironmentVariable is null &&
+                     !string.IsNullOrEmpty(name))
             {
                 asserts =
                 [
@@ -559,7 +610,8 @@ public sealed class FlowRecordTools
 
     private static bool IsEmptyArgs(FlowStepArgs a) =>
         a.Selector is null && a.Text is null && a.Name is null && a.Value is null && a.Route is null &&
-        a.Theme is null && a.Element is null && a.Dx is null && a.Dy is null && a.ItemIndex is null &&
+        a.Theme is null && a.ValueSource is null && a.SecretEnvironmentVariable is null &&
+        a.Element is null && a.Dx is null && a.Dy is null && a.ItemIndex is null &&
         a.Position is null && a.Animated is null;
 
     /// <summary>

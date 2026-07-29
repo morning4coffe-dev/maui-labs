@@ -287,6 +287,30 @@ body.df-disconnected #df-viewport-wrap {
 .df-problem-count { color: var(--df-muted); font-size: 11px; }
 .df-problem-message { margin-top: 3px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .df-problem-context { margin-top: 4px; color: var(--df-muted); font-size: 11px; overflow-wrap: anywhere; }
+
+/* ── On-demand diagnostics (Layout / Performance data tabs) ── */
+.df-diag-header { padding: 8px 10px; border-bottom: 1px solid var(--df-border-subtle); }
+.df-diag-meta { color: var(--df-muted); font-size: 11px; margin-top: 3px; overflow-wrap: anywhere; }
+.df-diag-subtitle { color: var(--df-type); font-weight: 600; font-size: 11px; margin: 8px 10px 3px; }
+.df-diag-controls { display: flex; gap: 6px; margin-top: 8px; }
+.df-diag-controls button { padding: 3px 10px; background: var(--df-surface-2); color: var(--df-fg);
+  border: 1px solid var(--df-border); border-radius: var(--df-radius-sm); cursor: pointer; font-size: 11px; }
+.df-diag-controls button:hover:not(:disabled) { background: var(--df-hover); border-color: var(--df-focus); }
+.df-diag-controls button:disabled { opacity: .45; cursor: not-allowed; }
+.df-diag-rules, .df-diag-metrics, .df-diag-hotspots { width: 100%; }
+.df-diag-rules th, .df-diag-hotspots th { text-align: left; color: var(--df-muted); font-size: 11px; font-weight: 600; }
+.df-diag-finding { display: block; width: 100%; padding: 8px 10px; border: 0;
+  border-bottom: 1px solid var(--df-border-subtle); border-left: 3px solid transparent;
+  background: transparent; color: var(--df-fg); text-align: left; cursor: pointer; }
+.df-diag-finding:hover:not(:disabled) { background: var(--df-hover-row); }
+.df-diag-finding:disabled { cursor: default; opacity: 1; }
+.df-diag-violation { border-left-color: var(--df-error); }
+.df-diag-observation { border-left-color: var(--df-warn); }
+.df-diag-incomplete { border-left-color: var(--df-muted); }
+.df-diag-explanation { margin-top: 4px; color: var(--df-muted); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
+.df-diag-limitation { margin-top: 3px; color: var(--df-muted); font-size: 11px; line-height: 1.3; overflow-wrap: anywhere; }
+.df-diag-warning { margin: 6px 10px; color: var(--df-warn); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
+.df-diag-footer { padding: 4px 0 12px; }
 .df-prop-source { flex: 0 0 auto; width: 25px; height: 25px; display: inline-flex; align-items: center; justify-content: center;
   grid-column: 2; grid-row: 1;
   padding: 0; color: var(--df-source); background: var(--df-surface-2); border: 1px solid var(--df-border);

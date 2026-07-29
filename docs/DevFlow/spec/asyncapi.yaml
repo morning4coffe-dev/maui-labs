@@ -565,6 +565,35 @@ channels:
                   $ref: './schemas/common.json#/$defs/Timestamp'
                   description: Timestamp when the tree change occurred.
 
+      uiProblemsChange:
+        name: uiProblemsChange
+        title: Problems Change Event
+        summary: The bounded runtime Problems snapshot changed.
+        contentType: application/json
+        payload:
+          type: object
+          required: [type, timestamp, data]
+          properties:
+            type:
+              type: string
+              const: problemsChange
+            timestamp:
+              $ref: './schemas/common.json#/$defs/Timestamp'
+            data:
+              type: object
+              required: [revision, count, timestamp]
+              properties:
+                revision:
+                  type: integer
+                  minimum: 0
+                  description: Latest monotonic Problems revision.
+                count:
+                  type: integer
+                  minimum: 0
+                  description: Number of deduplicated Problems currently retained.
+                timestamp:
+                  $ref: './schemas/common.json#/$defs/Timestamp'
+
       uiAlert:
         name: uiAlert
         title: Alert Event
@@ -698,7 +727,7 @@ channels:
                   type: array
                   items:
                     type: string
-                    enum: [navigation, lifecycle, treeChange, alert, error, all]
+                    enum: [navigation, lifecycle, treeChange, problemsChange, alert, error, all]
                   description: >
                     Event types to subscribe to. Use "all" to receive every
                     event type.
@@ -728,7 +757,7 @@ channels:
                   type: array
                   items:
                     type: string
-                    enum: [navigation, lifecycle, treeChange, alert, error, all]
+                    enum: [navigation, lifecycle, treeChange, problemsChange, alert, error, all]
                   description: Event types to unsubscribe from.
 
 # ---------------------------------------------------------------------------
@@ -817,6 +846,7 @@ operations:
       - $ref: '#/channels/uiEvents/messages/uiNavigation'
       - $ref: '#/channels/uiEvents/messages/uiLifecycle'
       - $ref: '#/channels/uiEvents/messages/uiTreeChange'
+      - $ref: '#/channels/uiEvents/messages/uiProblemsChange'
       - $ref: '#/channels/uiEvents/messages/uiAlert'
       - $ref: '#/channels/uiEvents/messages/uiError'
       - $ref: '#/channels/uiEvents/messages/uiLoss'

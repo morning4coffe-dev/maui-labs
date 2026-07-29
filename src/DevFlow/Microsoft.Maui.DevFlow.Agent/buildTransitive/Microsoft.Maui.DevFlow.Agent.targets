@@ -18,6 +18,7 @@
     <_MauiDevFlowMode Condition="'$(MauiDevFlowProfileMode)' == 'true'">profile</_MauiDevFlowMode>
     <_MauiDevFlowMode Condition="'$(_MauiDevFlowMode)' == '' and '$(MauiDevFlowEnabled)' == 'true'">debug</_MauiDevFlowMode>
     <_MauiDevFlowMode Condition="'$(_MauiDevFlowMode)' == ''">disabled</_MauiDevFlowMode>
+    <DefineConstants Condition="'$(MauiDevFlowEnabled)' == 'true'">$(DefineConstants);MAUI_DEVFLOW</DefineConstants>
   </PropertyGroup>
 
   <Target Name="_ValidateMauiDevFlowBuildSafety" BeforeTargets="PrepareForBuild"
@@ -64,7 +65,8 @@
       <MauiDevFlowProject Condition="'$(MauiDevFlowProject)' == ''">$(MSBuildProjectFile)</MauiDevFlowProject>
       <_MauiDevFlowProjectIdentity>$([MSBuild]::ValueOrDefault('$(MauiDevFlowProject)','').Replace('\','\\'))</_MauiDevFlowProjectIdentity>
       <_MauiDevFlowMetadata>$(_MauiDevFlowMetadata)[assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowProject", "$(_MauiDevFlowProjectIdentity)")]
-[assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowTfm", "$(TargetFramework)")]</_MauiDevFlowMetadata>
+      [assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowTfm", "$(TargetFramework)")]
+      [assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowPackageId", "$(ApplicationId)")]</_MauiDevFlowMetadata>
       <_MauiDevFlowMetadata Condition="'$(MauiDevFlowSessionId)' != ''">$(_MauiDevFlowMetadata)
 [assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowSessionId", "$(MauiDevFlowSessionId)")]</_MauiDevFlowMetadata>
     </PropertyGroup>

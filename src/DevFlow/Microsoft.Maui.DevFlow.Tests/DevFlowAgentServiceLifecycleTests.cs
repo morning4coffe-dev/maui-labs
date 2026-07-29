@@ -187,6 +187,35 @@ public class DevFlowAgentServiceLifecycleTests
     }
 
     [Fact]
+    public async Task ProfileMode_AllowsReadOnlyProfilerSessionControl()
+    {
+        var port = GetFreePort();
+        using var service = new DevFlowAgentService(new AgentOptions
+        {
+            Port = port,
+            Mode = "profile",
+            ReadOnly = true,
+            EnableProfiler = true
+        });
+        using var client = new AgentClient("localhost", port);
+
+        service.StartServerOnly(new ImmediateDispatcher());
+        await WaitForStatusAsync(client);
+
+        var started = await client.StartPerformanceSessionAsync(60_000);
+        Assert.NotNull(started);
+        Assert.True(started.Session.Active);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.StartPerformanceSessionAsync(60_000));
+        await Task.Delay(50);
+
+        var stopped = await client.StopPerformanceSessionAsync(started.Session.SessionId);
+        Assert.False(stopped.Session.Active);
+        Assert.True(stopped.Session.SampleCount >= 2);
+        Assert.True(stopped.Session.SampledDurationMs > 0);
+    }
+
+    [Fact]
     public void RegisterExtension_RejectsInvalidNamespace()
     {
         var options = new AgentOptions();

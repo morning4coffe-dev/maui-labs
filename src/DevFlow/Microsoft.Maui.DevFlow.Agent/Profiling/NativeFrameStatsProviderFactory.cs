@@ -42,10 +42,12 @@ internal static class NativeFrameStatsProviderFactory
 internal sealed class FrameStatsAccumulator
 {
     private readonly object _gate = new();
-    private readonly Queue<double> _durationsMs = new();
+    private readonly Queue<FrameObservation> _observations = new();
     private readonly double _jankThresholdMs;
     private readonly double _stallThresholdMs;
     private readonly int _maxBufferedFrames;
+    private int _frameDataLossCount;
+    private double? _lastSnapshotTimestampMs;
 
     public FrameStatsAccumulator(double frameBudgetMs, int maxBufferedFrames = 720)
     {
@@ -54,53 +56,95 @@ internal sealed class FrameStatsAccumulator
         _maxBufferedFrames = Math.Max(120, maxBufferedFrames);
     }
 
-    public void Record(double durationMs)
+    public void Reset()
+    {
+        lock (_gate)
+        {
+            _observations.Clear();
+            _frameDataLossCount = 0;
+            _lastSnapshotTimestampMs = null;
+        }
+    }
+
+    public void Record(double durationMs, double? timestampMs = null)
     {
         if (durationMs <= 0d || double.IsNaN(durationMs) || double.IsInfinity(durationMs))
             return;
 
         lock (_gate)
         {
-            _durationsMs.Enqueue(durationMs);
-            if (_durationsMs.Count > _maxBufferedFrames)
-                _durationsMs.Dequeue();
+            _observations.Enqueue(new FrameObservation(durationMs, timestampMs));
+            if (_observations.Count > _maxBufferedFrames)
+            {
+                _observations.Dequeue();
+                _frameDataLossCount++;
+            }
         }
+    }
+
+    public void RecordLoss(int count)
+    {
+        if (count <= 0)
+            return;
+        lock (_gate)
+            _frameDataLossCount += count;
     }
 
     public bool TryCreateSnapshot(string source, out NativeFrameStatsSnapshot snapshot)
     {
-        List<double> data;
+        List<FrameObservation> observations;
+        int frameDataLossCount;
         lock (_gate)
         {
-            if (_durationsMs.Count == 0)
+            if (_observations.Count == 0)
             {
                 snapshot = new NativeFrameStatsSnapshot();
                 return false;
             }
 
-            data = _durationsMs.ToList();
-            _durationsMs.Clear();
+            observations = _observations.ToList();
+            _observations.Clear();
+            frameDataLossCount = _frameDataLossCount;
+            _frameDataLossCount = 0;
         }
 
-        data.Sort();
-        var avg = data.Average();
+        var data = observations.Select(static observation => observation.DurationMs).Order().ToList();
         var p50 = Percentile(data, 0.50);
         var p95 = Percentile(data, 0.95);
         var worst = data[^1];
+        var timestamps = observations
+            .Where(static observation => observation.TimestampMs is not null)
+            .Select(static observation => observation.TimestampMs!.Value)
+            .Order()
+            .ToArray();
+        double? fps = null;
+        if (timestamps.Length > 0)
+        {
+            var firstTimestamp = _lastSnapshotTimestampMs ?? timestamps[0];
+            var intervals = _lastSnapshotTimestampMs.HasValue
+                ? timestamps.Length
+                : timestamps.Length - 1;
+            if (intervals > 0 && timestamps[^1] > firstTimestamp)
+                fps = intervals * 1000d / (timestamps[^1] - firstTimestamp);
+            _lastSnapshotTimestampMs = timestamps[^1];
+        }
 
         snapshot = new NativeFrameStatsSnapshot
         {
             TsUtc = DateTime.UtcNow,
             Source = source,
-            Fps = avg > 0d ? 1000d / avg : null,
+            Fps = fps,
             FrameTimeMsP50 = p50,
             FrameTimeMsP95 = p95,
             WorstFrameTimeMs = worst,
             JankFrameCount = data.Count(frame => frame >= _jankThresholdMs),
-            UiThreadStallCount = data.Count(frame => frame >= _stallThresholdMs)
+            UiThreadStallCount = data.Count(frame => frame >= _stallThresholdMs),
+            FrameDataLossCount = frameDataLossCount
         };
         return true;
     }
+
+    private readonly record struct FrameObservation(double DurationMs, double? TimestampMs);
 
     private static double Percentile(IReadOnlyList<double> sorted, double percentile)
     {
@@ -121,6 +165,7 @@ internal sealed class AndroidFrameMetricsStatsProvider : Java.Lang.Object, INati
     private WeakReference<global::Android.Views.Window>? _windowRef;
     private Handler? _frameMetricsHandler;
     private bool _running;
+    private int _lifecycleVersion;
 
     public AndroidFrameMetricsStatsProvider()
     {
@@ -140,8 +185,12 @@ internal sealed class AndroidFrameMetricsStatsProvider : Java.Lang.Object, INati
         if (!IsSupported)
             throw new PlatformNotSupportedException("FrameMetrics requires Android API 24+.");
 
+        _accumulator.Reset();
+        var version = Interlocked.Increment(ref _lifecycleVersion);
         MainThread.BeginInvokeOnMainThread(() =>
         {
+            if (version != Volatile.Read(ref _lifecycleVersion))
+                return;
             try
             {
                 var activity = Microsoft.Maui.ApplicationModel.Platform.CurrentActivity;
@@ -154,6 +203,8 @@ internal sealed class AndroidFrameMetricsStatsProvider : Java.Lang.Object, INati
                     return;
 
                 _frameMetricsHandler ??= new Handler(looper);
+                if (_windowRef?.TryGetTarget(out var previousWindow) == true)
+                    previousWindow.RemoveOnFrameMetricsAvailableListener(this);
                 _windowRef = new WeakReference<global::Android.Views.Window>(window);
                 window.AddOnFrameMetricsAvailableListener(this, _frameMetricsHandler);
                 _running = true;
@@ -167,12 +218,16 @@ internal sealed class AndroidFrameMetricsStatsProvider : Java.Lang.Object, INati
     public void Stop()
     {
         _running = false;
+        var version = Interlocked.Increment(ref _lifecycleVersion);
         MainThread.BeginInvokeOnMainThread(() =>
         {
+            if (version != Volatile.Read(ref _lifecycleVersion))
+                return;
             if (_windowRef?.TryGetTarget(out var window) == true)
                 window.RemoveOnFrameMetricsAvailableListener(this);
             _windowRef = null;
             _frameMetricsHandler = null;
+            _running = false;
         });
     }
 
@@ -188,6 +243,14 @@ internal sealed class AndroidFrameMetricsStatsProvider : Java.Lang.Object, INati
         return true;
     }
 
+    public bool TryReadNativeMemory(out long bytes, out string kind)
+    {
+        var value = TryReadAndroidNativeMemoryBytes();
+        bytes = value ?? 0;
+        kind = "android.native-heap-allocated";
+        return value.HasValue;
+    }
+
     public void OnFrameMetricsAvailable(global::Android.Views.Window? window, FrameMetrics? frameMetrics, int dropCountSinceLastInvocation)
     {
         if (!_running || frameMetrics == null)
@@ -197,7 +260,13 @@ internal sealed class AndroidFrameMetricsStatsProvider : Java.Lang.Object, INati
         if (durationNs <= 0)
             return;
 
-        _accumulator.Record(durationNs / 1_000_000d);
+        var intendedVsyncNs = OperatingSystem.IsAndroidVersionAtLeast(26)
+            ? frameMetrics.GetMetric((int)FrameMetricsId.IntendedVsyncTimestamp)
+            : 0;
+        _accumulator.Record(
+            durationNs / 1_000_000d,
+            intendedVsyncNs > 0 ? intendedVsyncNs / 1_000_000d : null);
+        _accumulator.RecordLoss(dropCountSinceLastInvocation);
     }
 
     public new void Dispose()
@@ -239,6 +308,7 @@ internal sealed class AndroidChoreographerFrameStatsProvider : Java.Lang.Object,
     private readonly FrameStatsAccumulator _accumulator;
     private bool _running;
     private long _lastFrameTimeNanos;
+    private int _lifecycleVersion;
 
     public AndroidChoreographerFrameStatsProvider()
     {
@@ -256,10 +326,15 @@ internal sealed class AndroidChoreographerFrameStatsProvider : Java.Lang.Object,
             return;
 
         _lastFrameTimeNanos = 0;
+        _accumulator.Reset();
+        var version = Interlocked.Increment(ref _lifecycleVersion);
         MainThread.BeginInvokeOnMainThread(() =>
         {
+            if (version != Volatile.Read(ref _lifecycleVersion))
+                return;
             try
             {
+                Choreographer.Instance!.RemoveFrameCallback(this);
                 Choreographer.Instance!.PostFrameCallback(this);
                 _running = true;
             }
@@ -272,7 +347,14 @@ internal sealed class AndroidChoreographerFrameStatsProvider : Java.Lang.Object,
     public void Stop()
     {
         _running = false;
-        MainThread.BeginInvokeOnMainThread(() => Choreographer.Instance!.RemoveFrameCallback(this));
+        var version = Interlocked.Increment(ref _lifecycleVersion);
+        MainThread.BeginInvokeOnMainThread(() =>
+        {
+            if (version != Volatile.Read(ref _lifecycleVersion))
+                return;
+            Choreographer.Instance!.RemoveFrameCallback(this);
+            _running = false;
+        });
     }
 
     public bool TryCollect(out NativeFrameStatsSnapshot snapshot)
@@ -287,6 +369,14 @@ internal sealed class AndroidChoreographerFrameStatsProvider : Java.Lang.Object,
         return true;
     }
 
+    public bool TryReadNativeMemory(out long bytes, out string kind)
+    {
+        var value = TryReadAndroidNativeMemoryBytes();
+        bytes = value ?? 0;
+        kind = "android.native-heap-allocated";
+        return value.HasValue;
+    }
+
     public void DoFrame(long frameTimeNanos)
     {
         if (!_running)
@@ -295,7 +385,7 @@ internal sealed class AndroidChoreographerFrameStatsProvider : Java.Lang.Object,
         if (_lastFrameTimeNanos > 0)
         {
             var durationMs = (frameTimeNanos - _lastFrameTimeNanos) / 1_000_000d;
-            _accumulator.Record(durationMs);
+            _accumulator.Record(durationMs, frameTimeNanos / 1_000_000d);
         }
 
         _lastFrameTimeNanos = frameTimeNanos;
@@ -344,6 +434,7 @@ internal sealed class AppleDisplayLinkFrameStatsProvider : INativeFrameStatsProv
     private CADisplayLink? _displayLink;
     private bool _running;
     private double _lastTimestampSeconds;
+    private int _lifecycleVersion;
 
     public AppleDisplayLinkFrameStatsProvider()
     {
@@ -361,10 +452,16 @@ internal sealed class AppleDisplayLinkFrameStatsProvider : INativeFrameStatsProv
             return;
 
         _lastTimestampSeconds = 0d;
+        _accumulator.Reset();
+        var version = Interlocked.Increment(ref _lifecycleVersion);
         MainThread.BeginInvokeOnMainThread(() =>
         {
+            if (version != Volatile.Read(ref _lifecycleVersion))
+                return;
             try
             {
+                _displayLink?.Invalidate();
+                _displayLink?.Dispose();
                 _displayLink = CADisplayLink.Create(OnTick);
                 _displayLink.AddToRunLoop(NSRunLoop.Main, NSRunLoopMode.Common);
                 _running = true;
@@ -378,11 +475,15 @@ internal sealed class AppleDisplayLinkFrameStatsProvider : INativeFrameStatsProv
     public void Stop()
     {
         _running = false;
+        var version = Interlocked.Increment(ref _lifecycleVersion);
         MainThread.BeginInvokeOnMainThread(() =>
         {
+            if (version != Volatile.Read(ref _lifecycleVersion))
+                return;
             _displayLink?.Invalidate();
             _displayLink?.Dispose();
             _displayLink = null;
+            _running = false;
         });
     }
 
@@ -396,6 +497,14 @@ internal sealed class AppleDisplayLinkFrameStatsProvider : INativeFrameStatsProv
             ? "apple.phys-footprint"
             : null;
         return true;
+    }
+
+    public bool TryReadNativeMemory(out long bytes, out string kind)
+    {
+        var value = TryReadPhysFootprint();
+        bytes = value ?? 0;
+        kind = "apple.phys-footprint";
+        return value.HasValue;
     }
 
     public void Dispose()
@@ -412,7 +521,7 @@ internal sealed class AppleDisplayLinkFrameStatsProvider : INativeFrameStatsProv
         if (_lastTimestampSeconds > 0d)
         {
             var durationMs = (ts - _lastTimestampSeconds) * 1000d;
-            _accumulator.Record(durationMs);
+            _accumulator.Record(durationMs, ts * 1000d);
         }
 
         _lastTimestampSeconds = ts;
@@ -494,6 +603,7 @@ internal sealed class WindowsCompositionFrameStatsProvider : INativeFrameStatsPr
     private readonly FrameStatsAccumulator _accumulator;
     private bool _running;
     private TimeSpan? _lastRenderingTime;
+    private int _lifecycleVersion;
 
     public WindowsCompositionFrameStatsProvider()
     {
@@ -511,10 +621,15 @@ internal sealed class WindowsCompositionFrameStatsProvider : INativeFrameStatsPr
             return;
 
         _lastRenderingTime = null;
+        _accumulator.Reset();
+        var version = Interlocked.Increment(ref _lifecycleVersion);
         MainThread.BeginInvokeOnMainThread(() =>
         {
+            if (version != Volatile.Read(ref _lifecycleVersion))
+                return;
             try
             {
+                CompositionTarget.Rendering -= OnRendering;
                 CompositionTarget.Rendering += OnRendering;
                 _running = true;
             }
@@ -527,7 +642,14 @@ internal sealed class WindowsCompositionFrameStatsProvider : INativeFrameStatsPr
     public void Stop()
     {
         _running = false;
-        MainThread.BeginInvokeOnMainThread(() => CompositionTarget.Rendering -= OnRendering);
+        var version = Interlocked.Increment(ref _lifecycleVersion);
+        MainThread.BeginInvokeOnMainThread(() =>
+        {
+            if (version != Volatile.Read(ref _lifecycleVersion))
+                return;
+            CompositionTarget.Rendering -= OnRendering;
+            _running = false;
+        });
     }
 
     public bool TryCollect(out NativeFrameStatsSnapshot snapshot)
@@ -542,6 +664,14 @@ internal sealed class WindowsCompositionFrameStatsProvider : INativeFrameStatsPr
         return true;
     }
 
+    public bool TryReadNativeMemory(out long bytes, out string kind)
+    {
+        var value = TryReadResidentMemoryBytes();
+        bytes = value ?? 0;
+        kind = "windows.working-set";
+        return value.HasValue;
+    }
+
     public void Dispose() => Stop();
 
     private void OnRendering(object? sender, object args)
@@ -552,7 +682,7 @@ internal sealed class WindowsCompositionFrameStatsProvider : INativeFrameStatsPr
         if (_lastRenderingTime.HasValue)
         {
             var durationMs = (renderingArgs.RenderingTime - _lastRenderingTime.Value).TotalMilliseconds;
-            _accumulator.Record(durationMs);
+            _accumulator.Record(durationMs, renderingArgs.RenderingTime.TotalMilliseconds);
         }
 
         _lastRenderingTime = renderingArgs.RenderingTime;

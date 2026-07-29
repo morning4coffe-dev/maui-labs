@@ -99,6 +99,7 @@ public static class FlowMarkdown
             var flags = new List<string>();
             if (s.Fragile) flags.Add("fragile-selector");
             if (s.Navigated) flags.Add("page-changed");
+            if (s.Args?.SecretEnvironmentVariable is not null) flags.Add("secret-input");
             var suffix = flags.Count > 0 ? $"  _({string.Join(", ", flags)})_" : "";
             sb.Append(s.Seq).Append(". ").Append(NoFence(Label(s))).Append(suffix).Append('\n');
             foreach (var a in s.Asserts ?? Enumerable.Empty<FlowAssert>())
@@ -123,7 +124,11 @@ public static class FlowMarkdown
         return s.Action switch
         {
             FlowActions.Tap => $"Tap {who}".Trim(),
+            FlowActions.Fill when s.Args?.SecretEnvironmentVariable is { } variable =>
+                $"Fill {who} from environment variable {variable}".Trim(),
             FlowActions.Fill => $"Fill {who} = \"{s.Value}\"".Trim(),
+            FlowActions.SetProperty when s.Args?.SecretEnvironmentVariable is { } variable =>
+                $"Set {who} property from environment variable {variable}".Trim(),
             FlowActions.SetProperty => $"Set {who} property = \"{s.Value}\"".Trim(),
             FlowActions.Scroll => $"Scroll {(string.IsNullOrEmpty(who) ? "view" : who)}".Trim(),
             FlowActions.Navigate => $"Navigate to {s.Value}".Trim(),

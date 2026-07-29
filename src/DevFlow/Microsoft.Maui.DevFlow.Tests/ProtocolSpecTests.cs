@@ -45,6 +45,53 @@ public class ProtocolSpecTests
     }
 
     [Fact]
+    public void OpenApiYaml_KeepsLayoutAndWebViewOperationsOnDistinctPaths()
+    {
+        var document = LoadDocument(Path.Combine(SpecRoot.Value, "openapi.yaml")).AsObject();
+        var paths = document["paths"]!.AsObject();
+
+        Assert.Equal(
+            "getLayoutDiagnostics",
+            paths["/api/v1/ui/diagnostics/layout"]!["get"]!["operationId"]!.GetValue<string>());
+        Assert.Equal(
+            "getWebViewContexts",
+            paths["/api/v1/webview/contexts"]!["get"]!["operationId"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ProtocolSpecs_ExposePropertySafetyProblemsAndProblemEvents()
+    {
+        var openApi = LoadDocument(Path.Combine(SpecRoot.Value, "openapi.yaml")).AsObject();
+        var paths = openApi["paths"]!.AsObject();
+        Assert.NotNull(paths["/api/v1/diagnostics/problems"]?["get"]);
+        Assert.NotNull(paths["/api/v1/diagnostics/problems"]?["delete"]);
+
+        var descriptors = LoadDocument(Path.Combine(
+            SpecRoot.Value,
+            "schemas",
+            "element-property-descriptors.json"));
+        var descriptorProperties = descriptors["$defs"]!["PropertyDescriptor"]!["properties"]!.AsObject();
+        foreach (var name in new[]
+        {
+            "forceWritable",
+            "valueSource",
+            "valueSourceConfidence",
+            "mutationSafety",
+            "mutationWarning"
+        })
+        {
+            Assert.True(descriptorProperties.ContainsKey(name), $"Missing property descriptor field '{name}'.");
+        }
+        Assert.NotNull(descriptors["$defs"]!["PropertyMutationRequest"]!["properties"]!["allowUnsafe"]);
+
+        var asyncApi = LoadDocument(Path.Combine(SpecRoot.Value, "asyncapi.yaml"));
+        Assert.NotNull(asyncApi["channels"]!["uiEvents"]!["messages"]!["uiProblemsChange"]);
+        var eventValues = asyncApi["channels"]!["uiEvents"]!["messages"]!["uiSubscribe"]!["payload"]!
+            ["properties"]!["data"]!["properties"]!["events"]!["items"]!["enum"]!.AsArray();
+        Assert.Contains(eventValues, value => value?.GetValue<string>() == "problemsChange");
+    }
+
+    [Fact]
     public void ProtocolSpecFiles_AreValidYamlOrJson()
     {
         var failures = new List<string>();

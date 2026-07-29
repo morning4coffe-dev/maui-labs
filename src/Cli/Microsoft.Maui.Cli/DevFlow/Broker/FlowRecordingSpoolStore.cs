@@ -28,7 +28,12 @@ public sealed class FlowRecordingSpoolStore
 
     public string StorageRoot => _root;
 
-    public void Save(string agentId, string? sessionId, string recordingId, FlowRecorder recorder)
+    public void Save(
+        string agentId,
+        string? sessionId,
+        string recordingId,
+        FlowRecorder recorder,
+        string? durabilityError = null)
     {
         if (!IsSafeRecordingId(recordingId))
             throw new ArgumentException("Invalid recording id.", nameof(recordingId));
@@ -43,7 +48,12 @@ public sealed class FlowRecordingSpoolStore
             RecordingId = recordingId,
             CreatedUtc = recorder.CreatedAtUtc,
             LastTouchedUtc = recorder.LastTouchedUtc,
-            Flow = snapshot
+            Flow = snapshot,
+            DurabilityError = string.IsNullOrWhiteSpace(durabilityError)
+                ? null
+                : durabilityError.Length <= 1_000
+                    ? durabilityError
+                    : durabilityError[..1_000]
         };
         var bytes = JsonSerializer.SerializeToUtf8Bytes(spool, JsonOptions);
         if (bytes.Length > MaxFileBytes)
@@ -59,7 +69,7 @@ public sealed class FlowRecordingSpoolStore
             BrokerPaths.RestrictStateFilePermissions(temporary);
             File.Move(temporary, path, overwrite: true);
             BrokerPaths.RestrictStateFilePermissions(path);
-            Prune();
+            try { Prune(); } catch { }
         }
         finally
         {
@@ -86,7 +96,7 @@ public sealed class FlowRecordingSpoolStore
                     throw new JsonException("Spool content is invalid.");
                 if (IsExpired(spool!))
                 {
-                    Delete(spool!.RecordingId);
+                    _ = Delete(spool!.RecordingId);
                     continue;
                 }
                 result.Add(spool!);
@@ -100,11 +110,26 @@ public sealed class FlowRecordingSpoolStore
         return result.OrderByDescending(static spool => spool.LastTouchedUtc).Take(MaxFiles).ToArray();
     }
 
-    public void Delete(string recordingId)
+    public bool Delete(string recordingId)
     {
         if (!IsSafeRecordingId(recordingId))
-            return;
-        try { File.Delete(FilePath(recordingId)); } catch { }
+            return false;
+        var path = FilePath(recordingId);
+        if (!File.Exists(path))
+            return true;
+        var retired = path + ".deleted-" + Guid.NewGuid().ToString("N");
+        try
+        {
+            File.Move(path, retired);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            Warn($"Could not retire workflow recording spool '{Path.GetFileName(path)}': {ex.Message}");
+            return false;
+        }
+
+        try { File.Delete(retired); } catch { }
+        return true;
     }
 
     public void Prune()
@@ -131,7 +156,8 @@ public sealed class FlowRecordingSpoolStore
            !string.IsNullOrWhiteSpace(spool.AgentId) &&
            IsSafeRecordingId(spool.RecordingId) &&
            spool.Flow is not null &&
-           spool.Flow.Steps.Count <= FlowRecorder.MaxSteps;
+           spool.Flow.Steps.Count <= FlowRecorder.MaxSteps &&
+           (spool.DurabilityError is null || spool.DurabilityError.Length <= 1_000);
 
     private static bool IsSafeRecordingId(string? id)
         => id is { Length: 24 } && id.All(static character =>
@@ -169,4 +195,5 @@ public sealed class FlowRecordingSpool
     [JsonPropertyName("createdUtc")] public DateTimeOffset CreatedUtc { get; set; }
     [JsonPropertyName("lastTouchedUtc")] public DateTimeOffset LastTouchedUtc { get; set; }
     [JsonPropertyName("flow")] public MauiFlow Flow { get; set; } = new();
+    [JsonPropertyName("durabilityError")] public string? DurabilityError { get; set; }
 }

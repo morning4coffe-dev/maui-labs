@@ -32,6 +32,7 @@ export function formatEvidencePlan(plan) {
   if (typeof counts.problems === 'number') summaryParts.push(`${counts.problems} problems`);
   if (typeof counts.logs === 'number') summaryParts.push(`${counts.logs} log entries`);
   if (typeof counts.networkRequests === 'number') summaryParts.push(`${counts.networkRequests} request summaries`);
+  if (typeof counts.layoutFindings === 'number') summaryParts.push(`${counts.layoutFindings} layout findings`);
 
   const limitParts = [];
   if (typeof limits.logs === 'number') limitParts.push(`${limits.logs} logs`);

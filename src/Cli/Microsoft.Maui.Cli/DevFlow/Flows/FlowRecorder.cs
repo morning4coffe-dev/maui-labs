@@ -88,6 +88,18 @@ public sealed class FlowRecorder
         }
     }
 
+    internal bool TryRollbackLastStep(int sequence)
+    {
+        lock (_gate)
+        {
+            if (_flow.Steps.Count == 0 || _flow.Steps[^1].Seq != sequence)
+                return false;
+            _flow.Steps.RemoveAt(_flow.Steps.Count - 1);
+            _seq = _flow.Steps.Count == 0 ? 0 : _flow.Steps[^1].Seq;
+            return true;
+        }
+    }
+
     /// <summary>Returns a snapshot copy of the flow so far, without stamping or closing it (for
     /// validation and status). Safe against a concurrent <see cref="AppendStep"/>.</summary>
     public MauiFlow Snapshot()
@@ -157,6 +169,7 @@ public sealed class FlowRecorder
             Route = step.Args.Route,
             Theme = step.Args.Theme,
             ValueSource = step.Args.ValueSource,
+            SecretEnvironmentVariable = step.Args.SecretEnvironmentVariable,
             Element = step.Args.Element,
             Dx = step.Args.Dx,
             Dy = step.Args.Dy,

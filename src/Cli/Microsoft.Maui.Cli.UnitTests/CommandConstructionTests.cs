@@ -99,6 +99,51 @@ public class CommandConstructionTests
 	}
 
 	[Fact]
+	public void DevFlowCommand_IncludesDiagnosticsCommands()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+
+		var diagnostics = Assert.Single(devflowCommand.Subcommands, c => c.Name == "diagnostics");
+
+		var layout = Assert.Single(diagnostics.Subcommands, c => c.Name == "layout");
+		Assert.Contains(layout.Options, option => option.Name == "--element");
+		Assert.Contains(layout.Options, option => option.Name == "--max-elements");
+		Assert.Empty(layout.Parse("--element MyList --max-elements 500").Errors);
+
+		var performance = Assert.Single(diagnostics.Subcommands, c => c.Name == "performance");
+		var durationOption = (Option<int>)Assert.Single(performance.Options, option => option.Name == "--duration");
+		Assert.Contains(performance.Options, option => option.Name == "--sample-interval");
+		Assert.Contains(performance.Options, option => option.Name == "--attach");
+
+		var parseResult = performance.Parse("--duration 12");
+		Assert.Empty(parseResult.Errors);
+		Assert.Equal(12, parseResult.GetValue(durationOption));
+		Assert.Equal(5, performance.Parse("").GetValue(durationOption));
+	}
+
+	[Fact]
+	public void FlowReplay_BareEvidenceOnFailureOptionIsPresent()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var flow = Assert.Single(devflowCommand.Subcommands, command => command.Name == "flow");
+		var replay = Assert.Single(flow.Subcommands, command => command.Name == "replay");
+		var evidence = (Option<string?>)Assert.Single(
+			replay.Options,
+			option => option.Name == "--evidence-on-failure");
+
+		var omitted = replay.Parse("scenario.md");
+		var bare = replay.Parse("scenario.md --evidence-on-failure");
+		var valued = replay.Parse("scenario.md --evidence-on-failure failure.mauitrace");
+
+		Assert.Null(omitted.GetResult(evidence));
+		Assert.NotNull(bare.GetResult(evidence));
+		Assert.Empty(bare.GetResult(evidence)!.Tokens);
+		Assert.Equal("failure.mauitrace", valued.GetValue(evidence));
+	}
+
+	[Fact]
 	public void DevFlowCommand_UpdateSkillIsHiddenCompatibilityAliasForSkillsUpdate()
 	{
 		var jsonOption = new Option<bool>("--json");

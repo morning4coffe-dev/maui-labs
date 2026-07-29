@@ -88,6 +88,8 @@ internal sealed class MutationObservation
     public string[]? FragilityReasons { get; set; }
     [JsonPropertyName("valueSource")]
     public string? ValueSource { get; set; }
+    [JsonPropertyName("sensitive")]
+    public bool Sensitive { get; set; }
 }
 
 internal sealed class MutationRecordingTracker

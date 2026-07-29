@@ -397,7 +397,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         _server = new AgentHttpServer(_options.Port);
         _server.MutationLeaseValidator = ValidateMutationLeaseAsync;
         _server.MutationObserver = ObserveMutationAsync;
-        _server.MutationGuard = request => _options.ReadOnly
+        _server.MutationGuard = request => _options.ReadOnly && !IsReadOnlyDiagnosticControl(request)
             ? HttpResponse.Error(
                 $"DevFlow is running in {_options.Mode} read-only mode; mutating endpoints are disabled.",
                 statusCode: 403,
@@ -421,6 +421,20 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         NetworkStore.OnRequestCaptured += HandleCapturedNetworkRequest;
         AppDomain.CurrentDomain.AssemblyLoad += OnAssemblyLoaded;
         RegisterRoutes();
+    }
+
+    private static bool IsReadOnlyDiagnosticControl(HttpRequest request)
+    {
+        if (request.Method.Equals("POST", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Path is
+                "/api/v1/profiler/sessions" or
+                "/api/v1/profiler/markers" or
+                "/api/v1/profiler/spans";
+        }
+
+        return request.Method.Equals("DELETE", StringComparison.OrdinalIgnoreCase) &&
+               request.Path.StartsWith("/api/v1/profiler/sessions/", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -628,6 +642,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         _server.MapGet("/api/v1/ui/elements/{id}/properties/{name}", HandleProperty);
         _server.MapPut("/api/v1/ui/elements/{id}/properties/{name}", HandleSetProperty);
         _server.MapGet("/api/v1/diagnostics/problems", HandleDiagnosticProblems);
+        _server.MapGet("/api/v1/ui/diagnostics/layout", HandleLayoutDiagnosticsGet);
+        _server.MapPost("/api/v1/ui/diagnostics/layout", HandleLayoutDiagnosticsPost, requiresMutationLease: false);
         _server.MapDelete(
             "/api/v1/diagnostics/problems",
             HandleDiagnosticProblemsClear,
@@ -883,6 +899,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                 ? new[] { "binding-failures", "dedupe", "source", "element-correlation", "clear" }
                 : Array.Empty<string>()
         };
+        capabilities["diagnostics.layout"] = BuildLayoutDiagnosticsCapability();
 
         if (GetCdpWebViewsSnapshot().Length > 0)
             capabilities["webview"] = new { version = 1, features = new[] { "evaluate", "contexts", "source", "dom", "dom-query", "network", "console", "screenshot" } };
@@ -1133,7 +1150,27 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var observedProperty = action == "fill"
             ? "Text"
             : (action == "setProperty" ? name : null);
-        if (!string.IsNullOrWhiteSpace(targetId) && !string.IsNullOrWhiteSpace(observedProperty) && _app is not null)
+        var sensitive = false;
+        var targetValueMayBeSecret = action == "fill" ||
+            (action == "setProperty" &&
+             (string.Equals(name, "Text", StringComparison.OrdinalIgnoreCase) ||
+              string.Equals(name, "Value", StringComparison.OrdinalIgnoreCase)));
+        if (targetValueMayBeSecret && !string.IsNullOrWhiteSpace(targetId) && _app is not null)
+        {
+            sensitive = await DispatchAsync(() =>
+            {
+                var runtime = _treeWalker.GetElementById(targetId, _app);
+                return runtime is Entry entry && entry.IsPassword;
+            });
+        }
+        sensitive |= LooksSensitiveMutationTarget(name) ||
+            (targetValueMayBeSecret &&
+             LooksSensitiveMutationTarget(targetId, target?.AutomationId, target?.Type));
+        if (sensitive)
+        {
+            value = null;
+        }
+        else if (!string.IsNullOrWhiteSpace(targetId) && !string.IsNullOrWhiteSpace(observedProperty) && _app is not null)
         {
             var runtimeValue = await DispatchAsync(() => ReadFormattedPropertyValue(targetId, observedProperty));
             if (runtimeValue is not null)
@@ -1215,7 +1252,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             MatchCount = matchCount,
             Quality = quality,
             FragilityReasons = fragilityReasons?.ToArray(),
-            ValueSource = valueSource
+            ValueSource = valueSource,
+            Sensitive = sensitive
         };
     }
 
@@ -1225,6 +1263,28 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
+
+    private static bool LooksSensitiveMutationTarget(params string?[] values)
+    {
+        string[] fragments =
+        [
+            "password", "passcode", "secret", "token", "apikey", "api_key", "api-key",
+            "credential", "authorization"
+        ];
+        foreach (var value in values)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                continue;
+            var normalized = value.Trim().ToLowerInvariant();
+            if (fragments.Any(normalized.Contains) ||
+                normalized == "pin" ||
+                normalized.EndsWith("pin", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+        return false;
+    }
 
     private static double? ReadJsonDouble(JsonElement body, string name)
         => body.ValueKind == JsonValueKind.Object &&
@@ -3952,18 +4012,49 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         if (intervalMs < 50 || intervalMs > 60_000)
             return HttpResponse.Error("sampleIntervalMs must be between 50 and 60000");
 
-        var session = await StartProfilerAsync(intervalMs);
+        var (session, created) = await StartProfilerAsync(intervalMs);
+        if (!created)
+        {
+            return HttpResponse.Error(
+                "A profiler session is already active. Attach to it instead of starting a replacement session.",
+                statusCode: 409,
+                reason: "profiler-active",
+                details: new { sessionId = session.SessionId });
+        }
         return HttpResponse.Json(new { session, capabilities = BuildProfilerCapabilitiesPayload() });
     }
 
     private async Task<HttpResponse> HandleProfilerStop(HttpRequest request)
     {
-        var validationError = ValidateProfilerSessionRequest(request, out _);
+        var validationError = ValidateProfilerSessionRequest(request, out var requestedSessionId);
         if (validationError != null)
             return validationError;
 
-        var session = await StopProfilerAsync();
-        return HttpResponse.Json(new { session, stoppedAtUtc = DateTime.UtcNow });
+        var sampleLimit = int.TryParse(
+            request.QueryParams.GetValueOrDefault("sampleLimit", "20000"),
+            out var parsedSampleLimit)
+            ? Math.Clamp(parsedSampleLimit, 1, 20_000)
+            : 20_000;
+        var hotspotLimit = int.TryParse(
+            request.QueryParams.GetValueOrDefault("hotspotLimit", "20"),
+            out var parsedHotspotLimit)
+            ? Math.Clamp(parsedHotspotLimit, 1, 200)
+            : 20;
+        var stopped = await StopProfilerAsync(
+            requestedSessionId.Equals("current", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : requestedSessionId,
+            sampleLimit,
+            hotspotLimit);
+        if (stopped is null)
+            return HttpResponse.NotFound($"Profiler session '{requestedSessionId}' not found");
+        return HttpResponse.Json(new
+        {
+            session = stopped.Session,
+            batch = stopped.Batch,
+            hotspots = stopped.Hotspots,
+            stoppedAtUtc = DateTime.UtcNow
+        });
     }
 
     private Task<HttpResponse> HandleProfilerSamples(HttpRequest request)
@@ -3981,7 +4072,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         if (!int.TryParse(request.QueryParams.GetValueOrDefault("limit", "500"), out var limit))
             limit = 500;
 
-        limit = Math.Clamp(limit, 1, 5000);
+        limit = Math.Clamp(limit, 1, 20_000);
         var batch = _profilerSessions.GetBatch(sampleCursor, markerCursor, limit, spanCursor);
         return Task.FromResult(HttpResponse.Json(batch));
     }
@@ -4046,6 +4137,10 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
     private Task<HttpResponse> HandleProfilerHotspots(HttpRequest request)
     {
+        var validationError = ValidateProfilerSessionRequest(request, out _);
+        if (validationError != null)
+            return Task.FromResult(validationError);
+
         if (!int.TryParse(request.QueryParams.GetValueOrDefault("limit", "20"), out var limit))
             limit = 20;
         if (!int.TryParse(request.QueryParams.GetValueOrDefault("minDurationMs", "16"), out var minDurationMs))
@@ -4058,14 +4153,14 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         return Task.FromResult(HttpResponse.Json(hotspots));
     }
 
-    private async Task<ProfilerSessionInfo> StartProfilerAsync(int intervalMs)
+    private async Task<(ProfilerSessionInfo Session, bool Created)> StartProfilerAsync(int intervalMs)
     {
         await _profilerStateGate.WaitAsync();
         try
         {
             var current = _profilerSessions.CurrentSession;
             if (current?.IsActive == true)
-                return current;
+                return (current, false);
 
             _profilerCollector.Start(intervalMs);
             var session = _profilerSessions.Start(intervalMs);
@@ -4073,7 +4168,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             EnsureAutoUiHooks();
             _profilerLoopCts = new CancellationTokenSource();
             _profilerLoopTask = Task.Run(() => RunProfilerLoopAsync(intervalMs, _profilerLoopCts.Token));
-            return session;
+            return (session, true);
         }
         finally
         {
@@ -4081,11 +4176,22 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         }
     }
 
-    private async Task<ProfilerSessionInfo?> StopProfilerAsync()
+    private async Task<ProfilerStopResult?> StopProfilerAsync(
+        string? expectedSessionId = null,
+        int sampleLimit = 20_000,
+        int hotspotLimit = 20)
     {
         await _profilerStateGate.WaitAsync();
         try
         {
+            var current = _profilerSessions.CurrentSession;
+            if (!string.IsNullOrWhiteSpace(expectedSessionId) &&
+                (current is null ||
+                 !string.Equals(current.SessionId, expectedSessionId, StringComparison.Ordinal)))
+            {
+                return null;
+            }
+
             var cts = _profilerLoopCts;
             var loopTask = _profilerLoopTask;
             _profilerLoopCts = null;
@@ -4105,9 +4211,15 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             }
 
             cts?.Dispose();
+            CollectProfilerSample();
             _profilerCollector.Stop();
             StopAutoUiHooks();
-            return _profilerSessions.Stop();
+            var session = _profilerSessions.Stop();
+            var batch = _profilerSessions.GetFinalBatch(Math.Clamp(sampleLimit, 1, 20_000));
+            var hotspots = _profilerSessions.GetHotspots(
+                Math.Clamp(hotspotLimit, 1, 200),
+                minDurationMs: 16);
+            return new ProfilerStopResult(session, batch, hotspots);
         }
         finally
         {
@@ -4115,19 +4227,28 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         }
     }
 
+    private sealed record ProfilerStopResult(
+        ProfilerSessionInfo? Session,
+        ProfilerBatch Batch,
+        List<ProfilerHotspot> Hotspots);
+
     private async Task RunProfilerLoopAsync(int intervalMs, CancellationToken ct)
     {
         while (!ct.IsCancellationRequested)
         {
-            if (_profilerCollector.TryCollect(out var sample))
-            {
-                _profilerSessions.AddSample(sample);
-                PublishNativeFrameSignals(sample);
-                TryPublishAutoJankSpan(sample);
-            }
+            CollectProfilerSample();
 
             await Task.Delay(intervalMs, ct);
         }
+    }
+
+    private void CollectProfilerSample()
+    {
+        if (!_profilerCollector.TryCollect(out var sample))
+            return;
+        _profilerSessions.AddSample(sample);
+        PublishNativeFrameSignals(sample);
+        TryPublishAutoJankSpan(sample);
     }
 
     private void PublishNativeFrameSignals(ProfilerSample sample)
@@ -5250,6 +5371,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         _profilerCollector.Stop();
         (_profilerCollector as IDisposable)?.Dispose();
         _profilerStateGate.Dispose();
+        _layoutDiagnosticsGate.Dispose();
         _brokerRegistration?.Dispose();
         _server.Dispose();
         _logProvider?.Dispose();

@@ -20,7 +20,7 @@
             "number",
             "null"
           ],
-          "description": "Frames per second from a native frame provider; null when no native provider is available.",
+          "description": "Value produced by a native frame provider. It is authoritative rendered FPS only when frameQuality is 'native.exact'; 'native.cadence' is a display-callback estimate and must not be presented as rendered FPS.",
           "minimum": 0
         },
         "frameTimeMsP50": {
@@ -28,7 +28,7 @@
             "number",
             "null"
           ],
-          "description": "Median (P50) frame time from a native frame provider; null when unavailable.",
+          "description": "Median interval from the native provider. Interpret as rendered-frame time only when frameQuality is 'native.exact'; 'native.cadence' is display-callback timing.",
           "minimum": 0
         },
         "frameTimeMsP95": {
@@ -36,7 +36,7 @@
             "number",
             "null"
           ],
-          "description": "95th percentile (P95) frame time from a native frame provider; null when unavailable.",
+          "description": "95th-percentile interval from the native provider. Interpret as rendered-frame time only when frameQuality is 'native.exact'; 'native.cadence' is display-callback timing.",
           "minimum": 0
         },
         "worstFrameTimeMs": {
@@ -44,7 +44,7 @@
             "number",
             "null"
           ],
-          "description": "Worst native frame time during the sample interval; null when unavailable.",
+          "description": "Worst interval from the native provider. Interpret as rendered-frame time only when frameQuality is 'native.exact'; 'native.cadence' is display-callback timing.",
           "minimum": 0
         },
         "managedBytes": {
@@ -125,6 +125,11 @@
             "null"
           ],
           "description": "Number of native UI thread stalls since the last sample. Zero when stall events are unsupported.",
+          "minimum": 0
+        },
+        "frameDataLossCount": {
+          "type": "integer",
+          "description": "Native frame callback records dropped by the platform or the provider's bounded accumulator since the previous sample.",
           "minimum": 0
         },
         "frameSource": {
@@ -540,6 +545,54 @@
           "type": "boolean",
           "description": "Whether thread count reporting is supported."
         }
+      }
+    },
+    "ProfilerStartResponse": {
+        "type": "object",
+        "required": [
+          "session",
+          "capabilities"
+        ],
+        "properties": {
+          "session": {
+            "$ref": "#/$defs/ProfilerSessionInfo"
+          },
+          "capabilities": {
+            "$ref": "#/$defs/ProfilerCapabilities"
+          }
+        }
+      },
+    "ProfilerStopResponse": {
+        "type": "object",
+        "required": [
+          "session",
+          "batch",
+          "hotspots",
+          "stoppedAtUtc"
+        ],
+        "properties": {
+          "session": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/ProfilerSessionInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "batch": {
+            "$ref": "#/$defs/ProfilerBatch"
+          },
+          "hotspots": {
+            "type": "array",
+            "items": {
+              "$ref": "#/$defs/ProfilerHotspot"
+            }
+          },
+          "stoppedAtUtc": {
+            "$ref": "common.json#/$defs/Timestamp"
+          }
       }
     }
   }

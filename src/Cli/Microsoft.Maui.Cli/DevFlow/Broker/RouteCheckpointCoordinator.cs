@@ -111,6 +111,10 @@ public sealed class RouteCheckpointCoordinator
                 ObservedRoute = observed
             };
         }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
         catch (Exception ex) when (ex is HttpRequestException or IOException or TaskCanceledException)
         {
             result = new RouteRestoreResult
@@ -127,7 +131,7 @@ public sealed class RouteCheckpointCoordinator
                 client.Dispose();
         }
 
-        _store.RecordRestoreResult(StableAgentId(registration), registration.SessionId, result);
+        _store.RecordRestoreResult(StableAgentId(registration), current.Checkpoint.SessionId, result);
         var outcome = Status(registration);
         outcome.Ok = result.Success;
         outcome.Connected = result.Kind != "disconnected";
@@ -136,9 +140,20 @@ public sealed class RouteCheckpointCoordinator
     }
 
     public bool Clear(AgentRegistration registration)
-        => _store.Clear(StableAgentId(registration), registration.SessionId) ||
-           _store.Clear(StableAgentId(registration));
+    {
+        var stableAgentId = StableAgentId(registration);
+        var sessionCleared = _store.Clear(stableAgentId, registration.SessionId);
+        var fallbackCleared = _store.Clear(stableAgentId);
+        return sessionCleared || fallbackCleared;
+    }
 
     public static string StableAgentId(AgentRegistration registration)
-        => AgentRegistration.ComputeId(registration.Project, registration.Tfm);
+    {
+        var identity = !string.IsNullOrWhiteSpace(registration.PackageId)
+            ? registration.PackageId!
+            : !string.IsNullOrWhiteSpace(registration.SessionId)
+                ? registration.SessionId!
+                : registration.Project;
+        return AgentRegistration.ComputeId(identity, registration.Tfm);
+    }
 }

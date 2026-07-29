@@ -210,6 +210,25 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
     [Theory]
     [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
     [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void ExplicitProfileMode_DefinesMauiDevFlowCompilationSymbol(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        var result = RunTarget(
+            "_WriteDefineConstants",
+            "/p:Configuration=Release",
+            "/p:MauiDevFlowProfileMode=true");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains(
+            "MAUI_DEVFLOW",
+            File.ReadAllText(Path.Combine(_projectDirectory, "defines.txt")),
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
     public void ValidateBuildSafety_RejectsNativeAot(string relativeTargetPath)
     {
         CreateTestProject(relativeTargetPath);
@@ -240,6 +259,7 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
         // ApplicationId must NOT be rewritten — no identity isolation metadata
         Assert.DoesNotContain("Microsoft.Maui.DevFlowBaseApplicationId", contents);
         Assert.DoesNotContain("Microsoft.Maui.DevFlowApplicationId", contents);
+        Assert.Contains("\"Microsoft.Maui.DevFlowPackageId\", \"com.example.myapp\"", contents);
     }
 
     private string ProjectFilePath => Path.Combine(_projectDirectory, "Test.csproj");
@@ -271,6 +291,11 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
             {{additionalProperties}}
               </PropertyGroup>
               <Import Project="{{escapedTargetFilePath}}" />
+              <Target Name="_WriteDefineConstants">
+                <WriteLinesToFile File="$(MSBuildProjectDirectory)/defines.txt"
+                                  Lines="$(DefineConstants)"
+                                  Overwrite="true" />
+              </Target>
             </Project>
             """);
     }

@@ -41,6 +41,8 @@ internal sealed class BrokerFlowCoordinator
     {
         if (_active.TryGetValue(agentId, out var existing))
         {
+            if (existing.DurabilityError is not null)
+                return DurabilityFailure(existing, "The active recording is not durable");
             if (_recordings.TryGet(existing.RecordingId, out var existingRecorder))
             {
                 return new BrokerFlowResult
@@ -66,7 +68,15 @@ internal sealed class BrokerFlowCoordinator
             return BrokerFlowResult.Failure("A recording is already active for this app.");
         }
         if (_recordings.TryGet(recordingId, out var started))
-            Persist(agentId, active, started);
+        {
+            var persistenceError = Persist(agentId, active, started);
+            if (persistenceError is not null)
+            {
+                _active.TryRemove(agentId, out _);
+                _recordings.Remove(recordingId);
+                return BrokerFlowResult.Failure($"Could not start a durable workflow recording: {persistenceError}");
+            }
+        }
 
         return new BrokerFlowResult
         {
@@ -88,12 +98,29 @@ internal sealed class BrokerFlowCoordinator
     {
         if (!_active.TryGetValue(agentId, out var active))
             return new BrokerFlowResult { Ok = true, Recording = false, Steps = 0 };
+        if (active.DurabilityError is not null)
+            return DurabilityFailure(active, "The active recording is not durable");
         if (!_recordings.TryGet(active.RecordingId, out var recorder))
         {
             _active.TryRemove(agentId, out _);
             return new BrokerFlowResult { Ok = true, Recording = false, Steps = 0 };
         }
-        Persist(agentId, active, recorder);
+        var persistenceError = Persist(agentId, active, recorder);
+        if (persistenceError is not null)
+        {
+            active.DurabilityError = persistenceError;
+            PersistDurabilityFailure(agentId, active, recorder, persistenceError);
+            return new BrokerFlowResult
+            {
+                Ok = false,
+                Recording = true,
+                RecordingId = active.RecordingId,
+                Name = recorder.Name,
+                Steps = recorder.StepCount,
+                Error = $"The active recording is not durably persisted: {persistenceError}"
+            };
+        }
+        active.LastDurableSteps = recorder.StepCount;
 
         return new BrokerFlowResult
         {
@@ -117,9 +144,20 @@ internal sealed class BrokerFlowCoordinator
             return new BrokerFlowResult { Ok = true, Recording = false, Steps = 0 };
         if (!MatchesExpected(active, expectedRecordingId))
             return BrokerFlowResult.Failure($"Unknown recordingId '{expectedRecordingId}'.");
+        if (active.DurabilityError is not null)
+            return DurabilityFailure(active, "The active recording is not durable");
         if (!_recordings.TryGet(active.RecordingId, out var recorder))
             return BrokerFlowResult.Failure("The active recording no longer exists.");
 
+        var targetValueMayBeSecret = observation.Action == FlowActions.Fill ||
+            (observation.Action == FlowActions.SetProperty &&
+             (string.Equals(observation.Name, "Text", StringComparison.OrdinalIgnoreCase) ||
+              string.Equals(observation.Name, "Value", StringComparison.OrdinalIgnoreCase)));
+        var sensitive = observation.Sensitive ||
+            FlowSecretReference.LooksSensitive(observation.Name) ||
+            (targetValueMayBeSecret && FlowSecretReference.LooksSensitive(
+                observation.AutomationId,
+                observation.Type));
         var added = FlowRecordTools.AddStepCore(
             recorder,
             observation.Action,
@@ -140,9 +178,28 @@ internal sealed class BrokerFlowCoordinator
             observation.MatchCount,
             observation.Quality,
             observation.FragilityReasons,
-            observation.ValueSource);
+            observation.ValueSource,
+            sensitive);
         if (added.ok)
-            Persist(agentId, active, recorder);
+        {
+            var persistenceError = Persist(agentId, active, recorder);
+            if (persistenceError is not null)
+            {
+                recorder.TryRollbackLastStep(added.seq);
+                active.DurabilityError = persistenceError;
+                PersistDurabilityFailure(agentId, active, recorder, persistenceError);
+                return new BrokerFlowResult
+                {
+                    Ok = false,
+                    Recording = true,
+                    RecordingId = active.RecordingId,
+                    Name = recorder.Name,
+                    Steps = recorder.StepCount,
+                    Error = $"The mutation succeeded, but its workflow step was not durably recorded: {persistenceError}"
+                };
+            }
+            active.LastDurableSteps = recorder.StepCount;
+        }
         return added.ok
             ? new BrokerFlowResult
             {
@@ -171,6 +228,8 @@ internal sealed class BrokerFlowCoordinator
         }
         if (!MatchesExpected(active, expectedRecordingId))
             return BrokerFlowResult.Failure($"Unknown recordingId '{expectedRecordingId}'.");
+        if (active.DurabilityError is not null)
+            return DurabilityFailure(active, "The recording cannot be completed because a mutation was not durably recorded");
         if (!_recordings.TryGet(active.RecordingId, out var recorder))
         {
             _active.TryRemove(agentId, out _);
@@ -197,8 +256,19 @@ internal sealed class BrokerFlowCoordinator
         if (!finished.ok)
             return BrokerFlowResult.Failure(finished.error ?? "Could not serialize recording.");
 
+        if (!_spools.Delete(active.RecordingId))
+        {
+            return new BrokerFlowResult
+            {
+                Ok = false,
+                Recording = true,
+                RecordingId = active.RecordingId,
+                Name = recorder.Name,
+                Steps = recorder.StepCount,
+                Error = "The completed recording could not be retired from durable storage; retry Stop."
+            };
+        }
         _recordings.Remove(active.RecordingId);
-        _spools.Delete(active.RecordingId);
         _active.TryRemove(agentId, out _);
         return new BrokerFlowResult
         {
@@ -231,8 +301,9 @@ internal sealed class BrokerFlowCoordinator
             if (recorder.StepCount != 0)
                 return BrokerFlowResult.Failure("Recording is no longer empty.");
 
+            if (!_spools.Delete(active.RecordingId))
+                return BrokerFlowResult.Failure("The empty recording could not be retired from durable storage.");
             _recordings.Remove(active.RecordingId);
-            _spools.Delete(active.RecordingId);
             _active.TryRemove(agentId, out _);
             return new BrokerFlowResult { Ok = true, Recording = false, RecordingId = active.RecordingId, Empty = true };
         }
@@ -246,8 +317,9 @@ internal sealed class BrokerFlowCoordinator
         }
         if (!MatchesExpected(active, expectedRecordingId))
             return BrokerFlowResult.Failure($"Unknown recordingId '{expectedRecordingId}'.");
+        if (!_spools.Delete(active.RecordingId))
+            return BrokerFlowResult.Failure("The recording could not be retired from durable storage.");
         _recordings.Remove(active.RecordingId);
-        _spools.Delete(active.RecordingId);
         _active.TryRemove(agentId, out _);
         return new BrokerFlowResult { Ok = true, Recording = false };
     }
@@ -266,13 +338,18 @@ internal sealed class BrokerFlowCoordinator
         _gates.Clear();
     }
 
-    private void Persist(string agentId, ActiveRecording active, FlowRecorder recorder)
+    private string? Persist(string agentId, ActiveRecording active, FlowRecorder recorder)
     {
-        try { _spools.Save(agentId, active.SessionId, active.RecordingId, recorder); }
+        try
+        {
+            _spools.Save(agentId, active.SessionId, active.RecordingId, recorder);
+            return null;
+        }
         catch (Exception ex)
         {
-            _spools.ReportWarning(
-                $"Could not persist workflow recording '{active.RecordingId}': {ex.GetBaseException().Message}");
+            var message = ex.GetBaseException().Message;
+            _spools.ReportWarning($"Could not persist workflow recording '{active.RecordingId}': {message}");
+            return message;
         }
     }
 
@@ -289,7 +366,28 @@ internal sealed class BrokerFlowCoordinator
                 lastTouchedUtc: spool.LastTouchedUtc,
                 restoredFlow: spool.Flow);
             if (_recordings.TryRestore(spool.RecordingId, recorder))
-                _active.TryAdd(spool.AgentId, new ActiveRecording(spool.RecordingId, spool.SessionId));
+                _active.TryAdd(spool.AgentId, new ActiveRecording(spool.RecordingId, spool.SessionId)
+                {
+                    LastDurableSteps = spool.Flow.Steps.Count,
+                    DurabilityError = spool.DurabilityError
+                });
+        }
+    }
+
+    private void PersistDurabilityFailure(
+        string agentId,
+        ActiveRecording active,
+        FlowRecorder recorder,
+        string error)
+    {
+        try
+        {
+            _spools.Save(agentId, active.SessionId, active.RecordingId, recorder, error);
+        }
+        catch
+        {
+            // Never allow an older healthy-looking snapshot to survive a durability failure.
+            _ = _spools.Delete(active.RecordingId);
         }
     }
 
@@ -299,7 +397,28 @@ internal sealed class BrokerFlowCoordinator
         => string.IsNullOrWhiteSpace(expectedRecordingId) ||
             string.Equals(active.RecordingId, expectedRecordingId, StringComparison.Ordinal);
 
-    private sealed record ActiveRecording(string RecordingId, string? SessionId);
+    private static BrokerFlowResult DurabilityFailure(ActiveRecording active, string prefix) => new()
+    {
+        Ok = false,
+        Recording = true,
+        RecordingId = active.RecordingId,
+        Steps = active.LastDurableSteps,
+        Error = $"{prefix}: {active.DurabilityError}. Cancel this recording and start again."
+    };
+
+    private sealed class ActiveRecording
+    {
+        public ActiveRecording(string recordingId, string? sessionId)
+        {
+            RecordingId = recordingId;
+            SessionId = sessionId;
+        }
+
+        public string RecordingId { get; }
+        public string? SessionId { get; }
+        public string? DurabilityError { get; set; }
+        public int LastDurableSteps { get; set; }
+    }
 }
 
 internal sealed class FlowObservation
@@ -323,6 +442,7 @@ internal sealed class FlowObservation
     public string? Quality { get; set; }
     public string[]? FragilityReasons { get; set; }
     public string? ValueSource { get; set; }
+    public bool Sensitive { get; set; }
 }
 
 internal sealed class BrokerFlowResult

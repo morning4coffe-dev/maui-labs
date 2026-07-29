@@ -24,6 +24,7 @@ internal static class EvidenceFormat
     public const string ManifestEntry = "manifest.json";
     public const string EnvironmentEntry = "environment.json";
     public const string TreeEntry = "tree.json";
+    public const string LayoutEntry = "layout.json";
     public const string ProblemsEntry = "problems.json";
     public const string LogsEntry = "logs.json";
     public const string NetworkEntry = "network.json";
@@ -36,6 +37,7 @@ internal static class EvidenceFormat
         ManifestEntry,
         EnvironmentEntry,
         TreeEntry,
+        LayoutEntry,
         ProblemsEntry,
         LogsEntry,
         NetworkEntry,
@@ -52,6 +54,15 @@ internal static class EvidenceFormat
     public const int MaxProblems = 500;
     public const int MaxTreeElements = 5_000;
     public const int MaxTreeDepth = 64;
+
+    /// <summary>Elements the bundled layout scan may examine.</summary>
+    public const int MaxLayoutElements = 2_000;
+
+    /// <summary>Layout findings retained in a bundle. Findings are bounded metadata, but not unbounded.</summary>
+    public const int MaxLayoutFindings = 500;
+
+    /// <summary>Free-form strings inside a layout finding (message, explanation, limitation).</summary>
+    public const int MaxLayoutTextChars = 600;
     public const int MaxLogMessageChars = 1_000;
     public const int MaxProblemMessageChars = 1_000;
     public const int MaxErrorChars = 400;
@@ -69,6 +80,13 @@ internal static class EvidenceFormat
     public const int MaxBundleEntries = 16;
     public const long MaxTotalUncompressedBytes = 128L * 1024 * 1024;
     public const long MaxEntryUncompressedBytes = 32L * 1024 * 1024;
+    public const long MaxManifestBytes = 1L * 1024 * 1024;
+    public const long MaxEnvironmentBytes = 1L * 1024 * 1024;
+    public const long MaxTreeBytes = 16L * 1024 * 1024;
+    public const long MaxLayoutBytes = 4L * 1024 * 1024;
+    public const long MaxProblemsBytes = 4L * 1024 * 1024;
+    public const long MaxLogsBytes = 4L * 1024 * 1024;
+    public const long MaxNetworkBytes = 4L * 1024 * 1024;
 
     /// <summary>Maximum uncompressed:compressed ratio tolerated for a single entry (zip-bomb guard).</summary>
     public const int MaxCompressionRatio = 200;

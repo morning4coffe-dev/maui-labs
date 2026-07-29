@@ -46,6 +46,7 @@ internal static class EvidenceReportRenderer
         RenderWarnings(html, result);
         RenderScreenshot(html, result);
         RenderProblems(html, result);
+        RenderLayout(html, result);
         RenderNetwork(html, result);
         RenderLogs(html, result);
         RenderTree(html, result);
@@ -103,6 +104,7 @@ internal static class EvidenceReportRenderer
             Stat(html, "Problems", counts.Problems);
             Stat(html, "Log entries", counts.Logs);
             Stat(html, "Network requests", counts.NetworkRequests);
+            Stat(html, "Layout findings", counts.LayoutFindings);
             html.Append("</ul>\n");
         }
 
@@ -188,16 +190,17 @@ internal static class EvidenceReportRenderer
     {
         var problems = result.Problems;
         if (problems is null) return;
+        var items = problems.Problems ?? [];
 
         html.Append("<section><h2>Problems</h2>\n");
-        if (problems.Problems.Count == 0)
+        if (items.Count == 0)
         {
             html.Append("<p class=\"muted\">No problems were recorded.</p>\n</section>\n");
             return;
         }
 
         html.Append("<table><thead><tr><th scope=\"col\">Severity</th><th scope=\"col\">Kind</th><th scope=\"col\">Message</th><th scope=\"col\">Element</th><th scope=\"col\">Binding</th><th scope=\"col\">Source</th><th scope=\"col\">Count</th></tr></thead><tbody>\n");
-        foreach (var problem in problems.Problems.Take(MaxRenderedRows))
+        foreach (var problem in items.Take(MaxRenderedRows))
         {
             html.Append("<tr><td>").Append(E(problem.Severity)).Append("</td><td>")
                 .Append(E(problem.Kind)).Append("</td><td>")
@@ -208,7 +211,89 @@ internal static class EvidenceReportRenderer
                 .Append(problem.Count.ToString(CultureInfo.InvariantCulture)).Append("</td></tr>\n");
         }
         html.Append("</tbody></table>\n");
-        AppendTruncationNote(html, problems.Problems.Count, MaxRenderedRows);
+        AppendTruncationNote(html, items.Count, MaxRenderedRows);
+        html.Append("</section>\n");
+    }
+
+    private static void RenderLayout(StringBuilder html, EvidenceReadResult result)
+    {
+        var layout = result.Layout;
+        if (layout is null) return;
+        var rules = layout.Rules ?? [];
+        var findings = layout.Findings ?? [];
+        var limitations = layout.Limitations ?? [];
+        var neverCaptured = layout.NeverCaptured ?? [];
+
+        html.Append("<section><h2>Layout diagnostics</h2>\n");
+        html.Append("<p class=\"muted\">Managed MAUI layout state only. This scan never asserts clipping, occlusion, text truncation, or accessibility mismatches, and geometry it could not read is reported as <em>incomplete</em> — never as a pass.</p>\n");
+        html.Append("<dl class=\"grid\">\n");
+        Definition(html, "Schema", Join(layout.SchemaVersion, layout.RuleSetVersion));
+        Definition(html, "Captured (UTC)", layout.CapturedUtc);
+        Definition(html, "Platform", layout.Platform);
+        Definition(html, "Elements examined",
+            layout.ElementsExamined.ToString(CultureInfo.InvariantCulture) + (layout.Truncated ? " (truncated)" : ""));
+        Definition(html, "Coverage", layout.Coverage);
+        html.Append("</dl>\n");
+
+        html.Append("<ul class=\"stats\">\n");
+        Stat(html, "Violations", layout.Violations);
+        Stat(html, "Observations", layout.Observations);
+        Stat(html, "Incomplete", layout.Incomplete);
+        html.Append("</ul>\n");
+
+        if (rules.Count > 0)
+        {
+            html.Append("<table><caption>Rule coverage</caption><thead><tr><th scope=\"col\">Rule</th><th scope=\"col\">Support</th><th scope=\"col\">Confidence</th><th scope=\"col\">Evaluated</th><th scope=\"col\">Skipped</th></tr></thead><tbody>\n");
+            foreach (var rule in rules)
+            {
+                html.Append("<tr><td><code>").Append(E(rule.RuleId)).Append("</code></td><td>")
+                    .Append(E(rule.Support)).Append("</td><td>")
+                    .Append(E(rule.Confidence)).Append("</td><td>")
+                    .Append(rule.Evaluated.ToString(CultureInfo.InvariantCulture)).Append("</td><td>")
+                    .Append(rule.Skipped.ToString(CultureInfo.InvariantCulture)).Append("</td></tr>\n");
+            }
+            html.Append("</tbody></table>\n");
+        }
+
+        if (findings.Count == 0)
+        {
+            html.Append("<p class=\"muted\">No findings were recorded. Read the coverage table above before treating that as a pass.</p>\n");
+        }
+        else
+        {
+            html.Append("<table><caption>Findings</caption><thead><tr><th scope=\"col\">Outcome</th><th scope=\"col\">Rule</th><th scope=\"col\">Confidence</th><th scope=\"col\">Element</th><th scope=\"col\">Source</th><th scope=\"col\">Detail</th></tr></thead><tbody>\n");
+            foreach (var finding in findings.Take(MaxRenderedRows))
+            {
+                html.Append("<tr><td>").Append(E(finding.Outcome)).Append("</td><td><code>")
+                    .Append(E(finding.RuleId)).Append("</code></td><td>")
+                    .Append(E(finding.Confidence)).Append("</td><td>")
+                    .Append(E(Join(finding.ElementType, finding.AutomationId ?? finding.ElementId))).Append("</td><td>")
+                    .Append(E(FormatSource(finding.SourceFile, finding.SourceLine, finding.SourceColumn))).Append("</td><td>")
+                    .Append(E(finding.Message)).Append("<br><span class=\"muted\">").Append(E(finding.Explanation)).Append("</span>");
+                foreach (var limitation in finding.Limitations ?? [])
+                    html.Append("<br><span class=\"muted\">! ").Append(E(limitation)).Append("</span>");
+                html.Append("</td></tr>\n");
+            }
+            html.Append("</tbody></table>\n");
+            AppendTruncationNote(html, findings.Count, MaxRenderedRows);
+            if (layout.FindingsTruncated)
+                html.Append("<p class=\"muted\">Findings were truncated when the bundle was captured.</p>\n");
+        }
+
+        if (limitations.Count > 0)
+        {
+            html.Append("<p class=\"muted\"><strong>Limitations:</strong></p>\n<ul>\n");
+            foreach (var limitation in limitations)
+                html.Append("<li>").Append(E(limitation)).Append("</li>\n");
+            html.Append("</ul>\n");
+        }
+
+        if (neverCaptured.Count > 0)
+        {
+            html.Append("<p class=\"muted\"><strong>Never captured:</strong> ")
+                .Append(E(string.Join(", ", neverCaptured))).Append("</p>\n");
+        }
+
         html.Append("</section>\n");
     }
 
@@ -216,16 +301,17 @@ internal static class EvidenceReportRenderer
     {
         var network = result.Network;
         if (network is null) return;
+        var requests = network.Requests ?? [];
 
         html.Append("<section><h2>Network</h2>\n<p class=\"muted\">Summaries only — no headers, bodies, or query-string values were captured.</p>\n");
-        if (network.Requests.Count == 0)
+        if (requests.Count == 0)
         {
             html.Append("<p class=\"muted\">No requests were recorded.</p>\n</section>\n");
             return;
         }
 
         html.Append("<table><thead><tr><th scope=\"col\">#</th><th scope=\"col\">Method</th><th scope=\"col\">Host</th><th scope=\"col\">Path</th><th scope=\"col\">Query keys</th><th scope=\"col\">Status</th><th scope=\"col\">Duration</th><th scope=\"col\">Size</th></tr></thead><tbody>\n");
-        foreach (var request in network.Requests.Take(MaxRenderedRows))
+        foreach (var request in requests.Take(MaxRenderedRows))
         {
             var status = request.StatusCode?.ToString(CultureInfo.InvariantCulture) ?? request.Error ?? "—";
             var size = request.ResponseBytes is null ? "—" : FormatBytes(request.ResponseBytes.Value);
@@ -239,7 +325,7 @@ internal static class EvidenceReportRenderer
                 .Append(E(size)).Append("</td></tr>\n");
         }
         html.Append("</tbody></table>\n");
-        AppendTruncationNote(html, network.Requests.Count, MaxRenderedRows);
+        AppendTruncationNote(html, requests.Count, MaxRenderedRows);
         html.Append("</section>\n");
     }
 
@@ -247,16 +333,17 @@ internal static class EvidenceReportRenderer
     {
         var logs = result.Logs;
         if (logs is null) return;
+        var entries = logs.Entries ?? [];
 
         html.Append("<section><h2>Logs</h2>\n");
-        if (logs.Entries.Count == 0)
+        if (entries.Count == 0)
         {
             html.Append("<p class=\"muted\">No log entries were captured.</p>\n</section>\n");
             return;
         }
 
         html.Append("<table><thead><tr><th scope=\"col\">Time</th><th scope=\"col\">Level</th><th scope=\"col\">Category</th><th scope=\"col\">Message</th></tr></thead><tbody>\n");
-        foreach (var entry in logs.Entries.Take(MaxRenderedRows))
+        foreach (var entry in entries.Take(MaxRenderedRows))
         {
             var message = entry.Exception is { Length: > 0 }
                 ? entry.Message + "\n" + entry.Exception
@@ -267,7 +354,7 @@ internal static class EvidenceReportRenderer
                 .Append(E(message)).Append("</pre></td></tr>\n");
         }
         html.Append("</tbody></table>\n");
-        AppendTruncationNote(html, logs.Entries.Count, MaxRenderedRows);
+        AppendTruncationNote(html, entries.Count, MaxRenderedRows);
         html.Append("</section>\n");
     }
 
@@ -275,9 +362,10 @@ internal static class EvidenceReportRenderer
     {
         var tree = result.Tree;
         if (tree is null) return;
+        var roots = tree.Roots ?? [];
 
         html.Append("<section><h2>Visual tree</h2>\n<p class=\"muted\">Structure only — element text and property values were not captured.</p>\n");
-        if (tree.Roots.Count == 0)
+        if (roots.Count == 0)
         {
             html.Append("<p class=\"muted\">No elements were captured.</p>\n</section>\n");
             return;
@@ -285,7 +373,7 @@ internal static class EvidenceReportRenderer
 
         var selected = result.Manifest?.SelectedElementId;
         var budget = MaxRenderedTreeNodes;
-        AppendTreeNodes(html, tree.Roots, selected, ref budget);
+        AppendTreeNodes(html, roots, selected, ref budget);
         if (budget <= 0)
             html.Append("<p class=\"muted\">Tree display truncated.</p>\n");
         html.Append("</section>\n");

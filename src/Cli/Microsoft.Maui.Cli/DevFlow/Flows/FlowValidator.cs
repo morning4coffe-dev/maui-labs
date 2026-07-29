@@ -51,6 +51,7 @@ public static class FlowValidator
                     ValidateSelector(v, where, EffectiveSelector(s), required: true);
                     if (s.Action == FlowActions.SetProperty && string.IsNullOrEmpty(s.Args?.Name))
                         v.Errors.Add($"{where}: setProperty requires a property name.");
+                    ValidateSecretReference(v, where, s);
                     break;
                 case FlowActions.Scroll:
                     ValidateSelector(v, where, EffectiveSelector(s), required: false);
@@ -107,6 +108,21 @@ public static class FlowValidator
                 v.Warnings.Add($"{where}: uses a fragile selector (no AutomationId) — replay may be brittle.");
         }
         return v;
+    }
+
+    private static void ValidateSecretReference(FlowValidation validation, string where, FlowStep step)
+    {
+        var variable = step.Args?.SecretEnvironmentVariable;
+        if (variable is null)
+            return;
+        if (!FlowSecretReference.IsValidEnvironmentVariable(variable))
+            validation.Errors.Add($"{where}: secretEnvironmentVariable must use the {FlowSecretReference.EnvironmentPrefix} prefix and contain only letters, digits, and underscores.");
+        if (!string.IsNullOrEmpty(step.Value) ||
+            !string.IsNullOrEmpty(step.Args?.Text) ||
+            !string.IsNullOrEmpty(step.Args?.Value))
+        {
+            validation.Errors.Add($"{where}: a secret-backed step cannot also persist a literal value.");
+        }
     }
 
     /// <summary>args.selector is authoritative; fall back to the step's target for compatibility.</summary>

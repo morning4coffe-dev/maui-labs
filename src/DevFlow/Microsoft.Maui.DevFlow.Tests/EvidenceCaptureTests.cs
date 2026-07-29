@@ -2,6 +2,7 @@ using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Maui.Cli.DevFlow.Evidence;
+using Microsoft.Maui.Cli.DevFlow.Flows;
 using Microsoft.Maui.DevFlow.Driver;
 
 namespace Microsoft.Maui.DevFlow.Tests;
@@ -56,6 +57,9 @@ public class EvidenceCaptureTests : IDisposable
     [InlineData("failed to load file:///home/alice/App/MainPage.xaml", "MainPage.xaml", "/home/alice")]
     [InlineData(@"probing \\build-share\drops\team\Alice\app.dll", "app.dll", "build-share")]
     [InlineData("wsl load /mnt/c/Users/alice/src/App/MainPage.xaml", "MainPage.xaml", "alice")]
+    [InlineData("ci load /workspace/acme/private-project/MainPage.xaml", "MainPage.xaml", "private-project")]
+    [InlineData("gitlab load /builds/acme/private-project/MainPage.xaml", "MainPage.xaml", "private-project")]
+    [InlineData("github load /github/workspace/private-project/MainPage.xaml", "MainPage.xaml", "private-project")]
     public void Scrub_ReplacesAbsolutePathsWithFileName(string input, string keeps, string drops)
     {
         var scrubbed = EvidenceRedaction.Scrub(input, EvidenceFormat.MaxLogMessageChars)!;
@@ -67,11 +71,12 @@ public class EvidenceCaptureTests : IDisposable
     [Fact]
     public void Scrub_DropsControlCharactersAndTruncates()
     {
-        var scrubbed = EvidenceRedaction.Scrub("a\u0007b" + new string('x', 50), 10)!;
+        var scrubbed = EvidenceRedaction.Scrub("a\u0007b" + new string('x', 50), 20)!;
 
         Assert.DoesNotContain('\u0007', scrubbed);
         Assert.StartsWith("ab", scrubbed, StringComparison.Ordinal);
         Assert.EndsWith("[truncated]", scrubbed, StringComparison.Ordinal);
+        Assert.True(scrubbed.Length <= 20);
     }
 
     [Fact]
@@ -322,6 +327,119 @@ public class EvidenceCaptureTests : IDisposable
         Assert.Contains(bundle.Entries, e => e.Name == EvidenceFormat.TreeEntry);
     }
 
+    // ── layout.json ──────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public async Task BuildAsync_IncludesLayoutFindingsAndCountsThem()
+    {
+        var bundle = await EvidenceBuilder.BuildAsync(new FakeEvidenceSource(), Options());
+
+        Assert.Contains(bundle.Entries, e => e.Name == EvidenceFormat.LayoutEntry);
+        Assert.Equal(1, bundle.Manifest.Counts.LayoutFindings);
+        Assert.Equal(1, bundle.Manifest.Counts.LayoutViolations);
+        Assert.Contains(bundle.Plan.Included, entry => entry.Name == EvidenceFormat.LayoutEntry && entry.Count == 1);
+        Assert.Equal(EvidenceFormat.MaxLayoutFindings, bundle.Manifest.Limits.LayoutFindings);
+    }
+
+    [Fact]
+    public async Task BuildAsync_ExcludesLayoutWhenTheAgentDoesNotSupportIt()
+    {
+        var bundle = await EvidenceBuilder.BuildAsync(
+            new FakeEvidenceSource { LayoutUnsupported = true }, Options());
+
+        Assert.DoesNotContain(bundle.Entries, e => e.Name == EvidenceFormat.LayoutEntry);
+        Assert.Contains(bundle.Manifest.Excluded,
+            e => e.Name == EvidenceFormat.LayoutEntry && e.Reason.Contains("does not support", StringComparison.OrdinalIgnoreCase));
+        Assert.Equal(0, bundle.Manifest.Counts.LayoutFindings);
+    }
+
+    [Fact]
+    public void ProjectLayout_NormalizesSourcePathsAndKeepsNoTextOrValues()
+    {
+        var report = new LayoutDiagnosticsReport
+        {
+            SchemaVersion = "1.0",
+            RuleSetVersion = "1.0",
+            Platform = "Windows",
+            Summary = new LayoutSummary { Violations = 1 },
+            Coverage = new LayoutCoverage { Overall = "partial", NeverCaptured = ["Element Text/Value content"] },
+            Findings =
+            [
+                new LayoutFinding
+                {
+                    Id = "layout.visible-zero-area:e1:area",
+                    RuleId = "layout.visible-zero-area",
+                    Outcome = "violation",
+                    Confidence = "high",
+                    Message = @"Collapsed in C:\Users\alice\App\MainPage.xaml with token=abcdefghijklmnop",
+                    Explanation = "explanation",
+                    Element = new LayoutElementReference
+                    {
+                        Id = "e1",
+                        Type = "Label",
+                        SourceFile = Path.Combine(_root, "MyApp", "Views", "MainPage.xaml"),
+                        SourceLine = 7,
+                    },
+                },
+            ],
+        };
+
+        var projected = EvidenceBuilder.ProjectLayout(report, Path.Combine(_root, "MyApp"));
+        var finding = Assert.Single(projected.Findings);
+
+        Assert.Equal("Views/MainPage.xaml", finding.SourceFile);
+        Assert.DoesNotContain(@"C:\Users\alice", finding.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("abcdefghijklmnop", finding.Message, StringComparison.Ordinal);
+
+        var json = EvidenceJson.Serialize(projected);
+        Assert.DoesNotContain("\"text\"", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"value\"", json, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void ProjectLayout_StopsAtTheFindingBudget()
+    {
+        var report = new LayoutDiagnosticsReport
+        {
+            Findings = [.. Enumerable.Range(0, EvidenceFormat.MaxLayoutFindings + 25).Select(index => new LayoutFinding
+            {
+                Id = $"layout.visible-zero-area:e{index}:area",
+                RuleId = "layout.visible-zero-area",
+                Outcome = "violation",
+                Message = "message",
+                Explanation = "explanation",
+            })],
+        };
+
+        var projected = EvidenceBuilder.ProjectLayout(report, projectRoot: null);
+
+        Assert.Equal(EvidenceFormat.MaxLayoutFindings, projected.Findings.Count);
+        Assert.True(projected.FindingsTruncated);
+    }
+
+    [Fact]
+    public async Task Bundle_RoundTripsLayoutFindingsThroughTheReader()
+    {
+        var bundle = await EvidenceBuilder.BuildAsync(new FakeEvidenceSource(), Options());
+        var path = Path.Combine(_root, "layout-roundtrip.mauitrace");
+        EvidenceBundleWriter.Write(bundle, path, overwrite: true);
+
+        var read = EvidenceBundleReader.Read(path);
+
+        Assert.True(read.Ok, read.Error);
+        Assert.NotNull(read.Layout);
+        Assert.Contains(EvidenceFormat.LayoutEntry, read.Entries);
+        var finding = Assert.Single(read.Layout!.Findings);
+        Assert.Equal("layout.visible-zero-area", finding.RuleId);
+        Assert.Equal("violation", finding.Outcome);
+        Assert.NotEmpty(read.Layout.NeverCaptured);
+
+        var html = EvidenceReportRenderer.Render(read);
+        Assert.Contains("Layout diagnostics", html, StringComparison.Ordinal);
+        Assert.Contains("layout.visible-zero-area", html, StringComparison.Ordinal);
+        Assert.Contains("incomplete", html, StringComparison.OrdinalIgnoreCase);
+    }
+
     [Fact]
     public async Task BuildAsync_RejectsOversizedWorkflow()
     {
@@ -352,6 +470,154 @@ public class EvidenceCaptureTests : IDisposable
         Assert.Contains("MainPage.xaml", workflow, StringComparison.Ordinal);
         Assert.Contains(bundle.Manifest.Warnings,
             w => w.Contains("reproduction steps", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task BuildAsync_RedactsStructuredFlowValuesBeforeAttachingWorkflow()
+    {
+        const string secret = "literal-flow-password";
+        var flow = new MauiFlow
+        {
+            Name = "login",
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Fill,
+                    Target = new FlowSelector { AutomationId = "PasswordEntry", Text = "private label" },
+                    Value = secret,
+                    Args = new FlowStepArgs { Text = secret },
+                    Asserts =
+                    [
+                        new FlowAssert
+                        {
+                            Kind = "propEquals",
+                            Selector = new FlowSelector { AutomationId = "PasswordEntry" },
+                            Name = "Text",
+                            Expected = secret,
+                            Verify = true
+                        }
+                    ]
+                }
+            }
+        };
+
+        var bundle = await EvidenceBuilder.BuildAsync(
+            new FakeEvidenceSource(),
+            Options() with { WorkflowMarkdown = FlowMarkdown.Serialize(flow) });
+        var workflow = Encoding.UTF8.GetString(
+            bundle.Entries.Single(entry => entry.Name == EvidenceFormat.WorkflowEntry).Content);
+
+        Assert.DoesNotContain(secret, workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("private label", workflow, StringComparison.Ordinal);
+        Assert.Contains("<redacted>", workflow, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BuildAsync_RedactsUnexpectedStructuredValueFieldsRegardlessOfAction()
+    {
+        const string secret = "unexpected-action-secret";
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Tap,
+                    Target = new FlowSelector { AutomationId = "Button" },
+                    Value = secret,
+                    Args = new FlowStepArgs
+                    {
+                        Route = "//account?email=alice@example.com",
+                        Theme = "secret-theme",
+                        ValueSource = "secret-source"
+                    },
+                    Asserts =
+                    [
+                        new FlowAssert
+                        {
+                            Kind = "exists",
+                            Selector = new FlowSelector { AutomationId = "Button" },
+                            Expected = secret,
+                            Verify = true
+                        }
+                    ]
+                }
+            }
+        };
+
+        var bundle = await EvidenceBuilder.BuildAsync(
+            new FakeEvidenceSource(),
+            Options() with { WorkflowMarkdown = FlowMarkdown.Serialize(flow) });
+        var workflow = Encoding.UTF8.GetString(
+            bundle.Entries.Single(entry => entry.Name == EvidenceFormat.WorkflowEntry).Content);
+
+        Assert.DoesNotContain(secret, workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("alice@example.com", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-theme", workflow, StringComparison.Ordinal);
+        Assert.DoesNotContain("secret-source", workflow, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task BuildAsync_OmitsMalformedStructuredWorkflowBlock()
+    {
+        var bundle = await EvidenceBuilder.BuildAsync(
+            new FakeEvidenceSource(),
+            Options() with
+            {
+                WorkflowMarkdown = "```json maui-test\n{\"steps\":[\n```"
+            });
+
+        Assert.DoesNotContain(
+            bundle.Entries,
+            entry => entry.Name == EvidenceFormat.WorkflowEntry);
+    }
+
+    [Fact]
+    public async Task BuildAsync_PropagatesCancellationInsteadOfWritingAPartialBundle()
+    {
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            EvidenceBuilder.BuildAsync(
+                new FakeEvidenceSource { CancelOnTree = true },
+                Options()));
+    }
+
+    [Fact]
+    public async Task BundleWriter_ObservesCancellationBeforePublishing()
+    {
+        var bundle = await EvidenceBuilder.BuildAsync(
+            new FakeEvidenceSource(),
+            Options());
+        var destination = Path.Combine(_root, "cancelled.mauitrace");
+        using var cts = new CancellationTokenSource();
+        cts.Cancel();
+
+        Assert.Throws<OperationCanceledException>(() =>
+            EvidenceBundleWriter.Write(bundle, destination, overwrite: false, cts.Token));
+        Assert.False(File.Exists(destination));
+    }
+
+    [Fact]
+    public async Task BundleWriter_PreservesGeneratedSectionsAtTheirExactStringLimits()
+    {
+        var longMessage = new string('x', EvidenceFormat.MaxLogMessageChars + 500);
+        var logs = JsonSerializer.Serialize(new[]
+        {
+            new { t = "2026-07-29T10:00:00Z", l = "info", c = "App", m = longMessage, s = "native" }
+        });
+        var bundle = await EvidenceBuilder.BuildAsync(
+            new FakeEvidenceSource { LogsJson = logs },
+            Options());
+
+        var bytes = EvidenceBundleWriter.ToBytes(bundle);
+        var read = EvidenceBundleReader.Read(new MemoryStream(bytes));
+
+        Assert.True(read.Ok, read.Error);
+        var entry = Assert.Single(read.Logs!.Entries);
+        Assert.True(entry.Message.Length <= EvidenceFormat.MaxLogMessageChars);
+        Assert.EndsWith("[truncated]", entry.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -526,10 +792,11 @@ public class EvidenceCaptureTests : IDisposable
         var path = WriteArchive("bomb.mauitrace", archive =>
         {
             AddText(archive, EvidenceFormat.ManifestEntry, ValidManifestJson());
-            // ~8 MB of zeros compresses to a few KB — far past the ratio guard.
+            // ~3 MB of zeros stays within the logs entry cap but compresses to a few KB — far past
+            // the ratio guard.
             var entry = archive.CreateEntry(EvidenceFormat.LogsEntry, CompressionLevel.SmallestSize);
             using var stream = entry.Open();
-            stream.Write(new byte[8 * 1024 * 1024]);
+            stream.Write(new byte[3 * 1024 * 1024]);
         });
 
         var read = EvidenceBundleReader.Read(path);
@@ -619,6 +886,43 @@ public class EvidenceCaptureTests : IDisposable
     }
 
     [Fact]
+    public void Read_RejectsManifestTerminalControlSequences()
+    {
+        var path = WriteArchive("terminal-control.mauitrace", archive =>
+            AddText(
+                archive,
+                EvidenceFormat.ManifestEntry,
+                $$"""{"schema":"{{EvidenceFormat.SchemaId}}","formatVersion":{{EvidenceFormat.Version}},"capturedUtc":"2026-07-29T10:00:00Z","source":"cli\u001b[31m","entries":[]}"""));
+
+        var read = EvidenceBundleReader.Read(path);
+
+        Assert.False(read.Ok);
+        Assert.Contains("invalid source", read.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void FormatView_EscapesTerminalControlCharactersDefensively()
+    {
+        var formatted = EvidenceCommands.FormatView(new EvidenceViewResult
+        {
+            Ok = true,
+            Report = "report\u001b[31m.html",
+            Bundle = "bundle\nname.mauitrace",
+            Entries = ["tree.json\u202E"],
+            Manifest = new EvidenceManifest
+            {
+                CapturedUtc = "now\rspoof",
+                Source = "cli\u001b[0m"
+            }
+        });
+
+        Assert.DoesNotContain('\u001b', formatted);
+        Assert.DoesNotContain('\u202E', formatted);
+        Assert.Contains("\\u001B", formatted, StringComparison.Ordinal);
+        Assert.Contains("\\u000A", formatted, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Read_IgnoresMalformedSectionsWithoutFailingTheBundle()
     {
         const string malformedLogs = "not json";
@@ -639,6 +943,53 @@ public class EvidenceCaptureTests : IDisposable
         Assert.Null(read.Screenshot);
         Assert.Contains(read.Warnings, w => w.Contains("logs.json", StringComparison.Ordinal));
         Assert.Contains(read.Warnings, w => w.Contains("screenshot.png", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Read_IgnoresSemanticallyInvalidNullCollections()
+    {
+        const string invalidLayout =
+            """{"schemaVersion":"1.0","ruleSetVersion":"1.0","rules":null,"findings":[],"limitations":[],"neverCaptured":[]}""";
+        const string invalidProblems =
+            """{"enabled":true,"revision":1,"count":1,"evicted":0,"problems":null}""";
+        var layoutBytes = Encoding.UTF8.GetBytes(invalidLayout);
+        var problemBytes = Encoding.UTF8.GetBytes(invalidProblems);
+        var path = WriteArchive("null-collections.mauitrace", archive =>
+        {
+            AddText(archive, EvidenceFormat.ManifestEntry, ManifestForEntries(
+                (EvidenceFormat.LayoutEntry, layoutBytes),
+                (EvidenceFormat.ProblemsEntry, problemBytes)));
+            AddBytes(archive, EvidenceFormat.LayoutEntry, layoutBytes);
+            AddBytes(archive, EvidenceFormat.ProblemsEntry, problemBytes);
+        });
+
+        var read = EvidenceBundleReader.Read(path);
+
+        Assert.True(read.Ok, read.Error);
+        Assert.Null(read.Layout);
+        Assert.Null(read.Problems);
+        Assert.Contains(read.Warnings, warning => warning.Contains("layout.json", StringComparison.Ordinal));
+        Assert.Contains(read.Warnings, warning => warning.Contains("problems.json", StringComparison.Ordinal));
+        var html = EvidenceReportRenderer.Render(read);
+        Assert.Contains("Content-Security-Policy", html, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(EvidenceFormat.WorkflowEntry, EvidenceFormat.MaxWorkflowBytes)]
+    [InlineData(EvidenceFormat.ScreenshotEntry, EvidenceFormat.MaxScreenshotBytes)]
+    public void Read_RejectsEntriesBeyondTheirCaptureSpecificLimit(string entryName, long limit)
+    {
+        var content = new byte[checked((int)limit + 1)];
+        var path = WriteArchive($"oversized-{entryName.Replace('.', '-')}.mauitrace", archive =>
+        {
+            AddText(archive, EvidenceFormat.ManifestEntry, ManifestForEntries((entryName, content)));
+            AddBytes(archive, entryName, content);
+        });
+
+        var read = EvidenceBundleReader.Read(path);
+
+        Assert.False(read.Ok);
+        Assert.Contains("larger than", read.Error!, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -868,8 +1219,12 @@ public class EvidenceCaptureTests : IDisposable
     private sealed class FakeEvidenceSource : IEvidenceDataSource
     {
         public bool FailNetwork { get; init; }
+        public bool LayoutUnsupported { get; init; }
+        public bool CancelOnTree { get; init; }
+        public string? LogsJson { get; init; }
         public List<ElementInfo>? Tree { get; init; }
         public int ScreenshotReads { get; private set; }
+        public int LayoutMaxElements { get; private set; }
 
         public Task<AgentStatus?> GetStatusAsync(CancellationToken ct) => Task.FromResult<AgentStatus?>(new AgentStatus
         {
@@ -882,18 +1237,23 @@ public class EvidenceCaptureTests : IDisposable
         public Task<JsonElement> GetCapabilitiesAsync(CancellationToken ct)
             => Task.FromResult(Parse("""{"capabilities":{"ui.actions":{"version":1},"ui.events":{"version":1}}}"""));
 
-        public Task<List<ElementInfo>> GetTreeAsync(CancellationToken ct) => Task.FromResult(Tree ?? new List<ElementInfo>
+        public Task<List<ElementInfo>> GetTreeAsync(CancellationToken ct)
         {
-            new()
+            if (CancelOnTree)
+                throw new OperationCanceledException(ct);
+            return Task.FromResult(Tree ?? new List<ElementInfo>
             {
-                Id = "e1",
-                Type = "ContentPage",
-                Children =
-                [
-                    new ElementInfo { Id = "e2", Type = "Label", Text = "secret label text", AutomationId = "Title" },
-                ],
-            },
-        });
+                new()
+                {
+                    Id = "e1",
+                    Type = "ContentPage",
+                    Children =
+                    [
+                        new ElementInfo { Id = "e2", Type = "Label", Text = "secret label text", AutomationId = "Title" },
+                    ],
+                }
+            });
+        }
 
         public Task<DiagnosticProblemBatch> GetProblemsAsync(int limit, CancellationToken ct)
             => Task.FromResult(new DiagnosticProblemBatch
@@ -916,7 +1276,60 @@ public class EvidenceCaptureTests : IDisposable
             });
 
         public Task<string> GetLogsAsync(int limit, CancellationToken ct)
-            => Task.FromResult("""[{"t":"2026-07-29T10:00:00Z","l":"info","c":"App","m":"started","s":"native"}]""");
+            => Task.FromResult(LogsJson ??
+                """[{"t":"2026-07-29T10:00:00Z","l":"info","c":"App","m":"started","s":"native"}]""");
+
+        public Task<LayoutDiagnosticsReport?> GetLayoutDiagnosticsAsync(int maxElements, CancellationToken ct)
+        {
+            LayoutMaxElements = maxElements;
+            if (LayoutUnsupported)
+                return Task.FromResult<LayoutDiagnosticsReport?>(null);
+
+            return Task.FromResult<LayoutDiagnosticsReport?>(new LayoutDiagnosticsReport
+            {
+                SchemaVersion = "1.0",
+                RuleSetVersion = "1.0",
+                CapturedUtc = "2026-07-29T10:00:00.000Z",
+                Platform = "Windows",
+                Scope = new LayoutScope { ElementsExamined = 2, MaxElements = maxElements },
+                Summary = new LayoutSummary { Violations = 1, Observations = 0, Incomplete = 1 },
+                Coverage = new LayoutCoverage
+                {
+                    Overall = "partial",
+                    Rules =
+                    [
+                        new LayoutRuleCoverage { RuleId = "layout.visible-zero-area", Support = "full", Confidence = "high", Evaluated = 2 },
+                    ],
+                    Limitations = ["Managed layout state only."],
+                    NeverCaptured = ["Element Text/Value content"],
+                },
+                Findings =
+                [
+                    new LayoutFinding
+                    {
+                        Id = "layout.visible-zero-area:e2:area",
+                        RuleId = "layout.visible-zero-area",
+                        Outcome = "violation",
+                        Confidence = "high",
+                        Message = @"Label collapsed, declared in C:\Users\alice\App\MainPage.xaml",
+                        Explanation = "A realized element with no area cannot draw.",
+                        Element = new LayoutElementReference
+                        {
+                            Id = "e2",
+                            Type = "Label",
+                            AutomationId = "Title",
+                            SourceFile = @"C:\Users\alice\App\MainPage.xaml",
+                            SourceLine = 12,
+                        },
+                        Evidence = new LayoutFindingEvidence
+                        {
+                            Frame = new LayoutRect { X = 1, Y = 2, Width = 0, Height = 20 },
+                        },
+                        Limitations = ["A deliberately collapsed element matches this rule."],
+                    },
+                ],
+            });
+        }
 
         public Task<List<NetworkRequest>> GetNetworkAsync(int limit, CancellationToken ct)
             => FailNetwork

@@ -46,6 +46,8 @@ public class ProfilerSample
     public int JankFrameCount { get; set; }
     [JsonPropertyName("uiThreadStallCount")]
     public int UiThreadStallCount { get; set; }
+    [JsonPropertyName("frameDataLossCount")]
+    public int FrameDataLossCount { get; set; }
     [JsonPropertyName("frameSource")]
     public string FrameSource { get; set; } = "unavailable";
     [JsonPropertyName("frameQuality")]

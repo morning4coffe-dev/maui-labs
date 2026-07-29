@@ -286,6 +286,34 @@ public class FlowReplayTests
     }
 
     [Fact]
+    public async Task Replay_CancellationFromFailureEvidenceIsNotSwallowed()
+    {
+        await using var agentSrv = new RoutingAgent();
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Tap,
+                    Target = new FlowSelector { AutomationId = "missing" }
+                }
+            }
+        };
+        using var cts = new CancellationTokenSource();
+        var evidence = new CancellingEvidenceCapture(cts);
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            new FlowReplayer(
+                client,
+                pollTries: 1,
+                pollGapMs: 0,
+                evidenceCapture: evidence).ReplayAsync(flow, ct: cts.Token));
+    }
+
+    [Fact]
     public async Task Replay_RouteIsAssertion_UsesAgentStatusRoute()
     {
         await using var agentSrv = new RoutingAgent();
@@ -309,6 +337,136 @@ public class FlowReplayTests
         Assert.True(report.Results[0].Asserts[0].Ok);
     }
 
+    [Fact]
+    public async Task Replay_SecretBackedFill_ResolvesAtExecutionWithoutPersistingTheValue()
+    {
+        await using var agentSrv = new RoutingAgent();
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        const string variable = "MAUI_DEVFLOW_SECRET_PASSWORD_STEP_1";
+        const string secret = "runtime-only-password";
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Fill,
+                    Target = new FlowSelector { AutomationId = "name" },
+                    Args = new FlowStepArgs { SecretEnvironmentVariable = variable }
+                }
+            }
+        };
+
+        var report = await new FlowReplayer(
+            client,
+            pollTries: 1,
+            pollGapMs: 0,
+            secretResolver: name => name == variable ? secret : null).ReplayAsync(flow);
+
+        Assert.True(report.Ok, JsonSerializer.Serialize(report));
+        Assert.Equal(secret, agentSrv.TextOf("entry"));
+        Assert.DoesNotContain(secret, FlowMarkdown.Serialize(flow), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Replay_MissingSecret_FailsBeforeDriving()
+    {
+        await using var agentSrv = new RoutingAgent();
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Fill,
+                    Target = new FlowSelector { AutomationId = "name" },
+                    Args = new FlowStepArgs
+                    {
+                        SecretEnvironmentVariable = "MAUI_DEVFLOW_SECRET_PASSWORD_STEP_1"
+                    }
+                }
+            }
+        };
+
+        var report = await new FlowReplayer(
+            client,
+            pollTries: 1,
+            pollGapMs: 0,
+            secretResolver: _ => null).ReplayAsync(flow);
+
+        Assert.False(report.Ok);
+        Assert.Equal(FlowFailureKinds.SecretRequired, report.Results[0].FailureKind);
+        Assert.Equal("", agentSrv.TextOf("entry"));
+    }
+
+    [Theory]
+    [InlineData(false, true)]
+    [InlineData(true, false)]
+    public async Task Replay_SetProperty_DoesNotRequireInteractionActionability(bool visible, bool enabled)
+    {
+        await using var agentSrv = new RoutingAgent();
+        agentSrv.SetState("entry", visible, enabled);
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.SetProperty,
+                    Target = new FlowSelector { AutomationId = "name" },
+                    Value = "updated",
+                    Args = new FlowStepArgs { Name = "Text", Value = "updated" }
+                }
+            }
+        };
+
+        var report = await new FlowReplayer(
+            client,
+            pollTries: 1,
+            pollGapMs: 0).ReplayAsync(flow);
+
+        Assert.True(report.Ok, JsonSerializer.Serialize(report));
+        Assert.Equal("updated", agentSrv.TextOf("entry"));
+    }
+
+    [Fact]
+    public async Task Replay_SafeTriggerValueSource_IsNotRejected()
+    {
+        await using var agentSrv = new RoutingAgent();
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.SetProperty,
+                    Target = new FlowSelector { AutomationId = "name" },
+                    Args = new FlowStepArgs
+                    {
+                        Name = "Text",
+                        Value = "trigger-safe",
+                        ValueSource = "trigger"
+                    }
+                }
+            }
+        };
+
+        var report = await new FlowReplayer(
+            client,
+            pollTries: 1,
+            pollGapMs: 0).ReplayAsync(flow);
+
+        Assert.True(report.Ok, JsonSerializer.Serialize(report));
+        Assert.Equal("trigger-safe", agentSrv.TextOf("entry"));
+    }
+
     private sealed class CountingEvidenceCapture : IFlowReplayEvidenceCapture
     {
         public int Count { get; private set; }
@@ -320,6 +478,19 @@ public class FlowReplayTests
         }
     }
 
+    private sealed class CancellingEvidenceCapture(CancellationTokenSource cts) : IFlowReplayEvidenceCapture
+    {
+        public Task CaptureOnFailureAsync(
+            MauiFlow flow,
+            FlowStep failedStep,
+            FlowStepResult result,
+            CancellationToken cancellationToken)
+        {
+            cts.Cancel();
+            throw new OperationCanceledException(cancellationToken);
+        }
+    }
+
     // ── Stateful fake agent ──────────────────────────────────────────────────────
     private sealed class Element
     {
@@ -327,6 +498,8 @@ public class FlowReplayTests
         public required string AutomationId;
         public required string Type;
         public string Text = "";
+        public bool Visible = true;
+        public bool Enabled = true;
         public DateTimeOffset? VisibleAfter;
     }
 
@@ -344,6 +517,12 @@ public class FlowReplayTests
 
         public List<string> Taps { get; } = new();
         public string? TextOf(string id) => _els.FirstOrDefault(e => e.Id == id)?.Text;
+        public void SetState(string id, bool visible, bool enabled)
+        {
+            var element = _els.Single(element => element.Id == id);
+            element.Visible = visible;
+            element.Enabled = enabled;
+        }
         public void AddElement(string id, string automationId, string type, string text)
             => _els.Add(new Element { Id = id, AutomationId = automationId, Type = type, Text = text });
 
@@ -493,8 +672,8 @@ public class FlowReplayTests
             fullType = e.Type,
             automationId = e.AutomationId,
             text = e.Text,
-            isVisible = true,
-            isEnabled = true,
+            isVisible = e.Visible,
+            isEnabled = e.Enabled,
             bounds = new { x = 0, y = 0, width = 100, height = 40 }
         };
 

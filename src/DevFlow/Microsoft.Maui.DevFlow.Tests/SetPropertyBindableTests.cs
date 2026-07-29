@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Sockets;
 using System.Net.WebSockets;
+using System.ComponentModel;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Maui;
@@ -119,7 +120,7 @@ public class SetPropertyBindableTests
     }
 
     [Fact]
-    public async Task SetPropertyAsync_FallsBackToClrSetter_WhenBindableFieldMapsDifferentProperty()
+    public async Task SetPropertyAsync_UnknownClrSetter_IsBlockedUnlessExplicitlyAllowed()
     {
         var control = new MismatchedBindablePropertyView
         {
@@ -130,12 +131,81 @@ public class SetPropertyBindableTests
         using var harness = await SetPropertyTestHarness.CreateAsync(control);
         var controlId = await harness.GetElementIdAsync(control.AutomationId!);
 
-        var success = await harness.Client.SetPropertyAsync(controlId, nameof(MismatchedBindablePropertyView.StatusText), "Updated");
+        var rejected = await harness.Client.SetPropertyDetailedAsync(
+            controlId,
+            nameof(MismatchedBindablePropertyView.StatusText),
+            "Updated");
 
-        Assert.True(success);
+        Assert.False(rejected.Success);
+        Assert.Equal("unknown", rejected.MutationSafety);
+        Assert.Equal("Original", control.StatusText);
+
+        var forced = await harness.Client.SetPropertyDetailedAsync(
+            controlId,
+            nameof(MismatchedBindablePropertyView.StatusText),
+            "Updated",
+            allowUnsafe: true);
+
+        Assert.True(forced.Success);
         Assert.Equal("Updated", control.StatusText);
         Assert.Null(control.BackingText);
         Assert.Equal("Updated", await harness.Client.GetPropertyAsync(controlId, nameof(MismatchedBindablePropertyView.StatusText)));
+    }
+
+    [Fact]
+    public async Task BoundProperty_IsReadOnlyByDefault_AndBindingRemainsActive()
+    {
+        var source = new BindingSource { Value = "Original" };
+        var label = new Label
+        {
+            AutomationId = "bound-property-label",
+            BindingContext = source
+        };
+        label.SetBinding(Label.TextProperty, nameof(BindingSource.Value), mode: BindingMode.OneWay);
+
+        using var harness = await SetPropertyTestHarness.CreateAsync(label);
+        var labelId = await harness.GetElementIdAsync(label.AutomationId!);
+        var descriptors = await harness.Client.GetPropertyDescriptorSetAsync(labelId);
+        var text = Assert.Single(descriptors!.Properties, property => property.Name == nameof(Label.Text));
+
+        Assert.Equal("binding", text.ValueSource);
+        Assert.Equal("bindingWouldBeReplaced", text.MutationSafety);
+        Assert.False(text.Writable);
+        Assert.True(text.ForceWritable);
+
+        var rejected = await harness.Client.SetPropertyDetailedAsync(labelId, nameof(Label.Text), "Inspector");
+        Assert.False(rejected.Success);
+        Assert.Equal("bindingWouldBeReplaced", rejected.MutationSafety);
+        Assert.Equal("Original", label.Text);
+
+        var after = await harness.Client.GetPropertyDescriptorSetAsync(labelId);
+        var textAfter = Assert.Single(after!.Properties, property => property.Name == nameof(Label.Text));
+        Assert.Equal("binding", textAfter.ValueSource);
+    }
+
+    [Fact]
+    public async Task DynamicResourceProperty_IsReadOnlyByDefault()
+    {
+        var label = new Label { AutomationId = "dynamic-resource-label" };
+        label.SetDynamicResource(Label.TextColorProperty, "AccentColor");
+
+        using var harness = await SetPropertyTestHarness.CreateAsync(label);
+        var labelId = await harness.GetElementIdAsync(label.AutomationId!);
+        var descriptors = await harness.Client.GetPropertyDescriptorSetAsync(labelId);
+        var textColor = Assert.Single(
+            descriptors!.Properties,
+            property => property.Name == nameof(Label.TextColor));
+
+        Assert.Equal("dynamicResource", textColor.ValueSource);
+        Assert.Equal("dynamicResourceWouldBeReplaced", textColor.MutationSafety);
+        Assert.False(textColor.Writable);
+
+        var rejected = await harness.Client.SetPropertyDetailedAsync(
+            labelId,
+            nameof(Label.TextColor),
+            "#ff0000");
+        Assert.False(rejected.Success);
+        Assert.Equal("dynamicResourceWouldBeReplaced", rejected.MutationSafety);
     }
 
     [Fact]
@@ -329,6 +399,25 @@ public class SetPropertyBindableTests
             get => (int)GetValue(ScoreProperty);
             set => SetValue(ScoreProperty, value);
         }
+    }
+
+    private sealed class BindingSource : INotifyPropertyChanged
+    {
+        private string _value = "";
+
+        public string Value
+        {
+            get => _value;
+            set
+            {
+                if (_value == value)
+                    return;
+                _value = value;
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Value)));
+            }
+        }
+
+        public event PropertyChangedEventHandler? PropertyChanged;
     }
 
     private sealed class TestApplication : Application, IVisualTreeElement

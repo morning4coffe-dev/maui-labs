@@ -31,8 +31,13 @@ function descriptorsFor(type) {
     name,
     kind,
     choices: choices || null,
-    writable: true,
+    writable: false,
+    forceWritable: true,
     persistable: true,
+    valueSource: 'unknown',
+    valueSourceConfidence: 'unknown',
+    mutationSafety: 'unknown',
+    mutationWarning: 'Upgrade the DevFlow agent to verify whether this property can be changed safely.',
     ...(PROPERTY_CONSTRAINTS[name] || {}),
   }));
 }
@@ -54,7 +59,13 @@ function normalizeDescriptors(value) {
       value: Object.prototype.hasOwnProperty.call(property, 'value') ? property.value : null,
       choices: Array.isArray(property.choices) ? property.choices.map(String) : null,
       writable: property.writable === true,
+      forceWritable: property.forceWritable === true,
       persistable: property.persistable === true,
+      valueSource: typeof property.valueSource === 'string' ? property.valueSource : 'unknown',
+      valueSourceConfidence: typeof property.valueSourceConfidence === 'string'
+        ? property.valueSourceConfidence : 'unknown',
+      mutationSafety: typeof property.mutationSafety === 'string' ? property.mutationSafety : 'unknown',
+      mutationWarning: typeof property.mutationWarning === 'string' ? property.mutationWarning : null,
       min: Number.isFinite(property.min) ? property.min : null,
       max: Number.isFinite(property.max) ? property.max : null,
       step: Number.isFinite(property.step) ? property.step : null,
@@ -185,6 +196,12 @@ export function createPropertyGridController(options) {
       nameElement.className = 'df-prop-name';
       nameElement.textContent = name;
       nameElement.title = name;
+      const sourceBadge = document.createElement('span');
+      sourceBadge.className = `df-prop-value-source df-source-${descriptor.valueSource}`;
+      sourceBadge.textContent = descriptor.valueSource;
+      sourceBadge.title = descriptor.mutationWarning
+        || `${name} is currently provided by ${descriptor.valueSource}.`;
+      nameElement.appendChild(sourceBadge);
       const fieldWrapper = document.createElement('span');
       fieldWrapper.className = 'df-prop-field';
 
@@ -257,7 +274,9 @@ export function createPropertyGridController(options) {
         editor.title = 'Value unavailable. Enter a value explicitly before applying it to XAML.';
       }
       editor.dataset.writable = descriptor.writable === false ? 'false' : 'true';
-      if (descriptor.writable === false) editor.title = editor.title || 'This property is read-only.';
+      if (descriptor.writable === false) {
+        editor.title = descriptor.mutationWarning || editor.title || 'This property is read-only.';
+      }
 
       const errorElement = document.createElement('span');
       errorElement.className = 'df-prop-error';
@@ -267,6 +286,9 @@ export function createPropertyGridController(options) {
         editor.setAttribute('aria-invalid', String(!!message));
         errorElement.textContent = message || '';
       };
+      const warningElement = document.createElement('span');
+      warningElement.className = 'df-prop-warning';
+      warningElement.textContent = descriptor.mutationWarning || '';
 
       let sourceButton = null;
       const setSourceState = (state) => {
@@ -395,6 +417,7 @@ export function createPropertyGridController(options) {
         fieldWrapper.appendChild(editor);
       }
       if (sourceButton) fieldWrapper.appendChild(sourceButton);
+      fieldWrapper.appendChild(warningElement);
       fieldWrapper.appendChild(errorElement);
       row.appendChild(fieldWrapper);
       body.appendChild(row);

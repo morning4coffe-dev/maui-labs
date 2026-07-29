@@ -760,10 +760,35 @@ public class AgentClient : IDisposable
     public Task<JsonElement> GetPropertyDescriptorsAsync(string elementId)
         => GetJsonAsync($"{UiApi}/elements/{elementId}/properties");
 
+    /// <summary>Get typed property descriptors, value-source metadata, and mutation safety.</summary>
+    public Task<ElementPropertyDescriptorSet?> GetPropertyDescriptorSetAsync(string elementId)
+        => GetAsync<ElementPropertyDescriptorSet>($"{UiApi}/elements/{elementId}/properties");
+
     /// <summary>
     /// Set a property value on an element.
     /// </summary>
     public async Task<bool> SetPropertyAsync(string elementId, string propertyName, string value)
+        => (await SetPropertyDetailedAsync(elementId, propertyName, value)).Success;
+
+    /// <summary>
+    /// Set a property value, optionally allowing a destructive session-only override of a binding
+    /// or dynamic resource. Prefer the safe overload unless the caller has explicit user consent.
+    /// </summary>
+    public async Task<bool> SetPropertyAsync(
+        string elementId,
+        string propertyName,
+        string value,
+        bool allowUnsafe)
+        => (await SetPropertyDetailedAsync(elementId, propertyName, value, allowUnsafe)).Success;
+
+    /// <summary>
+    /// Set a property value and return structured mutation-safety information.
+    /// </summary>
+    public async Task<PropertyMutationResponse> SetPropertyDetailedAsync(
+        string elementId,
+        string propertyName,
+        string value,
+        bool allowUnsafe = false)
     {
         try
         {
@@ -771,13 +796,72 @@ public class AgentClient : IDisposable
             {
                 using var content = DriverJson.CreateJsonContent(new JsonObject
                 {
-                    ["value"] = value
+                    ["value"] = value,
+                    ["allowUnsafe"] = allowUnsafe
                 });
                 return await _http.PutAsync($"{_baseUrl}{UiApi}/elements/{elementId}/properties/{propertyName}", content);
             });
-            return response.IsSuccessStatusCode;
+
+            var responseBody = await response.Content.ReadAsStringAsync();
+            if (response.IsSuccessStatusCode)
+            {
+                return DriverJson.Deserialize<PropertyMutationResponse>(responseBody)
+                    ?? new PropertyMutationResponse
+                    {
+                        Success = true,
+                        Id = elementId,
+                        Property = propertyName,
+                        Value = value
+                    };
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(responseBody);
+                var root = document.RootElement;
+                PropertyMutationResponse? result = null;
+                if (root.TryGetProperty("details", out var details)
+                    && details.ValueKind == JsonValueKind.Object)
+                {
+                    result = DriverJson.Deserialize<PropertyMutationResponse>(details.GetRawText());
+                }
+
+                result ??= new PropertyMutationResponse
+                {
+                    Id = elementId,
+                    Property = propertyName
+                };
+                result.Success = false;
+                if (root.TryGetProperty("error", out var error)
+                    && error.ValueKind == JsonValueKind.String)
+                {
+                    result.Error = error.GetString();
+                }
+                return result;
+            }
+            catch (JsonException)
+            {
+                return new PropertyMutationResponse
+                {
+                    Success = false,
+                    Id = elementId,
+                    Property = propertyName,
+                    Error = string.IsNullOrWhiteSpace(responseBody)
+                        ? $"Property mutation failed with HTTP {(int)response.StatusCode}."
+                        : responseBody
+                };
+            }
         }
-        catch (Exception ex) when (IsExpectedClientException(ex)) { return false; }
+        catch (Exception ex) when (IsExpectedClientException(ex))
+        {
+            return new PropertyMutationResponse
+            {
+                Success = false,
+                Id = elementId,
+                Property = propertyName,
+                Error = ex.Message
+            };
+        }
     }
 
     /// <summary>
@@ -1002,6 +1086,32 @@ public class AgentClient : IDisposable
         if (!string.IsNullOrWhiteSpace(kind))
             path += $"&kind={Uri.EscapeDataString(kind)}";
         return await GetAsync<List<ProfilerHotspot>>(path) ?? new();
+    }
+
+    /// <summary>Get bounded, deduplicated runtime diagnostic problems.</summary>
+    public async Task<DiagnosticProblemBatch> GetDiagnosticProblemsAsync(
+        int limit = 100,
+        string? elementId = null)
+    {
+        limit = Math.Clamp(limit, 1, 1000);
+        var path = $"{ApiV1}/diagnostics/problems?limit={limit}";
+        if (!string.IsNullOrWhiteSpace(elementId))
+            path += $"&elementId={Uri.EscapeDataString(elementId)}";
+        return await GetAsync<DiagnosticProblemBatch>(path) ?? new DiagnosticProblemBatch();
+    }
+
+    /// <summary>Clear the agent's retained diagnostic problems.</summary>
+    public async Task<bool> ClearDiagnosticProblemsAsync()
+    {
+        try
+        {
+            using var response = await _http.DeleteAsync($"{_baseUrl}{ApiV1}/diagnostics/problems");
+            return response.IsSuccessStatusCode;
+        }
+        catch (Exception ex) when (IsExpectedClientException(ex))
+        {
+            return false;
+        }
     }
 
     private async Task<T?> GetAsync<T>(string path) where T : class

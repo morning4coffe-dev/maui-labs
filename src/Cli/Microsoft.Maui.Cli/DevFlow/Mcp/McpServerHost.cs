@@ -35,6 +35,7 @@ public static class McpServerHost
 			.WithTools<NetworkTool>()
 			.WithTools<InteractionTools>()
 			.WithTools<PropertyTools>()
+			.WithTools<DiagnosticsTools>()
 			.WithTools<NavigationTools>()
 			.WithTools<QueryTools>()
 			.WithTools<AgentTools>()

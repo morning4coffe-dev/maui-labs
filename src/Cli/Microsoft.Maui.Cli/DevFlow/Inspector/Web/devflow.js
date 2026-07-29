@@ -690,8 +690,20 @@ import { createElementTreeController } from './inspector-tree.js';
         wsLive = true;
         if (!document.hidden && !replaying) scheduleRefresh(0);
       };
-      eventsWs.onmessage = () => {
-        if (!document.hidden && !replaying) scheduleRefresh(150);
+      eventsWs.onmessage = (event) => {
+        let type = null;
+        try { type = JSON.parse(event.data).type || null; } catch { }
+        if (type === 'problemsChange') {
+          const problemsTab = document.getElementById('df-tab-problems');
+          problemsTab?.classList.add('df-has-update');
+          if (!document.hidden && dockActiveTab === 'problems' && !dockEl.classList.contains('df-hidden'))
+            loadTab('problems');
+          return;
+        }
+        if (!document.hidden && !replaying
+          && (!type || ['treeChange', 'navigation', 'lifecycle', 'themeChange', 'alert'].includes(type))) {
+          scheduleRefresh(150);
+        }
       };
       eventsWs.onclose = () => { wsLive = false; eventsWs = null; scheduleEventConnect(EVENT_RETRY_MS); };
       eventsWs.onerror = () => { try { eventsWs && eventsWs.close(); } catch (e) { /* onclose reconnects */ } };
@@ -2051,7 +2063,7 @@ import { createElementTreeController } from './inspector-tree.js';
   const dockRefreshBtn = document.getElementById('df-dock-refresh');
   const dockCloseBtn = document.getElementById('df-dock-close');
   const toggleDockBtn = document.getElementById('df-toggle-dock');
-  dockActiveTab = 'logs';
+  dockActiveTab = 'problems';
   let dockLoaded = false;
   let filesRoot = null, filesPath = '';
   let filesRoots = [];
@@ -2170,6 +2182,65 @@ import { createElementTreeController } from './inspector-tree.js';
       clearDockSnapshot();
       dockEmpty(j && j.error ? j.error : 'No logs.');
       return;
+    }
+
+    function renderProblems(j) {
+      const problems = j && j.problems;
+      const problemsTab = document.getElementById('df-tab-problems');
+      problemsTab?.classList.remove('df-has-update');
+      if (problemsTab) problemsTab.textContent = `Problems${Number.isFinite(j && j.count) ? ` (${j.count})` : ''}`;
+
+      if (j && j.enabled === false) {
+        clearDockSnapshot();
+        dockEmpty('Binding Problems are disabled for this agent.');
+        return;
+      }
+      if (!Array.isArray(problems) || !problems.length) {
+        clearDockSnapshot();
+        dockEmpty(j && j.error ? j.error : 'No runtime UI problems captured.');
+        return;
+      }
+
+      const fragment = document.createDocumentFragment();
+      for (const problem of problems) {
+        const row = elh('button', { class: 'df-problem-row', type: 'button' });
+        const heading = elh('div', { class: 'df-problem-heading' });
+        heading.append(
+          elh('span', { class: 'df-problem-code', text: problem.code || problem.kind || 'problem' }),
+          elh('span', { class: 'df-problem-count', text: problem.count > 1 ? `×${problem.count}` : '' }));
+        row.append(heading, elh('div', { class: 'df-problem-message', text: problem.message || 'Runtime UI problem' }));
+
+        const context = [
+          problem.elementType,
+          problem.property,
+          problem.bindingPath ? `Binding ${problem.bindingPath}` : null,
+          problem.sourceFile ? `${shortFile(problem.sourceFile)}${problem.sourceLine ? `:${problem.sourceLine}` : ''}` : null,
+        ].filter(Boolean).join(' · ');
+        if (context) row.append(elh('div', { class: 'df-problem-context', text: context }));
+
+        if (problem.elementId) {
+          row.title = 'Select the affected element';
+          row.addEventListener('click', () => {
+            const target = elById(problem.elementId);
+            if (!target) {
+              setStatus('The affected element is no longer present in the current frame.');
+              return;
+            }
+            selectElement(problem.elementId);
+            propertyGrid.open(target);
+          });
+        } else {
+          row.disabled = true;
+        }
+        fragment.append(row);
+      }
+      dockBodyEl.replaceChildren(fragment);
+      recordDockSnapshot(
+        'problems',
+        `Problems · ${problems.length} shown`,
+        problems,
+        j.count || problems.length,
+        { revision: j.revision || 0, evicted: j.evicted || 0 });
     }
     const frag = document.createDocumentFragment();
     for (const e of logs) {
@@ -2583,6 +2654,10 @@ import { createElementTreeController } from './inspector-tree.js';
   }
 
   const tabLoaders = {
+    problems: async (generation) => {
+      const j = await apiPost('/api/problems', { limit: 200 });
+      if (dockLoadIsCurrent('problems', generation)) renderProblems(j);
+    },
     logs: async (generation) => {
       const j = await apiPost('/api/logs', { limit: 200 });
       if (dockLoadIsCurrent('logs', generation)) renderLogs(j);

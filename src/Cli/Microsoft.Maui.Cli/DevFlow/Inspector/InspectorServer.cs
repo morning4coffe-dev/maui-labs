@@ -623,6 +623,7 @@ public sealed class InspectorServer : IDisposable
                     "/api/logs" => await HandleLogsAsync(request.Body),
                     "/api/network" => await HandleNetworkAsync(request.Body),
                     "/api/network/detail" => await HandleNetworkDetailAsync(request.Body),
+                    "/api/problems" => await HandleProblemsAsync(request.Body),
                     "/api/preferences" => await HandlePreferencesAsync(request.Body),
                     "/api/device" => await HandleDeviceAsync(request.Body),
                     "/api/sensors" => await HandleSensorsAsync(request.Body),
@@ -1236,7 +1237,6 @@ public sealed class InspectorServer : IDisposable
         var root = doc.RootElement;
         var elementId = root.TryGetProperty("elementId", out var idProp) ? idProp.GetString() : null;
         var name = root.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
-
         if (!IsValidPropertyRef(elementId, name))
             return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"elementId and name required\"}"));
 
@@ -1281,6 +1281,8 @@ public sealed class InspectorServer : IDisposable
         var root = doc.RootElement;
         var elementId = root.TryGetProperty("elementId", out var idProp) ? idProp.GetString() : null;
         var name = root.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
+        var allowUnsafe = root.TryGetProperty("allowUnsafe", out var allowUnsafeProperty)
+            && allowUnsafeProperty.ValueKind == JsonValueKind.True;
 
         // Only scalar JSON is a valid property value. Number/bool raw text is culture-invariant.
         if (!TryReadScalarField(root, "value", out var value))
@@ -1288,11 +1290,27 @@ public sealed class InspectorServer : IDisposable
         if (!IsValidPropertyRef(elementId, name) || value is null)
             return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"elementId, name and value required\"}"));
 
-        var success = await _client.SetPropertyAsync(elementId!, name!, value);
-        InvalidateScreenshotCache();
-        return success
-            ? (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true}"))
-            : (500, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false}"));
+        var result = await _client.SetPropertyDetailedAsync(
+            elementId!,
+            name!,
+            value,
+            allowUnsafe);
+        if (result.Success)
+            InvalidateScreenshotCache();
+
+        var payload = JsonSerializer.Serialize(new
+        {
+            ok = result.Success,
+            value = result.Value,
+            valueSource = result.ValueSource,
+            mutationSafety = result.MutationSafety,
+            warning = result.Warning,
+            error = result.Error
+        }, CamelCase);
+        return (
+            result.Success ? 200 : (result.Warning is null ? 400 : 409),
+            "application/json",
+            Encoding.UTF8.GetBytes(payload));
     }
 
     // Persists an Inspector property value to an existing direct-literal XAML attribute. The agent
@@ -2003,7 +2021,7 @@ public sealed class InspectorServer : IDisposable
     // Paths whose responses expose more than the visible tree and therefore require the read token.
     internal static bool IsTokenGatedPath(string path) => path switch
     {
-        "/api/source" or "/api/persistProperty" or "/api/logs" or "/api/network" or "/api/network/detail" or "/api/preferences"
+        "/api/source" or "/api/persistProperty" or "/api/logs" or "/api/network" or "/api/network/detail" or "/api/problems" or "/api/preferences"
             or "/api/device" or "/api/sensors" or "/api/geolocation"
             or "/api/files/roots" or "/api/files/list"
             or "/api/flows/files/list" or "/api/flows/files/load"
@@ -2067,6 +2085,31 @@ public sealed class InspectorServer : IDisposable
             return Ok(JsonSerializer.Serialize(new { ok = true, request = detail }, CamelCase));
         }
         catch { return Ok("{\"ok\":false,\"error\":\"network unavailable\"}"); }
+    }
+
+    private async Task<(int, string, byte[])> HandleProblemsAsync(string? body)
+    {
+        var limit = ReadIntField(body, "limit", 100, 1, 500);
+        var elementId = ReadStringField(body, "elementId");
+        try
+        {
+            var batch = await _client.GetDiagnosticProblemsAsync(
+                limit,
+                string.IsNullOrWhiteSpace(elementId) ? null : elementId);
+            return Ok(JsonSerializer.Serialize(new
+            {
+                ok = true,
+                enabled = batch.Enabled,
+                revision = batch.Revision,
+                count = batch.Count,
+                evicted = batch.Evicted,
+                problems = batch.Problems
+            }, CamelCase));
+        }
+        catch
+        {
+            return Ok("{\"ok\":false,\"error\":\"diagnostic Problems unavailable\"}");
+        }
     }
 
     private async Task<(int, string, byte[])> HandlePreferencesAsync(string? body)

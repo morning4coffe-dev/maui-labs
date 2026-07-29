@@ -16,6 +16,7 @@ using Microsoft.Maui.Dispatching;
 using Microsoft.Maui.Networking;
 using Microsoft.Maui.Storage;
 using Microsoft.Maui.DevFlow.Agent.Core.Profiling;
+using Microsoft.Maui.DevFlow.Agent.Core.Properties;
 using Microsoft.Maui.DevFlow.Logging;
 using Microsoft.Maui.DevFlow.Agent.Core.Network;
 
@@ -405,6 +406,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             Math.Max(1, _options.MaxProfilerSamples),
             Math.Max(1, _options.MaxProfilerMarkers),
             Math.Max(1, _options.MaxProfilerSpans));
+        InitializeDiagnostics();
         if (_options.EnableNetworkMonitoring)
             DevFlowHttp.SetStore(NetworkStore);
         NetworkStore.OnRequestCaptured += HandleCapturedNetworkRequest;
@@ -616,6 +618,11 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         _server.MapGet("/api/v1/ui/elements/{id}/properties", HandlePropertyDescriptors);
         _server.MapGet("/api/v1/ui/elements/{id}/properties/{name}", HandleProperty);
         _server.MapPut("/api/v1/ui/elements/{id}/properties/{name}", HandleSetProperty);
+        _server.MapGet("/api/v1/diagnostics/problems", HandleDiagnosticProblems);
+        _server.MapDelete(
+            "/api/v1/diagnostics/problems",
+            HandleDiagnosticProblemsClear,
+            requiresMutationLease: false);
         _server.MapPost("/api/v1/ui/actions/tap", HandleTap);
         _server.MapPost("/api/v1/ui/actions/fill", HandleFill);
         _server.MapPost("/api/v1/ui/actions/clear", HandleClear);
@@ -845,9 +852,18 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var capabilities = new Dictionary<string, object>();
 
         capabilities["ui.tree"] = new { version = 1, features = new[] { "css-selector", "type", "text", "accessibility-id" } };
-        capabilities["ui.actions"] = new { version = 1, features = new[] { "tap", "fill", "clear", "focus", "scroll", "navigate", "resize", "back", "key", "gesture", "batch", "properties", "property-descriptors" } };
+        capabilities["ui.actions"] = new { version = 1, features = new[] { "tap", "fill", "clear", "focus", "scroll", "navigate", "resize", "back", "key", "gesture", "batch", "properties", "property-descriptors", "property-source", "safe-property-mutations" } };
         capabilities["ui.events"] = new { version = 1, features = new[] { "stream", "subscribe" } };
         capabilities["ui.screenshot"] = new { version = 1, features = new[] { "element", "fullscreen", "selector" } };
+        capabilities["diagnostics.problems"] = new
+        {
+            version = 1,
+            supported = _options.EnableBindingProblems,
+            diagnosticsEnabled = _options.EnableMauiDiagnostics,
+            features = _options.EnableBindingProblems
+                ? new[] { "binding-failures", "dedupe", "source", "element-correlation", "clear" }
+                : Array.Empty<string>()
+        };
 
         if (GetCdpWebViewsSnapshot().Length > 0)
             capabilities["webview"] = new { version = 1, features = new[] { "evaluate", "contexts", "source", "dom", "dom-query", "network", "console", "screenshot" } };
@@ -1060,6 +1076,13 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     request.Path.StartsWith("/api/v1/ui/elements/", StringComparison.OrdinalIgnoreCase) &&
                     request.Path.Contains("/properties/", StringComparison.OrdinalIgnoreCase))
                 {
+                    if (body.ValueKind == JsonValueKind.Object
+                        && body.TryGetProperty("allowUnsafe", out var allowUnsafe)
+                        && allowUnsafe.ValueKind == JsonValueKind.True)
+                    {
+                        return null;
+                    }
+
                     action = "setProperty";
                     request.RouteParams.TryGetValue("id", out targetId);
                     request.RouteParams.TryGetValue("name", out name);
@@ -1978,7 +2001,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             var element = _treeWalker.GetElementById(id, _app);
             if (element is null) return null;
 
-            var descriptors = new List<object>();
+            var descriptors = new List<ElementPropertyDescriptor>();
             foreach (var name in GetInspectablePropertyNames(element))
             {
                 var property = element.GetType().GetProperty(
@@ -1995,21 +2018,39 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                 var kind = GetPropertyEditorKind(propertyType);
                 if (kind is null) continue;
 
+                var bindableProperty = element is BindableObject bindable
+                    ? MauiPropertyDiagnostics.FindBindableProperty(element, property, _options.AllowPropertyReflection)
+                    : null;
+                var diagnostic = bindableProperty is not null && element is BindableObject bindableElement
+                    ? MauiPropertyDiagnostics.Inspect(bindableElement, bindableProperty)
+                    : PropertyDiagnosticSnapshot.Unknown(
+                        "DevFlow could not resolve a BindableProperty for this CLR property.");
                 var constraints = GetPropertyConstraints(property.Name);
-                descriptors.Add(new
+                var runtimeWritable = property.SetMethod?.IsPublic == true;
+                descriptors.Add(new ElementPropertyDescriptor
                 {
-                    name = property.Name,
-                    kind,
-                    value = FormatPropertyValue(rawValue),
-                    writable = property.SetMethod?.IsPublic == true,
-                    choices = propertyType.IsEnum ? Enum.GetNames(propertyType) : null,
-                    min = constraints.Min,
-                    max = constraints.Max,
-                    step = constraints.Step
+                    Name = property.Name,
+                    Kind = kind,
+                    Value = FormatPropertyValue(rawValue),
+                    Writable = runtimeWritable && diagnostic.CanWriteSafely,
+                    ForceWritable = runtimeWritable,
+                    Choices = propertyType.IsEnum ? Enum.GetNames(propertyType) : null,
+                    Min = constraints.Min,
+                    Max = constraints.Max,
+                    Step = constraints.Step,
+                    ValueSource = diagnostic.ValueSource,
+                    ValueSourceConfidence = diagnostic.Confidence,
+                    MutationSafety = diagnostic.MutationSafety,
+                    MutationWarning = diagnostic.Warning
                 });
             }
 
-            return new { id, type = element.GetType().Name, properties = descriptors };
+            return new ElementPropertyDescriptorSet
+            {
+                Id = id,
+                Type = element.GetType().Name,
+                Properties = descriptors
+            };
         });
 
         return result is not null
@@ -2162,31 +2203,6 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         return string.Join(", ", parts);
     }
 
-    private static BindableProperty? FindBindableProperty(Type type, PropertyInfo property)
-    {
-        var fieldName = $"{property.Name}Property";
-
-        while (type != null)
-        {
-            var bpField = type.GetField(fieldName,
-                BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly);
-
-            bpField ??= Array.Find(
-                type.GetFields(BindingFlags.Public | BindingFlags.Static | BindingFlags.DeclaredOnly),
-                f => f.Name.Equals(fieldName, StringComparison.OrdinalIgnoreCase));
-
-            if (bpField?.GetValue(null) is BindableProperty candidate &&
-                candidate.PropertyName.Equals(property.Name, StringComparison.OrdinalIgnoreCase))
-            {
-                return candidate;
-            }
-
-            type = type.BaseType!;
-        }
-
-        return null;
-    }
-
     private async Task<HttpResponse> HandleSetProperty(HttpRequest request)
     {
         if (_app == null) return HttpResponse.Error("Agent not bound to app");
@@ -2203,44 +2219,103 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var result = await DispatchAsync(() =>
         {
             var el = _treeWalker.GetElementById(id, _app);
-            if (el == null) return "Element not found";
+            if (el == null)
+                return new PropertyMutationResponse
+                {
+                    Error = "Element not found",
+                    Id = id,
+                    Property = propName
+                };
 
             var type = el.GetType();
             var prop = type.GetProperty(propName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase);
             if (prop == null || !prop.CanWrite)
-                return $"Property '{propName}' not found or read-only";
+            {
+                return new PropertyMutationResponse
+                {
+                    Error = $"Property '{propName}' not found or read-only",
+                    Id = id,
+                    Property = propName
+                };
+            }
 
             try
             {
                 var converted = ConvertPropertyValue(prop.PropertyType, body.Value);
+                var diagnostic = PropertyDiagnosticSnapshot.Unknown();
+                BindableProperty? bindableProperty = null;
+                var bindableObject = el as BindableObject;
+                if (bindableObject is not null)
+                {
+                    bindableProperty = MauiPropertyDiagnostics.FindBindableProperty(
+                        el,
+                        prop,
+                        _options.AllowPropertyReflection);
+                    if (bindableProperty is not null)
+                        diagnostic = MauiPropertyDiagnostics.Inspect(bindableObject, bindableProperty);
+                }
+
+                if (!diagnostic.CanWriteSafely && !body.AllowUnsafe)
+                {
+                    return new PropertyMutationResponse
+                    {
+                        Error = diagnostic.Warning,
+                        Id = id,
+                        Property = prop.Name,
+                        Value = FormatPropertyValue(prop.GetValue(el)),
+                        ValueSource = diagnostic.ValueSource,
+                        MutationSafety = diagnostic.MutationSafety,
+                        Warning = diagnostic.Warning
+                    };
+                }
 
                 // Use BindableObject.SetValue when possible so the handler mapper
                 // propagates the change to the native platform view.
-                if (el is BindableObject bindable &&
-                    FindBindableProperty(type, prop) is BindableProperty bp)
+                if (bindableObject is not null && bindableProperty is not null)
                 {
-                    bindable.SetValue(bp, converted);
-                    return "ok";
+                    bindableObject.SetValue(bindableProperty, converted);
+                }
+                else
+                {
+                    prop.SetValue(el, converted);
                 }
 
-                prop.SetValue(el, converted);
-                return "ok";
+                return new PropertyMutationResponse
+                {
+                    Success = true,
+                    Id = id,
+                    Property = prop.Name,
+                    Value = FormatPropertyValue(prop.GetValue(el)),
+                    ValueSource = diagnostic.ValueSource,
+                    MutationSafety = diagnostic.MutationSafety,
+                    Warning = body.AllowUnsafe ? diagnostic.Warning : null
+                };
             }
             catch (Exception ex)
             {
-                return $"Failed to set property: {ex.Message}";
+                return new PropertyMutationResponse
+                {
+                    Error = $"Failed to set property: {ex.Message}",
+                    Id = id,
+                    Property = propName
+                };
             }
         });
 
         PublishUiOperationSpan(
             "action.set-property",
             startedAtUtc,
-            result == "ok",
-            result == "ok" ? null : result,
+            result.Success,
+            result.Success ? null : result.Error,
             id,
-            new { property = propName });
+            new
+            {
+                property = propName,
+                mutationSafety = result.MutationSafety,
+                unsafeOverride = body.AllowUnsafe
+            });
 
-        if (result == "ok")
+        if (result.Success)
         {
             PublishUiEvent("treeChange", new
             {
@@ -2252,9 +2327,13 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             });
         }
 
-        return result == "ok"
-            ? HttpResponse.Json(new { id, property = propName, value = body.Value })
-            : HttpResponse.Error(result);
+        return result.Success
+            ? HttpResponse.Json(result)
+            : HttpResponse.Error(
+                result.Error ?? "Property mutation was rejected.",
+                statusCode: result.Warning is null ? 400 : 409,
+                reason: "property-mutation",
+                details: result);
     }
 
     private static object? ConvertPropertyValue(Type targetType, string value)
@@ -5081,6 +5160,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     {
         if (_disposed) return;
         _disposed = true;
+        DisposeDiagnostics();
         NetworkStore.OnRequestCaptured -= HandleCapturedNetworkRequest;
         AppDomain.CurrentDomain.AssemblyLoad -= OnAssemblyLoaded;
         StopAutoUiHooks();
@@ -7596,6 +7676,7 @@ public class WebViewInputTextRequest
 public class SetPropertyRequest
 {
     public string? Value { get; set; }
+    public bool AllowUnsafe { get; set; }
 }
 
 public class ScrollRequest

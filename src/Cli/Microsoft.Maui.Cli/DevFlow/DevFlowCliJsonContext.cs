@@ -32,4 +32,6 @@ namespace Microsoft.Maui.Cli.DevFlow;
 [JsonSerializable(typeof(ExtensionToolInfo))]
 [JsonSerializable(typeof(ExtensionToolAnnotationsInfo))]
 [JsonSerializable(typeof(Dictionary<string, ExtensionDescriptor>))]
+[JsonSerializable(typeof(DiagnosticProblemBatch))]
+[JsonSerializable(typeof(PropertyMutationResponse))]
 internal sealed partial class DevFlowCliJsonContext : JsonSerializerContext;

@@ -117,6 +117,29 @@ public class AgentOptions
     public bool EnableDetailedUiHooks { get; set; } = false;
 
     /// <summary>
+    /// Whether DevFlow may use runtime reflection to resolve BindableProperty metadata for
+    /// application-defined controls. Built-in MAUI properties use a trim-safe registry first.
+    /// Disable this in optimized diagnostic builds. Default: true.
+    /// </summary>
+    public bool AllowPropertyReflection { get; set; } = true;
+
+    /// <summary>
+    /// Enables the MAUI diagnostics feature switch when the DevFlow agent is registered.
+    /// Defaults to true for the explicitly opted-in development agent.
+    /// </summary>
+    public bool EnableMauiDiagnostics { get; set; } = true;
+
+    /// <summary>
+    /// Captures bounded, metadata-only binding failures for the Problems surface. Default: true.
+    /// </summary>
+    public bool EnableBindingProblems { get; set; } = true;
+
+    /// <summary>
+    /// Maximum number of deduplicated diagnostic problems retained in memory. Default: 256.
+    /// </summary>
+    public int MaxDiagnosticProblems { get; set; } = 256;
+
+    /// <summary>
     /// Whether mutating HTTP endpoints require a valid DevFlow mutation lease.
     /// The lease is broker-authoritative when connected and falls back to the local agent when
     /// no broker is available. Default: true.

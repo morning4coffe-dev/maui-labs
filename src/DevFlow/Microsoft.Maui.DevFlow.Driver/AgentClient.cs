@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -32,6 +33,9 @@ public class AgentClient : IDisposable
     private readonly HttpClient _http;
     private readonly string _baseUrl;
     private readonly AsyncLocal<MutationLeaseIdentity?> _mutationLeaseOverride = new();
+    private readonly ConcurrentDictionary<string, string> _ownedProfilerStopTokens =
+        new(StringComparer.Ordinal);
+    private string? _lastOwnedProfilerSessionId;
     private bool _disposed;
 
     public string BaseUrl => _baseUrl;
@@ -1042,42 +1046,131 @@ public class AgentClient : IDisposable
             throw new InvalidOperationException("A profiler session is already active. Attach to it instead.");
         if (!response.IsSuccessStatusCode || string.IsNullOrWhiteSpace(responseBody))
             return null;
-        return DriverJson.Deserialize<ProfilerSessionEnvelope>(responseBody)?.Session;
+        var envelope = DriverJson.Deserialize<ProfilerSessionEnvelope>(responseBody);
+        if (envelope?.Session is not null)
+        {
+            envelope.Session.StopToken = envelope.StopToken ?? "";
+            if (envelope.Session.IsActive &&
+                !string.IsNullOrWhiteSpace(envelope.Session.SessionId) &&
+                !string.IsNullOrWhiteSpace(envelope.Session.StopToken))
+            {
+                _ownedProfilerStopTokens.Clear();
+                _ownedProfilerStopTokens[envelope.Session.SessionId] = envelope.Session.StopToken;
+                Volatile.Write(ref _lastOwnedProfilerSessionId, envelope.Session.SessionId);
+            }
+        }
+        return envelope?.Session;
     }
 
-    public async Task<ProfilerSessionInfo?> StopProfilerAsync(string? sessionId = null)
+    public Task<ProfilerSessionInfo?> StopProfilerAsync(string? sessionId = null)
+        => StopOwnedProfilerAsync(sessionId);
+
+    public async Task<ProfilerSessionInfo?> StopProfilerAsync(
+        string sessionId,
+        string stopToken)
     {
-        var response = await StopProfilerEnvelopeAsync(sessionId, sampleLimit: 20_000, hotspotLimit: 20);
+        var response = await StopProfilerEnvelopeAsync(
+            sessionId,
+            stopToken,
+            sampleLimit: 20_000,
+            hotspotLimit: 20,
+            throwOnSessionMismatch: false);
         return response?.Session;
     }
 
     private async Task<ProfilerSessionEnvelope?> StopProfilerEnvelopeAsync(
         string? sessionId,
+        string stopToken,
         int sampleLimit,
-        int hotspotLimit)
+        int hotspotLimit,
+        bool throwOnSessionMismatch)
     {
+        if (string.IsNullOrWhiteSpace(sessionId) ||
+            string.IsNullOrWhiteSpace(stopToken))
+        {
+            throw new InvalidOperationException(
+                "Profiler session id and creator stop token are required.");
+        }
         var path =
-            $"{ProfilerApi}/sessions/{Uri.EscapeDataString(sessionId ?? "current")}" +
-            $"?sampleLimit={Math.Clamp(sampleLimit, 1, 20_000)}&hotspotLimit={Math.Clamp(hotspotLimit, 1, 200)}";
+            $"{ProfilerApi}/sessions/{Uri.EscapeDataString(sessionId)}" +
+            $"?sampleLimit={Math.Clamp(sampleLimit, 1, 20_000)}" +
+            $"&hotspotLimit={Math.Clamp(hotspotLimit, 1, 200)}";
         try
         {
             using var response = await SendWithTransientRetriesAsync(
                 HttpMethod.Delete,
-                () => _http.DeleteAsync($"{_baseUrl}{path}"));
+                async () =>
+                {
+                    using var request = new HttpRequestMessage(
+                        HttpMethod.Delete,
+                        $"{_baseUrl}{path}");
+                    request.Headers.TryAddWithoutValidation(
+                        "X-DevFlow-Profiler-Stop-Token",
+                        stopToken);
+                    return await _http.SendAsync(request);
+                });
             if (response.StatusCode == System.Net.HttpStatusCode.NotFound &&
                 !string.IsNullOrWhiteSpace(sessionId))
             {
-                throw new ProfilerSessionMismatchException(sessionId);
+                ForgetOwnedProfilerSession(sessionId);
+                if (throwOnSessionMismatch)
+                    throw new ProfilerSessionMismatchException(sessionId);
+                return null;
             }
             if (!response.IsSuccessStatusCode)
                 return null;
             var responseBody = await response.Content.ReadAsStringAsync();
-            return DriverJson.Deserialize<ProfilerSessionEnvelope>(responseBody);
+            var envelope = DriverJson.Deserialize<ProfilerSessionEnvelope>(responseBody);
+            if (envelope?.Session?.IsActive == false)
+                ForgetOwnedProfilerSession(sessionId);
+            return envelope;
         }
         catch (Exception ex) when (IsExpectedClientException(ex))
         {
             return null;
         }
+    }
+
+    private async Task<ProfilerSessionInfo?> StopOwnedProfilerAsync(string? sessionId)
+    {
+        if (!TryResolveOwnedProfilerSession(sessionId, out var ownedSessionId, out var stopToken))
+        {
+            throw new InvalidOperationException(
+                "This AgentClient did not create the requested profiler session. "
+                + "Use the overload that supplies the creator stop token.");
+        }
+
+        var stopped = await StopProfilerAsync(ownedSessionId, stopToken);
+        if (stopped is null)
+        {
+            throw new InvalidOperationException(
+                $"Profiler session '{ownedSessionId}' could not be stopped.");
+        }
+        return stopped;
+    }
+
+    private bool TryResolveOwnedProfilerSession(
+        string? sessionId,
+        out string ownedSessionId,
+        out string stopToken)
+    {
+        ownedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? Volatile.Read(ref _lastOwnedProfilerSessionId) ?? ""
+            : sessionId;
+        stopToken = "";
+        if (ownedSessionId.Length == 0 ||
+            !_ownedProfilerStopTokens.TryGetValue(ownedSessionId, out var cachedStopToken))
+        {
+            return false;
+        }
+        stopToken = cachedStopToken;
+        return true;
+    }
+
+    private void ForgetOwnedProfilerSession(string sessionId)
+    {
+        _ownedProfilerStopTokens.TryRemove(sessionId, out _);
+        Interlocked.CompareExchange(ref _lastOwnedProfilerSessionId, null, sessionId);
     }
 
     public async Task<ProfilerBatch?> GetProfilerSamplesAsync(
@@ -1266,15 +1359,39 @@ public class AgentClient : IDisposable
     }
 
     /// <summary>Stops the profiler session and returns the final triage summary for the window.</summary>
-    public async Task<PerformanceSummary> StopPerformanceSessionAsync(
+    public Task<PerformanceSummary> StopPerformanceSessionAsync(
         string? sessionId = null,
+        int sampleLimit = 20_000,
+        int hotspotLimit = 10)
+    {
+        if (!TryResolveOwnedProfilerSession(sessionId, out var ownedSessionId, out var stopToken))
+        {
+            return Task.FromException<PerformanceSummary>(new InvalidOperationException(
+                "This AgentClient did not create the requested profiler session. "
+                + "Use the overload that supplies the creator stop token."));
+        }
+        return StopPerformanceSessionAsync(
+            ownedSessionId,
+            stopToken,
+            sampleLimit,
+            hotspotLimit);
+    }
+
+    public async Task<PerformanceSummary> StopPerformanceSessionAsync(
+        string sessionId,
+        string stopToken,
         int sampleLimit = 20_000,
         int hotspotLimit = 10)
     {
         sampleLimit = Math.Clamp(sampleLimit, 1, 20_000);
         hotspotLimit = Math.Clamp(hotspotLimit, 1, 200);
 
-        var stopped = await StopProfilerEnvelopeAsync(sessionId, sampleLimit, hotspotLimit);
+        var stopped = await StopProfilerEnvelopeAsync(
+            sessionId,
+            stopToken,
+            sampleLimit,
+            hotspotLimit,
+            throwOnSessionMismatch: true);
         var session = stopped?.Session;
         if (!string.IsNullOrWhiteSpace(sessionId) && session is null)
             throw new InvalidOperationException($"Profiler session '{sessionId}' could not be stopped.");
@@ -1723,6 +1840,8 @@ public class AgentClient : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _ownedProfilerStopTokens.Clear();
+        Volatile.Write(ref _lastOwnedProfilerSessionId, null);
         _http.Dispose();
     }
 
@@ -1771,6 +1890,8 @@ public class AgentClient : IDisposable
     {
         [System.Text.Json.Serialization.JsonPropertyName("session")]
         public ProfilerSessionInfo? Session { get; set; }
+        [System.Text.Json.Serialization.JsonPropertyName("stopToken")]
+        public string? StopToken { get; set; }
         [System.Text.Json.Serialization.JsonPropertyName("batch")]
         public ProfilerBatch? Batch { get; set; }
         [System.Text.Json.Serialization.JsonPropertyName("hotspots")]
@@ -2014,6 +2135,8 @@ public class ProfilerSessionInfo
     public int SampleIntervalMs { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("isActive")]
     public bool IsActive { get; set; }
+    [System.Text.Json.Serialization.JsonIgnore]
+    public string StopToken { get; set; } = "";
 }
 
 public class ProfilerSample
@@ -2040,6 +2163,10 @@ public class ProfilerSample
     public long? NativeMemoryBytes { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("nativeMemoryKind")]
     public string? NativeMemoryKind { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("processMemoryBytes")]
+    public long? ProcessMemoryBytes { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("processMemoryKind")]
+    public string? ProcessMemoryKind { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("cpuPercent")]
     public double? CpuPercent { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("threadCount")]
@@ -2172,6 +2299,8 @@ public class ProfilerCapabilities
     public bool ManagedMemorySupported { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("nativeMemorySupported")]
     public bool NativeMemorySupported { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("processMemorySupported")]
+    public bool ProcessMemorySupported { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("gcSupported")]
     public bool GcSupported { get; set; }
     [System.Text.Json.Serialization.JsonPropertyName("cpuPercentSupported")]

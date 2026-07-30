@@ -617,7 +617,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
     public async Task StopAsync()
     {
-        await StopProfilerAsync();
+        await StopProfilerAsync(force: true);
         await _server.StopAsync();
     }
 
@@ -3967,6 +3967,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             Platform = capabilities.Platform,
             ManagedMemorySupported = capabilities.ManagedMemorySupported,
             NativeMemorySupported = capabilities.NativeMemorySupported,
+            ProcessMemorySupported = capabilities.ProcessMemorySupported,
             GcSupported = capabilities.GcSupported,
             CpuPercentSupported = capabilities.CpuPercentSupported,
             FpsSupported = capabilities.FpsSupported,
@@ -4021,7 +4022,12 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                 reason: "profiler-active",
                 details: new { sessionId = session.SessionId });
         }
-        return HttpResponse.Json(new { session, capabilities = BuildProfilerCapabilitiesPayload() });
+        return HttpResponse.Json(new
+        {
+            session,
+            stopToken = session.StopToken,
+            capabilities = BuildProfilerCapabilitiesPayload()
+        });
     }
 
     private async Task<HttpResponse> HandleProfilerStop(HttpRequest request)
@@ -4040,10 +4046,26 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             out var parsedHotspotLimit)
             ? Math.Clamp(parsedHotspotLimit, 1, 200)
             : 20;
+        request.Headers.TryGetValue("X-DevFlow-Profiler-Stop-Token", out var stopToken);
+        if (string.IsNullOrWhiteSpace(stopToken))
+        {
+            return HttpResponse.Error(
+                "The profiler creator stop token is required.",
+                statusCode: 403,
+                reason: "profiler-owner");
+        }
+        if (!IsValidProfilerStopToken(_profilerSessions.CurrentSession, stopToken))
+        {
+            return HttpResponse.Error(
+                "The profiler stop token does not belong to this session.",
+                statusCode: 403,
+                reason: "profiler-owner");
+        }
         var stopped = await StopProfilerAsync(
             requestedSessionId.Equals("current", StringComparison.OrdinalIgnoreCase)
                 ? null
                 : requestedSessionId,
+            stopToken,
             sampleLimit,
             hotspotLimit);
         if (stopped is null)
@@ -4178,8 +4200,10 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
     private async Task<ProfilerStopResult?> StopProfilerAsync(
         string? expectedSessionId = null,
+        string? stopToken = null,
         int sampleLimit = 20_000,
-        int hotspotLimit = 20)
+        int hotspotLimit = 20,
+        bool force = false)
     {
         await _profilerStateGate.WaitAsync();
         try
@@ -4188,6 +4212,10 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             if (!string.IsNullOrWhiteSpace(expectedSessionId) &&
                 (current is null ||
                  !string.Equals(current.SessionId, expectedSessionId, StringComparison.Ordinal)))
+            {
+                return null;
+            }
+            if (!force && !IsValidProfilerStopToken(current, stopToken))
             {
                 return null;
             }
@@ -4231,6 +4259,23 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         ProfilerSessionInfo? Session,
         ProfilerBatch Batch,
         List<ProfilerHotspot> Hotspots);
+
+    private static bool IsValidProfilerStopToken(
+        ProfilerSessionInfo? session,
+        string? stopToken)
+    {
+        if (session is null ||
+            string.IsNullOrWhiteSpace(session.StopToken) ||
+            string.IsNullOrWhiteSpace(stopToken))
+        {
+            return false;
+        }
+
+        var expected = Encoding.UTF8.GetBytes(session.StopToken);
+        var actual = Encoding.UTF8.GetBytes(stopToken);
+        return expected.Length == actual.Length &&
+            CryptographicOperations.FixedTimeEquals(expected, actual);
+    }
 
     private async Task RunProfilerLoopAsync(int intervalMs, CancellationToken ct)
     {

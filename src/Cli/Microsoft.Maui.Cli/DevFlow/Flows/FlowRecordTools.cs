@@ -82,7 +82,8 @@ public sealed class FlowRecordTools
         try
         {
             using var agent = await session.GetAgentClientAsync(agentPort);
-            var status = await agent.ControlMutationRecordingAsync("status");
+            var status = await agent.ControlMutationRecordingAsync(
+                "status", null, null, null, null, recordingId);
             if (!status.Ok)
                 return Error(status.Error ?? "No shared recording is active.");
             if (!string.Equals(recordingId, status.RecordingId, StringComparison.Ordinal))
@@ -300,7 +301,8 @@ public sealed class FlowRecordTools
         try
         {
             using var agent = await session.GetAgentClientAsync(agentPort);
-            var status = await agent.ControlMutationRecordingAsync("status");
+            var status = await agent.ControlMutationRecordingAsync(
+                "status", null, null, null, null, recordingId);
             if (!status.Ok || !string.Equals(recordingId, status.RecordingId, StringComparison.Ordinal))
                 return Error(status.Error ?? $"Unknown recordingId '{recordingId}'.");
 
@@ -366,7 +368,8 @@ public sealed class FlowRecordTools
         try
         {
             using var agent = await session.GetAgentClientAsync(agentPort);
-            var result = await agent.ControlMutationRecordingAsync("status");
+            var result = await agent.ControlMutationRecordingAsync(
+                "status", null, null, null, null, recordingId);
             if (!string.IsNullOrWhiteSpace(recordingId) &&
                 !string.Equals(recordingId, result.RecordingId, StringComparison.Ordinal))
                 return Error($"Unknown recordingId '{recordingId}'.");
@@ -391,7 +394,8 @@ public sealed class FlowRecordTools
         try
         {
             using var agent = await session.GetAgentClientAsync(agentPort);
-            var status = await agent.ControlMutationRecordingAsync("status");
+            var status = await agent.ControlMutationRecordingAsync(
+                "status", null, null, null, null, recordingId);
             if (!string.Equals(recordingId, status.RecordingId, StringComparison.Ordinal))
                 return Error($"Unknown recordingId '{recordingId}'.");
             return Json(await agent.ControlMutationRecordingAsync("cancel", null, null, null, null, recordingId));

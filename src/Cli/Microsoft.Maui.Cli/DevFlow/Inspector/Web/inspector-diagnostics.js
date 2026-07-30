@@ -143,13 +143,22 @@ export function formatPerformanceSummary(summary) {
       detail: `peak ${formatBytes(memory.managedPeakBytes)} · delta ${formatDelta(memory.managedDeltaBytes)}`,
     },
     {
-      label: 'Native memory',
+      label: 'Process memory',
+      value: memory.processSupported && memory.processEndBytes !== null && memory.processEndBytes !== undefined
+        ? `${formatBytes(memory.processStartBytes)} → ${formatBytes(memory.processEndBytes)}`
+        : 'not observable',
+      detail: memory.processSupported && memory.processEndBytes !== null && memory.processEndBytes !== undefined
+        ? `${text(memory.processKind, 'unknown')} · peak ${formatBytes(memory.processPeakBytes)} · delta ${formatDelta(memory.processDeltaBytes)}`
+        : 'This platform does not expose a process resident/physical memory counter.',
+    },
+    {
+      label: 'Native heap',
       value: memory.nativeSupported && memory.nativeEndBytes !== null && memory.nativeEndBytes !== undefined
         ? `${formatBytes(memory.nativeStartBytes)} → ${formatBytes(memory.nativeEndBytes)}`
         : 'not observable',
       detail: memory.nativeSupported && memory.nativeEndBytes !== null && memory.nativeEndBytes !== undefined
         ? `${text(memory.nativeKind, 'unknown')} · peak ${formatBytes(memory.nativePeakBytes)} · delta ${formatDelta(memory.nativeDeltaBytes)}`
-        : text(memory.nativeUnsupportedReason, 'This platform does not expose native allocation counters.'),
+        : text(memory.nativeUnsupportedReason, 'This platform does not expose a native-heap-specific counter.'),
     },
     {
       label: 'GC collections',

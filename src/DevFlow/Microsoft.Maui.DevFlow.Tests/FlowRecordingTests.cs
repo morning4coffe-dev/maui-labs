@@ -14,8 +14,17 @@ namespace Microsoft.Maui.DevFlow.Tests;
 /// </summary>
 public class FlowRecordingTests : System.IDisposable
 {
+    private readonly List<string> _temporaryRoots = [];
+
     public FlowRecordingTests() => FlowRecordingStore.Instance.Reset();
-    public void Dispose() => FlowRecordingStore.Instance.Reset();
+    public void Dispose()
+    {
+        FlowRecordingStore.Instance.Reset();
+        foreach (var root in _temporaryRoots)
+        {
+            try { Directory.Delete(root, recursive: true); } catch { }
+        }
+    }
 
     // ── FlowRecorder ──
 
@@ -418,7 +427,7 @@ public class FlowRecordingTests : System.IDisposable
     [Fact]
     public void BrokerCoordinator_CollectsBrowserCanvasAndMcpMutations_InOneRecording()
     {
-        var coordinator = new BrokerFlowCoordinator();
+        var coordinator = CreateIsolatedCoordinator();
         var started = coordinator.Start("agent", "cross-host", "App", "Windows", null);
 
         Assert.True(started.Ok, started.Error);
@@ -447,6 +456,113 @@ public class FlowRecordingTests : System.IDisposable
         var parsed = FlowMarkdown.Parse(stopped.Markdown!);
         Assert.True(parsed.Ok, parsed.Error);
         Assert.Equal(["tap", "fill", "navigate"], parsed.Flow!.Steps.Select(step => step.Action));
+    }
+
+    [Fact]
+    public void BrokerCoordinator_IsolatesConcurrentInstancesOfTheSamePackage()
+    {
+        var coordinator = CreateIsolatedCoordinator();
+        const string stable = "same-package-and-tfm";
+        Assert.True(coordinator.Start(
+            "process-a", "A", "App", "Windows", null, "session", stable).Ok);
+        Assert.True(coordinator.Start(
+            "process-b", "B", "App", "Windows", null, "session", stable).Ok);
+
+        Assert.True(coordinator.Observe("process-a", new FlowObservation
+        {
+            Action = FlowActions.Tap,
+            AutomationId = "OnlyA"
+        }).Ok);
+        Assert.True(coordinator.Observe("process-b", new FlowObservation
+        {
+            Action = FlowActions.Tap,
+            AutomationId = "OnlyB"
+        }).Ok);
+
+        var a = FlowMarkdown.Parse(coordinator.Stop("process-a").Markdown!).Flow!;
+        var b = FlowMarkdown.Parse(coordinator.Stop("process-b").Markdown!).Flow!;
+        Assert.Equal("OnlyA", Assert.Single(a.Steps).Target!.AutomationId);
+        Assert.Equal("OnlyB", Assert.Single(b.Steps).Target!.AutomationId);
+    }
+
+    [Fact]
+    public void BrokerCoordinator_AdoptsExactlyOneDisconnectedRebuildOrphan()
+    {
+        var coordinator = CreateIsolatedCoordinator();
+        const string stable = "same-package-and-tfm";
+        var started = coordinator.Start(
+            "old-process", "resume", "App", "Windows", null, "session", stable);
+        Assert.True(started.Ok);
+        Assert.True(coordinator.Observe("old-process", new FlowObservation
+        {
+            Action = FlowActions.Tap,
+            AutomationId = "BeforeRebuild"
+        }).Ok);
+        coordinator.RemoveAgent("old-process");
+
+        Assert.True(coordinator.ConnectAgent(
+            "new-process", stable, "session", started.RecordingId));
+        var resumed = coordinator.Status("new-process");
+
+        Assert.True(resumed.Recording);
+        Assert.Equal(started.RecordingId, resumed.RecordingId);
+        Assert.True(coordinator.Stop("new-process", resumed.RecordingId).Ok);
+    }
+
+    [Fact]
+    public void BrokerCoordinator_DoesNotAdoptFromAStillConnectedInstance()
+    {
+        var coordinator = CreateIsolatedCoordinator();
+        const string stable = "same-package-and-tfm";
+        Assert.True(coordinator.Start(
+            "process-a", "A", "App", "Windows", null, "session", stable).Ok);
+
+        var started = coordinator.Status("process-a");
+        Assert.False(coordinator.ConnectAgent(
+            "process-b", stable, "session", started.RecordingId));
+        Assert.False(coordinator.Status("process-b").Recording);
+        Assert.True(coordinator.Status("process-a").Recording);
+    }
+
+    [Fact]
+    public void BrokerCoordinator_DoesNotAdoptDisconnectedRecordingWithoutCapability()
+    {
+        var coordinator = CreateIsolatedCoordinator();
+        const string stable = "same-package-and-tfm";
+        var started = coordinator.Start(
+            "process-a", "A", "App", "Windows", null, "session", stable);
+        Assert.True(started.Ok);
+        coordinator.RemoveAgent("process-a");
+
+        Assert.False(coordinator.ConnectAgent("process-c", stable, "session"));
+        Assert.False(coordinator.Status("process-c").Recording);
+        Assert.True(coordinator.Status("process-a").Recording);
+        Assert.False(coordinator.ConnectAgent(
+            "process-c", stable, "session", "000000000000000000000000"));
+        Assert.True(coordinator.Status("process-a").Recording);
+    }
+
+    [Fact]
+    public void BrokerCoordinator_RecordingCapabilitySelectsTheIntendedDisconnectedInstance()
+    {
+        var coordinator = CreateIsolatedCoordinator();
+        const string stable = "same-package-and-tfm";
+        var a = coordinator.Start(
+            "process-a", "A", "App", "Windows", null, "session", stable);
+        var b = coordinator.Start(
+            "process-b", "B", "App", "Windows", null, "session", stable);
+        Assert.True(a.Ok);
+        Assert.True(b.Ok);
+        coordinator.RemoveAgent("process-a");
+        coordinator.RemoveAgent("process-b");
+
+        Assert.True(coordinator.ConnectAgent(
+            "process-c", stable, "session", b.RecordingId));
+        var resumed = coordinator.Status("process-c", b.RecordingId);
+
+        Assert.True(resumed.Recording);
+        Assert.Equal(b.RecordingId, resumed.RecordingId);
+        Assert.True(coordinator.Status("process-a", a.RecordingId).Recording);
     }
 
     [Fact]
@@ -731,6 +847,18 @@ public class FlowRecordingTests : System.IDisposable
     // ── helpers ──
 
     private static FlowSelector Sel(string automationId) => new() { AutomationId = automationId };
+
+    private BrokerFlowCoordinator CreateIsolatedCoordinator()
+    {
+        var root = Path.Combine(
+            AppContext.BaseDirectory,
+            "flow-recording-tests",
+            Guid.NewGuid().ToString("N"));
+        _temporaryRoots.Add(root);
+        return new BrokerFlowCoordinator(
+            new FlowRecordingStore(),
+            new FlowRecordingSpoolStore(root));
+    }
 
     private static string StartRecording(string name = "s")
     {

@@ -130,12 +130,8 @@ public class InspectorDiagnosticsRouteTests
             .GetField("_client", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(inspector)!;
         client.AutoAcquireMutationLease = false;
-        typeof(InspectorServer)
-            .GetField("_performanceSessionId", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(inspector, "s1");
-        typeof(InspectorServer)
-            .GetField("_performanceLeaseId", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(inspector, "browser-lease");
+        inspector.SetPerformanceOwnership(
+            "s1", "qa-stop-token", "browser-lease", "web-inspector", "Browser");
         inspector.Start();
 
         await inspector.StopAsync();
@@ -155,12 +151,8 @@ public class InspectorDiagnosticsRouteTests
             .GetField("_client", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(inspector)!;
         client.AutoAcquireMutationLease = false;
-        typeof(InspectorServer)
-            .GetField("_performanceSessionId", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(inspector, "s1");
-        typeof(InspectorServer)
-            .GetField("_performanceLeaseId", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(inspector, "browser-lease");
+        inspector.SetPerformanceOwnership(
+            "s1", "qa-stop-token", "browser-lease", "web-inspector", "Browser");
         inspector.Start();
         try
         {
@@ -171,11 +163,7 @@ public class InspectorDiagnosticsRouteTests
             using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 
             Assert.False(body.RootElement.GetProperty("ok").GetBoolean());
-            Assert.Equal(
-                "s1",
-                typeof(InspectorServer)
-                    .GetField("_performanceSessionId", BindingFlags.Instance | BindingFlags.NonPublic)!
-                    .GetValue(inspector));
+            Assert.Equal("s1", inspector.OwnedPerformanceSessionId);
         }
         finally
         {
@@ -195,9 +183,8 @@ public class InspectorDiagnosticsRouteTests
             .GetField("_client", BindingFlags.Instance | BindingFlags.NonPublic)!
             .GetValue(inspector)!;
         client.AutoAcquireMutationLease = false;
-        typeof(InspectorServer)
-            .GetField("_performanceSessionId", BindingFlags.Instance | BindingFlags.NonPublic)!
-            .SetValue(inspector, "s1");
+        inspector.SetPerformanceOwnership(
+            "s1", "qa-stop-token", "browser-lease", "web-inspector", "Browser");
         inspector.Start();
         try
         {
@@ -208,11 +195,7 @@ public class InspectorDiagnosticsRouteTests
             using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
 
             Assert.False(body.RootElement.GetProperty("ok").GetBoolean());
-            Assert.Equal(
-                "s1",
-                typeof(InspectorServer)
-                    .GetField("_performanceSessionId", BindingFlags.Instance | BindingFlags.NonPublic)!
-                    .GetValue(inspector));
+            Assert.Equal("s1", inspector.OwnedPerformanceSessionId);
         }
         finally
         {
@@ -220,6 +203,53 @@ public class InspectorDiagnosticsRouteTests
             await inspector.StopAsync();
             inspector.Dispose();
         }
+    }
+
+    [Fact]
+    public async Task ReplacedSnapshotSession_ClearsInspectorProfilerCapability()
+    {
+        await using var agent = new FakeDiagnosticsAgent();
+        var port = FreePort();
+        var inspector = new InspectorServer(port, "127.0.0.1", agent.Port);
+        var client = (AgentClient)typeof(InspectorServer)
+            .GetField("_client", BindingFlags.Instance | BindingFlags.NonPublic)!
+            .GetValue(inspector)!;
+        client.AutoAcquireMutationLease = false;
+        inspector.SetPerformanceOwnership(
+            "s1", "qa-stop-token", "browser-lease", "web-inspector", "Browser");
+        inspector.Start();
+        try
+        {
+            using var http = CreateTokenClient(inspector);
+            var response = await http.PostAsync(
+                $"http://127.0.0.1:{port}/api/performance/snapshot",
+                Json("{}"));
+            using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+            Assert.False(body.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Null(inspector.OwnedPerformanceSessionId);
+            Assert.Null(inspector.OwnedPerformanceStopToken);
+        }
+        finally
+        {
+            await inspector.StopAsync();
+            inspector.Dispose();
+        }
+    }
+
+    [Fact]
+    public void StalePerformanceCompletion_DoesNotClearNewerOwnership()
+    {
+        using var inspector = new InspectorServer(FreePort(), "127.0.0.1", FreePort());
+        inspector.SetPerformanceOwnership(
+            "old", "old-token", "old-lease", "web-inspector", "Old");
+        inspector.SetPerformanceOwnership(
+            "new", "new-token", "new-lease", "web-inspector", "New");
+
+        Assert.False(inspector.TryClearPerformanceOwnership("old", "old-token"));
+        Assert.Equal("new", inspector.OwnedPerformanceSessionId);
+        Assert.Equal("new-token", inspector.OwnedPerformanceStopToken);
+        Assert.True(inspector.TryClearPerformanceOwnership("new", "new-token"));
     }
 
     private static HttpClient CreateTokenClient(InspectorServer inspector)

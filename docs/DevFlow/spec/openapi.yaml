@@ -1091,7 +1091,8 @@ paths:
       summary: Start profiler session
       description: >
         Starts a new profiling session with the given sample interval. Returns 409 instead of
-        adopting a session that another caller already started.
+        adopting a session that another caller already started. The response includes an opaque
+        creator stop token that is not exposed by status or read-only attachment APIs.
       requestBody:
         required: true
         content:
@@ -1150,6 +1151,12 @@ paths:
           description: Profiler session ID.
           schema:
             type: string
+        - name: X-DevFlow-Profiler-Stop-Token
+          in: header
+          required: true
+          description: Opaque creator capability returned by the successful start response.
+          schema:
+            type: string
         - name: sampleLimit
           in: query
           schema:
@@ -1173,6 +1180,12 @@ paths:
                 $ref: "./schemas/profiler.json#/$defs/ProfilerStopResponse"
         "404":
           $ref: "#/components/responses/NotFound"
+        "403":
+          description: Missing or invalid profiler creator stop token.
+          content:
+            application/json:
+              schema:
+                $ref: "./schemas/common.json#/$defs/ProblemDetails"
         "500":
           $ref: "#/components/responses/InternalError"
 

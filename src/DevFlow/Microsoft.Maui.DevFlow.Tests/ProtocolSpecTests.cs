@@ -92,6 +92,30 @@ public class ProtocolSpecTests
     }
 
     [Fact]
+    public void ProtocolSpecs_RequireProfilerOwnershipAndSeparateProcessMemory()
+    {
+        var openApi = LoadDocument(Path.Combine(SpecRoot.Value, "openapi.yaml")).AsObject();
+        var stopParameters = openApi["paths"]!["/api/v1/profiler/sessions/{id}"]!["delete"]!
+            ["parameters"]!.AsArray();
+        var stopToken = Assert.Single(
+            stopParameters,
+            parameter => parameter?["name"]?.GetValue<string>() == "X-DevFlow-Profiler-Stop-Token");
+        Assert.Equal("header", stopToken!["in"]!.GetValue<string>());
+        Assert.Equal("true", stopToken!["required"]!.GetValue<string>());
+
+        var profiler = LoadDocument(Path.Combine(SpecRoot.Value, "schemas", "profiler.json"));
+        var sampleProperties = profiler["$defs"]!["ProfilerSample"]!["properties"]!.AsObject();
+        Assert.True(sampleProperties.ContainsKey("processMemoryBytes"));
+        Assert.True(sampleProperties.ContainsKey("processMemoryKind"));
+
+        var capabilityRequired = profiler["$defs"]!["ProfilerCapabilities"]!["required"]!.AsArray();
+        Assert.Contains(capabilityRequired, value => value?.GetValue<string>() == "processMemorySupported");
+
+        var startRequired = profiler["$defs"]!["ProfilerStartResponse"]!["required"]!.AsArray();
+        Assert.Contains(startRequired, value => value?.GetValue<string>() == "stopToken");
+    }
+
+    [Fact]
     public void ProtocolSpecFiles_AreValidYamlOrJson()
     {
         var failures = new List<string>();

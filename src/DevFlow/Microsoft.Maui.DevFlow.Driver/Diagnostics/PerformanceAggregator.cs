@@ -88,6 +88,9 @@ public static class PerformanceAggregator
                 : session.StartedAtUtc.ToString("O", CultureInfo.InvariantCulture),
             SampleIntervalMs = session?.SampleIntervalMs ?? 0,
             SampleCount = samples.Count,
+            StopToken = string.IsNullOrWhiteSpace(session?.StopToken)
+                ? null
+                : session.StopToken,
         };
 
         if (samples.Count >= 2)
@@ -103,6 +106,7 @@ public static class PerformanceAggregator
         var memory = new PerformanceMemory
         {
             NativeSupported = capabilities?.NativeMemorySupported ?? false,
+            ProcessSupported = capabilities?.ProcessMemorySupported ?? false,
         };
 
         if (samples.Count == 0)
@@ -112,6 +116,24 @@ public static class PerformanceAggregator
         memory.ManagedEndBytes = samples[^1].ManagedBytes;
         memory.ManagedPeakBytes = samples.Max(sample => sample.ManagedBytes);
         memory.ManagedDeltaBytes = memory.ManagedEndBytes - memory.ManagedStartBytes;
+
+        var process = samples.Where(sample => sample.ProcessMemoryBytes.HasValue).ToList();
+        if (process.Count > 0)
+        {
+            var processKinds = process
+                .Select(sample => sample.ProcessMemoryKind ?? "unknown")
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            if (processKinds.Length == 1)
+            {
+                memory.ProcessSupported = true;
+                memory.ProcessKind = processKinds[0];
+                memory.ProcessStartBytes = process[0].ProcessMemoryBytes;
+                memory.ProcessEndBytes = process[^1].ProcessMemoryBytes;
+                memory.ProcessPeakBytes = process.Max(sample => sample.ProcessMemoryBytes!.Value);
+                memory.ProcessDeltaBytes = memory.ProcessEndBytes - memory.ProcessStartBytes;
+            }
+        }
 
         var native = samples.Where(sample => sample.NativeMemoryBytes.HasValue).ToList();
         if (native.Count == 0)
@@ -126,7 +148,7 @@ public static class PerformanceAggregator
             memory.NativeSupported = false;
             memory.NativeKindsMixed = true;
             memory.NativeUnsupportedReason =
-                "Native memory samples used incompatible measurement kinds, so no start/end/peak/delta was calculated.";
+                "Native-heap samples used incompatible measurement kinds, so no start/end/peak/delta was calculated.";
             return memory;
         }
 
@@ -303,6 +325,7 @@ public static class PerformanceAggregator
             ReadOnly = status?.Agent?.ReadOnly ?? false,
             ManagedMemorySupported = capabilities?.ManagedMemorySupported ?? false,
             NativeMemorySupported = capabilities?.NativeMemorySupported ?? false,
+            ProcessMemorySupported = capabilities?.ProcessMemorySupported ?? false,
             GcSupported = capabilities?.GcSupported ?? false,
             CpuSupported = capabilities?.CpuPercentSupported ?? false,
             ThreadCountSupported = capabilities?.ThreadCountSupported ?? false,
@@ -322,7 +345,9 @@ public static class PerformanceAggregator
         if (capability.FrameTimingsEstimated)
             capability.Limitations.Add("This agent estimates frame timings; estimated frame rates are deliberately withheld.");
         if (!capability.NativeMemorySupported)
-            capability.Limitations.Add("Native (non-GC) memory is not observable on this platform.");
+            capability.Limitations.Add("A native-heap-specific counter is not observable on this platform.");
+        if (!capability.ProcessMemorySupported)
+            capability.Limitations.Add("Process resident/physical memory is not observable on this platform.");
         if (!capability.CpuSupported)
             capability.Limitations.Add("Process CPU percentage is not observable on this platform.");
         if (!capability.LowPerturbation)

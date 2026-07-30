@@ -84,7 +84,7 @@
             "integer",
             "null"
           ],
-          "description": "Native (unmanaged) memory usage in bytes.",
+          "description": "Native-heap-specific memory usage in bytes. Process resident or physical footprint is reported separately.",
           "minimum": 0
         },
         "nativeMemoryKind": {
@@ -92,7 +92,22 @@
             "string",
             "null"
           ],
-          "description": "Kind of native memory measurement (e.g. 'resident', 'virtual', 'private')."
+          "description": "Kind of native-heap-specific measurement (for example android.native-heap)."
+        },
+        "processMemoryBytes": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "Total process resident or physical footprint in bytes. This includes managed pages and must not be interpreted as native heap.",
+          "minimum": 0
+        },
+        "processMemoryKind": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Kind of process memory measurement (for example process.working-set or apple.phys-footprint)."
         },
         "cpuPercent": {
           "type": [
@@ -479,6 +494,7 @@
         "platform",
         "managedMemorySupported",
         "nativeMemorySupported",
+        "processMemorySupported",
         "gcSupported",
         "cpuPercentSupported",
         "fpsSupported",
@@ -511,7 +527,11 @@
         },
         "nativeMemorySupported": {
           "type": "boolean",
-          "description": "Whether native memory measurement is supported."
+          "description": "Whether a native-heap-specific memory measurement is supported."
+        },
+        "processMemorySupported": {
+          "type": "boolean",
+          "description": "Whether process resident/physical memory measurement is supported."
         },
         "gcSupported": {
           "type": "boolean",
@@ -551,11 +571,16 @@
         "type": "object",
         "required": [
           "session",
+          "stopToken",
           "capabilities"
         ],
         "properties": {
           "session": {
             "$ref": "#/$defs/ProfilerSessionInfo"
+          },
+          "stopToken": {
+            "type": "string",
+            "description": "Opaque creator capability required to stop this profiler session. It is returned only by start."
           },
           "capabilities": {
             "$ref": "#/$defs/ProfilerCapabilities"

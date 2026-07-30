@@ -69,6 +69,7 @@ internal static class MockAgentResponses
           "platform": "MacCatalyst",
           "managedMemorySupported": true,
           "nativeMemorySupported": false,
+          "processMemorySupported": true,
           "gcSupported": true,
           "cpuPercentSupported": true,
           "fpsSupported": false,
@@ -82,6 +83,7 @@ internal static class MockAgentResponses
 
     public const string ProfilerSessionEnvelope = """
         {
+          "stopToken": "qa-stop-token",
           "session": {
             "sessionId": "session-1",
             "startedAtUtc": "2026-04-01T12:00:00Z",

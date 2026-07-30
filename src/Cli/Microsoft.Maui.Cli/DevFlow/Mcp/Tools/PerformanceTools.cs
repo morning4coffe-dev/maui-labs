@@ -23,8 +23,8 @@ public sealed class PerformanceTools
     [McpServerTool(Name = "maui_performance_start"),
      Description(
          "Start a performance triage session on the connected MAUI app and return the initial capability and " +
-     "taint report. Preserve session.sessionId, drive the interaction you care about, then pass that id to " +
-     "maui_performance_snapshot or maui_performance_stop. " + TriageContract)]
+     "taint report. Preserve session.sessionId and session.stopToken, drive the interaction you care about, " +
+     "then pass the id to maui_performance_snapshot and both values to maui_performance_stop. " + TriageContract)]
     public static async Task<string> StartPerformance(
         McpAgentSession session,
         [Description("Agent HTTP port (optional if only one agent connected)")] int? agentPort = null,
@@ -37,8 +37,10 @@ public sealed class PerformanceTools
 
     [McpServerTool(Name = "maui_performance_snapshot"),
      Description(
-         "Summarize the running performance triage session without stopping it: managed/native memory start, " +
-         "end, peak and delta, GC deltas, CPU average and peak, thread peak, native frame statistics when " +
+         "Summarize the running performance triage session without stopping it: managed, process-footprint, " +
+         "and native-heap memory start, " +
+         "end, peak and delta for managed, process, and native-heap memory where supported, GC deltas, " +
+         "CPU average and peak, thread peak, native frame statistics when " +
          "supported, top hotspots, marker counts, and buffer-loss metadata. " + TriageContract)]
     public static async Task<string> SnapshotPerformance(
         McpAgentSession session,
@@ -58,12 +60,17 @@ public sealed class PerformanceTools
     public static async Task<string> StopPerformance(
         McpAgentSession session,
         [Description("Profiler session id returned by maui_performance_start; required so this call never stops another session")] string sessionId,
+        [Description("Opaque creator stop token returned by maui_performance_start; required to stop this session")] string stopToken,
         [Description("Agent HTTP port (optional if only one agent connected)")] int? agentPort = null,
         [Description("Maximum profiler samples to aggregate (1-20000, default: 20000)")] int sampleLimit = 20_000,
         [Description("Number of top hotspots to include (1-200, default: 10)")] int hotspotLimit = 10)
     {
         using var agent = await session.GetAgentClientAsync(agentPort);
-        var summary = await agent.StopPerformanceSessionAsync(sessionId, sampleLimit, hotspotLimit);
+        var summary = await agent.StopPerformanceSessionAsync(
+            sessionId,
+            stopToken,
+            sampleLimit,
+            hotspotLimit);
         return CliJson.SerializeUntyped(summary, indented: false);
     }
 }

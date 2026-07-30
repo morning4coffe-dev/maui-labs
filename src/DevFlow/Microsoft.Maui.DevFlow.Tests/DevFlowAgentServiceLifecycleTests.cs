@@ -207,9 +207,15 @@ public class DevFlowAgentServiceLifecycleTests
         Assert.True(started.Session.Active);
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
             client.StartPerformanceSessionAsync(60_000));
+        Assert.Null(await client.StopProfilerAsync(
+            started.Session.SessionId!,
+            "wrong-stop-token"));
+        Assert.True((await client.GetProfilerSessionAsync())!.IsActive);
         await Task.Delay(50);
 
-        var stopped = await client.StopPerformanceSessionAsync(started.Session.SessionId);
+        var stopped = await client.StopPerformanceSessionAsync(
+            started.Session.SessionId!,
+            started.Session.StopToken!);
         Assert.False(stopped.Session.Active);
         Assert.True(stopped.Session.SampleCount >= 2);
         Assert.True(stopped.Session.SampledDurationMs > 0);

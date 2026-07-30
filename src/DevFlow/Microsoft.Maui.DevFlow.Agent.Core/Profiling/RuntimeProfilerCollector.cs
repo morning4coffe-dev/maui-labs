@@ -20,7 +20,8 @@ public class RuntimeProfilerCollector : IProfilerCollector, IDisposable
         {
             Platform = GetPlatformName(),
             ManagedMemorySupported = true,
-            NativeMemorySupported = true,
+            NativeMemorySupported = _nativeFrameStatsProvider?.ProvidesNativeMemory == true,
+            ProcessMemorySupported = true,
             GcSupported = true,
             CpuPercentSupported = true,
             ThreadCountSupported = true,
@@ -60,7 +61,7 @@ public class RuntimeProfilerCollector : IProfilerCollector, IDisposable
         {
             _capabilities.CpuPercentSupported = false;
             _capabilities.ThreadCountSupported = false;
-            _capabilities.NativeMemorySupported = false;
+            _capabilities.ProcessMemorySupported = false;
         }
 
         if (_capabilities.CpuPercentSupported)
@@ -131,11 +132,19 @@ public class RuntimeProfilerCollector : IProfilerCollector, IDisposable
             sample.NativeMemoryBytes = providerBytes;
             sample.NativeMemoryKind = providerKind;
         }
-        else if (!sample.NativeMemoryBytes.HasValue && !_nativeFrameProviderActive)
+        if (_nativeFrameProviderActive &&
+            _nativeFrameStatsProvider?.TryReadProcessMemory(
+                out var processBytes,
+                out var processKind) == true)
         {
-            var nativeMemory = TryReadNativeMemory(processSnapshotAvailable, sample.ManagedBytes);
-            sample.NativeMemoryBytes = nativeMemory.Bytes;
-            sample.NativeMemoryKind = nativeMemory.Kind;
+            sample.ProcessMemoryBytes = processBytes;
+            sample.ProcessMemoryKind = processKind;
+        }
+        else if (!sample.ProcessMemoryBytes.HasValue)
+        {
+            var processMemory = TryReadProcessMemory(processSnapshotAvailable);
+            sample.ProcessMemoryBytes = processMemory.Bytes;
+            sample.ProcessMemoryKind = processMemory.Kind;
         }
         sample.CpuPercent = cpuPercent;
         sample.ThreadCount = threadCount;
@@ -166,6 +175,8 @@ public class RuntimeProfilerCollector : IProfilerCollector, IDisposable
                         FrameDataLossCount = nativeSnapshot.FrameDataLossCount,
                         NativeMemoryBytes = nativeSnapshot.NativeMemoryBytes,
                         NativeMemoryKind = nativeSnapshot.NativeMemoryKind,
+                        ProcessMemoryBytes = nativeSnapshot.ProcessMemoryBytes,
+                        ProcessMemoryKind = nativeSnapshot.ProcessMemoryKind,
                         FrameSource = nativeSnapshot.Source,
                         FrameQuality = _nativeFrameStatsProvider.ProvidesExactFrameTimings
                             ? "native.exact"
@@ -196,7 +207,7 @@ public class RuntimeProfilerCollector : IProfilerCollector, IDisposable
     {
         if (!_capabilities.CpuPercentSupported
             && !_capabilities.ThreadCountSupported
-            && !_capabilities.NativeMemorySupported)
+            && !_capabilities.ProcessMemorySupported)
             return false;
 
         try
@@ -211,7 +222,7 @@ public class RuntimeProfilerCollector : IProfilerCollector, IDisposable
         {
             _capabilities.CpuPercentSupported = false;
             _capabilities.ThreadCountSupported = false;
-            _capabilities.NativeMemorySupported = false;
+            _capabilities.ProcessMemorySupported = false;
             return false;
         }
     }
@@ -262,9 +273,9 @@ public class RuntimeProfilerCollector : IProfilerCollector, IDisposable
         }
     }
 
-    private (long? Bytes, string? Kind) TryReadNativeMemory(bool processSnapshotAvailable, long managedBytes)
+    private (long? Bytes, string? Kind) TryReadProcessMemory(bool processSnapshotAvailable)
     {
-        if (!_capabilities.NativeMemorySupported || !processSnapshotAvailable)
+        if (!_capabilities.ProcessMemorySupported || !processSnapshotAvailable)
             return (null, null);
 
         try
@@ -273,14 +284,14 @@ public class RuntimeProfilerCollector : IProfilerCollector, IDisposable
             if (workingSetBytes <= 0)
                 return (null, null);
 
-            return (Math.Max(0L, workingSetBytes - managedBytes), "process.working-set-minus-managed");
+            return (workingSetBytes, "process.working-set");
         }
         catch (Exception ex) when (
             ex is InvalidOperationException
             || ex is NotSupportedException
             || ex is PlatformNotSupportedException)
         {
-            _capabilities.NativeMemorySupported = false;
+            _capabilities.ProcessMemorySupported = false;
             return (null, null);
         }
     }

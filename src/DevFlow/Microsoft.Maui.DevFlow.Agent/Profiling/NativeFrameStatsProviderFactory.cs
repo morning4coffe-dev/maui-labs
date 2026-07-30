@@ -176,6 +176,7 @@ internal sealed class AndroidFrameMetricsStatsProvider : Java.Lang.Object, INati
     public static bool IsApiSupported => Build.VERSION.SdkInt >= BuildVersionCodes.N;
     public bool IsSupported => IsApiSupported;
     public bool ProvidesExactFrameTimings => true;
+    public bool ProvidesNativeMemory => true;
     public string Source => "native.android.framemetrics";
 
     public void Start()
@@ -318,6 +319,7 @@ internal sealed class AndroidChoreographerFrameStatsProvider : Java.Lang.Object,
 
     public bool IsSupported => true;
     public bool ProvidesExactFrameTimings => false;
+    public bool ProvidesNativeMemory => true;
     public string Source => "native.android.choreographer";
 
     public void Start()
@@ -444,6 +446,7 @@ internal sealed class AppleDisplayLinkFrameStatsProvider : INativeFrameStatsProv
 
     public bool IsSupported => true;
     public bool ProvidesExactFrameTimings => false;
+    public bool ProvidesProcessMemory => true;
     public string Source => "native.apple.cadisplaylink";
 
     public void Start()
@@ -492,14 +495,14 @@ internal sealed class AppleDisplayLinkFrameStatsProvider : INativeFrameStatsProv
         if (!_accumulator.TryCreateSnapshot(Source, out snapshot))
             return false;
 
-        snapshot.NativeMemoryBytes = TryReadPhysFootprint();
-        snapshot.NativeMemoryKind = snapshot.NativeMemoryBytes.HasValue
+        snapshot.ProcessMemoryBytes = TryReadPhysFootprint();
+        snapshot.ProcessMemoryKind = snapshot.ProcessMemoryBytes.HasValue
             ? "apple.phys-footprint"
             : null;
         return true;
     }
 
-    public bool TryReadNativeMemory(out long bytes, out string kind)
+    public bool TryReadProcessMemory(out long bytes, out string kind)
     {
         var value = TryReadPhysFootprint();
         bytes = value ?? 0;
@@ -613,6 +616,7 @@ internal sealed class WindowsCompositionFrameStatsProvider : INativeFrameStatsPr
 
     public bool IsSupported => true;
     public bool ProvidesExactFrameTimings => false;
+    public bool ProvidesProcessMemory => true;
     public string Source => "native.windows.compositiontarget";
 
     public void Start()
@@ -657,14 +661,14 @@ internal sealed class WindowsCompositionFrameStatsProvider : INativeFrameStatsPr
         if (!_accumulator.TryCreateSnapshot(Source, out snapshot))
             return false;
 
-        snapshot.NativeMemoryBytes = TryReadResidentMemoryBytes();
-        snapshot.NativeMemoryKind = snapshot.NativeMemoryBytes.HasValue
+        snapshot.ProcessMemoryBytes = TryReadResidentMemoryBytes();
+        snapshot.ProcessMemoryKind = snapshot.ProcessMemoryBytes.HasValue
             ? "windows.working-set"
             : null;
         return true;
     }
 
-    public bool TryReadNativeMemory(out long bytes, out string kind)
+    public bool TryReadProcessMemory(out long bytes, out string kind)
     {
         var value = TryReadResidentMemoryBytes();
         bytes = value ?? 0;

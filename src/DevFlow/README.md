@@ -53,6 +53,9 @@ dotnet build -c Release -p:MauiDevFlowProfileMode=true
 
 Profile mode also defines `MAUI_DEVFLOW`, so the same registration block is compiled without
 requiring `DEBUG`; accidental optimized inclusion without profile mode remains a build error.
+Profile mode disables network monitoring entirely so streaming/large HTTP bodies cannot perturb or
+block the diagnostic run. The same build contract and runtime defaults ship in the standard,
+GTK, and WPF agent packages.
 
 ### 3. Install the unified CLI tool
 
@@ -124,6 +127,14 @@ step stores an environment-variable reference such as
 replay. A spool write or size-limit failure rejects/rolls back the step and marks the recording
 non-durable so it cannot be silently completed with a missing mutation.
 
+Concurrent instances of the same package/TFM keep separate live recordings. After a rebuild, a new
+process may adopt a disconnected recording only when the host presents that recording's random
+`recordingId` capability; package/TFM identity alone never merges processes. Inspector keeps a
+bounded per-panel session list of active capabilities so its browser, VS Code, and Canvas hosts can
+resume after reconnecting without granting a separate tab authority, while MCP callers pass the id
+returned by `maui_flow_record_start`. Another panel may explicitly join a still-live recording by
+starting recording; Inspector's passive status polling never transfers resume authority.
+
 ### On-demand diagnostics
 
 Two explicit, read-only diagnostics are available from the CLI, the MCP tools, and the Inspector's
@@ -159,10 +170,13 @@ dictionaries are never captured.
 
 **Performance triage** starts a new profiler session only when none is active; otherwise callers
 must attach read-only to the existing session, and only the creator may stop it. Stopping captures
-a final boundary sample and returns the final batch atomically. The triage view aggregates the
-profiler streams into a
-task-focused summary: managed/native memory start, end, peak and delta; GC deltas; CPU average and
-peak; thread peak; top hotspots; marker counts; and prominent buffer-loss metadata. Frame rate is
+a final boundary sample and returns the final batch atomically. A successful start returns an
+opaque stop token; read-only status/attachment exposes only the session id, so another client
+cannot terminate the creator's session after a lease expires. The triage view aggregates the
+profiler streams into a task-focused summary: managed heap, process resident/physical footprint,
+and native-heap-specific memory (where available); GC deltas; CPU average and peak; thread peak;
+top hotspots; marker counts; and prominent buffer-loss metadata. Process footprint is never
+presented as unmanaged/native heap. Frame rate is
 reported **only** when the platform provides exact native rendered-frame timings — display-cadence
 estimates are never surfaced as FPS. Aggregation lives in `Microsoft.Maui.DevFlow.Driver`
 (`PerformanceAggregator`) so the CLI, MCP tools, and Inspector present identical analysis. In a

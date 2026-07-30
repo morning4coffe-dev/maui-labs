@@ -1334,6 +1334,41 @@ import { createElementTreeController } from './inspector-tree.js';
     recordStep(action, elById(elementId), extra);
   }
 
+  const recordingCapabilityStorageKey = 'maui-devflow-recording-capabilities-v1';
+  function savedRecordingCapabilities() {
+    try {
+      const parsed = JSON.parse(sessionStorage.getItem(recordingCapabilityStorageKey) || '[]');
+      return Array.isArray(parsed)
+        ? parsed.filter((id) => /^[a-f0-9]{24}$/.test(String(id))).slice(0, 16)
+        : [];
+    } catch {
+      return [];
+    }
+  }
+  function writeRecordingCapabilities(ids) {
+    try {
+      sessionStorage.setItem(recordingCapabilityStorageKey, JSON.stringify(ids.slice(0, 16)));
+    } catch {
+      // Storage can be unavailable in locked-down webviews; the in-memory capability still works.
+    }
+  }
+  function rememberRecordingCapability(id) {
+    if (!/^[a-f0-9]{24}$/.test(String(id || ''))) return;
+    writeRecordingCapabilities([id, ...savedRecordingCapabilities().filter((item) => item !== id)]);
+  }
+  function forgetRecordingCapability(id) {
+    if (!id) return;
+    writeRecordingCapabilities(savedRecordingCapabilities().filter((item) => item !== id));
+  }
+  async function requestRecordingStatus(candidate) {
+    const response = await fetch(`${basePath}/api/flows/record/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(candidate ? { recordingId: candidate } : {}),
+    });
+    return await response.json().catch(() => null);
+  }
+
   async function startRecording() {
     const name = 'recording-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     try {
@@ -1342,7 +1377,8 @@ import { createElementTreeController } from './inspector-tree.js';
       });
       const j = r.ok ? await r.json().catch(() => null) : null;
       if (j && j.ok) {
-        recordingId = j.recordingId; recStepCount = 0; recName = j.name;
+        recordingId = j.recordingId; recStepCount = Number(j.steps) || 0; recName = j.name;
+        rememberRecordingCapability(recordingId);
         if (j.route) { checkpointRoute = j.route; checkpointLabel = 'recording start'; }
         updateFlowButtons();
         timelineStart();
@@ -1369,6 +1405,7 @@ import { createElementTreeController } from './inspector-tree.js';
         const detail = (j && j.error) || `request failed (${r.status})`;
         if (/no recording is active|active recording no longer exists|unknown recordingid/i.test(detail)) {
           recordingId = null;
+          forgetRecordingCapability(id);
           recStepCount = 0;
           recName = null;
           dismissTimeline();
@@ -1381,6 +1418,7 @@ import { createElementTreeController } from './inspector-tree.js';
       }
 
       recordingId = null;
+      forgetRecordingCapability(id);
       if (j.markdown) {
         lastMarkdown = j.markdown;
         const fname = (j.name || recName || 'recording') + '.md';
@@ -1410,23 +1448,41 @@ import { createElementTreeController } from './inspector-tree.js';
 
   async function syncRecordingStatus() {
     try {
-      const response = await fetch(`${basePath}/api/flows/record/status`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
-      });
-      const status = response.ok ? await response.json().catch(() => null) : null;
-      if (!status || !status.ok) return;
-
-      if (status.recording) {
-        const discovered = !recordingId;
-        recordingId = status.recordingId || recordingId;
-        recStepCount = Number(status.steps) || 0;
-        recName = status.name || recName;
-        if (discovered) timelineStart();
-      } else if (recordingId) {
+      let status = null;
+      let currentCapabilityEnded = false;
+      const candidates = [...new Set(
+        [recordingId, ...savedRecordingCapabilities()].filter(Boolean))];
+      for (const candidate of candidates) {
+        const candidateStatus = await requestRecordingStatus(candidate);
+        if (candidateStatus && candidateStatus.ok && candidateStatus.recording) {
+          status = candidateStatus;
+          break;
+        }
+        if (candidate === recordingId &&
+            candidateStatus &&
+            /unknown recordingid|no recording is active|active recording no longer exists/i.test(
+              candidateStatus.error || '')) {
+          currentCapabilityEnded = true;
+        }
+      }
+      if (!status && currentCapabilityEnded && recordingId) {
+        forgetRecordingCapability(recordingId);
         recordingId = null;
         recordingStopping = false;
         dismissTimeline();
         setStatus('Recording ended in another session.');
+        updateFlowButtons();
+        updateHostButtons();
+      }
+      if (!status) return;
+
+      if (status.recording) {
+        const discovered = !recordingId;
+        recordingId = status.recordingId || recordingId;
+        rememberRecordingCapability(recordingId);
+        recStepCount = Number(status.steps) || 0;
+        recName = status.name || recName;
+        if (discovered) timelineStart();
       }
       updateFlowButtons();
       updateHostButtons();
@@ -1458,6 +1514,7 @@ import { createElementTreeController } from './inspector-tree.js';
       }
 
       recordingId = null;
+      forgetRecordingCapability(id);
       recStepCount = 0;
       recName = null;
       dismissTimeline();
@@ -2271,71 +2328,71 @@ import { createElementTreeController } from './inspector-tree.js';
     return tbl;
   }
 
+  function renderProblems(j) {
+    const problems = j && j.problems;
+    const problemsTab = document.getElementById('df-tab-problems');
+    problemsTab?.classList.remove('df-has-update');
+    if (problemsTab) problemsTab.textContent = `Problems${Number.isFinite(j && j.count) ? ` (${j.count})` : ''}`;
+
+    if (j && j.enabled === false) {
+      clearDockSnapshot();
+      dockEmpty('Binding Problems are disabled for this agent.');
+      return;
+    }
+    if (!Array.isArray(problems) || !problems.length) {
+      clearDockSnapshot();
+      dockEmpty(j && j.error ? j.error : 'No runtime UI problems captured.');
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (const problem of problems) {
+      const row = elh('button', { class: 'df-problem-row', type: 'button' });
+      const heading = elh('div', { class: 'df-problem-heading' });
+      heading.append(
+        elh('span', { class: 'df-problem-code', text: problem.code || problem.kind || 'problem' }),
+        elh('span', { class: 'df-problem-count', text: problem.count > 1 ? `×${problem.count}` : '' }));
+      row.append(heading, elh('div', { class: 'df-problem-message', text: problem.message || 'Runtime UI problem' }));
+
+      const context = [
+        problem.elementType,
+        problem.property,
+        problem.bindingPath ? `Binding ${problem.bindingPath}` : null,
+        problem.sourceFile ? `${shortFile(problem.sourceFile)}${problem.sourceLine ? `:${problem.sourceLine}` : ''}` : null,
+      ].filter(Boolean).join(' · ');
+      if (context) row.append(elh('div', { class: 'df-problem-context', text: context }));
+
+      if (problem.elementId) {
+        row.title = 'Select the affected element';
+        row.addEventListener('click', () => {
+          const target = elById(problem.elementId);
+          if (!target) {
+            setStatus('The affected element is no longer present in the current frame.');
+            return;
+          }
+          selectElement(problem.elementId);
+          propertyGrid.open(target);
+        });
+      } else {
+        row.disabled = true;
+      }
+      fragment.append(row);
+    }
+    dockBodyEl.replaceChildren(fragment);
+    recordDockSnapshot(
+      'problems',
+      `Problems · ${problems.length} shown`,
+      problems,
+      j.count || problems.length,
+      { revision: j.revision || 0, evicted: j.evicted || 0 });
+  }
+
   function renderLogs(j) {
     const logs = j && j.logs;
     if (!Array.isArray(logs) || !logs.length) {
       clearDockSnapshot();
       dockEmpty(j && j.error ? j.error : 'No logs.');
       return;
-    }
-
-    function renderProblems(j) {
-      const problems = j && j.problems;
-      const problemsTab = document.getElementById('df-tab-problems');
-      problemsTab?.classList.remove('df-has-update');
-      if (problemsTab) problemsTab.textContent = `Problems${Number.isFinite(j && j.count) ? ` (${j.count})` : ''}`;
-
-      if (j && j.enabled === false) {
-        clearDockSnapshot();
-        dockEmpty('Binding Problems are disabled for this agent.');
-        return;
-      }
-      if (!Array.isArray(problems) || !problems.length) {
-        clearDockSnapshot();
-        dockEmpty(j && j.error ? j.error : 'No runtime UI problems captured.');
-        return;
-      }
-
-      const fragment = document.createDocumentFragment();
-      for (const problem of problems) {
-        const row = elh('button', { class: 'df-problem-row', type: 'button' });
-        const heading = elh('div', { class: 'df-problem-heading' });
-        heading.append(
-          elh('span', { class: 'df-problem-code', text: problem.code || problem.kind || 'problem' }),
-          elh('span', { class: 'df-problem-count', text: problem.count > 1 ? `×${problem.count}` : '' }));
-        row.append(heading, elh('div', { class: 'df-problem-message', text: problem.message || 'Runtime UI problem' }));
-
-        const context = [
-          problem.elementType,
-          problem.property,
-          problem.bindingPath ? `Binding ${problem.bindingPath}` : null,
-          problem.sourceFile ? `${shortFile(problem.sourceFile)}${problem.sourceLine ? `:${problem.sourceLine}` : ''}` : null,
-        ].filter(Boolean).join(' · ');
-        if (context) row.append(elh('div', { class: 'df-problem-context', text: context }));
-
-        if (problem.elementId) {
-          row.title = 'Select the affected element';
-          row.addEventListener('click', () => {
-            const target = elById(problem.elementId);
-            if (!target) {
-              setStatus('The affected element is no longer present in the current frame.');
-              return;
-            }
-            selectElement(problem.elementId);
-            propertyGrid.open(target);
-          });
-        } else {
-          row.disabled = true;
-        }
-        fragment.append(row);
-      }
-      dockBodyEl.replaceChildren(fragment);
-      recordDockSnapshot(
-        'problems',
-        `Problems · ${problems.length} shown`,
-        problems,
-        j.count || problems.length,
-        { revision: j.revision || 0, evicted: j.evicted || 0 });
     }
     const frag = document.createDocumentFragment();
     for (const e of logs) {

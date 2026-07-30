@@ -265,10 +265,14 @@ public class ProfilerCoreTests
         Assert.False(capabilities.NativeFrameTimingsSupported);
         Assert.False(capabilities.JankEventsSupported);
         Assert.False(capabilities.UiThreadStallSupported);
-        if (sample1.NativeMemoryBytes.HasValue)
-            Assert.Equal("process.working-set-minus-managed", sample1.NativeMemoryKind);
+        Assert.False(capabilities.NativeMemorySupported);
+        Assert.True(capabilities.ProcessMemorySupported);
+        Assert.Null(sample1.NativeMemoryBytes);
+        Assert.Null(sample1.NativeMemoryKind);
+        if (sample1.ProcessMemoryBytes.HasValue)
+            Assert.Equal("process.working-set", sample1.ProcessMemoryKind);
         else
-            Assert.Null(sample1.NativeMemoryKind);
+            Assert.Null(sample1.ProcessMemoryKind);
         Assert.True(sample2.TsUtc > sample1.TsUtc);
     }
 
@@ -324,7 +328,7 @@ public class ProfilerCoreTests
             FrameTimeMsP95 = 20.5,
             WorstFrameTimeMs = 24.1,
             NativeMemoryBytes = 42_000,
-            NativeMemoryKind = "apple.phys-footprint"
+            NativeMemoryKind = "android.native-heap-allocated"
         });
         var collector = new RuntimeProfilerCollector(provider);
 
@@ -334,7 +338,7 @@ public class ProfilerCoreTests
 
         Assert.True(collected);
         Assert.Equal(42_000, sample.NativeMemoryBytes);
-        Assert.Equal("apple.phys-footprint", sample.NativeMemoryKind);
+        Assert.Equal("android.native-heap-allocated", sample.NativeMemoryKind);
     }
 
     [Fact]
@@ -350,6 +354,28 @@ public class ProfilerCoreTests
         Assert.Equal(64_000, sample.NativeMemoryBytes);
         Assert.Equal("native.test-memory", sample.NativeMemoryKind);
         Assert.Equal("unavailable", sample.FrameSource);
+    }
+
+    [Fact]
+    public void RuntimeProfilerCollector_SeparatesProcessFootprintFromNativeHeap()
+    {
+        var provider = new SnapshotNativeProvider(new NativeFrameStatsSnapshot
+        {
+            Source = "native.test",
+            ProcessMemoryBytes = 128_000,
+            ProcessMemoryKind = "windows.working-set"
+        });
+        var collector = new RuntimeProfilerCollector(provider);
+
+        collector.Start(100);
+        Assert.True(collector.TryCollect(out var sample));
+        collector.Stop();
+
+        Assert.Equal(128_000, sample.ProcessMemoryBytes);
+        Assert.Equal("windows.working-set", sample.ProcessMemoryKind);
+        Assert.Null(sample.NativeMemoryBytes);
+        Assert.False(collector.GetCapabilities().NativeMemorySupported);
+        Assert.True(collector.GetCapabilities().ProcessMemorySupported);
     }
 
     [Fact]
@@ -496,6 +522,8 @@ public class ProfilerCoreTests
     {
         public bool IsSupported => true;
         public bool ProvidesExactFrameTimings => true;
+        public bool ProvidesNativeMemory => snapshotToReturn.NativeMemoryBytes.HasValue;
+        public bool ProvidesProcessMemory => snapshotToReturn.ProcessMemoryBytes.HasValue;
         public string Source => snapshotToReturn.Source;
 
         public void Start()
@@ -519,7 +547,9 @@ public class ProfilerCoreTests
                 UiThreadStallCount = snapshotToReturn.UiThreadStallCount,
                 FrameDataLossCount = snapshotToReturn.FrameDataLossCount,
                 NativeMemoryBytes = snapshotToReturn.NativeMemoryBytes,
-                NativeMemoryKind = snapshotToReturn.NativeMemoryKind
+                NativeMemoryKind = snapshotToReturn.NativeMemoryKind,
+                ProcessMemoryBytes = snapshotToReturn.ProcessMemoryBytes,
+                ProcessMemoryKind = snapshotToReturn.ProcessMemoryKind
             };
             return true;
         }
@@ -533,6 +563,7 @@ public class ProfilerCoreTests
     {
         public bool IsSupported => true;
         public bool ProvidesExactFrameTimings => true;
+        public bool ProvidesNativeMemory => true;
         public string Source => "native.test";
         public void Start() { }
         public void Stop() { }

@@ -58,7 +58,7 @@ public partial class DevFlowAgentService
             }
         }
 
-        var message = DiagnosticRedactor.RedactText(args.Message);
+        var message = BuildBindingProblemMessage(args.ErrorCode, binding, extended);
         var problemKey = string.Join(
             "|",
             "binding",
@@ -121,11 +121,35 @@ public partial class DevFlowAgentService
                 if (latest.Revision != snapshot.Revision)
                     ScheduleProblemsChanged();
             }
+
             catch
             {
                 Interlocked.Exchange(ref _problemsNotificationScheduled, 0);
             }
         });
+    }
+
+    private static string BuildBindingProblemMessage(
+        string? errorCode,
+        Binding? binding,
+        BindingErrorEventArgs? error)
+    {
+        static string Metadata(string? value, string fallback)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+                return fallback;
+            var safe = new string(value
+                .Where(static character => !char.IsControl(character))
+                .Take(256)
+                .ToArray());
+            return safe.Length == 0 ? fallback : safe;
+        }
+
+        var code = Metadata(errorCode, "unknown");
+        var path = Metadata(binding?.Path, "(unknown path)");
+        var targetType = Metadata(error?.Target?.GetType().FullName, "target");
+        var property = Metadata(error?.TargetProperty?.PropertyName, "property");
+        return $"MAUI binding failure {code}: '{path}' could not update {targetType}.{property}.";
     }
 
     private Task<HttpResponse> HandleDiagnosticProblems(HttpRequest request)

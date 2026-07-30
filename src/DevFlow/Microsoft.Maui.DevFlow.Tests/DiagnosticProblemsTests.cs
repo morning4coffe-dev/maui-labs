@@ -79,6 +79,35 @@ public class DiagnosticProblemsTests
     }
 
     [Fact]
+    public async Task BindingConversionFailure_DoesNotRetainRejectedValue()
+    {
+        const string secret = "CorrectHorseBatteryStaple!";
+        var slider = new Slider
+        {
+            AutomationId = "binding-conversion-slider",
+            BindingContext = new ConversionBindingSource { SecretNumber = secret }
+        };
+
+        using var harness = await ProblemHarness.CreateAsync(slider);
+        await harness.Client.GetTreeAsync();
+        slider.SetBinding(Slider.ValueProperty, nameof(ConversionBindingSource.SecretNumber));
+
+        DriverDiagnosticProblemBatch? batch = null;
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            batch = await harness.Client.GetDiagnosticProblemsAsync();
+            if (batch.Problems.Count > 0)
+                break;
+            await Task.Delay(50);
+        }
+
+        var problem = Assert.Single(batch!.Problems);
+        Assert.Equal(nameof(ConversionBindingSource.SecretNumber), problem.BindingPath);
+        Assert.DoesNotContain(secret, problem.Message, StringComparison.Ordinal);
+        Assert.Contains("MAUI binding failure", problem.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void DiagnosticRedactor_RedactsAndBoundsMessages()
     {
         var redacted = DiagnosticRedactor.RedactText(
@@ -103,6 +132,11 @@ public class DiagnosticProblemsTests
     private sealed class BindingSource
     {
         public string ExistingProperty { get; set; } = "secret-value";
+    }
+
+    private sealed class ConversionBindingSource
+    {
+        public string SecretNumber { get; set; } = "";
     }
 
     private sealed class ProblemHarness : IDisposable

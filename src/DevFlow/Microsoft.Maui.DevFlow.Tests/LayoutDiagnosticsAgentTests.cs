@@ -228,7 +228,7 @@ public class LayoutDiagnosticsAgentTests
             Enumerable.Range(0, 20).Select(index =>
                 new Label { AutomationId = $"Label{index}" }));
 
-        var tree = walker.WalkTree(app, maxElements: 2);
+        var tree = walker.WalkTree(app, maxDepth: 0, windowIndex: null, maxElements: 2);
 
         Assert.Equal(2, tree.Count);
         Assert.Equal(2, walker.WalkElements.Count);
@@ -244,7 +244,7 @@ public class LayoutDiagnosticsAgentTests
         var walker = new VisualTreeWalker();
         var app = new TestApplication([page]);
 
-        var tree = walker.WalkTree(app, maxElements: 2);
+        var tree = walker.WalkTree(app, maxDepth: 0, windowIndex: null, maxElements: 2);
         var flattened = VisualTreeWalker.FlattenElementInfos(tree).ToList();
 
         Assert.Equal(2, flattened.Count);

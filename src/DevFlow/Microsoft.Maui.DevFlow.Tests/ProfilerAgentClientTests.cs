@@ -30,6 +30,7 @@ public class ProfilerAgentClientTests
                 {
                     var body = """
                     {
+                      "stopToken": "stop-token-1",
                       "session": {
                         "sessionId": "s-1",
                         "startedAtUtc": "2026-01-01T00:00:00Z",
@@ -120,6 +121,12 @@ public class ProfilerAgentClientTests
 
                 if (request.Contains("DELETE /api/v1/profiler/sessions/s-1", StringComparison.Ordinal))
                 {
+                    var requestLine = request.Split("\r\n", StringSplitOptions.None)[0];
+                    Assert.DoesNotContain("stop-token-1", requestLine, StringComparison.Ordinal);
+                    Assert.Contains(
+                        "X-DevFlow-Profiler-Stop-Token: stop-token-1",
+                        request,
+                        StringComparison.OrdinalIgnoreCase);
                     var body = """
                     {
                       "session": {
@@ -146,6 +153,7 @@ public class ProfilerAgentClientTests
         var started = await client.StartProfilerAsync(500);
         Assert.NotNull(started);
         Assert.Equal("s-1", started.SessionId);
+        Assert.Equal("stop-token-1", started.StopToken);
         Assert.True(started.IsActive);
 
         var batch = await client.GetProfilerSamplesAsync(started.SessionId);
@@ -165,11 +173,25 @@ public class ProfilerAgentClientTests
         Assert.Equal(3, batch.SampleMetadata.LatestCursor);
         Assert.Equal(3, batch.SampleMetadata.AvailableCount);
 
-        var stopped = await client.StopProfilerAsync(started.SessionId);
+        var stopped = await client.StopProfilerAsync();
         Assert.NotNull(stopped);
         Assert.False(stopped.IsActive);
 
         await serverTask;
+    }
+
+    [Fact]
+    public async Task LegacyProfilerStop_RejectsSessionsNotCreatedByThisClient()
+    {
+        using var client = new AgentClient("localhost", 1);
+
+        var profilerError = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.StopProfilerAsync("external-session"));
+        Assert.Contains("did not create", profilerError.Message, StringComparison.OrdinalIgnoreCase);
+
+        var performanceError = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.StopPerformanceSessionAsync("external-session"));
+        Assert.Contains("did not create", performanceError.Message, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -252,7 +274,7 @@ public class ProfilerAgentClientTests
             BindingFlags.Instance | BindingFlags.NonPublic);
         Assert.NotNull(method);
         var task = Assert.IsAssignableFrom<Task>(
-            method.Invoke(service, [first.SessionId, 100, 10]));
+            method.Invoke(service, [first.SessionId, first.StopToken, 100, 10, false]));
         await task;
         var result = task.GetType().GetProperty("Result")!.GetValue(task);
 

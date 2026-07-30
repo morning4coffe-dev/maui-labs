@@ -132,6 +132,14 @@ bounded size/steps, expiry, and per-user permissions. A temporary agent disconne
 restart therefore preserves the active recording; explicit stop, cancel, or expiry deletes it.
 Corrupt spools are quarantined and reported in the broker log.
 
+Live recordings are process-instance scoped, so two devices running the same package never append
+to one another. Rebuild recovery requires the random `recordingId` capability returned at start;
+package/TFM identity alone cannot adopt another process's recording. Inspector retains a bounded
+set of active capabilities in that host panel's browser session storage and removes each one when
+its recording is stopped or discarded; separate tabs/panels do not share resume authority. A
+different panel can explicitly join a still-live shared recording by pressing **Record**, which
+returns that active recording's capability under the normal workflow controls.
+
 Schema 2 adds selector diagnostics (`matchCount`, `quality`, and `fragilityReasons`) while preserving
 schema 1 parsing and replay. AutomationId and exact-text selectors must resolve exactly one element;
 duplicate matches fail loudly. Replay waits for visible/enabled targets and for positive stable tap
@@ -226,8 +234,10 @@ because a profiler session would perturb the run being replayed.
 
 Profiler sessions are single-owner. If another CLI/MCP/Inspector client already started one, this
 Inspector shows it as a read-only attachment: **Stop** remains disabled and starting a replacement
-returns a conflict. A creator stop captures one final boundary sample before returning the final
-summary.
+returns a conflict. The creator holds a separate opaque stop token (kept inside the host, not
+exposed through status); a creator stop captures one final boundary sample before returning the
+final summary. Memory rows distinguish managed heap, total process resident/physical footprint,
+and native-heap-specific counters instead of treating process footprint as unmanaged memory.
 
 Neither tab participates in **Add to Copilot**. The Copilot data-context scopes are limited to the
 bounded, redacted snapshot shapes that module already sanitizes; layout and performance payloads are

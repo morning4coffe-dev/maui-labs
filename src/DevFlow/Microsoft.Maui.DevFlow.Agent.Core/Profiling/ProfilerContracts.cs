@@ -12,6 +12,8 @@ public class ProfilerSessionInfo
     public int SampleIntervalMs { get; set; }
     [JsonPropertyName("isActive")]
     public bool IsActive { get; set; }
+    [JsonIgnore]
+    public string StopToken { get; set; } = "";
 }
 
 public class ProfilerSample
@@ -38,6 +40,10 @@ public class ProfilerSample
     public long? NativeMemoryBytes { get; set; }
     [JsonPropertyName("nativeMemoryKind")]
     public string? NativeMemoryKind { get; set; }
+    [JsonPropertyName("processMemoryBytes")]
+    public long? ProcessMemoryBytes { get; set; }
+    [JsonPropertyName("processMemoryKind")]
+    public string? ProcessMemoryKind { get; set; }
     [JsonPropertyName("cpuPercent")]
     public double? CpuPercent { get; set; }
     [JsonPropertyName("threadCount")]
@@ -190,6 +196,8 @@ public class ProfilerCapabilities
     public bool ManagedMemorySupported { get; set; }
     [JsonPropertyName("nativeMemorySupported")]
     public bool NativeMemorySupported { get; set; }
+    [JsonPropertyName("processMemorySupported")]
+    public bool ProcessMemorySupported { get; set; }
     [JsonPropertyName("gcSupported")]
     public bool GcSupported { get; set; }
     [JsonPropertyName("cpuPercentSupported")]

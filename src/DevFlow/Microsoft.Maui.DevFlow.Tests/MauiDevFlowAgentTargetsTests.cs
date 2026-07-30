@@ -262,6 +262,37 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
         Assert.Contains("\"Microsoft.Maui.DevFlowPackageId\", \"com.example.myapp\"", contents);
     }
 
+    [Theory]
+    [InlineData(
+        "Microsoft.Maui.DevFlow.Agent.Gtk/Microsoft.Maui.DevFlow.Agent.Gtk.csproj",
+        "Microsoft.Maui.DevFlow.Agent.Gtk.targets")]
+    [InlineData(
+        "Microsoft.Maui.DevFlow.Agent.WPF/Microsoft.Maui.DevFlow.Agent.WPF.csproj",
+        "Microsoft.Maui.DevFlow.Agent.WPF.targets")]
+    public void AlternateHostPackages_IncludeTheSharedBuildContract(
+        string relativeProjectPath,
+        string packagedTargetName)
+    {
+        var project = File.ReadAllText(Path.Combine(
+            RepoRoot,
+            "src",
+            "DevFlow",
+            relativeProjectPath.Replace('/', Path.DirectorySeparatorChar)));
+
+        Assert.Contains(
+            @"..\Microsoft.Maui.DevFlow.Agent\build\Microsoft.Maui.DevFlow.Agent.targets",
+            project,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $@"PackagePath=""build\{packagedTargetName}""",
+            project,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $@"PackagePath=""buildTransitive\{packagedTargetName}""",
+            project,
+            StringComparison.Ordinal);
+    }
+
     private string ProjectFilePath => Path.Combine(_projectDirectory, "Test.csproj");
 
     private string ConfigFilePath => Path.Combine(_projectDirectory, ".mauidevflow");

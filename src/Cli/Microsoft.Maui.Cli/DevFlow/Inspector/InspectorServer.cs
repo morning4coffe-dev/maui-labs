@@ -63,10 +63,7 @@ public sealed class InspectorServer : IDisposable
     private long _cacheGeneration;
     private readonly Dictionary<string, InspectorFrame> _frames = new(StringComparer.Ordinal);
     private readonly object _replayEvidenceGate = new();
-    private string? _performanceSessionId;
-    private string? _performanceLeaseId;
-    private string? _performanceHolderKind;
-    private string? _performanceHolderLabel;
+    private PerformanceOwnership? _performanceOwnership;
     private byte[]? _lastReplayEvidence;
     private static readonly TimeSpan ScreenshotCacheDuration = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan FrameReuseDuration = TimeSpan.FromMilliseconds(200);
@@ -147,12 +144,47 @@ public sealed class InspectorServer : IDisposable
         }
     }
 
-    private void ClearPerformanceLease()
+    internal string? OwnedPerformanceSessionId
+        => Volatile.Read(ref _performanceOwnership)?.SessionId;
+
+    internal string? OwnedPerformanceStopToken
+        => Volatile.Read(ref _performanceOwnership)?.StopToken;
+
+    internal void SetPerformanceOwnership(
+        string sessionId,
+        string stopToken,
+        string leaseId,
+        string holderKind,
+        string? holderLabel)
+        => Volatile.Write(
+            ref _performanceOwnership,
+            new PerformanceOwnership(
+                sessionId,
+                stopToken,
+                leaseId,
+                holderKind,
+                holderLabel));
+
+    internal bool TryClearPerformanceOwnership(string sessionId, string stopToken)
     {
-        Volatile.Write(ref _performanceLeaseId, null);
-        Volatile.Write(ref _performanceHolderKind, null);
-        Volatile.Write(ref _performanceHolderLabel, null);
+        var ownership = Volatile.Read(ref _performanceOwnership);
+        return ownership is not null &&
+            string.Equals(ownership.SessionId, sessionId, StringComparison.Ordinal) &&
+            string.Equals(ownership.StopToken, stopToken, StringComparison.Ordinal) &&
+            TryClearPerformanceOwnership(ownership);
     }
+
+    private bool TryClearPerformanceOwnership(PerformanceOwnership ownership)
+        => ReferenceEquals(
+            Interlocked.CompareExchange(ref _performanceOwnership, null, ownership),
+            ownership);
+
+    private sealed record PerformanceOwnership(
+        string SessionId,
+        string StopToken,
+        string LeaseId,
+        string HolderKind,
+        string? HolderLabel);
 
     /// <summary>
     /// Safely extract the "elements" array from a hit-test response. Returns false if
@@ -493,23 +525,22 @@ public sealed class InspectorServer : IDisposable
 
     private async Task StopOwnedPerformanceSessionAsync()
     {
-        var sessionId = Volatile.Read(ref _performanceSessionId);
-        if (sessionId is null)
+        var ownership = Volatile.Read(ref _performanceOwnership);
+        if (ownership is null)
             return;
         try
         {
             using var leaseScope = _client.UseMutationLease(
-                Volatile.Read(ref _performanceLeaseId) ?? _fallbackMutationLeaseId,
-                Volatile.Read(ref _performanceHolderKind) ?? "web-inspector",
-                Volatile.Read(ref _performanceHolderLabel) ?? "DevFlow Web Inspector");
-            var stopped = await _client.StopProfilerAsync(sessionId)
+                ownership.LeaseId,
+                ownership.HolderKind,
+                ownership.HolderLabel);
+            var stopped = await _client.StopProfilerAsync(
+                    ownership.SessionId,
+                    ownership.StopToken)
                 .WaitAsync(TimeSpan.FromSeconds(2))
                 .ConfigureAwait(false);
             if (stopped?.IsActive == false)
-            {
-                Interlocked.CompareExchange(ref _performanceSessionId, null, sessionId);
-                ClearPerformanceLease();
-            }
+                TryClearPerformanceOwnership(ownership);
         }
         catch
         {
@@ -1658,7 +1689,8 @@ public sealed class InspectorServer : IDisposable
                 Action = Flows.FlowActions.Assert,
                 AssertsJson = assertsJson
             }, recordingId)
-            : await _client.ControlMutationRecordingAsync("status");
+            : await _client.ControlMutationRecordingAsync(
+                "status", null, null, null, null, recordingId);
         var payload = JsonSerializer.Serialize(new
         {
             ok = result.Ok,
@@ -1701,7 +1733,9 @@ public sealed class InspectorServer : IDisposable
 
     private async Task<(int, string, byte[])> HandleFlowRecordStatusAsync(string? body)
     {
-        var result = await _client.ControlMutationRecordingAsync("status");
+        var recordingId = ReadStringField(body, "recordingId");
+        var result = await _client.ControlMutationRecordingAsync(
+            "status", null, null, null, null, recordingId);
         var payload = JsonSerializer.Serialize(new
         {
             ok = result.Ok,
@@ -2300,14 +2334,22 @@ public sealed class InspectorServer : IDisposable
         {
             var summary = await _client.StartPerformanceSessionAsync(
                 sampleIntervalMs >= 50 ? sampleIntervalMs : null);
+            var owned = false;
             if (summary.Session.Active && !string.IsNullOrWhiteSpace(summary.Session.SessionId))
             {
-                Volatile.Write(ref _performanceLeaseId, leaseId);
-                Volatile.Write(ref _performanceHolderKind, holderKind);
-                Volatile.Write(ref _performanceHolderLabel, holderLabel);
-                Volatile.Write(ref _performanceSessionId, summary.Session.SessionId);
+                if (string.IsNullOrWhiteSpace(summary.Session.StopToken))
+                    throw new InvalidOperationException(
+                        "The agent did not return a profiler creator stop token.");
+                SetPerformanceOwnership(
+                    summary.Session.SessionId,
+                    summary.Session.StopToken,
+                    leaseId,
+                    holderKind,
+                    holderLabel);
+                summary.Session.StopToken = null;
+                owned = true;
             }
-            return Ok(JsonSerializer.Serialize(new { ok = true, owned = true, summary }, CamelCase));
+            return Ok(JsonSerializer.Serialize(new { ok = true, owned, summary }, CamelCase));
         }
         catch
         {
@@ -2317,17 +2359,19 @@ public sealed class InspectorServer : IDisposable
 
     private async Task<(int, string, byte[])> HandlePerformanceSnapshotAsync()
     {
-        var sessionId = Volatile.Read(ref _performanceSessionId);
+        var ownership = Volatile.Read(ref _performanceOwnership);
+        var sessionId = ownership?.SessionId;
         try
         {
             var summary = await _client.GetPerformanceSummaryAsync(sessionId);
-            var owned = sessionId is not null &&
+            var owned = ownership is not null &&
+                ReferenceEquals(Volatile.Read(ref _performanceOwnership), ownership) &&
                 string.Equals(summary.Session.SessionId, sessionId, StringComparison.Ordinal);
             return Ok(JsonSerializer.Serialize(new { ok = true, owned, summary }, CamelCase));
         }
-        catch (ProfilerSessionMismatchException) when (sessionId is not null)
+        catch (ProfilerSessionMismatchException) when (ownership is not null)
         {
-            Interlocked.CompareExchange(ref _performanceSessionId, null, sessionId);
+            TryClearPerformanceOwnership(ownership);
             return Ok("{\"ok\":false,\"error\":\"The recorded performance session was replaced or disconnected. Refresh to inspect the current session.\"}");
         }
         catch
@@ -2338,27 +2382,25 @@ public sealed class InspectorServer : IDisposable
 
     private async Task<(int, string, byte[])> HandlePerformanceStopAsync()
     {
+        var ownership = Volatile.Read(ref _performanceOwnership);
         try
         {
-            var sessionId = Volatile.Read(ref _performanceSessionId);
-            if (sessionId is null)
+            if (ownership is null)
                 return Ok("{\"ok\":false,\"error\":\"This Inspector did not start the active performance session and will not stop it.\"}");
             using var leaseScope = _client.UseMutationLease(
-                Volatile.Read(ref _performanceLeaseId) ?? _fallbackMutationLeaseId,
-                Volatile.Read(ref _performanceHolderKind) ?? "web-inspector",
-                Volatile.Read(ref _performanceHolderLabel) ?? "DevFlow Web Inspector");
-            var summary = await _client.StopPerformanceSessionAsync(sessionId);
+                ownership.LeaseId,
+                ownership.HolderKind,
+                ownership.HolderLabel);
+            var summary = await _client.StopPerformanceSessionAsync(
+                ownership.SessionId,
+                ownership.StopToken);
             if (!summary.Session.Active)
-            {
-                Interlocked.CompareExchange(ref _performanceSessionId, null, sessionId);
-                ClearPerformanceLease();
-            }
+                TryClearPerformanceOwnership(ownership);
             return Ok(JsonSerializer.Serialize(new { ok = true, owned = false, summary }, CamelCase));
         }
-        catch (ProfilerSessionMismatchException)
+        catch (ProfilerSessionMismatchException) when (ownership is not null)
         {
-            Volatile.Write(ref _performanceSessionId, null);
-            ClearPerformanceLease();
+            TryClearPerformanceOwnership(ownership);
             return Ok("{\"ok\":false,\"error\":\"The recorded performance session was replaced or disconnected and was not stopped.\"}");
         }
         catch

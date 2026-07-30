@@ -167,6 +167,39 @@ public class AgentOptions
     /// </summary>
     public int MutationLeaseTimeoutMs { get; set; } = 10_000;
 
+    internal void ApplyProfileDefaults()
+    {
+        Mode = "profile";
+        ReadOnly = true;
+        EnableProfiler = true;
+        EnableFileLogging = false;
+        CaptureILogger = false;
+        CaptureConsole = false;
+        CaptureTrace = false;
+        EnableNetworkMonitoring = false;
+        MaxNetworkBodySize = 0;
+        EnableMauiDiagnostics = false;
+        EnableBindingProblems = false;
+        AllowPropertyReflection = false;
+        EnableHighLevelUiHooks = false;
+        EnableDetailedUiHooks = false;
+    }
+
+    internal void ApplyBuildMetadata(string? enabledMetadata, string? buildMode)
+    {
+        if (string.Equals(enabledMetadata, bool.FalseString, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "DevFlow Agent registration is disabled for this build. Remove AddMauiDevFlowAgent() "
+                + "or set MauiDevFlowEnabled=true in a Debug build. For optimized diagnostics, also set MauiDevFlowProfileMode=true.");
+        }
+
+        if (string.Equals(buildMode, "profile", StringComparison.OrdinalIgnoreCase))
+            ApplyProfileDefaults();
+        else if (!string.IsNullOrWhiteSpace(buildMode))
+            Mode = buildMode;
+    }
+
     /// <summary>
     /// Custom routes registered under /api/v1/ext/{namespace}/...
     /// </summary>

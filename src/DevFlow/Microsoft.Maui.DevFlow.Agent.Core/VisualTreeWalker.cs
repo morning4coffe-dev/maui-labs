@@ -381,8 +381,14 @@ public class VisualTreeWalker
     public List<ElementInfo> WalkTree(
         Application app,
         int maxDepth = 0,
-        int? windowIndex = null,
-        int maxElements = 0)
+        int? windowIndex = null)
+        => WalkTree(app, maxDepth, windowIndex, maxElements: 0);
+
+    internal List<ElementInfo> WalkTree(
+        Application app,
+        int maxDepth,
+        int? windowIndex,
+        int maxElements)
     {
         _usedIds.Clear();
         _elementIdToExternalId.Clear();

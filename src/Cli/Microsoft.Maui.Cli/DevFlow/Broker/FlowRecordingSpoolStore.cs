@@ -30,6 +30,7 @@ public sealed class FlowRecordingSpoolStore
 
     public void Save(
         string agentId,
+        string stableAgentId,
         string? sessionId,
         string recordingId,
         FlowRecorder recorder,
@@ -44,6 +45,7 @@ public sealed class FlowRecordingSpoolStore
         {
             Schema = SchemaVersion,
             AgentId = agentId,
+            StableAgentId = stableAgentId,
             SessionId = sessionId,
             RecordingId = recordingId,
             CreatedUtc = recorder.CreatedAtUtc,
@@ -190,6 +192,7 @@ public sealed class FlowRecordingSpool
 {
     [JsonPropertyName("schema")] public int Schema { get; set; }
     [JsonPropertyName("agentId")] public string AgentId { get; set; } = "";
+    [JsonPropertyName("stableAgentId")] public string StableAgentId { get; set; } = "";
     [JsonPropertyName("sessionId")] public string? SessionId { get; set; }
     [JsonPropertyName("recordingId")] public string RecordingId { get; set; } = "";
     [JsonPropertyName("createdUtc")] public DateTimeOffset CreatedUtc { get; set; }

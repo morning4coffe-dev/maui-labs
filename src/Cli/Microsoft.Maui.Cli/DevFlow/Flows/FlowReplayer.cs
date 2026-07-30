@@ -61,6 +61,20 @@ public sealed class FlowReplayer
     public FlowReplayer(
         AgentClient agent,
         int pollTries = 4,
+        int pollGapMs = 300)
+        : this(
+            agent,
+            pollTries,
+            pollGapMs,
+            continueOnFailure: false,
+            evidenceCapture: null,
+            secretResolver: null)
+    {
+    }
+
+    internal FlowReplayer(
+        AgentClient agent,
+        int pollTries = 4,
         int pollGapMs = 300,
         bool continueOnFailure = false,
         IFlowReplayEvidenceCapture? evidenceCapture = null,

@@ -55,7 +55,10 @@ public class ProfilerSessionStore
                 SessionId = Guid.NewGuid().ToString("N"),
                 StartedAtUtc = DateTime.UtcNow,
                 SampleIntervalMs = sampleIntervalMs,
-                IsActive = true
+                IsActive = true,
+                StopToken = Convert.ToHexString(
+                    System.Security.Cryptography.RandomNumberGenerator.GetBytes(32))
+                    .ToLowerInvariant()
             };
             return _session;
         }

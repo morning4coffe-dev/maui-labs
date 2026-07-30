@@ -15,11 +15,12 @@ public sealed class FlowRecordingSpoolStoreTests : IDisposable
         var store = new FlowRecordingSpoolStore(_root);
         const string id = "0123456789abcdef01234567";
 
-        store.Save("stable-agent", "session", id, recorder);
+        store.Save("live-agent", "stable-agent", "session", id, recorder);
         var restored = store.Restore();
 
         var spool = Assert.Single(restored);
-        Assert.Equal("stable-agent", spool.AgentId);
+        Assert.Equal("live-agent", spool.AgentId);
+        Assert.Equal("stable-agent", spool.StableAgentId);
         Assert.Equal(id, spool.RecordingId);
         Assert.Single(spool.Flow.Steps);
         Assert.True(store.Delete(id));
@@ -61,7 +62,7 @@ public sealed class FlowRecordingSpoolStoreTests : IDisposable
         {
             var id = index.ToString("x24");
             var recorder = new FlowRecorder($"flow-{index}", "Demo", "Windows", null);
-            store.Save($"agent-{index}", null, id, recorder);
+            store.Save($"agent-{index}", $"stable-{index}", null, id, recorder);
         }
 
         Assert.True(

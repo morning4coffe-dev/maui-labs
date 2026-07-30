@@ -661,7 +661,7 @@ internal static class EvidenceBuilder
                 Kind = EvidenceRedaction.SafeIdentifier(problem.Kind) ?? "",
                 Severity = EvidenceRedaction.SafeIdentifier(problem.Severity) ?? "",
                 Code = EvidenceRedaction.SafeIdentifier(problem.Code),
-                Message = EvidenceRedaction.Scrub(problem.Message, EvidenceFormat.MaxProblemMessageChars) ?? "",
+                Message = BuildEvidenceProblemMessage(problem),
                 Count = problem.Count,
                 FirstSeenUtc = FormatUtc(problem.FirstSeenUtc),
                 LastSeenUtc = FormatUtc(problem.LastSeenUtc),
@@ -681,6 +681,28 @@ internal static class EvidenceBuilder
 
         document.Count = document.Problems.Count;
         return document;
+    }
+
+    private static string BuildEvidenceProblemMessage(DiagnosticProblem problem)
+    {
+        var kind = EvidenceRedaction.SafeIdentifier(problem.Kind, 64) ?? "runtime";
+        var code = EvidenceRedaction.SafeIdentifier(problem.Code, 64);
+        if (string.Equals(kind, "binding", StringComparison.OrdinalIgnoreCase))
+        {
+            var path = EvidenceRedaction.SafeIdentifier(problem.BindingPath, 256) ?? "(unknown path)";
+            var target = EvidenceRedaction.SafeIdentifier(problem.ElementType, 128) ?? "target";
+            var property = EvidenceRedaction.SafeIdentifier(problem.Property, 128) ?? "property";
+            var suffix = code is null ? "" : $" {code}";
+            return EvidenceRedaction.Truncate(
+                $"MAUI binding failure{suffix}: '{path}' could not update {target}.{property}.",
+                EvidenceFormat.MaxProblemMessageChars);
+        }
+
+        return EvidenceRedaction.Truncate(
+            code is null
+                ? $"{kind} runtime diagnostic."
+                : $"{kind} runtime diagnostic {code}.",
+            EvidenceFormat.MaxProblemMessageChars);
     }
 
     private static string? FormatUtc(DateTime value)

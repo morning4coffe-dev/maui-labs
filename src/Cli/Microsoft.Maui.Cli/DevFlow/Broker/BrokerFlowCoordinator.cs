@@ -9,6 +9,7 @@ internal sealed class BrokerFlowCoordinator
     private readonly ConcurrentDictionary<string, object> _gates = new(StringComparer.Ordinal);
     private readonly FlowRecordingStore _recordings;
     private readonly FlowRecordingSpoolStore _spools;
+    private readonly object _adoptionGate = new();
 
     public BrokerFlowCoordinator(
         FlowRecordingStore? recordings = null,
@@ -25,10 +26,18 @@ internal sealed class BrokerFlowCoordinator
         string? app,
         string? platform,
         string? preconditions,
-        string? sessionId = null)
+        string? sessionId = null,
+        string? stableAgentId = null)
     {
         lock (Gate(agentId))
-            return StartCore(agentId, name, app, platform, preconditions, sessionId);
+            return StartCore(
+                agentId,
+                name,
+                app,
+                platform,
+                preconditions,
+                sessionId,
+                stableAgentId ?? agentId);
     }
 
     private BrokerFlowResult StartCore(
@@ -37,7 +46,8 @@ internal sealed class BrokerFlowCoordinator
         string? app,
         string? platform,
         string? preconditions,
-        string? sessionId)
+        string? sessionId,
+        string stableAgentId)
     {
         if (_active.TryGetValue(agentId, out var existing))
         {
@@ -61,7 +71,10 @@ internal sealed class BrokerFlowCoordinator
         if (recordingId is null)
             return BrokerFlowResult.Failure($"Too many active recordings (max {FlowRecordingStore.MaxActive}).");
 
-        var active = new ActiveRecording(recordingId, sessionId);
+        var active = new ActiveRecording(recordingId, stableAgentId, sessionId)
+        {
+            Connected = true
+        };
         if (!_active.TryAdd(agentId, active))
         {
             _recordings.Remove(recordingId);
@@ -88,16 +101,22 @@ internal sealed class BrokerFlowCoordinator
         };
     }
 
-    public BrokerFlowResult Status(string agentId)
+    public BrokerFlowResult Status(string agentId, string? expectedRecordingId = null)
     {
         lock (Gate(agentId))
-            return StatusCore(agentId);
+            return StatusCore(agentId, expectedRecordingId);
     }
 
-    private BrokerFlowResult StatusCore(string agentId)
+    private BrokerFlowResult StatusCore(string agentId, string? expectedRecordingId)
     {
         if (!_active.TryGetValue(agentId, out var active))
+        {
+            if (!string.IsNullOrWhiteSpace(expectedRecordingId))
+                return BrokerFlowResult.Failure($"Unknown recordingId '{expectedRecordingId}'.");
             return new BrokerFlowResult { Ok = true, Recording = false, Steps = 0 };
+        }
+        if (!MatchesExpected(active, expectedRecordingId))
+            return BrokerFlowResult.Failure($"Unknown recordingId '{expectedRecordingId}'.");
         if (active.DurabilityError is not null)
             return DurabilityFailure(active, "The active recording is not durable");
         if (!_recordings.TryGet(active.RecordingId, out var recorder))
@@ -326,8 +345,70 @@ internal sealed class BrokerFlowCoordinator
 
     public void RemoveAgent(string agentId)
     {
-        // A disconnect is routinely caused by a rebuild. Keep the spool and in-memory registration
-        // so the same stable broker agent id can resume recording on reconnect.
+        lock (_adoptionGate)
+        {
+            lock (Gate(agentId))
+            {
+                if (_active.TryGetValue(agentId, out var active))
+                    active.Connected = false;
+            }
+        }
+    }
+
+    public bool ConnectAgent(
+        string agentId,
+        string stableAgentId,
+        string? sessionId,
+        string? expectedRecordingId = null)
+    {
+        lock (_adoptionGate)
+        {
+            if (_active.TryGetValue(agentId, out var current))
+            {
+                current.Connected = true;
+                return true;
+            }
+            if (string.IsNullOrWhiteSpace(expectedRecordingId))
+                return false;
+
+            var candidates = _active
+                .Where(pair =>
+                    !pair.Value.Connected &&
+                    string.Equals(
+                        pair.Value.RecordingId,
+                        expectedRecordingId,
+                        StringComparison.Ordinal) &&
+                    string.Equals(pair.Value.StableAgentId, stableAgentId, StringComparison.Ordinal) &&
+                    SessionsCompatible(pair.Value.SessionId, sessionId))
+                .ToArray();
+            if (candidates.Length != 1)
+                return false;
+
+            var orphan = candidates[0];
+            lock (Gate(orphan.Key))
+            {
+                if (!_active.TryRemove(new KeyValuePair<string, ActiveRecording>(orphan.Key, orphan.Value)))
+                    return false;
+                orphan.Value.Connected = true;
+                if (!_active.TryAdd(agentId, orphan.Value))
+                {
+                    orphan.Value.Connected = false;
+                    _active.TryAdd(orphan.Key, orphan.Value);
+                    return false;
+                }
+
+                if (_recordings.TryGet(orphan.Value.RecordingId, out var recorder))
+                {
+                    var persistenceError = Persist(agentId, orphan.Value, recorder);
+                    if (persistenceError is not null)
+                    {
+                        orphan.Value.DurabilityError = persistenceError;
+                        PersistDurabilityFailure(agentId, orphan.Value, recorder, persistenceError);
+                    }
+                }
+                return true;
+            }
+        }
     }
 
     public void Clear()
@@ -342,7 +423,12 @@ internal sealed class BrokerFlowCoordinator
     {
         try
         {
-            _spools.Save(agentId, active.SessionId, active.RecordingId, recorder);
+            _spools.Save(
+                agentId,
+                active.StableAgentId,
+                active.SessionId,
+                active.RecordingId,
+                recorder);
             return null;
         }
         catch (Exception ex)
@@ -366,10 +452,18 @@ internal sealed class BrokerFlowCoordinator
                 lastTouchedUtc: spool.LastTouchedUtc,
                 restoredFlow: spool.Flow);
             if (_recordings.TryRestore(spool.RecordingId, recorder))
-                _active.TryAdd(spool.AgentId, new ActiveRecording(spool.RecordingId, spool.SessionId)
+                _active.TryAdd(
+                    spool.AgentId,
+                    new ActiveRecording(
+                        spool.RecordingId,
+                        string.IsNullOrWhiteSpace(spool.StableAgentId)
+                            ? spool.AgentId
+                            : spool.StableAgentId,
+                        spool.SessionId)
                 {
                     LastDurableSteps = spool.Flow.Steps.Count,
-                    DurabilityError = spool.DurabilityError
+                    DurabilityError = spool.DurabilityError,
+                    Connected = false
                 });
         }
     }
@@ -382,7 +476,13 @@ internal sealed class BrokerFlowCoordinator
     {
         try
         {
-            _spools.Save(agentId, active.SessionId, active.RecordingId, recorder, error);
+            _spools.Save(
+                agentId,
+                active.StableAgentId,
+                active.SessionId,
+                active.RecordingId,
+                recorder,
+                error);
         }
         catch
         {
@@ -397,6 +497,11 @@ internal sealed class BrokerFlowCoordinator
         => string.IsNullOrWhiteSpace(expectedRecordingId) ||
             string.Equals(active.RecordingId, expectedRecordingId, StringComparison.Ordinal);
 
+    private static bool SessionsCompatible(string? first, string? second)
+        => string.IsNullOrWhiteSpace(first) ||
+           string.IsNullOrWhiteSpace(second) ||
+           string.Equals(first, second, StringComparison.Ordinal);
+
     private static BrokerFlowResult DurabilityFailure(ActiveRecording active, string prefix) => new()
     {
         Ok = false,
@@ -408,16 +513,19 @@ internal sealed class BrokerFlowCoordinator
 
     private sealed class ActiveRecording
     {
-        public ActiveRecording(string recordingId, string? sessionId)
+        public ActiveRecording(string recordingId, string stableAgentId, string? sessionId)
         {
             RecordingId = recordingId;
+            StableAgentId = stableAgentId;
             SessionId = sessionId;
         }
 
         public string RecordingId { get; }
+        public string StableAgentId { get; }
         public string? SessionId { get; }
         public string? DurabilityError { get; set; }
         public int LastDurableSteps { get; set; }
+        public bool Connected { get; set; }
     }
 }
 

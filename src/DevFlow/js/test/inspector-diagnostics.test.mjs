@@ -124,6 +124,12 @@ const performanceSummary = {
     managedPeakBytes: 3145728,
     managedDeltaBytes: 1048576,
     nativeSupported: false,
+    processSupported: true,
+    processKind: "windows.working-set",
+    processStartBytes: 4194304,
+    processEndBytes: 5242880,
+    processPeakBytes: 6291456,
+    processDeltaBytes: 1048576,
   },
   gc: { supported: true, gen0Delta: 5, gen1Delta: 2, gen2Delta: 0 },
   cpu: { supported: true, averagePercent: 33.333, peakPercent: 61 },
@@ -157,6 +163,10 @@ test("performance view formats the metric rows a triage read needs", () => {
 
   const gc = view.metrics.find((metric) => metric.label === "GC collections");
   assert.equal(gc.value, "gen0 +5 · gen1 +2 · gen2 +0");
+
+  const process = view.metrics.find((metric) => metric.label === "Process memory");
+  assert.equal(process.value, "4.0 MB → 5.0 MB");
+  assert.match(process.detail, /windows\.working-set/);
 
   const cpu = view.metrics.find((metric) => metric.label === "CPU");
   assert.equal(cpu.value, "avg 33.33% · peak 61%");
@@ -229,7 +239,7 @@ test("unsupported metrics say so instead of showing a zero", () => {
     threads: { supported: false },
   });
 
-  assert.equal(view.metrics.find((metric) => metric.label === "Native memory").value, "not observable");
+  assert.equal(view.metrics.find((metric) => metric.label === "Native heap").value, "not observable");
   assert.equal(view.metrics.find((metric) => metric.label === "CPU").value, "not observable");
   assert.equal(view.metrics.find((metric) => metric.label === "Threads").value, "not observable");
 });

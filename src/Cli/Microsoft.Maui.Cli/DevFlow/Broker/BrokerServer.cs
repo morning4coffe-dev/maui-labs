@@ -46,10 +46,24 @@ public class BrokerServer : IDisposable
     public BrokerServer(
         int port = DefaultPort,
         TimeSpan? idleTimeout = null,
-        Action<string>? log = null,
-        RouteCheckpointStore? checkpointStore = null,
-        string? recordingStorageRoot = null,
-        TimeProvider? clock = null)
+        Action<string>? log = null)
+        : this(
+            port,
+            idleTimeout,
+            log,
+            checkpointStore: null,
+            recordingStorageRoot: null,
+            clock: null)
+    {
+    }
+
+    internal BrokerServer(
+        int port,
+        TimeSpan? idleTimeout,
+        Action<string>? log,
+        RouteCheckpointStore? checkpointStore,
+        string? recordingStorageRoot,
+        TimeProvider? clock)
     {
         _port = port;
         _idleTimeout = idleTimeout ?? TimeSpan.FromMinutes(5);
@@ -431,7 +445,7 @@ public class BrokerServer : IDisposable
                 {
                     ReleasePort(connection.Registration.Port);
                     _mutationLeases.Remove(connection.Registration.Id);
-                    _flows.RemoveAgent(RouteCheckpointCoordinator.StableAgentId(connection.Registration));
+                    _flows.RemoveAgent(connection.Registration.Id);
                     if (_inspectors.TryRemove(connection.Registration.Id, out var inspector))
                         inspector.Dispose();
                     Log($"Agent disconnected: {connection.Registration.AppName}|{connection.Registration.Tfm}");
@@ -770,7 +784,13 @@ public class BrokerServer : IDisposable
                 await WriteJsonResponseAsync(context, 404, new JsonObject { ["error"] = $"Agent '{agentId}' not found" });
                 return;
             }
-            var flowAgentId = RouteCheckpointCoordinator.StableAgentId(connection.Registration);
+            var flowAgentId = connection.Registration.Id;
+            var stableFlowAgentId = RouteCheckpointCoordinator.StableAgentId(connection.Registration);
+            _flows.ConnectAgent(
+                flowAgentId,
+                stableFlowAgentId,
+                connection.Registration.SessionId,
+                recordingId);
 
             switch (action)
             {
@@ -781,10 +801,11 @@ public class BrokerServer : IDisposable
                         body["app"]?.GetValue<string>() ?? connection.Registration.AppName,
                         body["platform"]?.GetValue<string>() ?? connection.Registration.Platform,
                         body["preconditions"]?.GetValue<string>(),
-                        connection.Registration.SessionId);
+                        connection.Registration.SessionId,
+                        stableFlowAgentId);
                     break;
                 case "status":
-                    result = _flows.Status(flowAgentId);
+                    result = _flows.Status(flowAgentId, recordingId);
                     break;
                 case "observe":
                     var observationNode = body["observation"];

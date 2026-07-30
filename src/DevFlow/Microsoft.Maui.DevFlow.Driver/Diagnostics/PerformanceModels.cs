@@ -78,6 +78,10 @@ public class PerformanceSessionInfo
     /// <summary>Span between the first and last retained sample, not wall-clock session length.</summary>
     [JsonPropertyName("sampledDurationMs")]
     public double SampledDurationMs { get; set; }
+
+    [JsonPropertyName("stopToken")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? StopToken { get; set; }
 }
 
 public class PerformanceMemory
@@ -117,6 +121,24 @@ public class PerformanceMemory
 
     [JsonPropertyName("nativeUnsupportedReason")]
     public string? NativeUnsupportedReason { get; set; }
+
+    [JsonPropertyName("processSupported")]
+    public bool ProcessSupported { get; set; }
+
+    [JsonPropertyName("processKind")]
+    public string? ProcessKind { get; set; }
+
+    [JsonPropertyName("processStartBytes")]
+    public long? ProcessStartBytes { get; set; }
+
+    [JsonPropertyName("processEndBytes")]
+    public long? ProcessEndBytes { get; set; }
+
+    [JsonPropertyName("processPeakBytes")]
+    public long? ProcessPeakBytes { get; set; }
+
+    [JsonPropertyName("processDeltaBytes")]
+    public long? ProcessDeltaBytes { get; set; }
 }
 
 public class PerformanceGc
@@ -311,6 +333,9 @@ public class PerformanceCapability
 
     [JsonPropertyName("nativeMemorySupported")]
     public bool NativeMemorySupported { get; set; }
+
+    [JsonPropertyName("processMemorySupported")]
+    public bool ProcessMemorySupported { get; set; }
 
     [JsonPropertyName("gcSupported")]
     public bool GcSupported { get; set; }

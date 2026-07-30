@@ -174,6 +174,38 @@ public class EvidenceCaptureTests : IDisposable
     }
 
     [Fact]
+    public void ProjectProblems_DropsRawMessagesWithArbitraryRejectedValues()
+    {
+        const string secret = "CorrectHorseBatteryStaple!";
+        var projected = EvidenceBuilder.ProjectProblems(
+            new DiagnosticProblemBatch
+            {
+                Enabled = true,
+                Revision = 1,
+                Count = 1,
+                Problems =
+                [
+                    new DiagnosticProblem
+                    {
+                        Id = "p1",
+                        Kind = "binding",
+                        Code = "conversion",
+                        Message = $"'{secret}' cannot be converted to System.Double",
+                        Count = 1,
+                        BindingPath = "SecretNumber",
+                        ElementType = "Microsoft.Maui.Controls.Slider",
+                        Property = "Value"
+                    }
+                ]
+            },
+            projectRoot: null);
+
+        var problem = Assert.Single(projected.Problems);
+        Assert.DoesNotContain(secret, problem.Message, StringComparison.Ordinal);
+        Assert.Contains("SecretNumber", problem.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void ProjectTree_StopsAtTheElementBudget()
     {
         var roots = new List<ElementInfo>();

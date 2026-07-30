@@ -21,6 +21,23 @@ public sealed class FlowRecorder
         string name,
         string? app,
         string? platform,
+        string? preconditions)
+        : this(
+            name,
+            app,
+            platform,
+            preconditions,
+            clock: null,
+            createdAtUtc: null,
+            lastTouchedUtc: null,
+            restoredFlow: null)
+    {
+    }
+
+    internal FlowRecorder(
+        string name,
+        string? app,
+        string? platform,
         string? preconditions,
         TimeProvider? clock = null,
         DateTimeOffset? createdAtUtc = null,

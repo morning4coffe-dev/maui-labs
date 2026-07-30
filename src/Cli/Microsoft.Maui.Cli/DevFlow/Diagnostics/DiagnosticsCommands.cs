@@ -224,6 +224,7 @@ internal static class DiagnosticsCommands
             {
                 using var client = await clientFactory(ctx.GetValue(agentHostOption)!, ctx.GetValue(agentPortOption));
                 string? ownedSessionId = null;
+                string? ownedStopToken = null;
                 try
                 {
                     PerformanceSummary summary;
@@ -241,24 +242,29 @@ internal static class DiagnosticsCommands
                         }
                         if (!started.Session.Active || string.IsNullOrWhiteSpace(started.Session.SessionId))
                             throw new InvalidOperationException("The agent did not return an active profiler session.");
+                        if (string.IsNullOrWhiteSpace(started.Session.StopToken))
+                            throw new InvalidOperationException("The agent did not return a profiler creator stop token.");
 
                         ownedSessionId = started.Session.SessionId;
+                        ownedStopToken = started.Session.StopToken;
                         await Task.Delay(TimeSpan.FromSeconds(duration), ct);
                         summary = await client.StopPerformanceSessionAsync(
                             ownedSessionId,
+                            ownedStopToken,
                             hotspotLimit: hotspots);
                         if (summary.Session.Active)
                             throw new InvalidOperationException("The profiler session did not stop.");
                         ownedSessionId = null;
+                        ownedStopToken = null;
                     }
 
                     WriteSummary(output, summary, isJson);
                 }
                 catch
                 {
-                    if (ownedSessionId is not null)
+                    if (ownedSessionId is not null && ownedStopToken is not null)
                     {
-                        var stopped = await client.StopProfilerAsync(ownedSessionId);
+                        var stopped = await client.StopProfilerAsync(ownedSessionId, ownedStopToken);
                         if (stopped is null || stopped.IsActive)
                         {
                             throw new InvalidOperationException(
@@ -302,11 +308,16 @@ internal static class DiagnosticsCommands
         text.AppendLine(
             $"  Managed memory: {FormatBytes(summary.Memory.ManagedStartBytes)} → {FormatBytes(summary.Memory.ManagedEndBytes)} " +
             $"(peak {FormatBytes(summary.Memory.ManagedPeakBytes)}, delta {FormatDelta(summary.Memory.ManagedDeltaBytes)})");
+        text.AppendLine(summary.Memory.ProcessSupported && summary.Memory.ProcessEndBytes.HasValue
+            ? $"  Process memory ({summary.Memory.ProcessKind ?? "unknown"}): {FormatBytes(summary.Memory.ProcessStartBytes)} → " +
+              $"{FormatBytes(summary.Memory.ProcessEndBytes)} (peak {FormatBytes(summary.Memory.ProcessPeakBytes)}, " +
+              $"delta {FormatDelta(summary.Memory.ProcessDeltaBytes)})"
+            : "  Process memory: not observable on this platform");
         text.AppendLine(summary.Memory.NativeSupported && summary.Memory.NativeEndBytes.HasValue
-            ? $"  Native memory ({summary.Memory.NativeKind ?? "unknown"}): {FormatBytes(summary.Memory.NativeStartBytes)} → " +
+            ? $"  Native heap ({summary.Memory.NativeKind ?? "unknown"}): {FormatBytes(summary.Memory.NativeStartBytes)} → " +
               $"{FormatBytes(summary.Memory.NativeEndBytes)} (peak {FormatBytes(summary.Memory.NativePeakBytes)}, " +
               $"delta {FormatDelta(summary.Memory.NativeDeltaBytes)})"
-            : $"  Native memory: {summary.Memory.NativeUnsupportedReason ?? "not observable on this platform"}");
+            : $"  Native heap: {summary.Memory.NativeUnsupportedReason ?? "not observable on this platform"}");
 
         text.AppendLine(summary.Gc.Supported
             ? $"  GC: gen0 +{summary.Gc.Gen0Delta ?? 0} · gen1 +{summary.Gc.Gen1Delta ?? 0} · gen2 +{summary.Gc.Gen2Delta ?? 0}"

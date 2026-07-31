@@ -34,8 +34,10 @@ Copilot Canvas ──► extension.mjs ──► broker-hosted shared inspector
   renders the lightweight disconnected/loading status shell (`renderDisconnected`) shown while no
   broker/agent has resolved yet; both share the hybrid `--df-*` theme-token language with the VS
   Code host shell.
-- **`recorder.mjs` / `replay.mjs`** — workflow persistence and replay. Active recording is owned
-  by the broker and observes successful mutations from every DevFlow host.
+- **`recorder.mjs`** — bounded workflow persistence and safe top-level test selection. Active
+  recording is owned by the broker and observes successful mutations from every DevFlow host.
+- **`replay.mjs`** — legacy offline compatibility fixture only. Production Canvas replay delegates
+  to the shared Inspector's canonical C# `FlowReplayer`.
 - **`selftest*.mjs`** — bridge smoke test and offline proof.
 
 ### File map
@@ -44,7 +46,8 @@ Copilot Canvas ──► extension.mjs ──► broker-hosted shared inspector
 |---|---|
 | `devflow.mjs` | Thin adapter over `@maui-devflow/client` |
 | `store.mjs`, `extension.mjs` | Live state and Canvas host integration |
-| `recorder.mjs`, `replay.mjs` | Workflow persistence and replay |
+| `recorder.mjs` | Workflow persistence and safe test-file selection |
+| `replay.mjs` | Legacy offline replay fixture; not used by the production Canvas |
 | `selftest*.mjs`, `test/device.test.mjs` | Live smoke checks and offline contract tests |
 
 ## Migration from the old user extension
@@ -103,7 +106,10 @@ MAUI_DEVFLOW_FORCE_LEASE=1 npm run selftest
 - Attach to Copilot sends bounded, text-only context; it does not attach a screenshot automatically.
 - The Inspector context menu can attach only the selected element, only the loaded workflow, both,
   or the current redacted Data snapshot.
-- Replays are blocked while a workflow recording is active.
+- Replays are blocked while a workflow recording is active and execute through the same C#
+  `FlowReplayer` used by the Inspector, CLI, and MCP.
+- Test file inputs are restricted to top-level Markdown files under the resolved project
+  `maui-tests` directory.
 
 ## Requirements
 

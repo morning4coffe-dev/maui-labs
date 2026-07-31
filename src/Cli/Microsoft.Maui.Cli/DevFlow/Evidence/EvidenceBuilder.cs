@@ -3,7 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Maui.DevFlow.Driver;
-using Microsoft.Maui.Cli.DevFlow.Flows;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Evidence;
 
@@ -17,6 +17,8 @@ internal sealed record EvidenceCaptureOptions
     public bool PreviewOnly { get; init; }
 
     public string? WorkflowMarkdown { get; init; }
+    /// <summary>Optional metadata-only link to a flow-run-report-v1 result.</summary>
+    public EvidenceFlowRunLink? FlowRun { get; init; }
     public string? CheckpointRoute { get; init; }
     public DateTimeOffset? CheckpointSavedUtc { get; init; }
     public string? CheckpointLastRestoreKind { get; init; }
@@ -322,6 +324,7 @@ internal static class EvidenceBuilder
             Limits = limits,
             Screenshot = screenshot,
             Checkpoint = environment.Checkpoint,
+            FlowRun = ProjectFlowRunLink(options.FlowRun, options.ProjectRoot),
             SelectedElementId = EvidenceRedaction.SafeIdentifier(options.SelectedElementId),
             Warnings = warnings,
         };
@@ -374,6 +377,25 @@ internal static class EvidenceBuilder
         "inspector" => "inspector",
         _ => "cli",
     };
+
+    private static EvidenceFlowRunLink? ProjectFlowRunLink(EvidenceFlowRunLink? link, string? projectRoot)
+    {
+        if (link is null)
+            return null;
+
+        return new EvidenceFlowRunLink
+        {
+            RunId = EvidenceRedaction.SafeIdentifier(link.RunId),
+            FailedStepId = EvidenceRedaction.SafeIdentifier(link.FailedStepId),
+            FailureCode = EvidenceRedaction.SafeIdentifier(link.FailureCode),
+            ReportDigest = EvidenceRedaction.SafeIdentifier(link.ReportDigest),
+            ReportPath = string.IsNullOrWhiteSpace(link.ReportPath)
+                ? null
+                : EvidenceRedaction.NormalizeSourcePath(link.ReportPath, projectRoot),
+            ReportReference = EvidenceRedaction.SafeIdentifier(link.ReportReference),
+            CaptureCompleteness = EvidenceRedaction.SafeIdentifier(link.CaptureCompleteness),
+        };
+    }
 
     // Exception text can carry hosts, ports, and local paths — scrub before it reaches a manifest.
     private static string Describe(Exception ex)

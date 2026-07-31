@@ -29,7 +29,7 @@ internal static class DiagnosticsCommands
         Option<string> agentHostOption,
         Option<int> agentPortOption,
         IDevFlowOutputWriter output,
-        Func<string, int, Task<AgentClient>> clientFactory,
+        Func<string, int, bool, Task<AgentClient>> clientFactory,
         Action onError)
     {
         var command = new Command("diagnostics",
@@ -48,7 +48,7 @@ internal static class DiagnosticsCommands
         Option<string> agentHostOption,
         Option<int> agentPortOption,
         IDevFlowOutputWriter output,
-        Func<string, int, Task<AgentClient>> clientFactory,
+        Func<string, int, bool, Task<AgentClient>> clientFactory,
         Action onError)
     {
         var elementOption = new Option<string?>("--element")
@@ -81,13 +81,48 @@ internal static class DiagnosticsCommands
         command.SetAction(async (ctx, ct) =>
         {
             var isJson = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+            var window = ctx.GetValue(windowOption);
+            if (window is < 0)
+            {
+                output.WriteError(
+                    "--window must be zero or greater.",
+                    isJson,
+                    "InvalidArgument");
+                onError();
+                return;
+            }
+            var maxElements = ctx.GetValue(maxElementsOption);
+            if (maxElements is < 1 or > 5000)
+            {
+                output.WriteError(
+                    "--max-elements must be between 1 and 5000.",
+                    isJson,
+                    "InvalidArgument");
+                onError();
+                return;
+            }
+
             try
             {
-                using var client = await clientFactory(ctx.GetValue(agentHostOption)!, ctx.GetValue(agentPortOption));
+                using var client = await clientFactory(
+                    ctx.GetValue(agentHostOption)!,
+                    ctx.GetValue(agentPortOption),
+                    !isJson);
+                if (await client.GetStatusAsync() is null)
+                {
+                    output.WriteError(
+                        $"The DevFlow agent at {client.BaseUrl} is not reachable.",
+                        isJson,
+                        "ConnectionError",
+                        retryable: true,
+                        suggestions: ["Start the app or select a reachable agent with --agent-port"]);
+                    onError();
+                    return;
+                }
                 var report = await client.GetLayoutDiagnosticsAsync(
                     ctx.GetValue(elementOption),
-                    ctx.GetValue(windowOption),
-                    ctx.GetValue(maxElementsOption));
+                    window,
+                    maxElements);
 
                 if (report is null)
                 {
@@ -105,7 +140,7 @@ internal static class DiagnosticsCommands
             }
             catch (Exception ex)
             {
-                output.WriteError(ex.Message, isJson, suggestions: ["Run 'maui devflow status' to confirm an app is connected"]);
+                output.WriteError(ex.Message, isJson, suggestions: ["Run 'maui devflow agent status' to confirm the selected app is connected"]);
                 onError();
             }
         });
@@ -172,7 +207,7 @@ internal static class DiagnosticsCommands
         Option<string> agentHostOption,
         Option<int> agentPortOption,
         IDevFlowOutputWriter output,
-        Func<string, int, Task<AgentClient>> clientFactory,
+        Func<string, int, bool, Task<AgentClient>> clientFactory,
         Action onError)
     {
         var durationOption = new Option<int>("--duration")
@@ -207,8 +242,26 @@ internal static class DiagnosticsCommands
         command.SetAction(async (ctx, ct) =>
         {
             var isJson = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
-            var duration = Math.Clamp(ctx.GetValue(durationOption), MinDurationSeconds, MaxDurationSeconds);
-            var hotspots = Math.Clamp(ctx.GetValue(hotspotLimitOption), 1, 50);
+            var duration = ctx.GetValue(durationOption);
+            if (duration < MinDurationSeconds || duration > MaxDurationSeconds)
+            {
+                output.WriteError(
+                    $"--duration must be between {MinDurationSeconds} and {MaxDurationSeconds} seconds.",
+                    isJson,
+                    "InvalidArgument");
+                onError();
+                return;
+            }
+            var hotspots = ctx.GetValue(hotspotLimitOption);
+            if (hotspots < 1 || hotspots > 50)
+            {
+                output.WriteError(
+                    "--hotspots must be between 1 and 50.",
+                    isJson,
+                    "InvalidArgument");
+                onError();
+                return;
+            }
             var sampleInterval = ctx.GetValue(sampleIntervalOption);
             if (sampleInterval is { } interval && (interval < MinSampleIntervalMs || interval > MaxSampleIntervalMs))
             {
@@ -222,7 +275,10 @@ internal static class DiagnosticsCommands
 
             try
             {
-                using var client = await clientFactory(ctx.GetValue(agentHostOption)!, ctx.GetValue(agentPortOption));
+                using var client = await clientFactory(
+                    ctx.GetValue(agentHostOption)!,
+                    ctx.GetValue(agentPortOption),
+                    !isJson);
                 string? ownedSessionId = null;
                 string? ownedStopToken = null;
                 try
@@ -281,7 +337,7 @@ internal static class DiagnosticsCommands
             }
             catch (Exception ex)
             {
-                output.WriteError(ex.Message, isJson, suggestions: ["Run 'maui devflow status' to confirm an app is connected"]);
+                output.WriteError(ex.Message, isJson, suggestions: ["Run 'maui devflow agent status' to confirm the selected app is connected"]);
                 onError();
             }
         });
@@ -312,7 +368,7 @@ internal static class DiagnosticsCommands
             ? $"  Process memory ({summary.Memory.ProcessKind ?? "unknown"}): {FormatBytes(summary.Memory.ProcessStartBytes)} → " +
               $"{FormatBytes(summary.Memory.ProcessEndBytes)} (peak {FormatBytes(summary.Memory.ProcessPeakBytes)}, " +
               $"delta {FormatDelta(summary.Memory.ProcessDeltaBytes)})"
-            : "  Process memory: not observable on this platform");
+            : $"  Process memory: {summary.Memory.ProcessUnsupportedReason ?? "not observable on this platform"}");
         text.AppendLine(summary.Memory.NativeSupported && summary.Memory.NativeEndBytes.HasValue
             ? $"  Native heap ({summary.Memory.NativeKind ?? "unknown"}): {FormatBytes(summary.Memory.NativeStartBytes)} → " +
               $"{FormatBytes(summary.Memory.NativeEndBytes)} (peak {FormatBytes(summary.Memory.NativePeakBytes)}, " +

@@ -24,6 +24,7 @@ public sealed class AppFixture : IAppFixture, IAsyncLifetime
     public int AgentPort => _inner.AgentPort;
     public string AgentBaseUrl => _inner.AgentBaseUrl;
     public string Platform => _inner.Platform;
+    public IPlatformFlowTestLifecycle? FlowLifecycle => _inner.FlowLifecycle;
 
     public Task InitializeAsync() => _inner.InitializeAsync();
     public Task DisposeAsync() => _inner.DisposeAsync();

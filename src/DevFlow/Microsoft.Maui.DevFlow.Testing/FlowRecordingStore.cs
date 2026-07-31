@@ -1,7 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 
-namespace Microsoft.Maui.Cli.DevFlow.Flows;
+namespace Microsoft.Maui.DevFlow.Testing;
 
 /// <summary>
 /// Process-wide registry of in-progress <see cref="FlowRecorder"/> sessions, keyed by a

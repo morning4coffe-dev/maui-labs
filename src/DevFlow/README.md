@@ -15,6 +15,7 @@ A comprehensive testing, automation, and debugging toolkit for .NET MAUI applica
 | **Microsoft.Maui.DevFlow.Blazor.Gtk** | Blazor CDP bridge for WebKitGTK on Linux. |
 | **Microsoft.Maui.DevFlow.CLI** | DevFlow command implementation used by the unified `maui devflow` CLI surface for automation, debugging, and MCP server support. |
 | **Microsoft.Maui.DevFlow.Driver** | Platform-aware app driver for iOS, Android, Mac Catalyst, Windows, and Linux. |
+| **Microsoft.Maui.DevFlow.Testing** | Public preview flow contracts, Markdown parsing, validation, recording, and replay runtime. It is independent of CLI, broker, Inspector, MCP, and test-framework adapters. |
 | **Microsoft.Maui.DevFlow.Logging** | Buffered rotating JSONL file logger. No MAUI dependency. |
 
 ## Quick Start
@@ -103,7 +104,17 @@ maui devflow resume clear
 ```
 
 The Web Inspector exposes the same Save route, Resume, and Clear route controls in its existing
-toolbar. Route query values are redacted when checkpoint metadata is included in evidence.
+toolbar. The raw route remains local so restore can navigate correctly, while CLI/Inspector status
+and evidence output redact every query value and fragment.
+
+### Diagnose binding Problems
+
+The Inspector's **Problems** tab and `GET /api/v1/diagnostics/problems` expose bounded,
+metadata-only MAUI binding failures. Entries identify the binding path, target type/property, and
+XAML source when available; rejected runtime values are never retained. Selecting a Problem jumps
+to the affected live element so you can inspect its value source and choose a safe edit. Binding
+and dynamic-resource properties fail closed unless an explicit unsafe override is requested, and
+unsafe overrides are never recorded into replay workflows.
 
 ### Reliable workflow replay
 
@@ -113,6 +124,10 @@ Before tap and fill, replay waits for a visible and enabled element; taps also w
 positive bounds. Safe property changes only require an unambiguous target, so a flow can disable
 and later re-enable the same element. Type/index and runtime-id selectors remain explicitly fragile.
 Replay stops at the first divergence by default.
+
+The canonical flow contracts and replay semantics live in
+`Microsoft.Maui.DevFlow.Testing`. The CLI, broker, Inspector, evidence capture, and MCP tools are
+adapters over that package rather than independent flow engines.
 
 ```bash
 maui devflow flow replay maui-tests/login.md --evidence-on-failure

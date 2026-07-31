@@ -210,6 +210,61 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
     [Theory]
     [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
     [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void ExplicitDisabledMode_WinsOverProfileMode(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        RunSetMauiDevFlowPortTarget(
+            "/p:MauiDevFlowProfileMode=true",
+            "/p:MauiDevFlowEnabled=false");
+
+        var contents = File.ReadAllText(GeneratedFilePath);
+        Assert.Contains("\"Microsoft.Maui.DevFlowEnabled\", \"false\"", contents);
+        Assert.Contains("\"Microsoft.Maui.DevFlowMode\", \"disabled\"", contents);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets", "0")]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets", "65536")]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets", "abc")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets", "0")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets", "65536")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets", "abc")]
+    public void SetMauiDevFlowPort_RejectsInvalidPorts(
+        string relativeTargetPath,
+        string port)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        var result = RunTarget(
+            "_SetMauiDevFlowPort",
+            $"/p:MauiDevFlowPort={port}");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("between 1 and 65535", result.Output + result.Error);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets", "1")]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets", "65535")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets", "1")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets", "65535")]
+    public void SetMauiDevFlowPort_AcceptsBoundaryPorts(
+        string relativeTargetPath,
+        string port)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        RunSetMauiDevFlowPortTarget($"/p:MauiDevFlowPort={port}");
+
+        Assert.Contains(
+            $"\"Microsoft.Maui.DevFlowPort\", \"{port}\"",
+            File.ReadAllText(GeneratedFilePath));
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
     public void ExplicitProfileMode_DefinesMauiDevFlowCompilationSymbol(string relativeTargetPath)
     {
         CreateTestProject(relativeTargetPath);

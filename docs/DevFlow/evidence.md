@@ -13,6 +13,9 @@ maui devflow evidence capture
 
 # Validate a bundle and open a generated offline report
 maui devflow evidence view ./maui-traces/MyApp-20260729-112233.mauitrace
+
+# Choose the report path; existing reports require explicit replacement
+maui devflow evidence view trace.mauitrace --output-report report.html --overwrite
 ```
 
 ## What a bundle contains
@@ -30,6 +33,13 @@ Format version 1 is a ZIP with a fixed, allow-listed set of entries:
 | `network.json` | HTTP **summaries**: method, host, path, query parameter *names*, status, duration, sizes, content types, scrubbed error |
 | `screenshot.png` | Only when explicitly opted in |
 | `workflow.md` | Only when reproduction steps are attached — scrubbed like every other payload (max 1 MB) |
+
+No new ZIP entry is added for flow replay. When a replay captures failure evidence, the existing
+`manifest.json` may include an additive `flowRun` object with the run ID, failed step ID, typed
+failure code, report digest, local `flow-run.json` path/reference, and capture-completeness state.
+This links the redacted `.mauitrace` v1 bundle back to its bounded structured report without
+changing the v1 allow-list. A missing path means the host retained the report in memory only; the
+run ID and digest still identify the report returned by CLI, MCP, Inspector, or broker status.
 
 ## Privacy contract
 
@@ -51,6 +61,8 @@ Bounded and scrubbed:
 
 - logs are capped (default 200, max 500) and each message is secret-masked, path-stripped and
   truncated;
+- redaction ruleset v2 recognizes keyed secrets plus common standalone credential shapes such as
+  `sk-`/Slack/GitHub/GitLab/Google/AWS tokens, basic-auth URLs, and PEM private-key blocks;
 - network summaries are capped (default 100, max 500);
 - the visual tree is capped at 5,000 elements and 64 levels deep;
 - the bundled layout scan examines at most 2,000 elements and retains at most 500 findings; each
@@ -67,6 +79,29 @@ Attached reproduction steps are opt-in too: the CLI and MCP tools only read a fi
 second checkbox in the confirmation dialog — because recorded steps quote the text and values you
 typed. Whatever is attached is scrubbed for secrets and absolute paths before it enters the bundle,
 and the manifest warns that the bundle carries it.
+
+## Flow replay report linkage
+
+`MauiFlowRunner` emits `flow-run-report-v1` for every pass, divergence, cancellation, timeout,
+lease loss, infrastructure failure, and unknown command completion. The broker retains that report
+with terminal run status and writes `<artifact-root>/<runId>/flow-run.json` atomically when an
+artifact root is configured. `maui devflow flow replay`, MCP replay, and Inspector replay preserve
+their legacy `FlowReplayReport` fields while adding optional `report`, `reportPath`, and
+`reportDigest` fields.
+
+The report records redacted selector/value descriptors, actionability polls, command receipts,
+assertion disclosure state, typed failure classification, artifact references, and additive
+side-effect admission facts: policy, reset/seed evidence, expected and observed preconditions,
+compensator outcome, independent business-oracle results, and explicit replay/repair eligibility
+reasons. A run is not marked verified unless its required independent oracle succeeds. These are
+identity-only facts; reset strategies, evidence references, seed identities, and messages are
+scrubbed with the same report redactor and never execute a reset or compensator.
+
+Legacy manual schema-2 flow replay remains usable. Its report makes the absence of safety evidence
+explicit with `sideEffectPolicy: "unspecified"` and `repairEligibility: false`; it does not claim a
+repair-verified clean state. The report intentionally does not embed a `.mauitrace`, raw secrets,
+or typed sensitive values. Evidence capture is failure-only and metadata/tree/log oriented by
+default; screenshots remain opt-in.
 
 ## Preview before you share
 
@@ -106,8 +141,11 @@ renderer.
 `evidence view` never renders or executes anything from the bundle. It parses the trusted entries
 and **regenerates** a self-contained static HTML report: every value is HTML-encoded, the document
 declares `default-src 'none'; script-src 'none'` (images limited to embedded `data:` URIs), and any
-bundled `workflow.md` is rendered as inert, encoded text. Generated reports live in a dedicated
-temporary folder and are aged out by TTL and count — only files this tool created are deleted.
+bundled `workflow.md` is rendered as inert, encoded text. Terminal control and Unicode format
+characters are removed before rendering. Explicit report paths must use `.html`/`.htm`, reject
+Windows device/alternate-stream names, and never overwrite unless `--overwrite` is supplied.
+Generated reports live in a dedicated temporary folder and are aged out by TTL and count — only
+files this tool created are deleted.
 
 ## MCP tools
 

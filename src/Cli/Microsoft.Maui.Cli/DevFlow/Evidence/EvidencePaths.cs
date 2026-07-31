@@ -166,6 +166,49 @@ internal static class EvidencePaths
         return new EvidencePathResult(full, null);
     }
 
+    public static EvidencePathResult ValidateReportPath(string? requested)
+    {
+        if (string.IsNullOrWhiteSpace(requested))
+            return new EvidencePathResult(null, "A report path is required.");
+
+        var value = requested.Trim();
+        if (value.Contains('\0') || value.Any(char.IsControl))
+            return new EvidencePathResult(null, "Report path contains invalid characters.");
+        if (value.Length > 1024)
+            return new EvidencePathResult(null, "Report path is too long.");
+
+        string full;
+        try
+        {
+            full = Path.GetFullPath(value);
+        }
+        catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return new EvidencePathResult(null, "Report path is not a valid file path.");
+        }
+
+        if (Directory.Exists(full))
+            return new EvidencePathResult(null, "Report path is a directory.");
+
+        var fileName = Path.GetFileName(full);
+        if (string.IsNullOrWhiteSpace(fileName))
+            return new EvidencePathResult(null, "Report path must include a file name.");
+        if (fileName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0 ||
+            (OperatingSystem.IsWindows() && fileName.Contains(':')))
+        {
+            return new EvidencePathResult(null, "Report file name contains invalid characters.");
+        }
+        if (OperatingSystem.IsWindows() && IsReservedWindowsFileName(fileName))
+            return new EvidencePathResult(null, "Report file name is reserved by Windows.");
+        if (!fileName.EndsWith(".html", StringComparison.OrdinalIgnoreCase) &&
+            !fileName.EndsWith(".htm", StringComparison.OrdinalIgnoreCase))
+        {
+            return new EvidencePathResult(null, "Evidence reports must use the .html or .htm extension.");
+        }
+
+        return new EvidencePathResult(full, null);
+    }
+
     public static string SanitizeFileNameComponent(string? value)
     {
         if (string.IsNullOrWhiteSpace(value)) return string.Empty;
@@ -175,6 +218,19 @@ internal static class EvidencePaths
             .Take(48)
             .ToArray();
         return new string(chars).Trim('.', '-');
+    }
+
+    private static bool IsReservedWindowsFileName(string fileName)
+    {
+        var stem = Path.GetFileNameWithoutExtension(fileName)
+            .TrimEnd(' ', '.')
+            .ToUpperInvariant();
+        if (stem is "CON" or "PRN" or "AUX" or "NUL")
+            return true;
+        return stem.Length == 4 &&
+            (stem.StartsWith("COM", StringComparison.Ordinal) ||
+             stem.StartsWith("LPT", StringComparison.Ordinal)) &&
+            stem[3] is >= '1' and <= '9';
     }
 
     // ── Generated report files ───────────────────────────────────────────────────────────────

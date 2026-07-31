@@ -28,11 +28,13 @@
 //   can evolve independently without changing that block.
 // - ASCII-only strings (matches the canvas's "no multibyte in shared payloads" rule).
 
-import { existsSync, mkdirSync, mkdtempSync, copyFileSync, writeFileSync, readdirSync, rmSync, statSync } from "node:fs";
-import { join, dirname, basename } from "node:path";
+import { Buffer } from "node:buffer";
+import { existsSync, mkdirSync, mkdtempSync, copyFileSync, linkSync, readFileSync, realpathSync, writeFileSync, readdirSync, rmSync, statSync, unlinkSync } from "node:fs";
+import { join, dirname, basename, extname, isAbsolute, relative, resolve, sep } from "node:path";
 import { tmpdir, homedir } from "node:os";
 
 export const RECORDER_SCHEMA_VERSION = 1;
+export const RECORDING_MAX_BYTES = 1024 * 1024;
 
 // Which store mutations count as recordable workflow steps (everything else — select, refresh,
 // screenshot, listAgents, resize, logs — is inspection noise and is NOT recorded).
@@ -386,6 +388,64 @@ export class Recorder {
     return join(homedir(), ".copilot", "maui-live-canvas", "tests");
   }
 
+  resolveTestName(store, { name, file } = {}) {
+    const root = resolve(this.outputRoot(store));
+    let candidateName = null;
+
+    if (typeof file === "string" && file.trim()) {
+      const candidate = resolve(isAbsolute(file) ? file : join(root, file));
+      const rel = relative(root, candidate);
+      if (rel === ".." || rel.startsWith(`..${sep}`) || isAbsolute(rel) || dirname(candidate) !== root) {
+        return { ok: false, error: "Test files must be top-level Markdown files inside the resolved maui-tests directory." };
+      }
+      if (existsSync(root) && existsSync(candidate)) {
+        try {
+          const realRoot = realpathSync.native(root);
+          const realCandidate = realpathSync.native(candidate);
+          if (dirname(realCandidate) !== realRoot) {
+            return { ok: false, error: "Test files must be top-level Markdown files inside the resolved maui-tests directory." };
+          }
+        } catch (e) {
+          return { ok: false, error: `Could not resolve test path: ${String(e?.message || e)}` };
+        }
+      }
+      candidateName = basename(candidate);
+    } else if (typeof name === "string" && name.trim()) {
+      candidateName = name.trim();
+      if (!extname(candidateName)) candidateName += ".md";
+    }
+
+    if (!candidateName ||
+        candidateName.length > 255 ||
+        basename(candidateName) !== candidateName ||
+        extname(candidateName).toLowerCase() !== ".md") {
+      return { ok: false, error: "Provide a top-level Markdown test name from the resolved maui-tests directory." };
+    }
+
+    return { ok: true, name: candidateName };
+  }
+
+  load(store, input = {}) {
+    const selected = this.resolveTestName(store, input);
+    if (!selected.ok) return selected;
+
+    const root = resolve(this.outputRoot(store));
+    const file = join(root, selected.name);
+    if (!existsSync(file))
+      return { ok: false, error: `Test not found: ${file}` };
+
+    const confined = this.resolveTestName(store, { file });
+    if (!confined.ok) return confined;
+    try {
+      const markdown = readFileSync(file, "utf8");
+      if (Buffer.byteLength(markdown, "utf8") > RECORDING_MAX_BYTES)
+        return { ok: false, error: "workflow test exceeds the 1 MiB limit" };
+      return { ok: true, name: selected.name, file, markdown };
+    } catch (e) {
+      return { ok: false, error: `Could not read test: ${String(e?.message || e)}` };
+    }
+  }
+
   save(store) {
     if (!this.steps.length) return { ok: false, error: "Nothing recorded yet — start recording and perform some actions first." };
     const root = this.outputRoot(store);
@@ -403,13 +463,36 @@ export class Recorder {
           }
         }
       }
+      const markdown = this.toMarkdown();
+      if (Buffer.byteLength(markdown, "utf8") > RECORDING_MAX_BYTES) {
+        return { ok: false, error: "recording exceeds the 1 MiB limit" };
+      }
       const file = join(root, `${slug}.md`);
-      writeFileSync(file, this.toMarkdown(), "utf8");
+      writeNewFileAtomic(file, markdown);
       this._savedTo = file;
       return { ok: true, file, dir: shotDir, steps: this.steps.length, root };
     } catch (e) {
       return { ok: false, error: `Save failed: ${String(e?.message || e)}` };
     }
+  }
+
+  persist(store, { markdown, name } = {}) {
+    const md = typeof markdown === "string" ? markdown : "";
+    if (!md) return { ok: false, error: "no markdown" };
+    if (Buffer.byteLength(md, "utf8") > RECORDING_MAX_BYTES) {
+      return { ok: false, error: "recording exceeds the 1 MiB limit" };
+    }
+
+    const root = this.outputRoot(store);
+    const file = join(root, `${slugify(name || "recording")}.md`);
+    try {
+      mkdirSync(root, { recursive: true });
+      writeNewFileAtomic(file, md);
+      return { ok: true, file, root };
+    } catch (e) {
+      return { ok: false, error: `Save failed: ${String(e?.message || e)}` };
+    }
+
   }
 
   // List saved tests in the output root (for the list_tests agent action).
@@ -431,5 +514,15 @@ export class Recorder {
       try { rmSync(this._stageDir, { recursive: true, force: true }); } catch { /* ignore */ }
     }
     this._stageDir = null;
+  }
+}
+
+function writeNewFileAtomic(file, content) {
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(temporary, content, { encoding: "utf8", flag: "wx" });
+    linkSync(temporary, file);
+  } finally {
+    try { unlinkSync(temporary); } catch { /* best effort */ }
   }
 }

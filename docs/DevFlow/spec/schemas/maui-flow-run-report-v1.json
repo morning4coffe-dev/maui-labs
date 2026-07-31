@@ -1,0 +1,968 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-run-report-v1.json",
+  "title": "MAUI Flow Run Report v1",
+  "description": "A bounded, redaction-aware report of one canonical flow run. Optional target and checkpoint fields are emitted only when observed; terminal lifecycle, ordered events, steps, and artifacts are always explicit.",
+  "type": "object",
+  "required": [
+    "schema",
+    "runId",
+    "flowDigest",
+    "startedAt",
+    "endedAt",
+    "outcome",
+    "events",
+    "steps",
+    "artifacts"
+  ],
+  "properties": {
+    "schema": {
+      "const": 1
+    },
+    "runId": {
+      "type": "string"
+    },
+    "flowId": {
+      "type": "string"
+    },
+    "flowRevision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "flowDigest": {
+      "type": "string"
+    },
+    "legacyFlowIdentity": {
+      "type": "string"
+    },
+    "target": {
+      "$ref": "#/$defs/RunTarget"
+    },
+    "reset": {
+      "$ref": "#/$defs/ResetResult"
+    },
+    "preconditions": {
+      "$ref": "#/$defs/ReplayPreconditions"
+    },
+    "sideEffectPolicy": {
+      "enum": [
+        "unspecified",
+        "none",
+        "test-tenant-resettable",
+        "compensated",
+        "non-replayable"
+      ]
+    },
+    "compensator": {
+      "$ref": "#/$defs/CompensatorOutcome"
+    },
+    "businessOracles": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/IndependentBusinessOracleResult"
+      }
+    },
+    "replayEligibility": {
+      "$ref": "#/$defs/ReplayEligibility"
+    },
+    "verification": {
+      "$ref": "#/$defs/Verification"
+    },
+    "startedAt": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "endedAt": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "outcome": {
+      "$ref": "#/$defs/Outcome"
+    },
+    "divergenceStepId": {
+      "type": "string"
+    },
+    "events": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/RunEvent"
+      }
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StepAttempt"
+      }
+    },
+    "failure": {
+      "$ref": "#/$defs/Failure"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/ArtifactReference"
+      }
+    },
+    "reportDigest": {
+      "type": "string"
+    },
+    "reportPath": {
+      "type": "string"
+    },
+    "truncated": {
+      "type": "boolean"
+    },
+    "truncationReason": {
+      "type": "string"
+    },
+    "omissions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/Omission"
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "Timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "RunTarget": {
+      "type": "object",
+      "properties": {
+        "targetId": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "deviceId": {
+          "type": "string"
+        },
+        "deviceProfile": {
+          "type": "string"
+        },
+        "appId": {
+          "type": "string"
+        },
+        "appBuildFingerprint": {
+          "type": "string"
+        },
+        "agentId": {
+          "type": "string"
+        },
+        "agentInstanceId": {
+          "type": "string"
+        },
+        "locale": {
+          "type": "string"
+        },
+        "theme": {
+          "type": "string"
+        },
+        "orientation": {
+          "type": "string"
+        },
+        "displayProfile": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ResetResult": {
+      "type": "object",
+      "properties": {
+        "requested": {
+          "type": "boolean"
+        },
+        "succeeded": {
+          "type": "boolean"
+        },
+        "appStateSucceeded": {
+          "type": "boolean"
+        },
+        "backendTestDataSucceeded": {
+          "type": "boolean"
+        },
+        "strategy": {
+          "type": "string"
+        },
+        "resetIdentity": {
+          "type": "string"
+        },
+        "seedFingerprint": {
+          "type": "string"
+        },
+        "backendStateFingerprint": {
+          "type": "string"
+        },
+        "reference": {
+          "$ref": "#/$defs/ResetReference"
+        },
+        "appStateSeed": {
+          "$ref": "#/$defs/AppStateSeed"
+        },
+        "backendTestDataSeed": {
+          "$ref": "#/$defs/BackendTestDataSeed"
+        },
+        "outcome": {
+          "$ref": "#/$defs/ResetOutcome"
+        },
+        "message": {
+          "type": "string"
+        },
+        "finalResolution": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ResetReference": {
+      "type": "object",
+      "properties": {
+        "strategy": {
+          "type": "string"
+        },
+        "resetId": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "evidenceReference": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "AppStateSeed": {
+      "type": "object",
+      "properties": {
+        "seedId": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "BackendTestDataSeed": {
+      "type": "object",
+      "properties": {
+        "seedId": {
+          "type": "string"
+        },
+        "fingerprint": {
+          "type": "string"
+        },
+        "dataset": {
+          "type": "string"
+        },
+        "version": {
+          "type": "string"
+        },
+        "source": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ResetOutcome": {
+      "type": "object",
+      "properties": {
+        "requested": {
+          "type": "boolean"
+        },
+        "succeeded": {
+          "type": "boolean"
+        },
+        "appStateSucceeded": {
+          "type": "boolean"
+        },
+        "backendTestDataSucceeded": {
+          "type": "boolean"
+        },
+        "completedAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "evidenceReference": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ReplayPreconditions": {
+      "type": "object",
+      "properties": {
+        "expected": {
+          "$ref": "#/$defs/Checkpoint"
+        },
+        "observed": {
+          "$ref": "#/$defs/Checkpoint"
+        },
+        "checkedAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "evidenceReference": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "CompensatorReference": {
+      "type": "object",
+      "properties": {
+        "compensatorId": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "evidenceKind": {
+          "type": "string"
+        },
+        "reference": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "CompensatorOutcome": {
+      "type": "object",
+      "properties": {
+        "compensator": {
+          "$ref": "#/$defs/CompensatorReference"
+        },
+        "succeeded": {
+          "type": "boolean"
+        },
+        "completedAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "evidenceReference": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "IndependentBusinessOracleResult": {
+      "type": "object",
+      "properties": {
+        "oracleId": {
+          "type": "string"
+        },
+        "succeeded": {
+          "type": "boolean"
+        },
+        "independent": {
+          "type": "boolean"
+        },
+        "observedAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "evidenceReference": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ReplayEligibilityReason": {
+      "type": "object",
+      "properties": {
+        "code": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "blocking": {
+          "type": "boolean"
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ReplayEligibility": {
+      "type": "object",
+      "properties": {
+        "sideEffectPolicy": {
+          "enum": [
+            "unspecified",
+            "none",
+            "test-tenant-resettable",
+            "compensated",
+            "non-replayable"
+          ]
+        },
+        "ordinaryReplayAllowed": {
+          "type": "boolean"
+        },
+        "diagnosticReplayAllowed": {
+          "type": "boolean"
+        },
+        "repairValidationAllowed": {
+          "type": "boolean"
+        },
+        "downstreamContinuationAllowed": {
+          "type": "boolean"
+        },
+        "repairEligibility": {
+          "type": "boolean"
+        },
+        "runVerificationAllowed": {
+          "type": "boolean"
+        },
+        "requiresManualOneShotAuthorization": {
+          "type": "boolean"
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ReplayEligibilityReason"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "Verification": {
+      "type": "object",
+      "properties": {
+        "verified": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "checkedAt": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "additionalProperties": true
+    },
+    "Outcome": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "cancelled",
+            "timed-out",
+            "lease-lost",
+            "infrastructure-error",
+            "unknown-completion",
+            "orphaned"
+          ]
+        },
+        "summary": {
+          "type": "string"
+        },
+        "terminal": {
+          "type": "boolean"
+        },
+        "verified": {
+          "type": "boolean"
+        },
+        "verificationReason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "RunEvent": {
+      "type": "object",
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "stepId": {
+          "type": "string"
+        },
+        "data": true
+      },
+      "additionalProperties": true
+    },
+    "StepAttempt": {
+      "type": "object",
+      "properties": {
+        "stepId": {
+          "type": "string"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "action": {
+          "type": "string"
+        },
+        "intent": {
+          "type": "string"
+        },
+        "startedAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "endedAt": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "durationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "selector": {
+          "$ref": "maui-flow-v2.json#/$defs/FlowSelector"
+        },
+        "selectorRequest": {
+          "$ref": "#/$defs/SelectorRequest"
+        },
+        "candidateCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "candidateSummary": {
+          "$ref": "#/$defs/CandidateSummary"
+        },
+        "targetResolution": {
+          "$ref": "#/$defs/TargetResolution"
+        },
+        "actionability": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ActionabilityAttempt"
+          }
+        },
+        "dispatch": {
+          "$ref": "#/$defs/DispatchReceipt"
+        },
+        "assertions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/AssertionResult"
+          }
+        },
+        "expectedCheckpoint": {
+          "$ref": "#/$defs/Checkpoint"
+        },
+        "observedCheckpoint": {
+          "$ref": "#/$defs/Checkpoint"
+        },
+        "seedFingerprint": {
+          "type": "string"
+        },
+        "backendStateFingerprint": {
+          "type": "string"
+        },
+        "commandId": {
+          "type": "string"
+        },
+        "commandSequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "actionDigest": {
+          "type": "string"
+        },
+        "authorityEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acknowledgementState": {
+          "type": "string"
+        },
+        "completionCertainty": {
+          "enum": [
+            "completed",
+            "unknown"
+          ]
+        },
+        "failureClass": {
+          "$ref": "#/$defs/FailureClass"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "TargetResolution": {
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string"
+        },
+        "matchCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "elementId": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "SelectorRequest": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "value": {
+          "$ref": "#/$defs/ValueDisclosure"
+        },
+        "scope": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "CandidateSummary": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "types": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "final": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ActionabilityAttempt": {
+      "type": "object",
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "resolved": {
+          "type": "boolean"
+        },
+        "visible": {
+          "type": "boolean"
+        },
+        "enabled": {
+          "type": "boolean"
+        },
+        "hasBounds": {
+          "type": "boolean"
+        },
+        "message": {
+          "type": "string"
+        },
+        "boundsStable": {
+          "type": "boolean"
+        },
+        "waitDurationMs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "outcome": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "DispatchReceipt": {
+      "type": "object",
+      "properties": {
+        "commandId": {
+          "type": "string"
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "actionDigest": {
+          "type": "string"
+        },
+        "authorityEpoch": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acknowledgementState": {
+          "type": "string"
+        },
+        "completionCertainty": {
+          "type": "string"
+        },
+        "receivedAt": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "additionalProperties": true
+    },
+    "AssertionResult": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "passed": {
+          "type": "boolean"
+        },
+        "skipped": {
+          "type": "boolean"
+        },
+        "expected": {
+          "type": "string"
+        },
+        "actual": {
+          "type": "string"
+        },
+        "expectedDisclosure": {
+          "$ref": "#/$defs/ValueDisclosure"
+        },
+        "actualDisclosure": {
+          "$ref": "#/$defs/ValueDisclosure"
+        },
+        "message": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "ValueDisclosure": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": [
+            "disclosed",
+            "redacted",
+            "omitted"
+          ]
+        },
+        "type": {
+          "type": "string"
+        },
+        "length": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "digest": {
+          "type": "string"
+        },
+        "value": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "Checkpoint": {
+      "type": "object",
+      "properties": {
+        "appBuildFingerprint": {
+          "type": "string"
+        },
+        "agentInstanceId": {
+          "type": "string"
+        },
+        "seedFingerprint": {
+          "type": "string"
+        },
+        "backendStateFingerprint": {
+          "type": "string"
+        },
+        "route": {
+          "type": "string"
+        },
+        "window": {
+          "type": "string"
+        },
+        "modal": {
+          "type": "string"
+        },
+        "locale": {
+          "type": "string"
+        },
+        "theme": {
+          "type": "string"
+        },
+        "orientation": {
+          "type": "string"
+        },
+        "displayProfile": {
+          "type": "string"
+        },
+        "collectionItemKey": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
+    "Failure": {
+      "type": "object",
+      "properties": {
+        "failureId": {
+          "type": "string"
+        },
+        "class": {
+          "$ref": "#/$defs/FailureClass"
+        },
+        "code": {
+          "type": "string"
+        },
+        "category": {
+          "type": "string"
+        },
+        "phase": {
+          "type": "string"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "repairEligible": {
+          "type": "boolean"
+        },
+        "legacyKind": {
+          "type": "string"
+        },
+        "message": {
+          "type": "string"
+        },
+        "stepId": {
+          "type": "string"
+        },
+        "at": {
+          "$ref": "#/$defs/Timestamp"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/ArtifactReference"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "FailureClass": {
+      "enum": [
+        "flow-invalid",
+        "schema-unsupported",
+        "capability-missing",
+        "lease-conflict",
+        "lease-lost",
+        "cancelled",
+        "timeout",
+        "reset-failed",
+        "precondition-unsatisfied",
+        "route-state-drift",
+        "locator-not-found",
+        "locator-ambiguous",
+        "not-visible",
+        "disabled",
+        "unstable-bounds",
+        "action-rejected",
+        "drive-failed",
+        "unknown-completion",
+        "workflow-command-conflict",
+        "secret-unavailable",
+        "unsafe-value",
+        "assertion-failed",
+        "transport",
+        "agent-disconnected",
+        "infrastructure"
+      ]
+    },
+    "ArtifactReference": {
+      "type": "object",
+      "properties": {
+        "artifactId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "digest": {
+          "type": "string"
+        },
+        "mediaType": {
+          "type": "string"
+        },
+        "redacted": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "$ref": "#/$defs/Timestamp"
+        }
+      },
+      "additionalProperties": true
+    },
+    "Omission": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string"
+        },
+        "reason": {
+          "type": "string"
+        },
+        "count": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    }
+  }
+}

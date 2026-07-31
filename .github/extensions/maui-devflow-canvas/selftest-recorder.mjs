@@ -113,7 +113,7 @@ store.getElement("e1").text = "";
 store.getElement("e2").text = "Hello";
 store.getElement("e3").text = "Click";
 rec.stop();
-const report = await replayTest(store, { file: saved.file });
+const report = await replayTest(store, { file: saved.file, root: saved.root });
 check("replay ok (all steps passed)", report.ok === true, `${report.passed}/${report.total}`);
 check("replay re-drove the fill (e1.text=Alice)", store.getElement("e1").text === "Alice", store.getElement("e1").text);
 check("replay re-drove the AutomationId setProperty (e2.text=World)", store.getElement("e2").text === "World", store.getElement("e2").text);
@@ -126,7 +126,7 @@ store.getElement("e2").text = "REGRESSED";
 // Make setProperty a no-op so replay can't "fix" the regression, isolating the assertion.
 const origSet = store.setProperty.bind(store);
 store.setProperty = async (id, name, value) => (id === "e2" ? { ok: true } : origSet(id, name, value));
-const bad = await replayTest(store, { file: saved.file });
+const bad = await replayTest(store, { file: saved.file, root: saved.root });
 check("replay FAILS when the app regressed", bad.ok === false, `${bad.passed}/${bad.total}`);
 store.setProperty = origSet;
 

@@ -1,14 +1,68 @@
+using Microsoft.Maui.Cli.DevFlow;
 using Microsoft.Maui.Cli.DevFlow.Broker;
 using Microsoft.Maui.DevFlow.Driver;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
+using System.Text.Json;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
 public sealed class RouteCheckpointStoreTests : IDisposable
 {
     private readonly string _root = Path.Combine(AppContext.BaseDirectory, "route-checkpoint-tests", Guid.NewGuid().ToString("N"));
+
+    [Fact]
+    public void RouteCheckpointStatus_IsSupportedByCliJsonContext()
+    {
+        var json = CliJson.SerializeUntyped(new RouteCheckpointStatus
+        {
+            Ok = true,
+            Connected = true,
+            HasCheckpoint = true,
+            Checkpoint = new RouteCheckpoint
+            {
+                AgentId = "agent",
+                Route = "//home",
+                SavedUtc = DateTimeOffset.Parse("2026-07-31T00:00:00Z")
+            }
+        });
+
+        Assert.Contains("\"checkpoint\"", json, StringComparison.Ordinal);
+        Assert.Contains("//home", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ResumeOutput_RedactsRouteQueryValuesWithoutChangingStoredRoute()
+    {
+        var status = new RouteCheckpointStatus
+        {
+            HasCheckpoint = true,
+            Checkpoint = new RouteCheckpoint
+            {
+                AgentId = "agent",
+                Route = "//pay?token=SECRET&id=42#receipt",
+                SavedUtc = DateTimeOffset.Parse("2026-07-31T00:00:00Z"),
+                LastRestore = new RouteRestoreResult
+                {
+                    ObservedRoute = "//pay?token=OTHER"
+                }
+            }
+        };
+
+        var output = DevFlowCommands.RedactCheckpointStatusForOutput(status);
+        var json = CliJson.SerializeUntyped(output);
+        using var document = JsonDocument.Parse(json);
+        var route = document.RootElement
+            .GetProperty("checkpoint")
+            .GetProperty("route")
+            .GetString();
+
+        Assert.DoesNotContain("SECRET", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("OTHER", json, StringComparison.Ordinal);
+        Assert.Equal("//pay?token=<redacted>&id=<redacted>", route);
+        Assert.Equal("//pay?token=SECRET&id=42#receipt", status.Checkpoint.Route);
+    }
 
     [Fact]
     public void Save_ReloadAndClear_UsesAtomicLocalState()

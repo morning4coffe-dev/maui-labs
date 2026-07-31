@@ -15,7 +15,7 @@
     <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == '' and '$(MauiDevFlowProfileMode)' == 'true'">true</MauiDevFlowEnabled>
     <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == '' and '$(Configuration)' == 'Debug'">true</MauiDevFlowEnabled>
     <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == ''">false</MauiDevFlowEnabled>
-    <_MauiDevFlowMode Condition="'$(MauiDevFlowProfileMode)' == 'true'">profile</_MauiDevFlowMode>
+    <_MauiDevFlowMode Condition="'$(MauiDevFlowProfileMode)' == 'true' and '$(MauiDevFlowEnabled)' == 'true'">profile</_MauiDevFlowMode>
     <_MauiDevFlowMode Condition="'$(_MauiDevFlowMode)' == '' and '$(MauiDevFlowEnabled)' == 'true'">debug</_MauiDevFlowMode>
     <_MauiDevFlowMode Condition="'$(_MauiDevFlowMode)' == ''">disabled</_MauiDevFlowMode>
     <DefineConstants Condition="'$(MauiDevFlowEnabled)' == 'true'">$(DefineConstants);MAUI_DEVFLOW</DefineConstants>
@@ -36,6 +36,18 @@
       <_MauiDevFlowConfigPort>$([System.Text.RegularExpressions.Regex]::Match($(_MauiDevFlowConfigContent), '"port"\s*:\s*(\d+)').Groups[1].Value)</_MauiDevFlowConfigPort>
       <MauiDevFlowPort Condition="'$(_MauiDevFlowConfigPort)' != ''">$(_MauiDevFlowConfigPort)</MauiDevFlowPort>
     </PropertyGroup>
+  </Target>
+
+  <Target Name="_ValidateMauiDevFlowPort" BeforeTargets="_SetMauiDevFlowPort;PrepareForBuild"
+          Condition="'$(MauiDevFlowPort)' != ''">
+    <PropertyGroup>
+      <_MauiDevFlowPortHasValidShape>$([System.Text.RegularExpressions.Regex]::IsMatch('$(MauiDevFlowPort)', '^[0-9]{1,5}$'))</_MauiDevFlowPortHasValidShape>
+      <_MauiDevFlowPortValue Condition="'$(_MauiDevFlowPortHasValidShape)' == 'True'">$([System.Int32]::Parse('$(MauiDevFlowPort)'))</_MauiDevFlowPortValue>
+    </PropertyGroup>
+    <Error Condition="'$(_MauiDevFlowPortHasValidShape)' != 'True'"
+           Text="MauiDevFlowPort must be an integer between 1 and 65535." />
+    <Error Condition="'$(_MauiDevFlowPortHasValidShape)' == 'True' and ($(_MauiDevFlowPortValue) &lt; 1 or $(_MauiDevFlowPortValue) &gt; 65535)"
+           Text="MauiDevFlowPort must be between 1 and 65535." />
   </Target>
 
   <Target Name="_SetMauiDevFlowPort" BeforeTargets="PrepareForBuild;CoreCompile">

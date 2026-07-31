@@ -144,6 +144,17 @@ public class CommandConstructionTests
 	}
 
 	[Fact]
+	public void FlowValidateCommand_IsPresentAndAcceptsAFlowPath()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var flow = Assert.Single(devflowCommand.Subcommands, command => command.Name == "flow");
+		var validate = Assert.Single(flow.Subcommands, command => command.Name == "validate");
+
+		Assert.Empty(validate.Parse("scenario.md").Errors);
+	}
+
+	[Fact]
 	public void DevFlowCommand_UpdateSkillIsHiddenCompatibilityAliasForSkillsUpdate()
 	{
 		var jsonOption = new Option<bool>("--json");

@@ -6,9 +6,10 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using System.Web;
-using Microsoft.Maui.Cli.DevFlow.Flows;
 using Microsoft.Maui.Cli.DevFlow.Inspector;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Broker;
 
@@ -32,6 +33,7 @@ public class BrokerServer : IDisposable
     private readonly MutationLeaseRegistry _mutationLeases;
     private readonly BrokerFlowCoordinator _flows;
     private readonly RouteCheckpointCoordinator _checkpoints;
+    private readonly WorkflowRunCoordinator _workflowRuns;
     private readonly HashSet<int> _assignedPorts = new();
     private readonly object _portLock = new();
     private DateTime _lastActivity = DateTime.UtcNow;
@@ -73,6 +75,17 @@ public class BrokerServer : IDisposable
             new FlowRecordingSpoolStore(recordingStorageRoot, clock, warning => Log("Warning: " + warning)));
         _checkpoints = new RouteCheckpointCoordinator(checkpointStore);
         _mutationLeases = new MutationLeaseRegistry();
+        _workflowRuns = new WorkflowRunCoordinator(
+            _mutationLeases,
+            ExecuteWorkflowRunAsync,
+            new WorkflowRunCoordinatorOptions
+            {
+                ArtifactRoot = string.IsNullOrWhiteSpace(recordingStorageRoot)
+                    ? null
+                    : Path.Combine(recordingStorageRoot, "workflow-runs"),
+            },
+            clock: clock,
+            controlLedger: ControlWorkflowRunLedgerAsync);
     }
 
     public async Task RunAsync(CancellationToken cancellationToken = default)
@@ -210,6 +223,11 @@ public class BrokerServer : IDisposable
                 await HandleCheckpointRoute(context, method, path);
                 return;
             }
+            if (path.StartsWith("/api/workflow-runs", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleWorkflowRunRoute(context, method, path);
+                return;
+            }
 
             var (statusCode, body) = (method, path) switch
             {
@@ -345,6 +363,7 @@ public class BrokerServer : IDisposable
                 Version = registration.Version,
                 SessionId = registration.SessionId,
                 ProcessId = registration.ProcessId,
+                InstanceId = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(),
                 ConnectedAt = DateTime.UtcNow
             };
 
@@ -358,6 +377,10 @@ public class BrokerServer : IDisposable
                     staleInspector.Dispose();
                 if (replaced is not null)
                 {
+                    _workflowRuns.MarkAgentInstanceUnavailable(
+                        replaced.Registration.Id,
+                        replaced.Registration.InstanceId,
+                        "The agent reconnected with a new instance.");
                     if (replaced.Registration.Port != assignedPort)
                         ReleasePort(replaced.Registration.Port);
                     try { replaced.WebSocket.Dispose(); } catch { }
@@ -377,7 +400,8 @@ public class BrokerServer : IDisposable
             {
                 ["type"] = "registered",
                 ["id"] = id,
-                ["port"] = assignedPort
+                ["port"] = assignedPort,
+                ["instanceId"] = agent.InstanceId
             }, indented: false);
             await ws.SendAsync(Encoding.UTF8.GetBytes(response), WebSocketMessageType.Text, true, CancellationToken.None);
 
@@ -446,6 +470,10 @@ public class BrokerServer : IDisposable
                     ReleasePort(connection.Registration.Port);
                     _mutationLeases.Remove(connection.Registration.Id);
                     _flows.RemoveAgent(connection.Registration.Id);
+                    _workflowRuns.MarkAgentInstanceUnavailable(
+                        connection.Registration.Id,
+                        connection.Registration.InstanceId,
+                        "The agent disconnected.");
                     if (_inspectors.TryRemove(connection.Registration.Id, out var inspector))
                         inspector.Dispose();
                     Log($"Agent disconnected: {connection.Registration.AppName}|{connection.Registration.Tfm}");
@@ -555,6 +583,7 @@ public class BrokerServer : IDisposable
         _agents.Clear();
         _mutationLeases.Clear();
         _flows.Clear();
+        _workflowRuns.Dispose();
 
         // Dispose inspector instances. Without this, a Shutdown() that doesn't
         // go through Dispose() (e.g. /api/shutdown handler or idle timeout)
@@ -689,6 +718,7 @@ public class BrokerServer : IDisposable
             ["holderKind"] = status.HolderKind,
             ["label"] = status.Label,
             ["expiresInMs"] = status.ExpiresInMs,
+            ["authorityEpoch"] = status.AuthorityEpoch,
             ["authority"] = "broker"
         });
     }
@@ -941,6 +971,315 @@ public class BrokerServer : IDisposable
         return new RouteCheckpointStatus { Connected = true, HasCheckpoint = false };
     }
 
+    private async Task HandleWorkflowRunRoute(HttpListenerContext context, string method, string path)
+    {
+        const int maxBodyChars = 1_048_576;
+        var normalizedPath = path.TrimEnd('/');
+
+        if (string.Equals(normalizedPath, "/api/workflow-runs/capabilities", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!method.Equals("GET", StringComparison.OrdinalIgnoreCase))
+            {
+                await WriteTypedJsonResponseAsync(
+                    context,
+                    405,
+                    WorkflowRunStatusResponse.Failure("Method not allowed."));
+                return;
+            }
+
+            await WriteTypedJsonResponseAsync(context, 200, _workflowRuns.GetCapabilities());
+            return;
+        }
+
+        if (string.Equals(normalizedPath, "/api/workflow-runs/start", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!method.Equals("POST", StringComparison.OrdinalIgnoreCase))
+            {
+                await WriteTypedJsonResponseAsync(
+                    context,
+                    405,
+                    WorkflowRunStatusResponse.Failure("Method not allowed."));
+                return;
+            }
+
+            var request = await ReadWorkflowRunBodyAsync<WorkflowRunStartRequest>(context, maxBodyChars);
+            if (request is null)
+                return;
+
+            if (string.IsNullOrWhiteSpace(request.AgentId) || string.IsNullOrWhiteSpace(request.AgentInstanceId))
+            {
+                await WriteTypedJsonResponseAsync(
+                    context,
+                    400,
+                    WorkflowRunStartResult.Rejected(400, "agentId and agentInstanceId are required.", null, null));
+                return;
+            }
+
+            var routeGate = AgentRouteGate(request.AgentId);
+            await routeGate.WaitAsync(_cts?.Token ?? CancellationToken.None);
+            try
+            {
+                if (!_agents.TryGetValue(request.AgentId, out var connection) ||
+                    !string.Equals(
+                        connection.Registration.InstanceId,
+                        request.AgentInstanceId,
+                        StringComparison.Ordinal))
+                {
+                    await WriteTypedJsonResponseAsync(
+                        context,
+                        409,
+                        WorkflowRunStartResult.Conflict(
+                            "The requested agent instance is stale or no longer connected."));
+                    return;
+                }
+
+                var target = CreateWorkflowRunTarget(connection.Registration);
+                var result = _workflowRuns.Start(
+                    request,
+                    target,
+                    () => IsCurrentAgentConnection(connection));
+                await WriteTypedJsonResponseAsync(context, result.StatusCode, result);
+            }
+            finally
+            {
+                routeGate.Release();
+            }
+            return;
+        }
+
+        var segments = normalizedPath.Trim('/').Split('/');
+        if (segments.Length != 4 ||
+            !segments[0].Equals("api", StringComparison.OrdinalIgnoreCase) ||
+            !segments[1].Equals("workflow-runs", StringComparison.OrdinalIgnoreCase))
+        {
+            await WriteTypedJsonResponseAsync(context, 404, WorkflowRunStatusResponse.Failure("Not found."));
+            return;
+        }
+
+        var runId = Uri.UnescapeDataString(segments[2]);
+        var action = segments[3];
+        if (string.Equals(action, "status", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!method.Equals("POST", StringComparison.OrdinalIgnoreCase))
+            {
+                await WriteTypedJsonResponseAsync(
+                    context,
+                    405,
+                    WorkflowRunStatusResponse.Failure("Method not allowed."));
+                return;
+            }
+
+            var request = await ReadWorkflowRunBodyAsync<WorkflowRunAccessRequest>(context, maxBodyChars);
+            if (request is null)
+                return;
+
+            var result = _workflowRuns.GetStatus(runId, request.CapabilityToken);
+            await WriteTypedJsonResponseAsync(
+                context,
+                result.StatusCode,
+                result.Run is null
+                    ? WorkflowRunStatusResponse.Failure(result.Error ?? "Workflow run was not found.")
+                    : WorkflowRunStatusResponse.Success(result.Run));
+            return;
+        }
+
+        if (string.Equals(action, "cancel", StringComparison.OrdinalIgnoreCase))
+        {
+            if (!method.Equals("POST", StringComparison.OrdinalIgnoreCase))
+            {
+                await WriteTypedJsonResponseAsync(
+                    context,
+                    405,
+                    WorkflowRunStatusResponse.Failure("Method not allowed."));
+                return;
+            }
+
+            var request = await ReadWorkflowRunBodyAsync<WorkflowRunAccessRequest>(context, maxBodyChars);
+            if (request is null)
+                return;
+
+            var result = _workflowRuns.Cancel(runId, request.CapabilityToken);
+            await WriteTypedJsonResponseAsync(context, result.StatusCode, result);
+            return;
+        }
+
+        await WriteTypedJsonResponseAsync(context, 404, WorkflowRunStatusResponse.Failure("Not found."));
+    }
+
+    private async Task<T?> ReadWorkflowRunBodyAsync<T>(HttpListenerContext context, int maxChars)
+        where T : class
+    {
+        if (context.Request.ContentLength64 > maxChars)
+        {
+            await WriteTypedJsonResponseAsync(
+                context,
+                413,
+                WorkflowRunStatusResponse.Failure("Request body too large."));
+            return null;
+        }
+
+        try
+        {
+            var text = await ReadBoundedBodyAsync(
+                context.Request.InputStream,
+                context.Request.ContentEncoding ?? Encoding.UTF8,
+                maxChars,
+                _cts?.Token ?? CancellationToken.None);
+            if (string.IsNullOrWhiteSpace(text))
+            {
+                await WriteTypedJsonResponseAsync(
+                    context,
+                    400,
+                    WorkflowRunStatusResponse.Failure("A JSON request body is required."));
+                return null;
+            }
+
+            var value = JsonSerializer.Deserialize<T>(text, WorkflowRunJsonOptions);
+            if (value is null)
+            {
+                await WriteTypedJsonResponseAsync(
+                    context,
+                    400,
+                    WorkflowRunStatusResponse.Failure("Invalid JSON request body."));
+            }
+            return value;
+        }
+        catch (RequestBodyTooLargeException)
+        {
+            await WriteTypedJsonResponseAsync(
+                context,
+                413,
+                WorkflowRunStatusResponse.Failure("Request body too large."));
+            return null;
+        }
+        catch (JsonException)
+        {
+            await WriteTypedJsonResponseAsync(
+                context,
+                400,
+                WorkflowRunStatusResponse.Failure("Invalid JSON request body."));
+            return null;
+        }
+    }
+
+    private static readonly JsonSerializerOptions WorkflowRunJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
+    private static async Task WriteTypedJsonResponseAsync<T>(
+        HttpListenerContext context,
+        int statusCode,
+        T body)
+    {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(body, WorkflowRunJsonOptions);
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "application/json";
+        context.Response.ContentLength64 = bytes.Length;
+        await context.Response.OutputStream.WriteAsync(bytes);
+        context.Response.Close();
+    }
+
+    private static WorkflowRunTarget CreateWorkflowRunTarget(AgentRegistration registration)
+        => new(
+            registration.Id,
+            registration.InstanceId,
+            registration.Port,
+            registration.Platform,
+            registration.AppName);
+
+    private bool IsCurrentAgentConnection(AgentConnection expected)
+        => _agents.TryGetValue(expected.Registration.Id, out var current) &&
+           ReferenceEquals(current, expected) &&
+           string.Equals(
+               current.Registration.InstanceId,
+               expected.Registration.InstanceId,
+               StringComparison.Ordinal);
+
+    private async Task<FlowReplayReport> ExecuteWorkflowRunAsync(
+        WorkflowRunExecution execution,
+        CancellationToken cancellationToken)
+    {
+        using var client = new Microsoft.Maui.DevFlow.Driver.AgentClient("localhost", execution.Target.AgentPort)
+        {
+            AutoAcquireMutationLease = false,
+            RetryMutatingRequests = false,
+            TransientFailureRetryCount = 0,
+            MutationLeaseHolderKind = "workflow-run",
+            MutationLeaseLabel = execution.RunId
+        };
+        using var leaseScope = client.UseMutationLease(
+            execution.LeaseId,
+            "workflow-run",
+            execution.RunId);
+        using var workflowScope = client.UseWorkflowRun(new Microsoft.Maui.DevFlow.Driver.WorkflowRunContext
+        {
+            RunId = execution.RunId,
+            AgentInstanceId = execution.Target.AgentInstanceId,
+            AuthorityEpoch = execution.AuthorityEpoch
+        });
+        var evidenceCapture = execution.Options.EvidenceCaptureFactory?.Invoke(client);
+        var runner = new MauiFlowRunner(
+            client,
+            new MauiFlowRunnerOptions
+            {
+                RunId = execution.RunId,
+                Target = new MauiFlowRunTarget
+                {
+                    TargetId = execution.Target.AgentId,
+                    AgentId = execution.Target.AgentId,
+                    AgentInstanceId = execution.Target.AgentInstanceId,
+                    Platform = execution.Target.Platform,
+                    AppId = execution.Target.AppName,
+                },
+                Plan = execution.SafetyRequest.Plan,
+                RunContext = execution.SafetyRequest.Context,
+                ThrowOnCancellation = false,
+            },
+            evidenceCapture);
+        return (await runner.RunWithLegacyAsync(execution.Flow, file: null, cancellationToken)
+            .ConfigureAwait(false)).LegacyReport;
+    }
+
+    private async Task<WorkflowRunLedgerControlResult> ControlWorkflowRunLedgerAsync(
+        WorkflowRunLedgerControl control,
+        CancellationToken cancellationToken)
+    {
+        using var client = new Microsoft.Maui.DevFlow.Driver.AgentClient("localhost", control.Target.AgentPort)
+        {
+            AutoAcquireMutationLease = false,
+            RetryMutatingRequests = false,
+            TransientFailureRetryCount = 0,
+            MutationLeaseHolderKind = "workflow-run",
+            MutationLeaseLabel = control.RunId
+        };
+        using var leaseScope = client.UseMutationLease(
+            control.LeaseId,
+            "workflow-run",
+            control.RunId);
+        var result = await client.ControlWorkflowRunAsync(
+            control.Action,
+            new Microsoft.Maui.DevFlow.Driver.WorkflowRunContext
+            {
+                RunId = control.RunId,
+                AgentInstanceId = control.Target.AgentInstanceId,
+                AuthorityEpoch = control.AuthorityEpoch,
+                ApprovalDigest = control.ApprovalDigest
+            },
+            control.Reason).WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        if (result.Ok && !string.Equals(result.State, "unknown-completion", StringComparison.Ordinal))
+            return WorkflowRunLedgerControlResult.Success();
+
+        return WorkflowRunLedgerControlResult.Failure(
+            result.Reason ?? (result.State == "unknown-completion" ? "workflow-unknown-completion" : null),
+            result.Error ?? (result.State == "unknown-completion"
+                ? "The agent reported a workflow command with unknown completion."
+                : null));
+    }
+
     internal static async Task<string> ReadBoundedBodyAsync(
         Stream stream,
         Encoding encoding,
@@ -1004,6 +1343,7 @@ public class BrokerServer : IDisposable
         _inspectors.Clear();
         _mutationLeases.Clear();
         _flows.Clear();
+        _workflowRuns.Dispose();
         _cts?.Dispose();
     }
     private record AgentConnection(AgentRegistration Registration, WebSocket WebSocket);
@@ -1123,8 +1463,10 @@ public class BrokerServer : IDisposable
                 registration.Platform,
                 registration.Project,
                 registration.SessionId,
-                _checkpoints,
-                registration);
+                checkpoints: _checkpoints,
+                checkpointRegistration: registration,
+                workflowReplay: (flow, evidenceFactory, cancellationToken) =>
+                    ReplayInspectorWorkflowAsync(connection, flow, evidenceFactory, cancellationToken));
             inspector = _inspectors.GetOrAdd(connection.Registration.Id, created);
             if (!ReferenceEquals(inspector, created))
             {
@@ -1187,6 +1529,60 @@ public class BrokerServer : IDisposable
 
         var candidates = agents.Values.Take(2).ToArray();
         return candidates.Length == 1 ? candidates[0] : null;
+    }
+
+    private async Task<FlowReplayReport> ReplayInspectorWorkflowAsync(
+        AgentConnection connection,
+        MauiFlow flow,
+        Func<Microsoft.Maui.DevFlow.Driver.AgentClient, IFlowReplayEvidenceCapture?> evidenceCaptureFactory,
+        CancellationToken _)
+    {
+        if (!IsCurrentAgentConnection(connection))
+        {
+            throw new WorkflowRunRejectedException(
+                409,
+                "The Inspector target was replaced by a newer agent instance. Reload the Inspector.");
+        }
+
+        var registration = connection.Registration;
+        var started = _workflowRuns.Start(
+            new WorkflowRunStartRequest
+            {
+                AgentId = registration.Id,
+                AgentInstanceId = registration.InstanceId,
+                IdempotencyKey = $"inspector-{Guid.NewGuid():N}",
+                Flow = flow,
+                TimeoutMs = 120_000
+            },
+            CreateWorkflowRunTarget(registration),
+            () => IsCurrentAgentConnection(connection),
+            new WorkflowRunExecutionOptions
+            {
+                EvidenceCaptureFactory = evidenceCaptureFactory
+            });
+        if (!started.Ok || started.Run is null || string.IsNullOrWhiteSpace(started.CapabilityToken))
+        {
+            throw new WorkflowRunRejectedException(
+                started.StatusCode == 0 ? 500 : started.StatusCode,
+                started.Error ?? "The broker could not start the workflow run.");
+        }
+
+        var snapshot = await _workflowRuns.WaitForTerminalAsync(
+            started.Run.RunId,
+            started.CapabilityToken,
+            CancellationToken.None).ConfigureAwait(false);
+        if (snapshot.CompatibilityReport is not null)
+            return snapshot.CompatibilityReport;
+
+        return new FlowReplayReport
+        {
+            Ok = false,
+            Name = flow.Name,
+            Total = flow.Steps.Count,
+            Failed = flow.Steps.Count,
+            DivergencePoint = snapshot.FirstDivergence,
+            StoppedEarly = true
+        };
     }
 
     private async Task ServeAgentListPage(HttpListenerContext context)

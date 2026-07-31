@@ -1,4 +1,8 @@
 using System.Text.Json;
+using System.Net;
+using System.Net.Sockets;
+using Microsoft.Maui.Cli.DevFlow;
+using Microsoft.Maui.Cli.DevFlow.Broker;
 using Microsoft.Maui.Cli.UnitTests.Fixtures;
 using Xunit;
 
@@ -82,6 +86,68 @@ public class EvidenceCliTests : IDisposable
     }
 
     [Fact]
+    public async Task EvidencePreviewAndCapture_RejectAnUnreachableAgent()
+    {
+        var port = GetUnusedPort();
+        var cli = new CliTestHarness(port);
+        var output = Path.Combine(_root, "unreachable.mauitrace");
+
+        var preview = await cli.InvokeAsync("devflow", "evidence", "preview", "--json");
+        var capture = await cli.InvokeAsync(
+            "devflow", "evidence", "capture", "--output", output, "--json");
+
+        Assert.Equal(1, preview.ExitCode);
+        Assert.Equal(1, capture.ExitCode);
+        Assert.Contains("No DevFlow agent responded", preview.StdErr, StringComparison.Ordinal);
+        Assert.Contains($"localhost:{port}", preview.StdErr, StringComparison.Ordinal);
+        Assert.Contains("maui devflow agent status", preview.StdErr, StringComparison.Ordinal);
+        Assert.DoesNotContain("maui devflow status", preview.StdErr, StringComparison.Ordinal);
+        Assert.False(File.Exists(output));
+    }
+
+    [Fact]
+    public async Task EvidenceJsonError_DoesNotIncludeAHumanAgentLabel()
+    {
+        var (server, cli) = await CreateFixturesAsync();
+        await using var _ = server;
+        var output = Path.Combine(_root, "existing-json.mauitrace");
+        File.WriteAllText(output, "existing");
+        DevFlowCommands.ResolveRunningBrokerPortAsync = () => Task.FromResult<int?>(19223);
+        DevFlowCommands.ListBrokerAgentsAsync = _ => Task.FromResult<AgentRegistration[]?>([
+            new AgentRegistration
+            {
+                Id = "target",
+                AppName = "Target",
+                Platform = "Windows",
+                Tfm = "net10.0-windows",
+                Port = server.Port
+            },
+            new AgentRegistration
+            {
+                Id = "other",
+                AppName = "Other",
+                Platform = "Android",
+                Tfm = "net10.0-android",
+                Port = server.Port + 1
+            }
+        ]);
+        try
+        {
+            var result = await cli.InvokeAsync(
+                "devflow", "evidence", "capture", "--output", output, "--json");
+
+            Assert.Equal(1, result.ExitCode);
+            using var error = JsonDocument.Parse(result.StdErr);
+            Assert.Equal("InvocationError", error.RootElement.GetProperty("type").GetString());
+            Assert.DoesNotContain("target:", result.StdErr, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            DevFlowCommands.ResetBrokerClientForTests();
+        }
+    }
+
+    [Fact]
     public async Task EvidenceCapture_RefusesToOverwriteWithoutTheFlag()
     {
         var (server, cli) = await CreateFixturesAsync();
@@ -157,6 +223,28 @@ public class EvidenceCliTests : IDisposable
     }
 
     [Fact]
+    public async Task EvidenceView_RefusesToOverwriteAReportWithoutTheFlag()
+    {
+        var (server, cli) = await CreateFixturesAsync();
+        await using var _ = server;
+        var bundle = Path.Combine(_root, "view-overwrite.mauitrace");
+        var report = Path.Combine(_root, "report.html");
+        Assert.Equal(0, (await cli.InvokeAsync(
+            "devflow", "evidence", "capture", "--output", bundle, "--json")).ExitCode);
+        File.WriteAllText(report, "original");
+
+        var refused = await cli.InvokeRawAsync(
+            "devflow", "evidence", "view", bundle, "--no-open", "--output-report", report, "--json");
+        var overwritten = await cli.InvokeRawAsync(
+            "devflow", "evidence", "view", bundle, "--no-open", "--output-report", report, "--overwrite", "--json");
+
+        Assert.Equal(1, refused.ExitCode);
+        Assert.Contains("already exists", refused.StdErr, StringComparison.OrdinalIgnoreCase);
+        Assert.Equal(0, overwritten.ExitCode);
+        Assert.Contains("Content-Security-Policy", File.ReadAllText(report), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task EvidenceView_RejectsAMissingBundle()
     {
         var (server, cli) = await CreateFixturesAsync();
@@ -167,5 +255,12 @@ public class EvidenceCliTests : IDisposable
 
         Assert.Equal(1, result.ExitCode);
         Assert.Contains("Bundle not found", result.StdErr, StringComparison.Ordinal);
+    }
+
+    private static int GetUnusedPort()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 }

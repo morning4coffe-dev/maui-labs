@@ -251,6 +251,11 @@ function showEvidenceDialog(view, options) {
       // Keep focus inside the dialog: it is a decision point, not a page overlay.
       const first = focusables[0];
       const last = focusables[focusables.length - 1];
+      if (!box.contains(document.activeElement)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first).focus();
+        return;
+      }
       if (event.shiftKey && document.activeElement === first) {
         event.preventDefault();
         last.focus();

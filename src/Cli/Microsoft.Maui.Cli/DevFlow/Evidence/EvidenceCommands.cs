@@ -18,7 +18,7 @@ internal static class EvidenceCommands
         Option<string> agentHostOption,
         Option<int> agentPortOption,
         IDevFlowOutputWriter output,
-        Func<string, int, Task<AgentClient>> clientFactory,
+        Func<string, int, bool, Task<AgentClient>> clientFactory,
         Action onError)
     {
         var command = new Command("evidence",
@@ -36,7 +36,7 @@ internal static class EvidenceCommands
         Option<string> agentHostOption,
         Option<int> agentPortOption,
         IDevFlowOutputWriter output,
-        Func<string, int, Task<AgentClient>> clientFactory,
+        Func<string, int, bool, Task<AgentClient>> clientFactory,
         Action onError)
     {
         var screenshotOption = CreateScreenshotOption();
@@ -63,7 +63,10 @@ internal static class EvidenceCommands
             var isJson = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
             try
             {
-                using var client = await clientFactory(ctx.GetValue(agentHostOption)!, ctx.GetValue(agentPortOption));
+                using var client = await clientFactory(
+                    ctx.GetValue(agentHostOption)!,
+                    ctx.GetValue(agentPortOption),
+                    !isJson);
                 var plan = await EvidenceCapture.PreviewAsync(client, new EvidenceRequest
                 {
                     IncludeScreenshot = ctx.GetValue(screenshotOption),
@@ -79,7 +82,7 @@ internal static class EvidenceCommands
             }
             catch (Exception ex)
             {
-                output.WriteError(ex.Message, isJson, suggestions: ["Run 'maui devflow status' to confirm an app is connected"]);
+                output.WriteError(ex.Message, isJson, suggestions: ["Run 'maui devflow agent status' to confirm the selected app is connected"]);
                 onError();
             }
         });
@@ -93,7 +96,7 @@ internal static class EvidenceCommands
         Option<string> agentHostOption,
         Option<int> agentPortOption,
         IDevFlowOutputWriter output,
-        Func<string, int, Task<AgentClient>> clientFactory,
+        Func<string, int, bool, Task<AgentClient>> clientFactory,
         Action onError)
     {
         var outputOption = new Option<string?>("--output", "-o")
@@ -144,7 +147,10 @@ internal static class EvidenceCommands
                     workflow = read.Text;
                 }
 
-                using var client = await clientFactory(ctx.GetValue(agentHostOption)!, ctx.GetValue(agentPortOption));
+                using var client = await clientFactory(
+                    ctx.GetValue(agentHostOption)!,
+                    ctx.GetValue(agentPortOption),
+                    !isJson);
                 var result = await EvidenceCapture.CaptureAsync(client, new EvidenceRequest
                 {
                     IncludeScreenshot = ctx.GetValue(screenshotOption),
@@ -169,7 +175,7 @@ internal static class EvidenceCommands
             }
             catch (Exception ex)
             {
-                output.WriteError(ex.Message, isJson, suggestions: ["Run 'maui devflow status' to confirm an app is connected"]);
+                output.WriteError(ex.Message, isJson, suggestions: ["Run 'maui devflow agent status' to confirm the selected app is connected"]);
                 onError();
             }
         });
@@ -194,7 +200,12 @@ internal static class EvidenceCommands
         };
         var reportOption = new Option<string?>("--output-report")
         {
-            Description = "Write the generated HTML report to this path instead of a temporary file"
+            Description = "Write the generated HTML report to this .html path instead of a temporary file"
+        };
+        var overwriteOption = new Option<bool>("--overwrite")
+        {
+            Description = "Overwrite an existing report file",
+            DefaultValueFactory = _ => false
         };
 
         var command = new Command("view",
@@ -203,6 +214,7 @@ internal static class EvidenceCommands
             bundleArgument,
             noOpenOption,
             reportOption,
+            overwriteOption,
         };
 
         command.SetAction((ctx, ct) =>
@@ -213,7 +225,8 @@ internal static class EvidenceCommands
                 var result = EvidenceCapture.View(
                     ctx.GetValue(bundleArgument)!,
                     ctx.GetValue(reportOption),
-                    open: !ctx.GetValue(noOpenOption));
+                    open: !ctx.GetValue(noOpenOption),
+                    overwrite: ctx.GetValue(overwriteOption));
 
                 if (!result.Ok)
                 {

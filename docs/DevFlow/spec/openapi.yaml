@@ -41,6 +41,13 @@ tags:
   - name: extensions
     description: Third-party extension routes
 
+x-workflow-command-envelope:
+  description: >
+    Every mutation dispatched while an AgentClient workflow-run scope is active carries these
+    headers. The agent records prepared, dispatched, and bounded completed receipts; exact
+    duplicates return the stored receipt and incomplete commands remain unknown-completion.
+  $ref: "./schemas/workflow-command-ledger.json#/$defs/WorkflowCommandEnvelopeHeaders"
+
 paths:
   # ─────────────────────────────── Agent ───────────────────────────────
   /api/v1/agent/status:
@@ -76,6 +83,37 @@ paths:
                 $ref: "./schemas/agent-capabilities.json"
         "500":
           $ref: "#/components/responses/InternalError"
+
+  /api/v1/agent/workflow-runs:
+    post:
+      operationId: controlWorkflowRunLedger
+      tags: [agent]
+      summary: Begin, end, or abandon an in-process workflow command ledger
+      description: >
+        Broker-owned workflow runs use this control endpoint before and after canonical replay.
+        The active ledger is bound to the exact broker-assigned agent instance and authority epoch;
+        it is not durable across a new app process.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "./schemas/workflow-command-ledger.json#/$defs/WorkflowRunControlRequest"
+      responses:
+        "200":
+          description: Ledger control completed.
+          content:
+            application/json:
+              schema:
+                $ref: "./schemas/workflow-command-ledger.json#/$defs/WorkflowRunControlStatus"
+        "400":
+          $ref: "#/components/responses/InvalidArgument"
+        "409":
+          description: The run, agent instance, sequence authority, or terminal state conflicts.
+        "429":
+          description: The bounded ledger capacity was reached.
+        "503":
+          description: Broker authority is unavailable. Workflow commands fail closed.
 
   # ─────────────────────────── UI Inspection ───────────────────────────
   /api/v1/ui/tree:

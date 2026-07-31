@@ -2,6 +2,7 @@ using System.Text.Json.Serialization;
 using Microsoft.Maui.Cli.DevFlow.Android;
 using Microsoft.Maui.Cli.DevFlow.Broker;
 using Microsoft.Maui.DevFlow.Driver;
+using Testing = Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow;
 
@@ -25,6 +26,9 @@ namespace Microsoft.Maui.Cli.DevFlow;
 [JsonSerializable(typeof(AgentRegistration[]))]
 [JsonSerializable(typeof(BrokerState))]
 [JsonSerializable(typeof(RegistrationMessage))]
+[JsonSerializable(typeof(RouteCheckpoint))]
+[JsonSerializable(typeof(RouteRestoreResult))]
+[JsonSerializable(typeof(RouteCheckpointStatus))]
 [JsonSerializable(typeof(AndroidDevFlowForwardingReport))]
 [JsonSerializable(typeof(AndroidDevFlowDevice[]))]
 [JsonSerializable(typeof(AndroidDevFlowPortForward[]))]
@@ -36,4 +40,34 @@ namespace Microsoft.Maui.Cli.DevFlow;
 [JsonSerializable(typeof(LayoutDiagnosticsReport))]
 [JsonSerializable(typeof(PerformanceSummary))]
 [JsonSerializable(typeof(PropertyMutationResponse))]
+[JsonSerializable(typeof(FlowValidationCliResult))]
+[JsonSerializable(typeof(FlowReplayCliResult))]
+[JsonSerializable(typeof(Testing.FlowStepResult))]
+[JsonSerializable(typeof(List<Testing.FlowStepResult>))]
+[JsonSerializable(typeof(Testing.MauiFlowRunReport))]
 internal sealed partial class DevFlowCliJsonContext : JsonSerializerContext;
+
+internal sealed class FlowValidationCliResult
+{
+    [JsonPropertyName("ok")] public bool Ok { get; init; }
+    [JsonPropertyName("name")] public string Name { get; init; } = "";
+    [JsonPropertyName("steps")] public int Steps { get; init; }
+    [JsonPropertyName("errors")] public List<string> Errors { get; init; } = [];
+    [JsonPropertyName("warnings")] public List<string> Warnings { get; init; } = [];
+}
+
+internal sealed class FlowReplayCliResult
+{
+    [JsonPropertyName("ok")] public bool Ok { get; init; }
+    [JsonPropertyName("name")] public string Name { get; init; } = "";
+    [JsonPropertyName("total")] public int Total { get; init; }
+    [JsonPropertyName("passed")] public int Passed { get; init; }
+    [JsonPropertyName("failed")] public int Failed { get; init; }
+    [JsonPropertyName("divergencePoint")] public int? DivergencePoint { get; init; }
+    [JsonPropertyName("stoppedEarly")] public bool StoppedEarly { get; init; }
+    [JsonPropertyName("results")] public List<Testing.FlowStepResult> Results { get; init; } = [];
+    [JsonPropertyName("evidencePath")] public string? EvidencePath { get; init; }
+    [JsonPropertyName("report")] public Testing.MauiFlowRunReport? Report { get; init; }
+    [JsonPropertyName("reportPath")] public string? ReportPath { get; init; }
+    [JsonPropertyName("reportDigest")] public string? ReportDigest { get; init; }
+}

@@ -32,6 +32,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     private readonly AgentHttpServer _server;
     private readonly VisualTreeWalker _treeWalker;
     private readonly MutationLeaseCoordinator _mutationLease;
+    private readonly WorkflowCommandLedger _workflowCommands;
     private readonly MutationRecordingTracker _mutationRecording = new();
     private FileLogProvider? _logProvider;
     private BrokerRegistration? _brokerRegistration;
@@ -394,9 +395,21 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         _mutationLease = new MutationLeaseCoordinator(
             () => _brokerRegistration,
             _options.MutationLeaseTimeoutMs);
+        _workflowCommands = new WorkflowCommandLedger(
+            () => _brokerRegistration?.InstanceId,
+            () => _brokerRegistration?.HasBrokerAuthority == true,
+            new WorkflowCommandLedgerOptions
+            {
+                MaxActiveLedgers = _options.MaxActiveWorkflowRunLedgers,
+                MaxCommandsPerRun = _options.MaxWorkflowCommandsPerRun,
+                MaxRetainedTerminalLedgers = _options.MaxRetainedWorkflowRunLedgers,
+                TerminalRetention = TimeSpan.FromSeconds(_options.WorkflowRunLedgerRetentionSeconds),
+                MaxStoredResponseBytes = _options.MaxWorkflowCommandResponseBytes
+            });
         _server = new AgentHttpServer(_options.Port);
         _server.MutationLeaseValidator = ValidateMutationLeaseAsync;
         _server.MutationObserver = ObserveMutationAsync;
+        _server.WorkflowCommandLedger = _workflowCommands;
         _server.MutationGuard = request => _options.ReadOnly && !IsReadOnlyDiagnosticControl(request)
             ? HttpResponse.Error(
                 $"DevFlow is running in {_options.Mode} read-only mode; mutating endpoints are disabled.",
@@ -627,6 +640,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         _server.MapGet("/api/v1/agent/status", HandleStatus);
         _server.MapGet("/api/v1/agent/capabilities", HandleCapabilities);
         _server.MapPost("/api/v1/agent/lease", HandleMutationLeaseControl, requiresMutationLease: false);
+        _server.MapPost("/api/v1/agent/workflow-runs", HandleWorkflowRunControl, requiresMutationLease: false);
         _server.MapPost(
             "/api/v1/agent/recording",
             HandleMutationRecordingControl,
@@ -805,6 +819,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     framework = ".NET MAUI",
                     frameworkVersion = Environment.Version.ToString(),
                     sessionId = _sessionId,
+                    instanceId = _brokerRegistration?.InstanceId,
                     mode = _options.Mode,
                     readOnly = _options.ReadOnly,
                 },
@@ -839,6 +854,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     jobs = IsJobsSupported,
                     theme = true,
                     mutationLease = _options.RequireMutationLease,
+                    workflowCommandLedger = true,
                     mutations = !_options.ReadOnly,
                 },
                 running = _app != null,
@@ -930,6 +946,25 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             enforced = _options.RequireMutationLease,
             features = new[] { "claim", "status", "heartbeat", "release", "force-takeover", "broker-authority", "local-fallback" }
         };
+        capabilities["agent.workflowCommandLedger"] = new
+        {
+            version = 1,
+            supported = true,
+            brokerAuthorityRequired = true,
+            features = new[]
+            {
+                "begin", "end", "abandon", "agent-instance-binding", "contiguous-sequence",
+                "duplicate-receipts", "unknown-completion", "bounded-retention"
+            },
+            limits = new
+            {
+                maxActiveLedgers = _options.MaxActiveWorkflowRunLedgers,
+                maxCommandsPerRun = _options.MaxWorkflowCommandsPerRun,
+                maxRetainedTerminalLedgers = _options.MaxRetainedWorkflowRunLedgers,
+                terminalRetentionSeconds = _options.WorkflowRunLedgerRetentionSeconds,
+                maxStoredResponseBytes = _options.MaxWorkflowCommandResponseBytes
+            }
+        };
 
         var result = new Dictionary<string, object?>
         {
@@ -968,6 +1003,18 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
     private async Task<MutationLeaseStatus> ValidateMutationLeaseAsync(HttpRequest request)
     {
+        if (WorkflowCommandHeaders.HasAny(request))
+        {
+            if (!request.Headers.TryGetValue(WorkflowCommandHeaders.AuthorityEpoch, out var epochText) ||
+                !long.TryParse(epochText, out var authorityEpoch) ||
+                authorityEpoch < 1)
+            {
+                return MutationLeaseStatus.Failure("The workflow command authority epoch is invalid.");
+            }
+
+            return await ValidateWorkflowRunAuthorityAsync(request, authorityEpoch).ConfigureAwait(false);
+        }
+
         if (!_options.RequireMutationLease)
             return MutationLeaseStatus.Unrestricted();
 
@@ -993,6 +1040,77 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             : body.Action.Trim().ToLowerInvariant();
         var result = await _mutationLease.ControlAsync(body).ConfigureAwait(false);
         return HttpResponse.Json(result);
+    }
+
+    private Task<HttpResponse> HandleWorkflowRunControl(HttpRequest request)
+    {
+        var body = request.BodyAs<WorkflowRunControlRequest>() ?? new WorkflowRunControlRequest();
+        body.Action = body.Action?.Trim().ToLowerInvariant();
+        return HandleWorkflowRunControlCoreAsync(request, body);
+    }
+
+    private async Task<HttpResponse> HandleWorkflowRunControlCoreAsync(
+        HttpRequest request,
+        WorkflowRunControlRequest body)
+    {
+        if (body.Action is "begin" or "end")
+        {
+            var authority = await ValidateWorkflowRunAuthorityAsync(request, body.AuthorityEpoch)
+                .ConfigureAwait(false);
+            if (!authority.Allowed)
+            {
+                var statusCode = _brokerRegistration?.HasBrokerAuthority == true ? 409 : 503;
+                return HttpResponse.Error(
+                    authority.Error ?? "The workflow ledger requires the current broker mutation lease.",
+                    statusCode,
+                    statusCode == 503 ? "workflow-broker-unavailable" : "workflow-stale-epoch");
+            }
+        }
+
+        var result = _workflowCommands.Control(body);
+        var response = HttpResponse.Json(result);
+        response.StatusCode = result.StatusCode;
+        response.StatusText = result.StatusCode switch
+        {
+            200 => "OK",
+            400 => "Bad Request",
+            409 => "Conflict",
+            429 => "Too Many Requests",
+            503 => "Service Unavailable",
+            _ => "Bad Request"
+        };
+        return response;
+    }
+
+    private async Task<MutationLeaseStatus> ValidateWorkflowRunAuthorityAsync(
+        HttpRequest request,
+        long authorityEpoch)
+    {
+        var broker = _brokerRegistration;
+        if (broker?.HasBrokerAuthority != true)
+        {
+            return MutationLeaseStatus.Failure(
+                "Workflow runs require active DevFlow broker authority.");
+        }
+
+        request.Headers.TryGetValue("X-DevFlow-Lease", out var leaseId);
+        if (string.IsNullOrWhiteSpace(leaseId))
+            request.Headers.TryGetValue("X-DevFlow-Writer", out leaseId);
+        if (string.IsNullOrWhiteSpace(leaseId))
+            return MutationLeaseStatus.Failure("The workflow ledger requires a broker mutation lease.");
+
+        var status = await broker.ControlMutationLeaseAsync(new MutationLeaseRequest
+        {
+            Action = "validate",
+            LeaseId = leaseId
+        }).ConfigureAwait(false);
+        if (status is null || !status.Allowed)
+            return status ?? MutationLeaseStatus.Failure("The broker did not validate the workflow mutation lease.");
+
+        if (authorityEpoch <= 0 || status.AuthorityEpoch != authorityEpoch)
+            return MutationLeaseStatus.Failure("The workflow authority epoch is stale.");
+
+        return status;
     }
 
     private async Task<HttpResponse> HandleMutationRecordingControl(HttpRequest request)
@@ -1032,17 +1150,17 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         }
     }
 
-    private async Task ObserveMutationAsync(HttpRequest request, HttpResponse response)
+    private async Task<HttpResponse?> ObserveMutationAsync(HttpRequest request, HttpResponse response)
     {
         var leaseId = request.MutationLease?.LeaseId;
         var broker = _brokerRegistration;
         if (string.IsNullOrWhiteSpace(leaseId) || broker?.HasBrokerAuthority != true ||
             !_mutationRecording.IsActive)
-            return;
+            return null;
 
         var observation = await CreateMutationObservationAsync(request, response).ConfigureAwait(false);
         if (observation is null)
-            return;
+            return null;
 
         var result = await broker.ControlMutationRecordingAsync(new MutationRecordingRequest
         {
@@ -1052,6 +1170,21 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             Observation = observation
         }).ConfigureAwait(false);
         UpdateMutationRecordingState(result);
+        if (result is null)
+        {
+            return HttpResponse.Error(
+                "The app mutation succeeded, but the DevFlow broker did not acknowledge the workflow step.",
+                statusCode: 503,
+                reason: "recording");
+        }
+        if (!result.Ok)
+        {
+            return HttpResponse.Error(
+                $"The app mutation succeeded, but workflow recording failed: {result.Error ?? "unknown recording error"}",
+                statusCode: 409,
+                reason: "recording");
+        }
+        return null;
     }
 
     private void UpdateMutationRecordingState(MutationRecordingStatus? status)
@@ -1150,12 +1283,15 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var observedProperty = action == "fill"
             ? "Text"
             : (action == "setProperty" ? name : null);
-        var sensitive = false;
+        var sensitive = request.MutationTargetSensitive;
         var targetValueMayBeSecret = action == "fill" ||
             (action == "setProperty" &&
              (string.Equals(name, "Text", StringComparison.OrdinalIgnoreCase) ||
               string.Equals(name, "Value", StringComparison.OrdinalIgnoreCase)));
-        if (targetValueMayBeSecret && !string.IsNullOrWhiteSpace(targetId) && _app is not null)
+        if (!sensitive &&
+            targetValueMayBeSecret &&
+            !string.IsNullOrWhiteSpace(targetId) &&
+            _app is not null)
         {
             sensitive = await DispatchAsync(() =>
             {
@@ -1165,7 +1301,10 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         }
         sensitive |= LooksSensitiveMutationTarget(name) ||
             (targetValueMayBeSecret &&
-             LooksSensitiveMutationTarget(targetId, target?.AutomationId, target?.Type));
+             LooksSensitiveMutationTarget(
+                 targetId,
+                 request.MutationTargetAutomationId ?? target?.AutomationId,
+                 request.MutationTargetType ?? target?.Type));
         if (sensitive)
         {
             value = null;
@@ -1180,15 +1319,17 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var avoidText = action == "fill" ||
             (action == "setProperty" && string.Equals(name, "Text", StringComparison.OrdinalIgnoreCase));
         var automationId = request.MutationTargetAutomationId ?? target?.AutomationId;
-        var selectorText = !avoidText && string.IsNullOrWhiteSpace(automationId) ? target?.Text : null;
-        var selectorType = string.IsNullOrWhiteSpace(automationId) && string.IsNullOrWhiteSpace(selectorText)
-            ? target?.Type
-            : null;
-        int? selectorIndex = null;
-        int? matchCount = null;
-        string? quality = null;
-        List<string>? fragilityReasons = null;
-        if (!string.IsNullOrWhiteSpace(automationId))
+        var selectorText = request.MutationTargetText ??
+            (!avoidText && string.IsNullOrWhiteSpace(automationId) ? target?.Text : null);
+        var selectorType = request.MutationTargetType ??
+            (string.IsNullOrWhiteSpace(automationId) && string.IsNullOrWhiteSpace(selectorText)
+                ? target?.Type
+                : null);
+        int? selectorIndex = request.MutationTargetIndex;
+        int? matchCount = request.MutationTargetMatchCount;
+        string? quality = request.MutationTargetQuality;
+        List<string>? fragilityReasons = request.MutationTargetFragilityReasons?.ToList();
+        if (quality is null && !string.IsNullOrWhiteSpace(automationId))
         {
             matchCount = observedElements?.Count(element =>
                 string.Equals(element.AutomationId, automationId, StringComparison.OrdinalIgnoreCase));
@@ -1196,7 +1337,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             if (matchCount != 1)
                 fragilityReasons = [$"AutomationId matched {matchCount ?? 0} elements at record time"];
         }
-        else if (!string.IsNullOrWhiteSpace(selectorText))
+        else if (quality is null && !string.IsNullOrWhiteSpace(selectorText))
         {
             matchCount = observedElements?.Count(element =>
                 string.Equals(element.Text, selectorText, StringComparison.Ordinal));
@@ -1204,7 +1345,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             if (matchCount != 1)
                 fragilityReasons = [$"exact text matched {matchCount ?? 0} elements at record time"];
         }
-        else if (!string.IsNullOrWhiteSpace(selectorType) && observedElements is not null)
+        else if (quality is null && !string.IsNullOrWhiteSpace(selectorType) && observedElements is not null)
         {
             var sameType = observedElements
                 .Where(element => string.Equals(element.Type, selectorType, StringComparison.OrdinalIgnoreCase))
@@ -2368,6 +2509,14 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     Property = propName
                 };
 
+            CaptureMutationTargetBeforeMutation(
+                request,
+                id,
+                el,
+                allowTextSelector:
+                    !string.Equals(propName, "Text", StringComparison.OrdinalIgnoreCase) &&
+                    !string.Equals(propName, "Value", StringComparison.OrdinalIgnoreCase));
+
             var type = el.GetType();
             var prop = type.GetProperty(propName, System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.IgnoreCase);
             if (prop == null || !prop.CanWrite)
@@ -2555,6 +2704,8 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var startedAtUtc = DateTime.UtcNow;
         if (IsNativeElementId(body.ElementId))
         {
+            if (_mutationRecording.IsActive)
+                await CaptureNativeMutationTargetBeforeMutationAsync(request, body.ElementId);
             var nativeResult = await Task.Run(() => _treeWalker.TryNativeElementTap(body.ElementId!));
             PublishUiOperationSpan(
                 "action.tap",
@@ -2570,7 +2721,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         {
             var el = _treeWalker.GetElementById(body.ElementId, _app);
             if (el == null) return "Element not found";
-            CaptureMutationTarget(request, el);
+            CaptureMutationTargetBeforeMutation(request, body.ElementId, el);
 
             switch (el)
             {
@@ -2701,14 +2852,157 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         return result == "ok" ? HttpResponse.Ok("Tapped") : HttpResponse.Error(result);
     }
 
-    internal static void CaptureMutationTarget(HttpRequest request, object target)
+    internal static void CaptureMutationTarget(
+        HttpRequest request,
+        object target,
+        ElementInfo? targetInfo = null,
+        IReadOnlyList<ElementInfo>? observedElements = null,
+        bool allowTextSelector = true)
     {
+        request.MutationTargetSensitive = target is Entry entry && entry.IsPassword;
         request.MutationTargetAutomationId = target switch
         {
             VisualElement element => element.AutomationId,
             IView view => view.AutomationId,
             _ => null
         };
+        request.MutationTargetAutomationId ??= targetInfo?.AutomationId;
+        if (!string.IsNullOrWhiteSpace(request.MutationTargetAutomationId))
+        {
+            if (observedElements is null)
+                return;
+
+            request.MutationTargetMatchCount = observedElements.Count(element =>
+                string.Equals(
+                    element.AutomationId,
+                    request.MutationTargetAutomationId,
+                    StringComparison.OrdinalIgnoreCase));
+            request.MutationTargetQuality = request.MutationTargetMatchCount == 1
+                ? "durable"
+                : "ambiguous";
+            if (request.MutationTargetMatchCount != 1)
+            {
+                request.MutationTargetFragilityReasons =
+                    [$"AutomationId matched {request.MutationTargetMatchCount ?? 0} elements at record time"];
+            }
+            return;
+        }
+
+        if (allowTextSelector && !string.IsNullOrWhiteSpace(targetInfo?.Text))
+        {
+            request.MutationTargetText = targetInfo.Text;
+            if (observedElements is null)
+                return;
+
+            request.MutationTargetMatchCount = observedElements.Count(element =>
+                string.Equals(element.Text, targetInfo.Text, StringComparison.Ordinal));
+            request.MutationTargetQuality = request.MutationTargetMatchCount == 1
+                ? "text"
+                : "ambiguous";
+            if (request.MutationTargetMatchCount != 1)
+            {
+                request.MutationTargetFragilityReasons =
+                    [$"exact text matched {request.MutationTargetMatchCount ?? 0} elements at record time"];
+            }
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(targetInfo?.Type) || observedElements is null)
+            return;
+
+        var sameType = observedElements
+            .Where(element =>
+                string.Equals(element.Type, targetInfo.Type, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        request.MutationTargetType = targetInfo.Type;
+        request.MutationTargetIndex = sameType.FindIndex(element =>
+            string.Equals(element.Id, targetInfo.Id, StringComparison.Ordinal));
+        request.MutationTargetMatchCount = sameType.Count;
+        request.MutationTargetQuality = "fragile";
+        request.MutationTargetFragilityReasons =
+            ["type-index selector can change when the visual tree changes"];
+    }
+
+    private void CaptureMutationTargetBeforeMutation(
+        HttpRequest request,
+        string targetId,
+        object? target,
+        bool allowTextSelector = true)
+    {
+        if (!_mutationRecording.IsActive)
+        {
+            if (target is not null)
+                CaptureMutationTarget(request, target, allowTextSelector: allowTextSelector);
+            return;
+        }
+
+        var tree = _treeWalker.WalkTree(_app!, _options.MaxTreeDepth);
+        var observedElements = VisualTreeWalker.FlattenElementInfos(tree).ToList();
+        var targetInfo = observedElements.FirstOrDefault(element =>
+            string.Equals(element.Id, targetId, StringComparison.Ordinal));
+        CaptureMutationTarget(
+            request,
+            target ?? new object(),
+            targetInfo,
+            observedElements,
+            allowTextSelector);
+    }
+
+    internal async Task CaptureNativeMutationTargetBeforeMutationAsync(
+        HttpRequest request,
+        string targetId,
+        bool allowTextSelector = true,
+        bool protectPotentialSecret = false)
+    {
+        var targetInfo = await Task.Run(() => _treeWalker.GetNativeElementInfoById(targetId));
+        CaptureNativeMutationTarget(
+            request,
+            targetInfo,
+            allowTextSelector,
+            protectPotentialSecret);
+    }
+
+    internal static void CaptureNativeMutationTarget(
+        HttpRequest request,
+        ElementInfo? targetInfo,
+        bool allowTextSelector,
+        bool protectPotentialSecret)
+    {
+        CaptureMutationTarget(
+            request,
+            new object(),
+            targetInfo,
+            observedElements: null,
+            allowTextSelector);
+
+        if (!string.IsNullOrWhiteSpace(request.MutationTargetAutomationId) ||
+            !string.IsNullOrWhiteSpace(request.MutationTargetText))
+        {
+            request.MutationTargetMatchCount = null;
+            request.MutationTargetQuality = "fragile";
+            request.MutationTargetFragilityReasons =
+                ["native selector uniqueness could not be verified at record time"];
+        }
+
+        if (string.IsNullOrWhiteSpace(request.MutationTargetAutomationId) &&
+            string.IsNullOrWhiteSpace(request.MutationTargetText) &&
+            string.IsNullOrWhiteSpace(request.MutationTargetType))
+        {
+            request.MutationTargetMatchCount = 0;
+            request.MutationTargetQuality = "fragile";
+            request.MutationTargetFragilityReasons =
+                ["native element exposed no stable replay selector; recording uses its transient element ID"];
+        }
+
+        if (protectPotentialSecret)
+        {
+            var isPassword = false;
+            var passwordStateKnown = targetInfo?.NativeProperties?.TryGetValue(
+                "isPassword",
+                out var rawPasswordState) == true &&
+                bool.TryParse(rawPasswordState, out isPassword);
+            request.MutationTargetSensitive |= !passwordStateKnown || isPassword;
+        }
     }
 
     /// <summary>
@@ -2872,6 +3166,14 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var startedAtUtc = DateTime.UtcNow;
         if (IsNativeElementId(body.ElementId))
         {
+            if (_mutationRecording.IsActive)
+            {
+                await CaptureNativeMutationTargetBeforeMutationAsync(
+                    request,
+                    body.ElementId,
+                    allowTextSelector: false,
+                    protectPotentialSecret: true);
+            }
             var nativeResult = await Task.Run(() => _treeWalker.TryNativeElementSetValue(body.ElementId!, body.Text!));
             PublishUiOperationSpan(
                 "action.fill",
@@ -2900,6 +3202,11 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         {
             var el = _treeWalker.GetElementById(body.ElementId, _app);
             if (el == null) return "Element not found";
+            CaptureMutationTargetBeforeMutation(
+                request,
+                body.ElementId,
+                el,
+                allowTextSelector: false);
 
             switch (el)
             {
@@ -3429,6 +3736,18 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var results = new List<object>(body.Actions.Count);
         var allSucceeded = true;
 
+        async Task<HttpResponse> ExecuteAsync(
+            HttpRequest actionRequest,
+            Func<HttpRequest, Task<HttpResponse>> handler)
+        {
+            actionRequest.MutationLease = request.MutationLease;
+            var actionResponse = await handler(actionRequest);
+            if (actionResponse.StatusCode >= 400)
+                return actionResponse;
+
+            return await ObserveMutationAsync(actionRequest, actionResponse) ?? actionResponse;
+        }
+
         foreach (var action in body.Actions)
         {
             var actionName = (action.Action ?? action.Type ?? string.Empty).Trim().ToLowerInvariant();
@@ -3437,95 +3756,150 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             switch (actionName)
             {
                 case "tap":
-                    response = await HandleTap(new HttpRequest { Method = "POST", Body = JsonSerializer.Serialize(new ActionRequest { ElementId = action.ElementId }) });
+                    response = await ExecuteAsync(
+                        new HttpRequest
+                        {
+                            Method = "POST",
+                            Path = "/api/v1/ui/actions/tap",
+                            Body = JsonSerializer.Serialize(new ActionRequest { ElementId = action.ElementId })
+                        },
+                        HandleTap);
                     break;
                 case "fill":
-                    response = await HandleFill(new HttpRequest
-                    {
-                        Method = "POST",
-                        Body = JsonSerializer.Serialize(new FillRequest { ElementId = action.ElementId, Text = action.Text ?? string.Empty })
-                    });
+                    response = await ExecuteAsync(
+                        new HttpRequest
+                        {
+                            Method = "POST",
+                            Path = "/api/v1/ui/actions/fill",
+                            Body = JsonSerializer.Serialize(new FillRequest { ElementId = action.ElementId, Text = action.Text ?? string.Empty })
+                        },
+                        HandleFill);
                     break;
                 case "clear":
-                    response = await HandleClear(new HttpRequest { Method = "POST", Body = JsonSerializer.Serialize(new ActionRequest { ElementId = action.ElementId }) });
+                    response = await ExecuteAsync(
+                        new HttpRequest
+                        {
+                            Method = "POST",
+                            Path = "/api/v1/ui/actions/clear",
+                            Body = JsonSerializer.Serialize(new ActionRequest { ElementId = action.ElementId })
+                        },
+                        HandleClear);
                     break;
                 case "focus":
-                    response = await HandleFocus(new HttpRequest { Method = "POST", Body = JsonSerializer.Serialize(new ActionRequest { ElementId = action.ElementId }) });
+                    response = await ExecuteAsync(
+                        new HttpRequest
+                        {
+                            Method = "POST",
+                            Path = "/api/v1/ui/actions/focus",
+                            Body = JsonSerializer.Serialize(new ActionRequest { ElementId = action.ElementId })
+                        },
+                        HandleFocus);
                     break;
                 case "navigate":
-                    response = await HandleNavigate(new HttpRequest
-                    {
-                        Method = "POST",
-                        Body = JsonSerializer.Serialize(new NavigateRequest { Route = action.Route ?? string.Empty })
-                    });
+                    response = await ExecuteAsync(
+                        new HttpRequest
+                        {
+                            Method = "POST",
+                            Path = "/api/v1/ui/actions/navigate",
+                            Body = JsonSerializer.Serialize(new NavigateRequest { Route = action.Route ?? string.Empty })
+                        },
+                        HandleNavigate);
                     break;
                 case "resize":
-                    response = await HandleResize(new HttpRequest { Method = "POST", Body = JsonSerializer.Serialize(new ResizeRequest(action.Width, action.Height)) });
+                    response = await ExecuteAsync(
+                        new HttpRequest
+                        {
+                            Method = "POST",
+                            Path = "/api/v1/ui/actions/resize",
+                            Body = JsonSerializer.Serialize(new ResizeRequest(action.Width, action.Height))
+                        },
+                        HandleResize);
                     break;
                 case "scroll":
-                    response = await HandleScroll(new HttpRequest
-                    {
-                        Method = "POST",
-                        Body = JsonSerializer.Serialize(new ScrollRequest
+                    response = await ExecuteAsync(
+                        new HttpRequest
                         {
-                            ElementId = action.ElementId,
-                            DeltaX = action.DeltaX,
-                            DeltaY = action.DeltaY,
-                            ItemIndex = action.ItemIndex,
-                            GroupIndex = action.GroupIndex,
-                            ScrollToPosition = action.ScrollToPosition,
-                            Animated = action.Animated
-                        })
-                    });
+                            Method = "POST",
+                            Path = "/api/v1/ui/actions/scroll",
+                            Body = JsonSerializer.Serialize(new ScrollRequest
+                            {
+                                ElementId = action.ElementId,
+                                DeltaX = action.DeltaX,
+                                DeltaY = action.DeltaY,
+                                ItemIndex = action.ItemIndex,
+                                GroupIndex = action.GroupIndex,
+                                ScrollToPosition = action.ScrollToPosition,
+                                Animated = action.Animated
+                            })
+                        },
+                        HandleScroll);
                     break;
                 case "back":
-                    response = await HandleBack(new HttpRequest { Method = "POST" });
+                    response = await ExecuteAsync(
+                        new HttpRequest
+                        {
+                            Method = "POST",
+                            Path = "/api/v1/ui/actions/back"
+                        },
+                        HandleBack);
                     break;
                 case "key":
-                    response = await HandleKey(new HttpRequest
-                    {
-                        Method = "POST",
-                        Body = JsonSerializer.Serialize(new KeyActionRequest { ElementId = action.ElementId, Key = action.Key, Text = action.Text })
-                    });
+                    response = await ExecuteAsync(
+                        new HttpRequest
+                        {
+                            Method = "POST",
+                            Path = "/api/v1/ui/actions/key",
+                            Body = JsonSerializer.Serialize(new KeyActionRequest { ElementId = action.ElementId, Key = action.Key, Text = action.Text })
+                        },
+                        HandleKey);
                     break;
                 case "gesture":
-                    response = await HandleGesture(new HttpRequest
-                    {
-                        Method = "POST",
-                        Body = JsonSerializer.Serialize(new GestureActionRequest
+                    response = await ExecuteAsync(
+                        new HttpRequest
                         {
-                            ElementId = action.ElementId,
-                            Type = action.Type ?? action.Action,
-                            Direction = action.Direction,
-                            Distance = action.Distance,
-                            DurationMs = action.DurationMs
-                        })
-                    });
+                            Method = "POST",
+                            Path = "/api/v1/ui/actions/gesture",
+                            Body = JsonSerializer.Serialize(new GestureActionRequest
+                            {
+                                ElementId = action.ElementId,
+                                Type = action.Type ?? action.Action,
+                                Direction = action.Direction,
+                                Distance = action.Distance,
+                                DurationMs = action.DurationMs
+                            })
+                        },
+                        HandleGesture);
                     break;
                 case "set-property":
                 case "set_property":
-                    response = await HandleSetProperty(new HttpRequest
-                    {
-                        Method = "PUT",
-                        RouteParams = new Dictionary<string, string>
+                    response = await ExecuteAsync(
+                        new HttpRequest
                         {
-                            ["id"] = action.ElementId ?? string.Empty,
-                            ["name"] = action.Property ?? string.Empty
+                            Method = "PUT",
+                            Path = $"/api/v1/ui/elements/{action.ElementId}/properties/{action.Property}",
+                            RouteParams = new Dictionary<string, string>
+                            {
+                                ["id"] = action.ElementId ?? string.Empty,
+                                ["name"] = action.Property ?? string.Empty
+                            },
+                            Body = JsonSerializer.Serialize(new SetPropertyRequest { Value = action.Value ?? string.Empty })
                         },
-                        Body = JsonSerializer.Serialize(new SetPropertyRequest { Value = action.Value ?? string.Empty })
-                    });
+                        HandleSetProperty);
                     break;
                 case "invoke-action":
                 case "invoke_action":
-                    response = await HandleInvokeAction(new HttpRequest
-                    {
-                        Method = "POST",
-                        RouteParams = new Dictionary<string, string>
+                    response = await ExecuteAsync(
+                        new HttpRequest
                         {
-                            ["name"] = action.Name ?? string.Empty
+                            Method = "POST",
+                            Path = $"/api/v1/invoke/actions/{action.Name}",
+                            RouteParams = new Dictionary<string, string>
+                            {
+                                ["name"] = action.Name ?? string.Empty
+                            },
+                            Body = JsonSerializer.Serialize(new InvokeActionRequest { Args = action.Args })
                         },
-                        Body = JsonSerializer.Serialize(new InvokeActionRequest { Args = action.Args })
-                    });
+                        HandleInvokeAction);
                     break;
                 default:
                     response = HttpResponse.Error($"Unsupported batch action '{actionName}'");

@@ -2,7 +2,7 @@ using System.Collections.Concurrent;
 
 namespace Microsoft.Maui.Cli.DevFlow.Broker;
 
-internal sealed class MutationLeaseRegistry
+internal sealed class MutationLeaseRegistry : IWorkflowMutationLeaseRegistry
 {
     internal const int DefaultLeaseDurationMs = 10_000;
     internal const int DefaultTransactionDurationMs = 5 * 60_000;
@@ -58,7 +58,16 @@ internal sealed class MutationLeaseRegistry
                 case "heartbeat":
                 case "validate":
                     if (!string.IsNullOrWhiteSpace(leaseId) && state.LeaseId == leaseId)
-                        state.LastSeenTicks = Environment.TickCount64;
+                    {
+                        var now = _getTicks();
+                        state.LastSeenTicks = now;
+                        if (!string.IsNullOrWhiteSpace(transactionId) &&
+                            state.TransactionLeaseId == leaseId &&
+                            state.TransactionIds.ContainsKey(transactionId))
+                        {
+                            state.TransactionIds[transactionId] = now;
+                        }
+                    }
                     break;
                 case "release":
                     if (!string.IsNullOrWhiteSpace(leaseId) && state.LeaseId == leaseId &&
@@ -127,6 +136,8 @@ internal sealed class MutationLeaseRegistry
 
     private void SetHolder(LeaseState state, string leaseId, string? holderKind, string? label)
     {
+        if (!string.Equals(state.LeaseId, leaseId, StringComparison.Ordinal))
+            state.AuthorityEpoch = checked(state.AuthorityEpoch + 1);
         state.LeaseId = leaseId;
         state.HolderKind = Clean(holderKind) ?? "unknown";
         state.Label = Clean(label);
@@ -152,7 +163,10 @@ internal sealed class MutationLeaseRegistry
             Label: state.Label,
             ExpiresInMs: state.LeaseId is null
                 ? 0
-                : Math.Max(0, _leaseDurationMs - (_getTicks() - state.LastSeenTicks)));
+                : Math.Max(0, _leaseDurationMs - (_getTicks() - state.LastSeenTicks)))
+        {
+            AuthorityEpoch = state.AuthorityEpoch
+        };
     }
 
     private static string? Clean(string? value)
@@ -177,6 +191,7 @@ internal sealed class MutationLeaseRegistry
         public long LastSeenTicks { get; set; }
         public string? TransactionLeaseId { get; set; }
         public Dictionary<string, long> TransactionIds { get; } = new(StringComparer.Ordinal);
+        public long AuthorityEpoch { get; set; }
     }
 }
 
@@ -188,4 +203,7 @@ internal sealed record MutationLeaseSnapshot(
     string? TransactionId,
     string? HolderKind,
     string? Label,
-    long ExpiresInMs);
+    long ExpiresInMs)
+{
+    public long AuthorityEpoch { get; init; }
+}

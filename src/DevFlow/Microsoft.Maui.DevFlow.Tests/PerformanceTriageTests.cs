@@ -108,9 +108,48 @@ public class PerformanceTriageTests
 
         Assert.True(summary.Memory.ProcessSupported);
         Assert.Equal(500, summary.Memory.ProcessDeltaBytes);
-        Assert.Equal("windows.working-set", summary.Memory.ProcessKind);
+        Assert.Equal("process.working-set", summary.Memory.ProcessKind);
         Assert.False(summary.Memory.NativeSupported);
         Assert.Null(summary.Memory.NativeDeltaBytes);
+    }
+
+    [Fact]
+    public void Aggregate_NormalizesEquivalentProcessMemoryKinds()
+    {
+        var first = Sample(0, managed: 10);
+        first.ProcessMemoryBytes = 1_000;
+        first.ProcessMemoryKind = "windows.working-set";
+        var second = Sample(1, managed: 20);
+        second.ProcessMemoryBytes = 1_500;
+        second.ProcessMemoryKind = "process.working-set";
+
+        var summary = PerformanceAggregator.Aggregate(
+            Capabilities(), Session(), Batch(first, second), null, Status(), Generated);
+
+        Assert.True(summary.Memory.ProcessSupported);
+        Assert.False(summary.Memory.ProcessKindsMixed);
+        Assert.Equal("process.working-set", summary.Memory.ProcessKind);
+        Assert.Equal(500, summary.Memory.ProcessDeltaBytes);
+    }
+
+    [Fact]
+    public void Aggregate_WithholdsIncompatibleProcessMemoryKindsWithAWarning()
+    {
+        var first = Sample(0, managed: 10);
+        first.ProcessMemoryBytes = 1_000;
+        first.ProcessMemoryKind = "apple.phys-footprint";
+        var second = Sample(1, managed: 20);
+        second.ProcessMemoryBytes = 1_500;
+        second.ProcessMemoryKind = "process.working-set";
+
+        var summary = PerformanceAggregator.Aggregate(
+            Capabilities(), Session(), Batch(first, second), null, Status(), Generated);
+
+        Assert.False(summary.Memory.ProcessSupported);
+        Assert.True(summary.Memory.ProcessKindsMixed);
+        Assert.Null(summary.Memory.ProcessDeltaBytes);
+        Assert.Contains(summary.Warnings, warning =>
+            warning.Contains("incompatible", StringComparison.OrdinalIgnoreCase));
     }
 
     // ── frames: never synthesise ─────────────────────────────────────────────────────────────

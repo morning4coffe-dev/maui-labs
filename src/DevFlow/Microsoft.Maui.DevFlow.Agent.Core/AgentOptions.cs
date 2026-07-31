@@ -167,6 +167,33 @@ public class AgentOptions
     /// </summary>
     public int MutationLeaseTimeoutMs { get; set; } = 10_000;
 
+    /// <summary>
+    /// Maximum broker-owned workflow command ledgers that may be active in this app process.
+    /// Active ledgers are never evicted to make room for a new run. Default: 8.
+    /// </summary>
+    public int MaxActiveWorkflowRunLedgers { get; set; } = 8;
+
+    /// <summary>
+    /// Maximum fenced mutating commands accepted by one workflow run. Default: 2000.
+    /// </summary>
+    public int MaxWorkflowCommandsPerRun { get; set; } = 2_000;
+
+    /// <summary>
+    /// Maximum terminal workflow ledgers retained for diagnostics. Default: 32.
+    /// </summary>
+    public int MaxRetainedWorkflowRunLedgers { get; set; } = 32;
+
+    /// <summary>
+    /// Number of seconds terminal workflow ledgers remain available for diagnostics. Default: 900.
+    /// </summary>
+    public int WorkflowRunLedgerRetentionSeconds { get; set; } = 15 * 60;
+
+    /// <summary>
+    /// Maximum response bytes retained as a workflow command receipt. Responses over this limit
+    /// are replaced by an explicit failure receipt rather than silently truncated. Default: 64KB.
+    /// </summary>
+    public int MaxWorkflowCommandResponseBytes { get; set; } = 64 * 1024;
+
     internal void ApplyProfileDefaults()
     {
         Mode = "profile";
@@ -198,6 +225,35 @@ public class AgentOptions
             ApplyProfileDefaults();
         else if (!string.IsNullOrWhiteSpace(buildMode))
             Mode = buildMode;
+    }
+
+    internal void ValidateForRegistration()
+    {
+        if (Port is < 1 or > 65_535)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(Port),
+                Port,
+                "DevFlow Agent port must be between 1 and 65535.");
+        }
+    }
+
+    internal void ApplyPortMetadata(int? metadataPort)
+    {
+        if (Port == DefaultPort && metadataPort.HasValue)
+            Port = metadataPort.Value;
+    }
+
+    internal static int? ParsePortMetadata(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        if (!int.TryParse(value, out var port) || port is < 1 or > 65_535)
+        {
+            throw new InvalidOperationException(
+                "Microsoft.Maui.DevFlowPort assembly metadata must be an integer between 1 and 65535.");
+        }
+        return port;
     }
 
     /// <summary>

@@ -3,6 +3,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using ModelContextProtocol.Server;
 using Microsoft.Maui.Cli.DevFlow.Mcp;
+using Microsoft.Maui.DevFlow.Testing;
+using Testing = Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Flows;
 
@@ -110,7 +112,7 @@ public sealed class FlowRecordTools
     /// replay-validation probe) as an agent-recorded one.
     /// </summary>
     internal static (bool ok, int seq, int stepCount, bool fragile, string? error) AddStepCore(
-        FlowRecorder recorder, string action,
+        Testing.FlowRecorder recorder, string action,
         string? automationId, string? text, string? type, int? index, string? id,
         string? value, string? name, double? dx, double? dy, int? itemIndex, string? position,
         string? page, bool navigated, string? assertsJson,
@@ -120,16 +122,16 @@ public sealed class FlowRecordTools
         string? valueSource = null,
         bool sensitive = false)
     {
-        if (string.IsNullOrWhiteSpace(action) || !FlowActions.All.Contains(action))
-            return (false, -1, recorder.StepCount, false, $"Unknown action '{action}'. Use one of: {string.Join(", ", FlowActions.All)}.");
+        if (string.IsNullOrWhiteSpace(action) || !Testing.FlowActions.All.Contains(action))
+            return (false, -1, recorder.StepCount, false, $"Unknown action '{action}'. Use one of: {string.Join(", ", Testing.FlowActions.All)}.");
 
-        var targetValueMayBeSecret = action == FlowActions.Fill ||
-            (action == FlowActions.SetProperty &&
+        var targetValueMayBeSecret = action == Testing.FlowActions.Fill ||
+            (action == Testing.FlowActions.SetProperty &&
              (string.Equals(name, "Text", StringComparison.OrdinalIgnoreCase) ||
               string.Equals(name, "Value", StringComparison.OrdinalIgnoreCase)));
-        sensitive |= FlowSecretReference.LooksSensitive(name) ||
+        sensitive |= Testing.FlowSecretReference.LooksSensitive(name) ||
             (targetValueMayBeSecret &&
-             FlowSecretReference.LooksSensitive(automationId, text, type, id));
+             Testing.FlowSecretReference.LooksSensitive(automationId, text, type, id));
 
         foreach (var s in new[] { automationId, text, type, id, value, name, position, page })
             if (TooLong(s, out var e)) return (false, -1, recorder.StepCount, false, e);
@@ -153,20 +155,20 @@ public sealed class FlowRecordTools
             quality,
             fragilityReasons);
 
-        var args = new FlowStepArgs();
+        var args = new Testing.FlowStepArgs();
         string? stepValue = null;
-        var secretEnvironmentVariable = sensitive && action is FlowActions.Fill or FlowActions.SetProperty
-            ? FlowSecretReference.BuildEnvironmentVariable(automationId, name, type, recorder.StepCount + 1)
+        var secretEnvironmentVariable = sensitive && action is Testing.FlowActions.Fill or Testing.FlowActions.SetProperty
+            ? Testing.FlowSecretReference.BuildEnvironmentVariable(automationId, name, type, recorder.StepCount + 1)
             : null;
         switch (action)
         {
-            case FlowActions.Fill:
+            case Testing.FlowActions.Fill:
                 if (secretEnvironmentVariable is not null)
                     args.SecretEnvironmentVariable = secretEnvironmentVariable;
                 else
                     stepValue = args.Text = value;
                 break;
-            case FlowActions.SetProperty:
+            case Testing.FlowActions.SetProperty:
                 args.Name = name;
                 args.ValueSource = valueSource;
                 if (secretEnvironmentVariable is not null)
@@ -174,16 +176,16 @@ public sealed class FlowRecordTools
                 else
                     stepValue = args.Value = value;
                 break;
-            case FlowActions.Navigate: stepValue = Clean(value); args.Route = stepValue; break;
-            case FlowActions.SetTheme: stepValue = value; args.Theme = value; break;
-            case FlowActions.Scroll:
+            case Testing.FlowActions.Navigate: stepValue = Clean(value); args.Route = stepValue; break;
+            case Testing.FlowActions.SetTheme: stepValue = value; args.Theme = value; break;
+            case Testing.FlowActions.Scroll:
                 args.Dx = dx; args.Dy = dy; args.ItemIndex = itemIndex;
                 args.Position = position;
                 break;
         }
         if (IsEmptyArgs(args)) args = null;
 
-        List<FlowAssert>? asserts;
+        List<Testing.FlowAssert>? asserts;
         try
         {
             asserts = ParseAsserts(assertsJson);
@@ -200,8 +202,8 @@ public sealed class FlowRecordTools
                     string.Equals(assertion.Name, "Text", StringComparison.OrdinalIgnoreCase) ||
                     string.Equals(assertion.Name, "Value", StringComparison.OrdinalIgnoreCase);
                 if (assertion.Kind == "propEquals" &&
-                    (FlowSecretReference.LooksSensitive(assertion.Name) ||
-                     (assertionTargetMayBeSecret && FlowSecretReference.LooksSensitive(
+                    (Testing.FlowSecretReference.LooksSensitive(assertion.Name) ||
+                     (assertionTargetMayBeSecret && Testing.FlowSecretReference.LooksSensitive(
                          assertion.Selector?.AutomationId,
                          assertion.Selector?.Text,
                          assertion.Selector?.Type,
@@ -224,11 +226,11 @@ public sealed class FlowRecordTools
         }
         if (asserts is null && target is not null && !target.IsEmpty)
         {
-            if (action == FlowActions.Fill && secretEnvironmentVariable is null)
+            if (action == Testing.FlowActions.Fill && secretEnvironmentVariable is null)
             {
                 asserts =
                 [
-                    new FlowAssert
+                    new Testing.FlowAssert
                     {
                         Kind = "propEquals",
                         Selector = target,
@@ -238,13 +240,13 @@ public sealed class FlowRecordTools
                     },
                 ];
             }
-            else if (action == FlowActions.SetProperty &&
+            else if (action == Testing.FlowActions.SetProperty &&
                      secretEnvironmentVariable is null &&
                      !string.IsNullOrEmpty(name))
             {
                 asserts =
                 [
-                    new FlowAssert
+                    new Testing.FlowAssert
                     {
                         Kind = "propEquals",
                         Selector = target,
@@ -257,7 +259,7 @@ public sealed class FlowRecordTools
         }
 
         // Fail fast: reject a step that would not replay, using the exact replay validation rules.
-        var candidate = new FlowStep
+        var candidate = new Testing.FlowStep
         {
             Seq = 1,
             Action = action,
@@ -268,15 +270,15 @@ public sealed class FlowRecordTools
             Navigated = navigated,
             Asserts = asserts,
         };
-        var probe = new MauiFlow();
+        var probe = new Testing.MauiFlow();
         probe.Steps.Add(candidate);
-        var validation = FlowValidator.Validate(probe);
+        var validation = Testing.FlowValidator.Validate(probe);
         if (!validation.Ok)
             return (false, -1, recorder.StepCount, false, "Step rejected: " + string.Join("; ", validation.Errors));
 
         var seq = recorder.AppendStep(action, target, stepValue, args, page, navigated, asserts);
         if (seq < 0)
-            return (false, -1, recorder.StepCount, false, $"Recording is full (max {FlowRecorder.MaxSteps} steps).");
+            return (false, -1, recorder.StepCount, false, $"Recording is full (max {Testing.FlowRecorder.MaxSteps} steps).");
 
         var fragile = IsFragileSelector(target);
         return (true, seq, recorder.StepCount, fragile, null);
@@ -334,22 +336,22 @@ public sealed class FlowRecordTools
     }
 
     /// <summary>Non-mutating validation of the current recording (shared by MCP stop and HTTP stop).</summary>
-    internal static (bool valid, bool empty, string[] errors, string[] warnings) ValidatePeekCore(FlowRecorder recorder)
+    internal static (bool valid, bool empty, string[] errors, string[] warnings) ValidatePeekCore(Testing.FlowRecorder recorder)
     {
         var peek = recorder.Snapshot();
         if (peek.Steps.Count == 0)
             return (false, true, Array.Empty<string>(), Array.Empty<string>());
-        var v = FlowValidator.Validate(peek);
+        var v = Testing.FlowValidator.Validate(peek);
         return (v.Ok, false, v.Errors.ToArray(), v.Warnings.ToArray());
     }
 
     /// <summary>Closes the recording and serializes it to Markdown, with a parse round-trip safety
     /// net (shared by MCP stop and HTTP stop). Caller decides whether to write a file or return it.</summary>
-    internal static (bool ok, string? markdown, MauiFlow? flow, string? error) FinishToMarkdownCore(FlowRecorder recorder)
+    internal static (bool ok, string? markdown, Testing.MauiFlow? flow, string? error) FinishToMarkdownCore(Testing.FlowRecorder recorder)
     {
         var flow = recorder.Finish();
-        var markdown = FlowMarkdown.Serialize(flow);
-        var roundTrip = FlowMarkdown.Parse(markdown);
+        var markdown = Testing.FlowMarkdown.Serialize(flow);
+        var roundTrip = Testing.FlowMarkdown.Parse(markdown);
         if (!roundTrip.Ok)
             return (false, null, null, $"Internal: recorded flow did not round-trip ({roundTrip.Error}).");
         return (true, markdown, flow, null);
@@ -410,9 +412,9 @@ public sealed class FlowRecordTools
 
     private static string StartLocal(string name, string? app, string? platform, string? preconditions)
     {
-        var id = FlowRecordingStore.Instance.Start(name, app, platform, preconditions);
+        var id = Testing.FlowRecordingStore.Instance.Start(name, app, platform, preconditions);
         return id is null
-            ? Error($"Too many active recordings (max {FlowRecordingStore.MaxActive}). Stop or cancel one first.")
+            ? Error($"Too many active recordings (max {Testing.FlowRecordingStore.MaxActive}). Stop or cancel one first.")
             : Json(new { ok = true, recordingId = id, name = string.IsNullOrWhiteSpace(name) ? "scenario" : name.Trim(), app, platform });
     }
 
@@ -434,7 +436,7 @@ public sealed class FlowRecordTools
         bool navigated,
         string? assertsJson)
     {
-        if (!FlowRecordingStore.Instance.TryGet(recordingId, out var recorder))
+        if (!Testing.FlowRecordingStore.Instance.TryGet(recordingId, out var recorder))
             return Error($"Unknown recordingId '{recordingId}'.");
 
         var added = AddStepCore(
@@ -447,7 +449,7 @@ public sealed class FlowRecordTools
 
     private static string StopLocal(string recordingId, string? file, string? directory, bool overwrite)
     {
-        if (!FlowRecordingStore.Instance.TryGet(recordingId, out var recorder))
+        if (!Testing.FlowRecordingStore.Instance.TryGet(recordingId, out var recorder))
             return Error($"Unknown recordingId '{recordingId}'.");
 
         var validation = ValidatePeekCore(recorder);
@@ -489,7 +491,7 @@ public sealed class FlowRecordTools
             return Error($"Could not write flow test: {ex.Message}");
         }
 
-        FlowRecordingStore.Instance.Remove(recordingId);
+        Testing.FlowRecordingStore.Instance.Remove(recordingId);
         return Json(new
         {
             ok = true,
@@ -503,12 +505,12 @@ public sealed class FlowRecordTools
     {
         if (!string.IsNullOrWhiteSpace(recordingId))
         {
-            if (!FlowRecordingStore.Instance.TryGet(recordingId!, out var recorder))
+            if (!Testing.FlowRecordingStore.Instance.TryGet(recordingId!, out var recorder))
                 return Error($"Unknown recordingId '{recordingId}'.");
             return Json(new { ok = true, recordingId, name = recorder.Name, steps = recorder.StepCount });
         }
 
-        var active = FlowRecordingStore.Instance.List()
+        var active = Testing.FlowRecordingStore.Instance.List()
             .Select(r => new { name = r.Name, steps = r.Steps })
             .ToList();
         return Json(new { ok = true, count = active.Count, active });
@@ -516,7 +518,7 @@ public sealed class FlowRecordTools
 
     private static string CancelLocal(string recordingId)
     {
-        var removed = FlowRecordingStore.Instance.Remove(recordingId);
+        var removed = Testing.FlowRecordingStore.Instance.Remove(recordingId);
         return removed is null
             ? Error($"Unknown recordingId '{recordingId}'.")
             : Json(new { ok = true, cancelled = recordingId });
@@ -524,7 +526,7 @@ public sealed class FlowRecordTools
 
     /// <summary>Builds a canonical selector keeping ONLY the highest-precedence form provided
     /// (AutomationId &gt; Text &gt; Type+Index &gt; Id), so the JSON is never ambiguous.</summary>
-    internal static FlowSelector? BuildSelector(
+    internal static Testing.FlowSelector? BuildSelector(
         string? automationId,
         string? text,
         string? type,
@@ -535,7 +537,7 @@ public sealed class FlowRecordTools
         IReadOnlyList<string>? fragilityReasons = null)
     {
         if (!string.IsNullOrEmpty(automationId))
-            return new FlowSelector
+            return new Testing.FlowSelector
             {
                 AutomationId = automationId,
                 MatchCount = matchCount,
@@ -543,7 +545,7 @@ public sealed class FlowRecordTools
                 FragilityReasons = fragilityReasons?.ToList()
             };
         if (!string.IsNullOrEmpty(text))
-            return new FlowSelector
+            return new Testing.FlowSelector
             {
                 Text = text,
                 MatchCount = matchCount,
@@ -551,16 +553,16 @@ public sealed class FlowRecordTools
                 FragilityReasons = fragilityReasons?.ToList()
             };
         if (!string.IsNullOrEmpty(type))
-            return new FlowSelector
+            return new Testing.FlowSelector
             {
-                TypeIndex = new FlowTypeIndex { Type = type, Index = index ?? 0 },
+                TypeIndex = new Testing.FlowTypeIndex { Type = type, Index = index ?? 0 },
                 MatchCount = matchCount,
                 Quality = quality ?? "fragile",
                 FragilityReasons = fragilityReasons?.ToList()
                     ?? ["type-index selector can change when the visual tree changes"]
             };
         if (!string.IsNullOrEmpty(id))
-            return new FlowSelector
+            return new Testing.FlowSelector
             {
                 Id = id,
                 Quality = "fragile",
@@ -569,22 +571,17 @@ public sealed class FlowRecordTools
         return null;
     }
 
-    internal static bool IsFragileSelector(FlowSelector? selector)
-        => selector is not null
-            && !selector.IsEmpty
-            && (string.IsNullOrEmpty(selector.AutomationId)
-                || selector.MatchCount is > 1
-                || string.Equals(selector.Quality, "ambiguous", StringComparison.OrdinalIgnoreCase)
-                || selector.FragilityReasons is { Count: > 0 });
+    internal static bool IsFragileSelector(Testing.FlowSelector? selector)
+        => Testing.FlowSelector.IsFragile(selector);
 
-    private static List<FlowAssert>? ParseAsserts(string? assertsJson)
+    private static List<Testing.FlowAssert>? ParseAsserts(string? assertsJson)
     {
         if (string.IsNullOrWhiteSpace(assertsJson))
             return null;
         if (assertsJson.Length > MaxAssertsJson)
             throw new InvalidOperationException("assertsJson is too large.");
 
-        var parsed = JsonSerializer.Deserialize<List<FlowAssert>>(assertsJson, ReadOptions);
+        var parsed = JsonSerializer.Deserialize<List<Testing.FlowAssert>>(assertsJson, ReadOptions);
         if (parsed is not { Count: > 0 })
             return null;
         if (parsed.Any(a => a is null))
@@ -603,7 +600,7 @@ public sealed class FlowRecordTools
 
     /// <summary>Collapses an arbitrary selector to a canonical single form, treating whitespace-only
     /// fields as missing (so it lands null when nothing usable remains).</summary>
-    private static FlowSelector? CanonicalizeSelector(FlowSelector? s)
+    private static Testing.FlowSelector? CanonicalizeSelector(Testing.FlowSelector? s)
     {
         if (s is null) return null;
         var type = Clean(s.TypeIndex?.Type ?? s.Type);
@@ -612,7 +609,7 @@ public sealed class FlowRecordTools
         return BuildSelector(Clean(s.AutomationId), text, type, idx, Clean(s.Id));
     }
 
-    private static bool IsEmptyArgs(FlowStepArgs a) =>
+    private static bool IsEmptyArgs(Testing.FlowStepArgs a) =>
         a.Selector is null && a.Text is null && a.Name is null && a.Value is null && a.Route is null &&
         a.Theme is null && a.ValueSource is null && a.SecretEnvironmentVariable is null &&
         a.Element is null && a.Dx is null && a.Dy is null && a.ItemIndex is null &&

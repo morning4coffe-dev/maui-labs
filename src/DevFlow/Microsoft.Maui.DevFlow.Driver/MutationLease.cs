@@ -31,6 +31,9 @@ public sealed class MutationLeaseStatus
     [JsonPropertyName("expiresInMs")]
     public long ExpiresInMs { get; set; }
 
+    [JsonPropertyName("authorityEpoch")]
+    public long AuthorityEpoch { get; set; }
+
     [JsonPropertyName("authority")]
     public string? Authority { get; set; }
 

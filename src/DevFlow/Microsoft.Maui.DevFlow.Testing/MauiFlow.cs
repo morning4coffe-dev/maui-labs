@@ -1,6 +1,7 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Microsoft.Maui.Cli.DevFlow.Flows;
+namespace Microsoft.Maui.DevFlow.Testing;
 
 /// <summary>
 /// A durable element selector recorded in a flow test. Exactly one form is meaningful:
@@ -23,17 +24,28 @@ public sealed class FlowSelector
     [JsonPropertyName("matchCount")] public int? MatchCount { get; set; }
     [JsonPropertyName("quality")] public string? Quality { get; set; }
     [JsonPropertyName("fragilityReasons")] public List<string>? FragilityReasons { get; set; }
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 
     [JsonIgnore]
     public bool IsEmpty =>
         string.IsNullOrEmpty(AutomationId) && string.IsNullOrEmpty(Text) && string.IsNullOrEmpty(Id) &&
         TypeIndex is null && !(SelectorKind == "typeIndex" && !string.IsNullOrEmpty(Type) && Index is not null);
+
+    /// <summary>Returns whether this selector is less durable than a unique AutomationId.</summary>
+    public static bool IsFragile(FlowSelector? selector)
+        => selector is not null
+            && !selector.IsEmpty
+            && (string.IsNullOrEmpty(selector.AutomationId)
+                || selector.MatchCount is > 1
+                || string.Equals(selector.Quality, "ambiguous", StringComparison.OrdinalIgnoreCase)
+                || selector.FragilityReasons is { Count: > 0 });
 }
 
 public sealed class FlowTypeIndex
 {
     [JsonPropertyName("type")] public string? Type { get; set; }
     [JsonPropertyName("index")] public int Index { get; set; }
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
 /// <summary>
@@ -48,6 +60,7 @@ public sealed class FlowAssert
     [JsonPropertyName("expected")] public string? Expected { get; set; }
     [JsonPropertyName("verify")] public bool Verify { get; set; }
     [JsonPropertyName("note")] public string? Note { get; set; }
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
 /// <summary>
@@ -75,6 +88,7 @@ public sealed class FlowStepArgs
     [JsonPropertyName("itemIndex")] public int? ItemIndex { get; set; }
     [JsonPropertyName("position")] public string? Position { get; set; }
     [JsonPropertyName("animated")] public bool? Animated { get; set; }
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
 public sealed class FlowStep
@@ -89,6 +103,7 @@ public sealed class FlowStep
     [JsonPropertyName("fragile")] public bool Fragile { get; set; }
     [JsonPropertyName("screenshot")] public string? Screenshot { get; set; }
     [JsonPropertyName("asserts")] public List<FlowAssert>? Asserts { get; set; }
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
 /// <summary>
@@ -106,6 +121,7 @@ public sealed class MauiFlow
     [JsonPropertyName("recordedAt")] public string? RecordedAt { get; set; }
     [JsonPropertyName("preconditions")] public string? Preconditions { get; set; }
     [JsonPropertyName("steps")] public List<FlowStep> Steps { get; set; } = new();
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
 /// <summary>The set of mutating actions a recorded flow step may drive.</summary>
@@ -136,7 +152,10 @@ public static class FlowSecretReference
     private static readonly string[] SensitiveFragments =
     [
         "password", "passcode", "secret", "token", "apikey", "api_key", "api-key",
-        "credential", "authorization"
+        "credential", "authorization", "cookie", "pwd", "privatekey", "private_key", "private-key",
+        "accesskey", "access_key", "access-key", "signingkey", "signing_key", "signing-key",
+        "clientsecret", "client_secret", "client-secret", "refreshtoken", "refresh_token",
+        "refresh-token"
     ];
 
     public static bool LooksSensitive(params string?[] values)
@@ -146,9 +165,11 @@ public static class FlowSecretReference
             if (string.IsNullOrWhiteSpace(value))
                 continue;
             var normalized = value.Trim().ToLowerInvariant();
+            var compact = new string(normalized.Where(char.IsAsciiLetterOrDigit).ToArray());
             if (SensitiveFragments.Any(normalized.Contains) ||
-                normalized == "pin" ||
-                normalized.EndsWith("pin", StringComparison.Ordinal))
+                new[] { "pin", "otp", "cvv", "ssn", "mfa" }.Any(
+                    marker => compact.StartsWith(marker, StringComparison.Ordinal) ||
+                              compact.EndsWith(marker, StringComparison.Ordinal)))
             {
                 return true;
             }

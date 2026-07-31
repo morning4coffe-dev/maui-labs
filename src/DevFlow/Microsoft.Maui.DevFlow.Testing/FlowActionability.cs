@@ -1,6 +1,7 @@
 using Microsoft.Maui.DevFlow.Driver;
+using System.Diagnostics;
 
-namespace Microsoft.Maui.Cli.DevFlow.Flows;
+namespace Microsoft.Maui.DevFlow.Testing;
 
 /// <summary>
 /// Shared, capability-honest actionability checks for workflow drivers. It checks only what every
@@ -9,15 +10,26 @@ namespace Microsoft.Maui.Cli.DevFlow.Flows;
 /// </summary>
 public sealed class FlowActionabilityEngine
 {
-    private readonly AgentClient _agent;
+    private readonly IMauiFlowDriver _driver;
     private readonly int _tries;
     private readonly int _gapMs;
+    private readonly Action<FlowActionabilityObservation>? _observe;
 
     public FlowActionabilityEngine(AgentClient agent, int tries = 4, int gapMs = 300)
+        : this(new AgentClientMauiFlowDriver(agent), tries, gapMs)
     {
-        _agent = agent;
+    }
+
+    public FlowActionabilityEngine(
+        IMauiFlowDriver driver,
+        int tries = 4,
+        int gapMs = 300,
+        Action<FlowActionabilityObservation>? observe = null)
+    {
+        _driver = driver ?? throw new ArgumentNullException(nameof(driver));
         _tries = Math.Max(1, tries);
         _gapMs = Math.Max(0, gapMs);
+        _observe = observe;
     }
 
     public async Task<FlowTargetResolution> WaitForActionableAsync(
@@ -29,8 +41,10 @@ public sealed class FlowActionabilityEngine
         for (var attempt = 0; attempt < _tries; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var started = Stopwatch.GetTimestamp();
             var resolution = await ResolveAsync(selector, cancellationToken);
             last = resolution;
+            Observe(attempt + 1, "resolution", resolution, null, elapsed: ElapsedMilliseconds(started), outcome: resolution.Ok ? "resolved" : resolution.Kind);
             if (!resolution.Ok)
             {
                 if (resolution.Kind == FlowFailureKinds.Ambiguous)
@@ -39,10 +53,12 @@ public sealed class FlowActionabilityEngine
             else if (!resolution.Element!.IsVisible)
             {
                 last = resolution.WithFailure(FlowFailureKinds.NotVisible, "The resolved element is not visible.");
+                Observe(attempt + 1, "visibility", last, null, elapsed: 0, outcome: last.Kind);
             }
             else if (!resolution.Element.IsEnabled)
             {
                 last = resolution.WithFailure(FlowFailureKinds.Disabled, "The resolved element is disabled.");
+                Observe(attempt + 1, "enabled", last, null, elapsed: 0, outcome: last.Kind);
             }
             else if (requireStableBounds)
             {
@@ -50,16 +66,22 @@ public sealed class FlowActionabilityEngine
                 if (bounds is null || bounds.Width <= 0 || bounds.Height <= 0)
                 {
                     last = resolution.WithFailure(FlowFailureKinds.Unstable, "The tap target has empty or non-positive bounds.");
+                    Observe(attempt + 1, "bounds", last, false, elapsed: 0, outcome: last.Kind);
                 }
                 else
                 {
+                    var stableStarted = Stopwatch.GetTimestamp();
                     await Task.Delay(Math.Max(40, Math.Min(_gapMs, 150)), cancellationToken);
-                    var second = await _agent.GetElementAsync(resolution.Element.Id);
+                    var second = await _driver.GetElementAsync(resolution.Element.Id);
                     if (second is not null && SameBounds(bounds, second.Bounds))
+                    {
+                        Observe(attempt + 1, "bounds", resolution, true, ElapsedMilliseconds(stableStarted), "stable");
                         return resolution;
+                    }
                     last = resolution.WithFailure(
                         FlowFailureKinds.Unstable,
                         "The tap target bounds changed while waiting for a stable layout.");
+                    Observe(attempt + 1, "bounds", last, false, ElapsedMilliseconds(stableStarted), last.Kind);
                 }
             }
             else
@@ -81,8 +103,10 @@ public sealed class FlowActionabilityEngine
         for (var attempt = 0; attempt < _tries; attempt++)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            var started = Stopwatch.GetTimestamp();
             var resolution = await ResolveAsync(selector, cancellationToken);
             last = resolution;
+            Observe(attempt + 1, "resolution", resolution, null, ElapsedMilliseconds(started), resolution.Ok ? "resolved" : resolution.Kind);
             if (resolution.Ok || resolution.Kind == FlowFailureKinds.Ambiguous)
                 return resolution;
             if (attempt < _tries - 1)
@@ -102,12 +126,12 @@ public sealed class FlowActionabilityEngine
         IReadOnlyList<ElementInfo> matches;
         if (!string.IsNullOrEmpty(selector.AutomationId))
         {
-            matches = await _agent.QueryAsync(automationId: selector.AutomationId);
+            matches = await _driver.QueryAsync(automationId: selector.AutomationId);
             return Exact(matches, "AutomationId");
         }
         if (!string.IsNullOrEmpty(selector.Text))
         {
-            matches = (await _agent.QueryAsync(text: selector.Text))
+            matches = (await _driver.QueryAsync(text: selector.Text))
                 .Where(element => string.Equals(element.Text, selector.Text, StringComparison.Ordinal))
                 .ToArray();
             return Exact(matches, "text");
@@ -118,14 +142,14 @@ public sealed class FlowActionabilityEngine
                 : null);
         if (typeIndex is not null && !string.IsNullOrEmpty(typeIndex.Type))
         {
-            matches = await _agent.QueryAsync(type: typeIndex.Type);
+            matches = await _driver.QueryAsync(type: typeIndex.Type);
             if (typeIndex.Index < 0 || typeIndex.Index >= matches.Count)
                 return FlowTargetResolution.Failure(FlowFailureKinds.NotFound, $"Type+index selector found {matches.Count} candidate(s), not index {typeIndex.Index}.", matches);
             return FlowTargetResolution.Success(matches[typeIndex.Index], matches.Count, "fragile");
         }
         if (!string.IsNullOrEmpty(selector.Id))
         {
-            var element = await _agent.GetElementAsync(selector.Id);
+            var element = await _driver.GetElementAsync(selector.Id);
             return element is null
                 ? FlowTargetResolution.Failure(FlowFailureKinds.NotFound, "Raw element id was not found.")
                 : FlowTargetResolution.Success(element, 1, "fragile");
@@ -155,6 +179,58 @@ public sealed class FlowActionabilityEngine
         => second is not null &&
            first.X == second.X && first.Y == second.Y &&
            first.Width == second.Width && first.Height == second.Height;
+
+    private void Observe(
+        int attempt,
+        string kind,
+        FlowTargetResolution resolution,
+        bool? boundsStable,
+        long elapsed,
+        string outcome)
+    {
+        if (_observe is null)
+            return;
+
+        var element = resolution.Element;
+        var bounds = element?.Bounds;
+        _observe(new FlowActionabilityObservation
+        {
+            Attempt = attempt,
+            At = DateTimeOffset.UtcNow,
+            Kind = kind,
+            Resolved = resolution.Ok,
+            Visible = element?.IsVisible,
+            Enabled = element?.IsEnabled,
+            HasBounds = bounds is not null && bounds.Width > 0 && bounds.Height > 0,
+            BoundsStable = boundsStable,
+            MatchCount = resolution.MatchCount,
+            WaitDurationMs = elapsed,
+            Outcome = outcome,
+            Message = resolution.Error,
+            Resolution = resolution,
+        });
+    }
+
+    private static long ElapsedMilliseconds(long started)
+        => (long)(Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+}
+
+/// <summary>One observed poll/check emitted by <see cref="FlowActionabilityEngine"/>.</summary>
+public sealed class FlowActionabilityObservation
+{
+    public int Attempt { get; init; }
+    public DateTimeOffset At { get; init; }
+    public string Kind { get; init; } = "";
+    public bool Resolved { get; init; }
+    public bool? Visible { get; init; }
+    public bool? Enabled { get; init; }
+    public bool? HasBounds { get; init; }
+    public bool? BoundsStable { get; init; }
+    public int MatchCount { get; init; }
+    public long WaitDurationMs { get; init; }
+    public string Outcome { get; init; } = "";
+    public string? Message { get; init; }
+    public FlowTargetResolution? Resolution { get; init; }
 }
 
 public static class FlowFailureKinds
@@ -168,6 +244,9 @@ public static class FlowFailureKinds
     public const string SecretRequired = "secret-required";
     public const string Drive = "drive";
     public const string Assertion = "assertion";
+    public const string Validation = "validation";
+    public const string UnknownCompletion = "unknown-completion";
+    public const string WorkflowCommandConflict = "workflow-command-conflict";
 }
 
 public sealed class FlowTargetResolution

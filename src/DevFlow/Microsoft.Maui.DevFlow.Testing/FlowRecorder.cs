@@ -1,8 +1,8 @@
-namespace Microsoft.Maui.Cli.DevFlow.Flows;
+namespace Microsoft.Maui.DevFlow.Testing;
 
 /// <summary>
 /// Accumulates a workflow recording in memory as a <see cref="MauiFlow"/>, one host-reported step
-/// at a time. Pure (no agent dependency) and thread-safe, so interleaved MCP record calls are safe.
+/// at a time. Pure (no agent dependency) and thread-safe, so interleaved host record calls are safe.
 /// Recordings serialized via <see cref="FlowMarkdown"/> replay unchanged under
 /// <see cref="FlowReplayer"/>.
 /// </summary>
@@ -34,7 +34,11 @@ public sealed class FlowRecorder
     {
     }
 
-    internal FlowRecorder(
+    /// <summary>
+    /// Creates a recorder from an existing flow snapshot. This is useful for hosts that persist
+    /// and restore an in-progress recording.
+    /// </summary>
+    public FlowRecorder(
         string name,
         string? app,
         string? platform,
@@ -98,14 +102,15 @@ public sealed class FlowRecorder
                 Args = args,
                 Page = page,
                 Navigated = navigated,
-                Fragile = FlowRecordTools.IsFragileSelector(target),
+                Fragile = FlowSelector.IsFragile(target),
                 Asserts = asserts is { Count: > 0 } ? asserts : null,
             });
             return seq;
         }
     }
 
-    internal bool TryRollbackLastStep(int sequence)
+    /// <summary>Removes the most recently appended step when it has the supplied sequence.</summary>
+    public bool TryRollbackLastStep(int sequence)
     {
         lock (_gate)
         {
@@ -128,7 +133,7 @@ public sealed class FlowRecorder
     /// Validates and closes the recording under the same lock so a concurrent observation cannot
     /// append an unvalidated step between validation and final serialization.
     /// </summary>
-    internal (MauiFlow? Flow, FlowValidation Validation, bool Empty) ValidateAndFinish()
+    public (MauiFlow? Flow, FlowValidation Validation, bool Empty) ValidateAndFinish()
     {
         lock (_gate)
         {
@@ -158,72 +163,7 @@ public sealed class FlowRecorder
         }
     }
 
-    private MauiFlow CopyLocked() => Clone(_flow);
+    private MauiFlow CopyLocked() => MauiFlowClone.Clone(_flow);
 
-    private static MauiFlow Clone(MauiFlow source) => new()
-    {
-        Schema = source.Schema,
-        Name = source.Name,
-        App = source.App,
-        Platform = source.Platform,
-        RecordedAt = source.RecordedAt,
-        Preconditions = source.Preconditions,
-        Steps = source.Steps.Select(CloneStep).ToList(),
-    };
-
-    private static FlowStep CloneStep(FlowStep step) => new()
-    {
-        Seq = step.Seq,
-        Action = step.Action,
-        Target = CloneSelector(step.Target),
-        Value = step.Value,
-        Args = step.Args is null ? null : new FlowStepArgs
-        {
-            Selector = CloneSelector(step.Args.Selector),
-            Text = step.Args.Text,
-            Name = step.Args.Name,
-            Value = step.Args.Value,
-            Route = step.Args.Route,
-            Theme = step.Args.Theme,
-            ValueSource = step.Args.ValueSource,
-            SecretEnvironmentVariable = step.Args.SecretEnvironmentVariable,
-            Element = step.Args.Element,
-            Dx = step.Args.Dx,
-            Dy = step.Args.Dy,
-            ItemIndex = step.Args.ItemIndex,
-            Position = step.Args.Position,
-            Animated = step.Args.Animated
-        },
-        Page = step.Page,
-        Navigated = step.Navigated,
-        Fragile = step.Fragile,
-        Screenshot = step.Screenshot,
-        Asserts = step.Asserts?.Select(assertion => new FlowAssert
-        {
-            Kind = assertion.Kind,
-            Selector = CloneSelector(assertion.Selector),
-            Name = assertion.Name,
-            Expected = assertion.Expected,
-            Verify = assertion.Verify,
-            Note = assertion.Note
-        }).ToList()
-    };
-
-    private static FlowSelector? CloneSelector(FlowSelector? selector) => selector is null ? null : new FlowSelector
-    {
-        AutomationId = selector.AutomationId,
-        Text = selector.Text,
-        Id = selector.Id,
-        Type = selector.Type,
-        Index = selector.Index,
-        SelectorKind = selector.SelectorKind,
-        MatchCount = selector.MatchCount,
-        Quality = selector.Quality,
-        FragilityReasons = selector.FragilityReasons is null ? null : new List<string>(selector.FragilityReasons),
-        TypeIndex = selector.TypeIndex is null ? null : new FlowTypeIndex
-        {
-            Type = selector.TypeIndex.Type,
-            Index = selector.TypeIndex.Index
-        }
-    };
+    private static MauiFlow Clone(MauiFlow source) => MauiFlowClone.Clone(source);
 }

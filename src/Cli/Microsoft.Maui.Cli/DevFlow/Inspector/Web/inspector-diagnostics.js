@@ -149,7 +149,7 @@ export function formatPerformanceSummary(summary) {
         : 'not observable',
       detail: memory.processSupported && memory.processEndBytes !== null && memory.processEndBytes !== undefined
         ? `${text(memory.processKind, 'unknown')} · peak ${formatBytes(memory.processPeakBytes)} · delta ${formatDelta(memory.processDeltaBytes)}`
-        : 'This platform does not expose a process resident/physical memory counter.',
+        : text(memory.processUnsupportedReason, 'This platform does not expose a process resident/physical memory counter.'),
     },
     {
       label: 'Native heap',

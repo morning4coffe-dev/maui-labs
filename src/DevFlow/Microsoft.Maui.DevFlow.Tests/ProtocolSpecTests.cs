@@ -45,6 +45,32 @@ public class ProtocolSpecTests
     }
 
     [Fact]
+    public async Task BrokerWorkflowRunOpenApi_CanBeParsedByOpenApiTooling()
+    {
+        var openApiPath = Path.Combine(SpecRoot.Value, "broker-workflow-runs-v1.yaml");
+        var openApiJson = ConvertYamlToJson(File.ReadAllText(openApiPath));
+
+        await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(openApiJson));
+        var ruleSet = new ValidationRuleSet(ValidationRuleSet.GetDefaultRuleSet());
+        ruleSet.Remove("OpenApiDocumentReferencesAreValid");
+
+        var result = await OpenApiDocument.LoadAsync(
+            stream,
+            "json",
+            new OpenApiReaderSettings { RuleSet = ruleSet },
+            CancellationToken.None);
+
+        var document = result.Document ?? throw new InvalidOperationException("OpenAPI parser did not return a document.");
+        var diagnostic = result.Diagnostic ?? throw new InvalidOperationException("OpenAPI parser did not return diagnostics.");
+
+        Assert.Equal(OpenApiSpecVersion.OpenApi3_1, diagnostic.SpecificationVersion);
+        Assert.Empty(diagnostic.Errors);
+        Assert.Empty(diagnostic.Warnings);
+        Assert.Equal("DevFlow Broker Workflow Runs", document.Info.Title);
+        Assert.NotNull(document.Paths["/api/workflow-runs/start"]);
+    }
+
+    [Fact]
     public void OpenApiYaml_KeepsLayoutAndWebViewOperationsOnDistinctPaths()
     {
         var document = LoadDocument(Path.Combine(SpecRoot.Value, "openapi.yaml")).AsObject();
@@ -171,6 +197,41 @@ public class ProtocolSpecTests
         }
 
         Assert.Empty(failures);
+    }
+
+    [Fact]
+    public void TestingSchemas_HaveStableIdsAndResolvableReferences()
+    {
+        var schemaNames = new[]
+        {
+            "maui-flow-v2.json",
+            "maui-test-plan-v1.json",
+            "maui-flow-run-report-v1.json",
+            "broker-workflow-run-v1.json",
+            "maui-flow-repair-proposal-v1.json",
+            "maui-flow-repair-outcome-v1.json",
+        };
+
+        foreach (var schemaName in schemaNames)
+        {
+            var schemaPath = Path.Combine(SpecRoot.Value, "schemas", schemaName);
+            var schema = LoadDocument(schemaPath);
+            var expectedId = $"https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/{schemaName}";
+
+            Assert.Equal(expectedId, schema["$id"]!.GetValue<string>());
+            Assert.Equal("https://json-schema.org/draft/2020-12/schema", schema["$schema"]!.GetValue<string>());
+
+            foreach (var reference in EnumerateReferences(schema))
+            {
+                var (targetPath, pointer) = ResolveReference(schemaPath, reference.Value);
+                Assert.True(
+                    File.Exists(targetPath),
+                    $"{schemaName} {reference.JsonPath}: '{reference.Value}' targets missing file '{RelativeSpecPath(targetPath)}'.");
+                Assert.True(
+                    PointerExists(LoadDocument(targetPath), pointer),
+                    $"{schemaName} {reference.JsonPath}: '{reference.Value}' targets a missing JSON pointer.");
+            }
+        }
     }
 
     [Fact]

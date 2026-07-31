@@ -38,7 +38,7 @@ public static class MauiProgram
 		builder.Services.AddTransient<NetworkTestPage>();
 
 #if DEBUG
-		//builder.Services.AddBlazorWebViewDeveloperTools();
+		builder.Services.AddBlazorWebViewDeveloperTools();
 		builder.Logging.AddDebug();
 		builder.AddMauiDevFlowAgent(options =>
 		{

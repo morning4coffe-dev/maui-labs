@@ -3,8 +3,8 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Microsoft.Maui.Cli.DevFlow.Flows;
 using Microsoft.Maui.Cli.DevFlow.Inspector;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -138,6 +138,27 @@ public class InspectorFlowReplayTests
     }
 
     [Fact]
+    public async Task Replay_EmptyFlow_ReturnsBadRequest()
+    {
+        await using var agent = new ReplayAgent(recording: false);
+        await using var inspector = await StartInspectorAsync(agent.Port);
+        using var http = new HttpClient();
+
+        var response = await http.PostAsync(
+            $"{inspector.Url}/api/flows/replay",
+            Json(JsonSerializer.Serialize(new
+            {
+                markdown = FlowMarkdown.Serialize(new MauiFlow { Name = "empty" })
+            })));
+
+        Assert.Equal(HttpStatusCode.BadRequest, response.StatusCode);
+        Assert.Contains(
+            "at least one step",
+            await response.Content.ReadAsStringAsync(),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task Replay_WhileRecording_ReturnsConflict()
     {
         await using var agent = new ReplayAgent(recording: true);
@@ -150,6 +171,45 @@ public class InspectorFlowReplayTests
 
         Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
         Assert.Contains("Stop the active recording", await response.Content.ReadAsStringAsync());
+    }
+
+    [Fact]
+    public async Task Replay_CoordinatedRunner_PreservesCompatibilityResponse()
+    {
+        await using var agent = new ReplayAgent(recording: false);
+        var delegated = 0;
+        await using var inspector = await StartCoordinatedInspectorAsync(
+            agent.Port,
+            (flow, _, _) =>
+            {
+                Interlocked.Increment(ref delegated);
+                return Task.FromResult(new FlowReplayReport
+                {
+                    Ok = true,
+                    Name = flow.Name,
+                    Total = flow.Steps.Count,
+                    Passed = flow.Steps.Count,
+                    Results = flow.Steps.Select(step => new FlowStepResult
+                    {
+                        Seq = step.Seq,
+                        Action = step.Action,
+                        Label = "Assert",
+                        Ok = true
+                    }).ToList()
+                });
+            });
+        using var http = new HttpClient();
+
+        var response = await http.PostAsync(
+            $"{inspector.Url}/api/flows/replay",
+            Json(JsonSerializer.Serialize(new { markdown = FlowMarkdown.Serialize(ValidFlow()) })));
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        Assert.True(body.RootElement.GetProperty("ok").GetBoolean());
+        Assert.Equal(1, body.RootElement.GetProperty("total").GetInt32());
+        Assert.Equal(1, body.RootElement.GetProperty("passed").GetInt32());
+        Assert.Equal(1, Volatile.Read(ref delegated));
     }
 
     [Theory]
@@ -264,6 +324,47 @@ public class InspectorFlowReplayTests
                 platform: "test",
                 project,
                 sessionId: null);
+        inspector.Start();
+        using var http = new HttpClient();
+        for (var attempt = 0; attempt < 20; attempt++)
+        {
+            try
+            {
+                using var response = await http.GetAsync($"http://127.0.0.1:{port}/devflow.js");
+                if (response.IsSuccessStatusCode)
+                    return new RunningInspector(inspector, $"http://127.0.0.1:{port}");
+            }
+            catch (HttpRequestException)
+            {
+            }
+            await Task.Delay(25);
+        }
+
+        await inspector.StopAsync();
+        inspector.Dispose();
+        throw new InvalidOperationException("Inspector did not start.");
+    }
+
+    private static async Task<RunningInspector> StartCoordinatedInspectorAsync(
+        int agentPort,
+        Func<
+            MauiFlow,
+            Func<Microsoft.Maui.DevFlow.Driver.AgentClient, IFlowReplayEvidenceCapture?>,
+            CancellationToken,
+            Task<FlowReplayReport>> workflowReplay)
+    {
+        var port = FreePort();
+        var inspector = new InspectorServer(
+            port,
+            "127.0.0.1",
+            agentPort,
+            embedToken: null,
+            agentId: "agent",
+            appName: "App",
+            platform: "test",
+            project: null,
+            sessionId: null,
+            workflowReplay: workflowReplay);
         inspector.Start();
         using var http = new HttpClient();
         for (var attempt = 0; attempt < 20; attempt++)

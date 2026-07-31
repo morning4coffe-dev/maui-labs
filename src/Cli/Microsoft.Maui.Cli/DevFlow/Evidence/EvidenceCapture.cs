@@ -20,6 +20,7 @@ internal static class EvidenceCapture
         EvidenceRequest request,
         CancellationToken ct = default)
     {
+        await EnsureAgentReachableAsync(client, ct);
         var utcNow = request.UtcNow ?? DateTime.UtcNow;
         var projectRoot = request.ProjectRoot ?? EvidencePaths.FindProjectRoot(request.ProjectHint);
 
@@ -44,6 +45,7 @@ internal static class EvidenceCapture
         EvidenceRequest request,
         CancellationToken ct = default)
     {
+        await EnsureAgentReachableAsync(client, ct);
         var utcNow = request.UtcNow ?? DateTime.UtcNow;
         var projectRoot = request.ProjectRoot ?? EvidencePaths.FindProjectRoot(request.ProjectHint);
 
@@ -85,6 +87,7 @@ internal static class EvidenceCapture
         EvidenceRequest request,
         CancellationToken ct = default)
     {
+        await EnsureAgentReachableAsync(client, ct);
         var utcNow = request.UtcNow ?? DateTime.UtcNow;
         var projectRoot = request.ProjectRoot ?? EvidencePaths.FindProjectRoot(request.ProjectHint);
         var bundle = await EvidenceBuilder.BuildAsync(
@@ -99,7 +102,12 @@ internal static class EvidenceCapture
     /// Validates a bundle and regenerates a static HTML report from its parsed contents.
     /// The bundle's own bytes are never rendered or executed.
     /// </summary>
-    public static EvidenceViewResult View(string bundlePath, string? reportPath, bool open, DateTime? utcNow = null)
+    public static EvidenceViewResult View(
+        string bundlePath,
+        string? reportPath,
+        bool open,
+        DateTime? utcNow = null,
+        bool overwrite = false)
     {
         var now = utcNow ?? DateTime.UtcNow;
 
@@ -118,25 +126,46 @@ internal static class EvidenceCapture
         }
         else
         {
-            try
-            {
-                target = Path.GetFullPath(reportPath!);
-                var directory = Path.GetDirectoryName(target);
-                if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
-            }
-            catch (Exception ex) when (ex is ArgumentException or IOException or NotSupportedException or UnauthorizedAccessException)
-            {
-                return new EvidenceViewResult { Ok = false, Error = "Report path is not a valid file path.", Bundle = input.Path };
-            }
+            var report = EvidencePaths.ValidateReportPath(reportPath);
+            if (!report.Ok)
+                return new EvidenceViewResult { Ok = false, Error = report.Error, Bundle = input.Path };
+            target = report.Path!;
         }
 
+        var temporary = target + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            File.WriteAllText(target, EvidenceReportRenderer.Render(read));
+            var directory = Path.GetDirectoryName(target);
+            if (!string.IsNullOrEmpty(directory))
+                Directory.CreateDirectory(directory);
+            if (!overwrite && File.Exists(target))
+            {
+                return new EvidenceViewResult
+                {
+                    Ok = false,
+                    Error = $"Report file already exists: {target}. Pass --overwrite to replace it.",
+                    Bundle = input.Path
+                };
+            }
+            File.WriteAllText(temporary, EvidenceReportRenderer.Render(read));
+            File.Move(temporary, target, overwrite);
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
+            if (!overwrite && File.Exists(target))
+            {
+                return new EvidenceViewResult
+                {
+                    Ok = false,
+                    Error = $"Report file already exists: {target}. Pass --overwrite to replace it.",
+                    Bundle = input.Path
+                };
+            }
             return new EvidenceViewResult { Ok = false, Error = $"Could not write the report: {ex.Message}", Bundle = input.Path };
+        }
+        finally
+        {
+            try { File.Delete(temporary); } catch { }
         }
 
         return new EvidenceViewResult
@@ -160,6 +189,7 @@ internal static class EvidenceCapture
             IncludeScreenshot = request.IncludeScreenshot,
             PreviewOnly = previewOnly,
             WorkflowMarkdown = request.WorkflowMarkdown,
+            FlowRun = request.FlowRun,
             CheckpointRoute = request.CheckpointRoute,
             CheckpointSavedUtc = request.CheckpointSavedUtc,
             CheckpointLastRestoreKind = request.CheckpointLastRestoreKind,
@@ -171,6 +201,19 @@ internal static class EvidenceCapture
             ToolVersion = ToolVersion,
             UtcNow = utcNow,
         };
+
+    private static async Task EnsureAgentReachableAsync(
+        AgentClient client,
+        CancellationToken ct)
+    {
+        var status = await client.GetStatusAsync().WaitAsync(ct);
+        if (status is null)
+        {
+            throw new InvalidOperationException(
+                $"No DevFlow agent responded at {client.BaseUrl}. "
+                + "Start the app or select a reachable agent port.");
+        }
+    }
 }
 
 /// <summary>Caller-facing capture request shared by the CLI, MCP tools, and the Web Inspector.</summary>
@@ -180,6 +223,8 @@ internal sealed class EvidenceRequest
     public bool Overwrite { get; init; }
     public string? OutputPath { get; init; }
     public string? WorkflowMarkdown { get; init; }
+    /// <summary>Metadata-only flow-run-report linkage for failure evidence.</summary>
+    public EvidenceFlowRunLink? FlowRun { get; init; }
     public string? CheckpointRoute { get; init; }
     public DateTimeOffset? CheckpointSavedUtc { get; init; }
     public string? CheckpointLastRestoreKind { get; init; }

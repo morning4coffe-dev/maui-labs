@@ -10,6 +10,7 @@ using Microsoft.Maui.Cli.DevFlow.Skills;
 using Microsoft.Maui.Cli.Providers.Apple;
 using Microsoft.Maui.Cli.Utils;
 using Microsoft.Maui.DevFlow.Driver;
+using Testing = Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow;
 
@@ -32,6 +33,8 @@ public class DevFlowCommands
     private static IDevFlowOutputWriter? s_output;
     internal static Func<Task<int?>> ResolveRunningBrokerPortAsync { get; set; } = Broker.BrokerClient.GetRunningBrokerPortAsync;
     internal static Func<int, Task<Broker.AgentRegistration[]?>> ListBrokerAgentsAsync { get; set; } = Broker.BrokerClient.ListAgentsAsync;
+    internal static Func<int, string, string, Task<Broker.RouteCheckpointStatus>> ControlBrokerCheckpointAsync { get; set; } =
+        Broker.BrokerClient.ControlCheckpointAsync;
     internal static Func<AndroidDevFlowPortForwarder> CreateAndroidPortForwarder { get; set; } = AndroidDevFlowPortForwarder.CreateDefault;
     internal static Func<bool> IsAndroidAdbLikelyAvailable { get; set; } = AndroidDevFlowPortForwarder.IsAdbLikelyAvailable;
 
@@ -41,6 +44,7 @@ public class DevFlowCommands
     {
         ResolveRunningBrokerPortAsync = Broker.BrokerClient.GetRunningBrokerPortAsync;
         ListBrokerAgentsAsync = Broker.BrokerClient.ListAgentsAsync;
+        ControlBrokerCheckpointAsync = Broker.BrokerClient.ControlCheckpointAsync;
         CreateAndroidPortForwarder = AndroidDevFlowPortForwarder.CreateDefault;
         IsAndroidAdbLikelyAvailable = AndroidDevFlowPortForwarder.IsAdbLikelyAvailable;
         _errorOccurred = false;
@@ -1368,6 +1372,53 @@ public class DevFlowCommands
 
         // ===== replayable workflow commands =====
         var flowCommand = new Command("flow", "Validate and replay recorded Markdown workflow tests");
+        var flowValidateFile = new Argument<string>("file") { Description = "Path to a .md workflow test containing a maui-test block" };
+        var flowValidate = new Command("validate", "Parse and validate a workflow without connecting to or driving an app")
+        {
+            flowValidateFile
+        };
+        flowValidate.SetAction(async (ctx, ct) =>
+        {
+            var json = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+            var file = ctx.GetValue(flowValidateFile)!;
+            if (!File.Exists(file) || !file.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+            {
+                Output.WriteError("Workflow validation requires an existing .md file.", json, "InvalidArgument");
+                _errorOccurred = true;
+                return;
+            }
+
+            var parsed = Testing.FlowMarkdown.Parse(await File.ReadAllTextAsync(file, ct), file);
+            if (!parsed.Ok || parsed.Flow is null)
+            {
+                Output.WriteError(parsed.Error ?? "Workflow could not be parsed.", json, "InvalidFlow");
+                _errorOccurred = true;
+                return;
+            }
+
+            var validation = Testing.FlowValidator.Validate(parsed.Flow);
+            var result = new FlowValidationCliResult
+            {
+                Ok = validation.Ok,
+                Name = parsed.Flow.Name,
+                Steps = parsed.Flow.Steps.Count,
+                Errors = validation.Errors,
+                Warnings = validation.Warnings,
+            };
+            Output.WriteResult(result, json, static value =>
+            {
+                Console.WriteLine(value.Ok
+                    ? $"Valid: {value.Name} ({value.Steps} steps)"
+                    : $"Invalid: {value.Name} ({value.Steps} steps)");
+                foreach (var error in value.Errors)
+                    Console.WriteLine($"Error: {error}");
+                foreach (var warning in value.Warnings)
+                    Console.WriteLine($"Warning: {warning}");
+            });
+            if (!validation.Ok)
+                _errorOccurred = true;
+        });
+
         var flowReplayFile = new Argument<string>("file") { Description = "Path to a .md workflow test containing a maui-test block" };
         var evidenceOnFailure = new Option<string?>("--evidence-on-failure")
         {
@@ -1392,8 +1443,8 @@ public class DevFlowCommands
                 _errorOccurred = true;
                 return;
             }
-            var parsed = Flows.FlowMarkdown.Parse(await File.ReadAllTextAsync(file, ct), file);
-            var validation = parsed.Ok && parsed.Flow is not null ? Flows.FlowValidator.Validate(parsed.Flow) : null;
+            var parsed = Testing.FlowMarkdown.Parse(await File.ReadAllTextAsync(file, ct), file);
+            var validation = parsed.Ok && parsed.Flow is not null ? Testing.FlowValidator.Validate(parsed.Flow) : null;
             if (!parsed.Ok || validation is null || !validation.Ok)
             {
                 Output.WriteError(parsed.Error ?? "Flow failed validation: " + string.Join("; ", validation?.Errors ?? []), json, "InvalidFlow");
@@ -1402,27 +1453,33 @@ public class DevFlowCommands
             }
             try
             {
-                using var client = await CreateAgentClientAsync(ctx.GetValue(agentHostOption)!, ctx.GetValue(agentPortOption));
+                using var client = await CreateAgentClientAsync(
+                    ctx.GetValue(agentHostOption)!,
+                    ctx.GetValue(agentPortOption),
+                    emitAgentLabel: !json);
                 var evidenceRequested = ctx.GetResult(evidenceOnFailure) is not null;
                 var capture = evidenceRequested
                     ? new Evidence.FlowReplayEvidenceCapture(client, ctx.GetValue(evidenceOnFailure), Path.GetDirectoryName(Path.GetFullPath(file)), "cli")
                     : null;
-                var replay = new Flows.FlowReplayer(
+                var replay = new Testing.FlowReplayer(
                     client,
                     continueOnFailure: ctx.GetValue(continueOnFailure),
                     evidenceCapture: capture);
                 var result = await replay.ReplayAsync(parsed.Flow!, file, ct);
-                Output.WriteResult(new
+                Output.WriteResult(new FlowReplayCliResult
                 {
-                    result.Ok,
-                    result.Name,
-                    result.Total,
-                    result.Passed,
-                    result.Failed,
-                    result.DivergencePoint,
-                    result.StoppedEarly,
-                    results = result.Results,
-                    evidencePath = capture?.CapturedPath
+                    Ok = result.Ok,
+                    Name = result.Name,
+                    Total = result.Total,
+                    Passed = result.Passed,
+                    Failed = result.Failed,
+                    DivergencePoint = result.DivergencePoint,
+                    StoppedEarly = result.StoppedEarly,
+                    Results = result.Results,
+                    EvidencePath = capture?.CapturedPath,
+                    Report = result.StructuredReport,
+                    ReportPath = result.ReportPath,
+                    ReportDigest = result.ReportDigest
                 }, json);
                 if (!result.Ok) _errorOccurred = true;
             }
@@ -1432,6 +1489,7 @@ public class DevFlowCommands
                 _errorOccurred = true;
             }
         });
+        flowCommand.Add(flowValidate);
         flowCommand.Add(flowReplay);
         devflowCommand.Add(flowCommand);
 
@@ -1470,8 +1528,12 @@ public class DevFlowCommands
                     _errorOccurred = true;
                     return;
                 }
-                var result = await Broker.BrokerClient.ControlCheckpointAsync(brokerPort.Value, agent.Id, resumeAction);
-                Output.WriteResult(result, json, static status =>
+                var result = await ControlBrokerCheckpointAsync(
+                    brokerPort.Value,
+                    agent.Id,
+                    resumeAction);
+                var displayResult = RedactCheckpointStatusForOutput(result);
+                Output.WriteResult(displayResult, json, static status =>
                 {
                     if (!status.Ok) Console.WriteLine(status.Warning ?? "Checkpoint operation failed.");
                     else if (!status.HasCheckpoint) Console.WriteLine("No saved route checkpoint.");
@@ -1851,7 +1913,10 @@ public class DevFlowCommands
 
     private static readonly string s_cliMutationLeaseId = Guid.NewGuid().ToString("N");
 
-    private static async Task<Microsoft.Maui.DevFlow.Driver.AgentClient> CreateAgentClientAsync(string host, int port)
+    private static async Task<Microsoft.Maui.DevFlow.Driver.AgentClient> CreateAgentClientAsync(
+        string host,
+        int port,
+        bool emitAgentLabel = true)
     {
         EnsureAgentPortResolved(port);
 
@@ -1865,7 +1930,8 @@ public class DevFlowCommands
                 if (agent is not null && IsAndroidAgent(agent))
                     await EnsureAndroidForwardingForAgentsAsync([agent], deviceId: null, repair: true, emitWarnings: false, CancellationToken.None, brokerPort: brokerPort.Value);
 
-                EmitAgentLabel(host, port, agents);
+                if (emitAgentLabel)
+                    EmitAgentLabel(host, port, agents);
             }
         }
 
@@ -4412,6 +4478,44 @@ public class DevFlowCommands
 
         // Genuinely ambiguous: refuse via the sentinel instead of guessing.
         return 0;
+    }
+
+    internal static Broker.RouteCheckpointStatus RedactCheckpointStatusForOutput(
+        Broker.RouteCheckpointStatus status)
+    {
+        var checkpoint = status.Checkpoint;
+        var restore = checkpoint?.LastRestore;
+        return new Broker.RouteCheckpointStatus
+        {
+            Ok = status.Ok,
+            HasCheckpoint = status.HasCheckpoint,
+            Connected = status.Connected,
+            Stale = status.Stale,
+            Warning = status.Warning,
+            Checkpoint = checkpoint is null
+                ? null
+                : new Broker.RouteCheckpoint
+                {
+                    Schema = checkpoint.Schema,
+                    AgentId = checkpoint.AgentId,
+                    SessionId = checkpoint.SessionId,
+                    Route = Evidence.EvidenceRedaction.ScrubRoute(checkpoint.Route) ?? "",
+                    AppName = checkpoint.AppName,
+                    Platform = checkpoint.Platform,
+                    Project = checkpoint.Project,
+                    SavedUtc = checkpoint.SavedUtc,
+                    LastRestore = restore is null
+                        ? null
+                        : new Broker.RouteRestoreResult
+                        {
+                            AttemptedUtc = restore.AttemptedUtc,
+                            Success = restore.Success,
+                            Kind = restore.Kind,
+                            Message = restore.Message,
+                            ObservedRoute = Evidence.EvidenceRedaction.ScrubRoute(restore.ObservedRoute)
+                        }
+                }
+        };
     }
 
     /// <summary>

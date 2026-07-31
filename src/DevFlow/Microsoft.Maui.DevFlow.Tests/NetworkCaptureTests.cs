@@ -30,6 +30,69 @@ public class NetworkCaptureTests
         Assert.Contains("disabled for this build", error.Message, StringComparison.OrdinalIgnoreCase);
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(65536)]
+    public void AgentOptions_RejectInvalidPorts(int port)
+    {
+        var options = new AgentOptions { Port = port };
+
+        var error = Assert.Throws<ArgumentOutOfRangeException>(
+            options.ValidateForRegistration);
+
+        Assert.Contains("between 1 and 65535", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(1)]
+    [InlineData(65535)]
+    public void AgentOptions_AcceptBoundaryPorts(int port)
+    {
+        var options = new AgentOptions { Port = port };
+
+        options.ValidateForRegistration();
+    }
+
+    [Theory]
+    [InlineData("0")]
+    [InlineData("65536")]
+    [InlineData("not-a-port")]
+    public void AgentOptions_RejectInvalidPortMetadata(string value)
+    {
+        var error = Assert.Throws<InvalidOperationException>(
+            () => AgentOptions.ParsePortMetadata(value));
+
+        Assert.Contains("between 1 and 65535", error.Message, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null, null)]
+    [InlineData("", null)]
+    [InlineData("1", 1)]
+    [InlineData("65535", 65535)]
+    public void AgentOptions_ParseValidPortMetadata(string? value, int? expected)
+        => Assert.Equal(expected, AgentOptions.ParsePortMetadata(value));
+
+    [Fact]
+    public void AgentOptions_AppliesMetadataPortBeforeBrokerRegistration()
+    {
+        var options = new AgentOptions();
+
+        options.ApplyPortMetadata(19333);
+
+        Assert.Equal(19333, options.Port);
+    }
+
+    [Fact]
+    public void AgentOptions_RuntimeCustomPortWinsOverMetadata()
+    {
+        var options = new AgentOptions { Port = 19444 };
+
+        options.ApplyPortMetadata(19333);
+
+        Assert.Equal(19444, options.Port);
+    }
+
     [Fact]
     public async Task ZeroBodyLimit_DoesNotReadRequestOrStreamingResponseBodies()
     {

@@ -1,6 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.Maui.Cli.DevFlow.Flows;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Broker;
 
@@ -96,6 +96,13 @@ public sealed class FlowRecordingSpoolStore
                 var spool = JsonSerializer.Deserialize<FlowRecordingSpool>(File.ReadAllText(file), JsonOptions);
                 if (!IsValid(spool))
                     throw new JsonException("Spool content is invalid.");
+                if (!string.Equals(
+                    Path.GetFileNameWithoutExtension(file),
+                    spool!.RecordingId,
+                    StringComparison.Ordinal))
+                {
+                    throw new JsonException("Spool filename does not match its recording id.");
+                }
                 if (IsExpired(spool!))
                 {
                     _ = Delete(spool!.RecordingId);

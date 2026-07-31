@@ -196,6 +196,8 @@ internal sealed class MutationLeaseStatus
     public string? Label { get; set; }
     [JsonPropertyName("expiresInMs")]
     public long ExpiresInMs { get; set; }
+    [JsonPropertyName("authorityEpoch")]
+    public long AuthorityEpoch { get; set; }
     [JsonPropertyName("authority")]
     public string Authority { get; set; } = "agent";
     [JsonPropertyName("error")]

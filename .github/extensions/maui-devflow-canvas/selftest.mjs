@@ -139,6 +139,7 @@ async function pickTarget(cands) {
   return cands.find((e) => e.text) || null; // graceful fallback (may not round-trip)
 }
 const target = await pickTarget(all);
+let recorderTarget = null;
 if (target) {
   line(`      target: ${target.type} #${target.id} text="${target.text}"`);
   const read = await store.getProperty(target.id, "Text");
@@ -153,11 +154,19 @@ if (target) {
   const original = target.text ?? "";
   const probe = original + " (edited)";
   const res = await store.applyAndVerify(target.id, "Text", probe);
-  check("set-property succeeded", res.ok, res.error || "");
-  check("value verified via read-back", res.verified === true, `expected="${res.expected}" actual="${res.actual}"`);
-  // Restore.
-  const restore = await store.applyAndVerify(target.id, "Text", original);
-  check("restored original text", restore.verified === true, `back to "${original}"`);
+  const safelyRefused = !res.ok &&
+    /binding|dynamic resource|would remove/i.test(String(res.error || ""));
+  if (safelyRefused) {
+    line(`  \u2139 live edit skipped: target is safely protected — ${res.error}`);
+  } else {
+    check("set-property succeeded", res.ok, res.error || "");
+    check("value verified via read-back", res.verified === true, `expected="${res.expected}" actual="${res.actual}"`);
+    // Restore.
+    const restore = await store.applyAndVerify(target.id, "Text", original);
+    check("restored original text", restore.verified === true, `back to "${original}"`);
+    if (res.ok && res.verified === true && restore.verified === true)
+      recorderTarget = target;
+  }
 } else {
   check("had a target for live edit", false);
 }
@@ -382,8 +391,8 @@ line("\n[11] workflow recorder — record → .md → replay");
   check("extension exposes record.* control verbs", /record\.start/.test(extSrc) && /record\.save/.test(extSrc) && /"replay"/.test(extSrc));
   check("extension registers recorder agent actions", /start_recording/.test(extSrc) && /replay_test/.test(extSrc) && /list_tests/.test(extSrc));
   // Live: record one durable edit, save a real .md, replay it, assert all steps pass.
-  if (target && snap.connected) {
-    const originalText = target.text ?? "";
+  if (recorderTarget && snap.connected) {
+    const originalText = recorderTarget.text ?? "";
     const probeVal = "RecTest" + String(Date.now()).slice(-5);
     let recordingActive = false;
     let tempRoot = null;
@@ -398,7 +407,7 @@ line("\n[11] workflow recorder — record → .md → replay");
         started?.error || started?.recordingId || "no recording status");
 
       // Drive a durable text edit through the SAME store method the canvas uses.
-      await store.applyAndVerify(target.id, "Text", probeVal);
+      await store.applyAndVerify(recorderTarget.id, "Text", probeVal);
       const status = await store.device.recordingStatus();
       store._recordingStatus = status;
       check("captured >= 1 step from a live edit", Number(status?.steps) >= 1, `${status?.steps || 0} step(s)`);
@@ -412,8 +421,11 @@ line("\n[11] workflow recorder — record → .md → replay");
       const block = mdText.match(/```json maui-test\s*\r?\n([\s\S]*?)\r?\n```/);
       let flow = null;
       try { flow = block ? JSON.parse(block[1]) : null; } catch { /* asserted below */ }
-      const step0 = flow?.steps?.[0] || {};
-      const selector = step0.target || step0.args?.selector || {};
+      const editStep = (flow?.steps || []).find((step) =>
+        step?.value === probeVal ||
+        step?.args?.value === probeVal ||
+        step?.args?.text === probeVal) || {};
+      const selector = editStep.target || editStep.args?.selector || {};
       check("step carries a durable selector",
         !!(selector.automationId || selector.text || selector.typeIndex || selector.id),
         JSON.stringify(selector));
@@ -423,7 +435,7 @@ line("\n[11] workflow recorder — record → .md → replay");
         String(selector.text || "") !== probeVal,
         JSON.stringify(selector));
       check("step auto-generated a verifiable assertion",
-        (step0.asserts || []).some((a) => a.verify), `${(step0.asserts || []).length} assert(s)`);
+        (editStep.asserts || []).some((a) => a.verify), `${(editStep.asserts || []).length} assert(s)`);
 
       // Persist the broker-returned Markdown to a temporary file, matching the extension's
       // persistRecording path without leaving a test artifact in the user's project.
@@ -433,8 +445,8 @@ line("\n[11] workflow recorder — record → .md → replay");
       check("broker Markdown was persisted for replay", readFileSync(testFile, "utf8") === mdText, testFile);
 
       // Replay the saved test against the live app.
-      if (mdText) {
-        const report = await replayTest(store, { file: testFile });
+      if (flow) {
+        const report = await replayTest(store, { json: flow });
         check("replay executed the recorded steps", !!(report && Array.isArray(report.results) && report.results.length >= 1),
           report && report.error ? report.error : (report ? `${report.results?.length || 0} step result(s)` : "(no report)"));
         check("replay: all steps + asserts passed", !!(report && report.ok === true),
@@ -443,7 +455,7 @@ line("\n[11] workflow recorder — record → .md → replay");
     } finally {
       // Restore the app + remove the generated test artifacts (keep the tree clean).
       if (recordingActive) await store.device.recordingCancel(store._recordingStatus?.recordingId).catch(() => {});
-      await store.applyAndVerify(target.id, "Text", originalText).catch(() => {});
+      await store.applyAndVerify(recorderTarget.id, "Text", originalText).catch(() => {});
       store._recordingStatus = null;
       if (tempRoot) try { rmSync(tempRoot, { recursive: true, force: true }); } catch { /* */ }
     }

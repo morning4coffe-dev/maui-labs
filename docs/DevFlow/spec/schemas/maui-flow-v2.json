@@ -1,0 +1,523 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-v2.json",
+  "title": "MAUI Executable Flow v2",
+  "description": "The authoritative JSON payload embedded in a Markdown ```json maui-test fenced block. Unknown properties are extensions and must survive compatible readers and writers.",
+  "type": "object",
+  "required": [
+    "schema",
+    "name",
+    "steps"
+  ],
+  "properties": {
+    "schema": {
+      "const": 2,
+      "default": 2,
+      "description": "Executable flow schema version."
+    },
+    "name": {
+      "type": "string",
+      "description": "Human-readable scenario name."
+    },
+    "app": {
+      "$ref": "#/$defs/NullableString"
+    },
+    "platform": {
+      "$ref": "#/$defs/NullableString"
+    },
+    "recordedAt": {
+      "$ref": "#/$defs/NullableString"
+    },
+    "preconditions": {
+      "$ref": "#/$defs/NullableString"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/FlowStep"
+      }
+    }
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "NullableString": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "NullableInteger": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "NullableNumber": {
+      "type": [
+        "number",
+        "null"
+      ]
+    },
+    "NullableBoolean": {
+      "type": [
+        "boolean",
+        "null"
+      ]
+    },
+    "NullableStringList": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "type": "string"
+      }
+    },
+    "NullableFlowSelector": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FlowSelector"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "NullableFlowTypeIndex": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FlowTypeIndex"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "NullableFlowStepArgs": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FlowStepArgs"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "NullableFlowAssertList": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "items": {
+        "$ref": "#/$defs/FlowAssert"
+      }
+    },
+    "FlowSelector": {
+      "type": "object",
+      "description": "A durable selector. AutomationId is preferred; raw runtime IDs and type-index selectors are fragile.",
+      "properties": {
+        "automationId": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "text": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "id": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "typeIndex": {
+          "$ref": "#/$defs/NullableFlowTypeIndex"
+        },
+        "type": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "index": {
+          "$ref": "#/$defs/NullableInteger"
+        },
+        "selectorKind": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "matchCount": {
+          "$ref": "#/$defs/NullableInteger"
+        },
+        "quality": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "fragilityReasons": {
+          "$ref": "#/$defs/NullableStringList"
+        }
+      },
+      "anyOf": [
+        {
+          "properties": {
+            "automationId": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "automationId"
+          ]
+        },
+        {
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "text"
+          ]
+        },
+        {
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "required": [
+            "id"
+          ]
+        },
+        {
+          "properties": {
+            "typeIndex": {
+              "$ref": "#/$defs/FlowTypeIndex"
+            }
+          },
+          "required": [
+            "typeIndex"
+          ]
+        },
+        {
+          "properties": {
+            "selectorKind": {
+              "const": "typeIndex"
+            },
+            "type": {
+              "type": "string",
+              "minLength": 1
+            },
+            "index": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "required": [
+            "selectorKind",
+            "type",
+            "index"
+          ]
+        }
+      ],
+      "additionalProperties": true
+    },
+    "FlowTypeIndex": {
+      "type": "object",
+      "required": [
+        "type",
+        "index"
+      ],
+      "properties": {
+        "type": {
+          "type": "string",
+          "minLength": 1
+        },
+        "index": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": true
+    },
+    "FlowAssert": {
+      "type": "object",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "Unknown report-only assertion kinds are retained as warnings by the runtime."
+        },
+        "selector": {
+          "$ref": "#/$defs/NullableFlowSelector"
+        },
+        "name": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "expected": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "verify": {
+          "type": "boolean",
+          "default": false
+        },
+        "note": {
+          "$ref": "#/$defs/NullableString"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verify": {
+                "const": true
+              }
+            },
+            "required": [
+              "verify"
+            ]
+          },
+          "then": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "propEquals",
+                  "exists",
+                  "routeIs"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verify": {
+                "const": true
+              },
+              "kind": {
+                "const": "propEquals"
+              }
+            },
+            "required": [
+              "verify",
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "selector": {
+                "$ref": "#/$defs/FlowSelector"
+              },
+              "name": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "selector",
+              "name"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verify": {
+                "const": true
+              },
+              "kind": {
+                "const": "exists"
+              }
+            },
+            "required": [
+              "verify",
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "selector": {
+                "$ref": "#/$defs/FlowSelector"
+              }
+            },
+            "required": [
+              "selector"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verify": {
+                "const": true
+              },
+              "kind": {
+                "const": "routeIs"
+              }
+            },
+            "required": [
+              "verify",
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "expected": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "required": [
+              "expected"
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    },
+    "FlowStepArgs": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "$ref": "#/$defs/NullableFlowSelector"
+        },
+        "text": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "name": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "value": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "route": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "theme": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "valueSource": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "secretEnvironmentVariable": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "element": {
+          "$ref": "#/$defs/NullableString",
+          "description": "A stale runtime ID retained for recording compatibility; replay resolves selector instead."
+        },
+        "dx": {
+          "$ref": "#/$defs/NullableNumber"
+        },
+        "dy": {
+          "$ref": "#/$defs/NullableNumber"
+        },
+        "itemIndex": {
+          "$ref": "#/$defs/NullableInteger"
+        },
+        "position": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "animated": {
+          "$ref": "#/$defs/NullableBoolean"
+        }
+      },
+      "additionalProperties": true
+    },
+    "FlowStep": {
+      "type": "object",
+      "required": [
+        "action"
+      ],
+      "properties": {
+        "seq": {
+          "type": "integer"
+        },
+        "action": {
+          "enum": [
+            "tap",
+            "fill",
+            "scroll",
+            "navigate",
+            "back",
+            "setTheme",
+            "setProperty",
+            "assert"
+          ]
+        },
+        "target": {
+          "$ref": "#/$defs/NullableFlowSelector"
+        },
+        "value": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "args": {
+          "$ref": "#/$defs/NullableFlowStepArgs"
+        },
+        "page": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "navigated": {
+          "type": "boolean",
+          "default": false
+        },
+        "fragile": {
+          "type": "boolean",
+          "default": false
+        },
+        "screenshot": {
+          "$ref": "#/$defs/NullableString"
+        },
+        "asserts": {
+          "$ref": "#/$defs/NullableFlowAssertList"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "action": {
+                "enum": [
+                  "tap",
+                  "fill",
+                  "setProperty"
+                ]
+              }
+            },
+            "required": [
+              "action"
+            ]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "target": {
+                    "$ref": "#/$defs/FlowSelector"
+                  }
+                },
+                "required": [
+                  "target"
+                ]
+              },
+              {
+                "properties": {
+                  "args": {
+                    "type": "object",
+                    "required": [
+                      "selector"
+                    ],
+                    "properties": {
+                      "selector": {
+                        "$ref": "#/$defs/FlowSelector"
+                      }
+                    }
+                  }
+                },
+                "required": [
+                  "args"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "additionalProperties": true
+    }
+  }
+}

@@ -13,6 +13,13 @@ public record AgentRegistration
     [JsonPropertyName("id")]
     public string Id { get; init; } = "";
 
+    /// <summary>
+    /// Opaque broker-assigned generation for this connected process. It changes on every
+    /// registration, including a reconnect with the same stable agent ID.
+    /// </summary>
+    [JsonPropertyName("instanceId")]
+    public string InstanceId { get; init; } = "";
+
     [JsonPropertyName("project")]
     public string Project { get; init; } = "";
 

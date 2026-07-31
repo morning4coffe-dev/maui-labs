@@ -30,6 +30,7 @@ public class BrokerRegistration : IDisposable
     private readonly string? _sessionId;
     private readonly string? _packageId;
     private string _agentId;
+    private string? _instanceId;
     private int _brokerPort;
     private int? _assignedPort;
     private ILogger? _logger;
@@ -62,8 +63,13 @@ public class BrokerRegistration : IDisposable
     /// Whether the agent is currently connected to the broker.
     /// </summary>
     public bool IsConnected => _ws?.State == WebSocketState.Open;
-    internal bool HasBrokerAuthority => !_disposed && _assignedPort.HasValue;
+    internal bool HasBrokerAuthority =>
+        !_disposed &&
+        IsConnected &&
+        _assignedPort.HasValue &&
+        !string.IsNullOrWhiteSpace(_instanceId);
     internal string AgentId => _agentId;
+    internal string? InstanceId => _instanceId;
     internal int BrokerPort => _brokerPort;
     private static readonly string[] _brokerHttpHosts = ["127.0.0.1", "localhost"];
     internal static IReadOnlyList<string> BrokerHttpHosts => _brokerHttpHosts;
@@ -143,6 +149,8 @@ public class BrokerRegistration : IDisposable
             {
                 if (!string.IsNullOrWhiteSpace(response.Id))
                     _agentId = response.Id;
+                if (!string.IsNullOrWhiteSpace(response.InstanceId))
+                    _instanceId = response.InstanceId;
                 _assignedPort = response.Port;
                 logger?.LogInformation("DevFlow agent registered. Broker assigned port: {Port}", _assignedPort);
 
@@ -239,6 +247,8 @@ public class BrokerRegistration : IDisposable
                         candidate = null;
                         if (!string.IsNullOrWhiteSpace(response.Id))
                             _agentId = response.Id;
+                        if (!string.IsNullOrWhiteSpace(response.InstanceId))
+                            _instanceId = response.InstanceId;
                         _assignedPort = response.Port;
                     }
                     previous?.Dispose();
@@ -425,6 +435,7 @@ public class BrokerRegistration : IDisposable
             socket = _ws;
             _ws = null;
             _assignedPort = null;
+            _instanceId = null;
         }
         reconnectTimer?.Dispose();
         lifetimeCts?.Cancel();
@@ -463,5 +474,8 @@ public class BrokerRegistration : IDisposable
 
         [JsonPropertyName("port")]
         public int Port { get; init; }
+
+        [JsonPropertyName("instanceId")]
+        public string? InstanceId { get; init; }
     }
 }

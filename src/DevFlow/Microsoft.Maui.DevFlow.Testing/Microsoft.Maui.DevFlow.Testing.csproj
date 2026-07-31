@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+    <IsPackable>true</IsPackable>
+    <IsShipping>true</IsShipping>
+    <IsAotCompatible>true</IsAotCompatible>
+    <PackageId>Microsoft.Maui.DevFlow.Testing</PackageId>
+    <Description>Framework-neutral Markdown workflow contracts, validation, recording, and replay for .NET MAUI DevFlow.</Description>
+    <PackageTags>maui;devflow;testing;automation;workflow</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackRepoRootReadme>false</PackRepoRootReadme>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Microsoft.Maui.DevFlow.Driver\Microsoft.Maui.DevFlow.Driver.csproj" />
+    <None Include="README.md" Pack="true" PackagePath="/" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Microsoft.Maui.DevFlow.Tests" />
+  </ItemGroup>
+
+</Project>

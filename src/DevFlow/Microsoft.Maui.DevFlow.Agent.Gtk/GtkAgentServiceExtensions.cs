@@ -23,6 +23,8 @@ public static class GtkAgentServiceExtensions
         options.ApplyBuildMetadata(
             ReadAssemblyMetadata("Microsoft.Maui.DevFlowEnabled"),
             ReadAssemblyMetadata("Microsoft.Maui.DevFlowMode"));
+        options.ApplyPortMetadata(ReadAssemblyMetadataPort());
+        options.ValidateForRegistration();
 
         // Read project identity from assembly metadata (injected by .targets)
         var project = ReadAssemblyMetadata("Microsoft.Maui.DevFlowProject") ?? "unknown";
@@ -56,13 +58,7 @@ public static class GtkAgentServiceExtensions
             brokerReg = null;
         }
 
-        // Fall back to assembly metadata port if broker didn't assign one
-        if (!hasCustomPort && brokerReg?.AssignedPort == null)
-        {
-            var metaPort = ReadAssemblyMetadataPort();
-            if (metaPort.HasValue)
-                options.Port = metaPort.Value;
-        }
+        options.ValidateForRegistration();
 
         var service = new GtkAgentService(options);
         service.SetSessionId(sessionId);
@@ -177,8 +173,5 @@ public static class GtkAgentServiceExtensions
     }
 
     private static int? ReadAssemblyMetadataPort()
-    {
-        var value = ReadAssemblyMetadata("Microsoft.Maui.DevFlowPort");
-        return value != null && int.TryParse(value, out var port) ? port : null;
-    }
+        => AgentOptions.ParsePortMetadata(ReadAssemblyMetadata("Microsoft.Maui.DevFlowPort"));
 }

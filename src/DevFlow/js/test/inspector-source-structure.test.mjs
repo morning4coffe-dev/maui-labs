@@ -10,6 +10,12 @@ const sourcePath = resolve(
   here,
   '../../../Cli/Microsoft.Maui.Cli/DevFlow/Inspector/Web/devflow.js');
 const source = readFileSync(sourcePath, 'utf8');
+const html = readFileSync(resolve(
+  here,
+  '../../../Cli/Microsoft.Maui.Cli/DevFlow/Inspector/Web/inspector.html'), 'utf8');
+const evidence = readFileSync(resolve(
+  here,
+  '../../../Cli/Microsoft.Maui.Cli/DevFlow/Inspector/Web/inspector-evidence.js'), 'utf8');
 
 test('Inspector composition script parses as an ES module', () => {
   const result = spawnSync(process.execPath, ['--check', sourcePath], { encoding: 'utf8' });
@@ -33,4 +39,26 @@ test('workflow rebuild resume presents a stored recording capability', () => {
     source,
     /body: JSON\.stringify\(candidate \? \{ recordingId: candidate \} : \{\}\)/);
   assert.doesNotMatch(source, /requestRecordingStatus\(null\)/);
+});
+
+test('Inspector accessibility structure keeps hidden inputs out of tab order', () => {
+  assert.match(html, /id="df-workflow-file-input"[^>]*tabindex="-1"[^>]*aria-hidden="true"/);
+  assert.match(html, /id="df-hit-candidates"[^>]*role="group"/);
+  assert.doesNotMatch(source, /setAttribute\('role', 'option'\)/);
+  assert.match(html, /id="df-problems-status"[^>]*aria-live="polite"/);
+});
+
+test('Evidence dialog redirects tab focus back inside when focus escapes', () => {
+  assert.match(evidence, /if \(!box\.contains\(document\.activeElement\)\)/);
+});
+
+test('workflow assertions never read Text from password entries', () => {
+  const passwordProbe = source.indexOf("name: 'IsPassword'");
+  const passwordGuard = source.indexOf('if (isPassword)', passwordProbe);
+  const textProbe = source.indexOf("name: 'Text'", passwordGuard);
+
+  assert.ok(passwordProbe >= 0);
+  assert.ok(passwordGuard > passwordProbe);
+  assert.ok(textProbe > passwordGuard);
+  assert.match(source.slice(passwordGuard, textProbe), /kind:\s*'exists'/);
 });

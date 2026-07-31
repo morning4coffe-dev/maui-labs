@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Globalization;
 
 namespace Microsoft.Maui.Cli.DevFlow.Evidence;
 
@@ -14,7 +15,7 @@ namespace Microsoft.Maui.Cli.DevFlow.Evidence;
 internal static class EvidenceRedaction
 {
     /// <summary>Ruleset version. Bump whenever the rules below change what is masked or dropped.</summary>
-    public const int Version = 1;
+    public const int Version = 2;
 
     private const string Redacted = "<redacted>";
 
@@ -32,13 +33,33 @@ internal static class EvidenceRedaction
         @"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]{12,}",
         RegexOptions.Compiled);
 
+    private static readonly Regex PrefixedSecretRegex = new(
+        @"(?ix)\b(?:
+            sk[-_][a-z0-9_-]{16,} |
+            xox[baprs]-[a-z0-9-]{10,} |
+            gh[pousr]_[a-z0-9]{20,} |
+            github_pat_[a-z0-9_]{20,} |
+            glpat-[a-z0-9_-]{16,} |
+            AIza[a-z0-9_-]{20,} |
+            (?:AKIA|ASIA)[A-Z0-9]{16}
+        )\b",
+        RegexOptions.Compiled);
+
+    private static readonly Regex PemPrivateKeyRegex = new(
+        @"(?is)-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----.*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----",
+        RegexOptions.Compiled);
+
+    private static readonly Regex BasicAuthUrlRegex = new(
+        @"(?i)(https?://)[^/\s:@]+:[^/\s@]+@",
+        RegexOptions.Compiled);
+
     private static readonly Regex SecretKvRegex = new(
-        "(?i)(\"(?:[a-z0-9_-]*(?:token|secret|password|apikey|api[_-]?key|authorization)[a-z0-9_-]*)\"\\s*:\\s*)\"[^\"]*\"",
+        "(?i)(\"(?:[a-z0-9_-]*(?:token|secret|password|passwd|pwd|cookie|private[_-]?key|access[_-]?key|signing[_-]?key|apikey|api[_-]?key|authorization)[a-z0-9_-]*)\"\\s*:\\s*)\"[^\"]*\"",
         RegexOptions.Compiled);
 
     // key=value / key: value assignments in free-form log text (not JSON).
     private static readonly Regex SecretAssignmentRegex = new(
-        @"(?i)\b([a-z0-9_-]*(?:token|secret|password|passwd|apikey|api[_-]?key|authorization|credential)[a-z0-9_-]*)\s*[:=]\s*(""[^""]*""|'[^']*'|[^\s,;}{\]]+)",
+        @"(?i)\b([a-z0-9_-]*(?:token|secret|password|passwd|pwd|cookie|private[_-]?key|access[_-]?key|signing[_-]?key|apikey|api[_-]?key|authorization|credential)[a-z0-9_-]*)\s*[:=]\s*(""[^""]*""|'[^']*'|[^\s,;}{\]]+)",
         RegexOptions.Compiled);
 
     // Absolute filesystem paths that would leak the developer's machine layout: drive-rooted,
@@ -62,6 +83,9 @@ internal static class EvidenceRedaction
     public static string MaskSecrets(string text)
     {
         if (string.IsNullOrEmpty(text)) return text;
+        text = PemPrivateKeyRegex.Replace(text, "<private-key>");
+        text = PrefixedSecretRegex.Replace(text, Redacted);
+        text = BasicAuthUrlRegex.Replace(text, "$1" + Redacted + "@");
         text = JwtRegex.Replace(text, "<jwt>");
         text = BearerRegex.Replace(text, "$1" + Redacted);
         text = SecretKvRegex.Replace(text, "$1\"" + Redacted + "\"");
@@ -135,7 +159,8 @@ internal static class EvidenceRedaction
         var needsWork = false;
         foreach (var c in text)
         {
-            if (char.IsControl(c) && c is not ('\n' or '\r' or '\t'))
+            if ((char.IsControl(c) && c is not ('\n' or '\r' or '\t')) ||
+                char.GetUnicodeCategory(c) == UnicodeCategory.Format)
             {
                 needsWork = true;
                 break;
@@ -146,7 +171,8 @@ internal static class EvidenceRedaction
         var builder = new StringBuilder(text.Length);
         foreach (var c in text)
         {
-            if (!char.IsControl(c) || c is '\n' or '\r' or '\t')
+            if ((!char.IsControl(c) || c is '\n' or '\r' or '\t') &&
+                char.GetUnicodeCategory(c) != UnicodeCategory.Format)
                 builder.Append(c);
         }
         return builder.ToString();

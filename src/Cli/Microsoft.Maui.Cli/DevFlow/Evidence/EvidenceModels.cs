@@ -28,6 +28,8 @@ internal sealed class EvidenceManifest
     public EvidenceLimits Limits { get; set; } = new();
     public EvidenceScreenshotStatus Screenshot { get; set; } = new();
     public EvidenceCheckpointInfo? Checkpoint { get; set; }
+    /// <summary>Additive link to the structured flow run that produced failure evidence.</summary>
+    public EvidenceFlowRunLink? FlowRun { get; set; }
     public string? SelectedElementId { get; set; }
     public List<string> Warnings { get; set; } = [];
 }
@@ -111,6 +113,21 @@ internal sealed class EvidenceScreenshotStatus
     public bool Requested { get; set; }
     public bool Included { get; set; }
     public string? OmittedReason { get; set; }
+}
+
+/// <summary>
+/// Metadata-only linkage to <c>flow-run.json</c>. It does not add an archive entry and does not
+/// retain flow input values, command payloads, or screenshots.
+/// </summary>
+internal sealed class EvidenceFlowRunLink
+{
+    public string? RunId { get; set; }
+    public string? FailedStepId { get; set; }
+    public string? FailureCode { get; set; }
+    public string? ReportDigest { get; set; }
+    public string? ReportPath { get; set; }
+    public string? ReportReference { get; set; }
+    public string? CaptureCompleteness { get; set; }
 }
 
 // ── environment.json ─────────────────────────────────────────────────────────────────────────
@@ -411,6 +428,7 @@ internal sealed class EvidencePreviewResponse
     PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase,
     DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull)]
 [JsonSerializable(typeof(EvidenceManifest))]
+[JsonSerializable(typeof(EvidenceFlowRunLink))]
 [JsonSerializable(typeof(EvidenceEnvironment))]
 [JsonSerializable(typeof(EvidenceTreeDocument))]
 [JsonSerializable(typeof(EvidenceLayoutDocument))]

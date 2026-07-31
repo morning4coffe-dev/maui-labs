@@ -10,16 +10,15 @@
 // in-app DevFlow Agent (http://127.0.0.1:<port>/api/v1/...) — the same two hops the
 // `maui devflow` CLI does internally, minus the per-call process spawn.
 
-import { createReadStream, mkdirSync, writeFileSync } from "node:fs";
+import { createReadStream } from "node:fs";
 import { createServer } from "node:http";
-import { join } from "node:path";
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
 import { joinSession, createCanvas, CanvasError } from "@github/copilot-sdk/extension";
 import { LiveStore } from "./store.mjs";
-import { Recorder, slugify } from "./recorder.mjs";
-import { replayTest } from "./replay.mjs";
+import { Recorder } from "./recorder.mjs";
 import { renderShell, renderDisconnected } from "./shell.mjs";
+import { readJsonBody, selectInspectorAgent } from "./http.mjs";
 import { readBrokerState } from "@maui-devflow/client";
 
 // Device targeting is optional — the CLI auto-discovers the agent via the broker. Override
@@ -111,24 +110,6 @@ function broadcast(st, snapshot) {
       st.sse.delete(res);
     }
   }
-}
-
-function readJsonBody(req) {
-  return new Promise((resolve) => {
-    let raw = "";
-    req.on("data", (c) => {
-      raw += c;
-      if (raw.length > 1e6) req.destroy();
-    });
-    req.on("end", () => {
-      try {
-        resolve(JSON.parse(raw || "{}"));
-      } catch {
-        resolve({});
-      }
-    });
-    req.on("error", () => resolve({}));
-  });
 }
 
 const CONTEXT_ATTACHMENT_MAX_BYTES = 20_000;
@@ -332,11 +313,7 @@ async function applyControl(st, body, instanceId) {
   case "replay": {
     const status = await store.device.recordingStatus();
     if (status.recording) return { ok: false, error: "Stop or cancel the active recording before replaying a test." };
-    return replayTest(store, {
-      file: body.file,
-      name: body.name,
-      root: st.recorder.outputRoot(store),
-    });
+    return replaySharedFlow(st, body);
   }
   default:             return { ok: false, error: `unknown action: ${body.action}` };
 }
@@ -360,6 +337,51 @@ function brokerInspectorUrl(st) {
     // Broker state unreadable — fall back to the disconnected shell.
   }
   return null;
+}
+
+async function postInspectorJson(st, path, body, timeoutMs = 30000) {
+  const inspectorUrl = await resolveInspectorUrl(st);
+  if (!inspectorUrl) return { ok: false, error: "The shared DevFlow Inspector is unavailable." };
+
+  const endpoint = new URL(path.replace(/^\/+/, ""), inspectorUrl);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body || {}),
+      signal: controller.signal,
+    });
+    const result = await response.json().catch(() => null);
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: result?.error || `The shared DevFlow Inspector rejected the request (HTTP ${response.status}).`,
+        status: response.status,
+      };
+    }
+    return result && typeof result === "object" ? result : { ok: false, error: "The shared DevFlow Inspector returned an invalid response." };
+  } catch (e) {
+    return { ok: false, error: e?.name === "AbortError" ? "The shared DevFlow Inspector request timed out." : String(e?.message || e) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function replaySharedFlow(st, input = {}) {
+  const selected = st.recorder.resolveTestName(st.store, input);
+  if (!selected.ok) return selected;
+
+  const loaded = st.recorder.load(st.store, { name: selected.name });
+  if (!loaded.ok || typeof loaded.markdown !== "string") {
+    return { ok: false, error: loaded.error || "The Canvas host could not load the workflow test." };
+  }
+
+  // Canvas mutations use their own lease identity. Release it before the shared Inspector
+  // claims its run-scoped lease so the canonical C# replay cannot interleave with Canvas actions.
+  await st.store.device.releaseMutationLease().catch(() => {});
+  return postInspectorJson(st, "/api/flows/replay", { markdown: loaded.markdown }, 130000);
 }
 
 // Query the broker's live agent list. HTTP fallback used when the client's cached registration
@@ -390,7 +412,7 @@ async function resolveInspectorUrl(st) {
     if (!state?.port) return null;
     const port = st.store?.device?.whichPort?.();
     const agents = await fetchBrokerAgents(state.port);
-    const match = (port && agents.find((a) => a.port === port)) || agents[0];
+    const match = selectInspectorAgent(agents, port);
     if (match?.id) {
       const base = `http://localhost:${state.port}/inspector/${encodeURIComponent(match.id)}/`;
       return state.embedToken ? `${base}?embed=${encodeURIComponent(state.embedToken)}` : base;
@@ -416,14 +438,7 @@ function saveBridgeRecording(st, body) {
 }
 
 function persistRecording(st, body) {
-  const md = typeof body?.markdown === "string" ? body.markdown : "";
-  if (!md) return { ok: false, error: "no markdown" };
-  const safe = slugify(typeof body?.name === "string" && body.name ? body.name : "recording");
-  const root = st.recorder.outputRoot(st.store);
-  mkdirSync(root, { recursive: true });
-  const file = join(root, `${safe}.md`);
-  writeFileSync(file, md, "utf8");
-  return { ok: true, file };
+  return st.recorder.persist(st.store, body);
 }
 
 async function startServer(instanceId, input = {}) {
@@ -453,7 +468,7 @@ async function startServer(instanceId, input = {}) {
       }
       res.end(inspectorUrl
         ? renderShell(inspectorUrl, st.store.snapshot()?.info?.appName, st.bridgeId)
-        : renderDisconnected(st.store.snapshot()?.info?.appName, st.bridgeId));
+        : renderDisconnected(st.store.snapshot()?.info?.appName));
       return;
     }
 
@@ -509,7 +524,14 @@ async function startServer(instanceId, input = {}) {
         res.end(JSON.stringify({ ok: false, error: "unsupported media type" }));
         return;
       }
-      const body = await readJsonBody(req);
+      const parsed = await readJsonBody(req);
+      if (!parsed.ok) {
+        res.statusCode = parsed.status;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ ok: false, error: parsed.error }));
+        return;
+      }
+      const body = parsed.value;
       if (!body || body.bridgeId !== st.bridgeId) {
         res.statusCode = 403;
         res.setHeader("Content-Type", "application/json");
@@ -539,7 +561,14 @@ async function startServer(instanceId, input = {}) {
         res.end(JSON.stringify({ ok: false, error: "unsupported media type" }));
         return;
       }
-      const body = await readJsonBody(req);
+      const parsed = await readJsonBody(req);
+      if (!parsed.ok) {
+        res.statusCode = parsed.status;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ ok: false, error: parsed.error }));
+        return;
+      }
+      const body = parsed.value;
       let r;
       try {
         r = saveBridgeRecording(st, body);
@@ -990,15 +1019,15 @@ const canvas = createCanvas({
     {
       name: "replay_test",
       description:
-        "Replay a recorded workflow test against the running app and verify it. Pass a scenario 'name' (resolved under " +
-        "maui-tests/) or an absolute 'file' path. Returns a per-step pass/fail report with assertion results — the way to " +
-        "validate the app still behaves as recorded.",
+        "Replay a recorded workflow test through the shared Inspector's canonical C# FlowReplayer. Pass a scenario " +
+        "'name' from list_tests, or a top-level Markdown 'file' inside the resolved maui-tests directory. Returns the " +
+        "same per-step pass/fail report as CLI, MCP, and the Inspector UI.",
       timeoutMs: 120000,
       inputSchema: {
         type: "object",
         properties: {
           name: { type: "string", description: "Scenario name to replay (see list_tests)." },
-          file: { type: "string", description: "Absolute path to a test .md (alternative to name)." },
+          file: { type: "string", description: "Top-level test .md path inside the resolved maui-tests directory (alternative to name)." },
         },
       },
       handler: async (ctx) => {
@@ -1007,10 +1036,9 @@ const canvas = createCanvas({
         if (status.recording) {
           throw new CanvasError("bad_input", "Stop or cancel the active recording before replaying a test.");
         }
-        const r = await replayTest(st.store, {
+        const r = await replaySharedFlow(st, {
           name: ctx.input?.name,
           file: ctx.input?.file,
-          root: st.recorder.outputRoot(st.store),
         });
         if (!r.ok && r.error) throw new CanvasError("bad_input", r.error);
         return r;

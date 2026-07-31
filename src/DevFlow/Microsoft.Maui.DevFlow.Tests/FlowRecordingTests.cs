@@ -1,8 +1,9 @@
 using System.Text.Json;
 using Microsoft.Maui.Cli.DevFlow.Broker;
-using Microsoft.Maui.Cli.DevFlow.Flows;
 using Microsoft.Maui.Cli.DevFlow.Mcp;
 using Microsoft.Maui.DevFlow.Agent.Core;
+using Microsoft.Maui.DevFlow.Testing;
+using FlowRecordTools = Microsoft.Maui.Cli.DevFlow.Flows.FlowRecordTools;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -133,6 +134,164 @@ public class FlowRecordingTests : System.IDisposable
             new Button { AutomationId = "CloseModalButton" });
 
         Assert.Equal("CloseModalButton", request.MutationTargetAutomationId);
+        Assert.Null(request.MutationTargetMatchCount);
+        Assert.Null(request.MutationTargetQuality);
+        Assert.Null(request.MutationTargetFragilityReasons);
+    }
+
+    [Fact]
+    public async Task CaptureMutationTarget_PreservesTextSelectorAfterTargetDisappears()
+    {
+        var request = new HttpRequest
+        {
+            Method = "POST",
+            Path = "/api/v1/ui/actions/tap",
+            Body = """{"elementId":"gone"}"""
+        };
+        var target = new ElementInfo
+        {
+            Id = "gone",
+            Type = "Label",
+            Text = "Open details"
+        };
+        DevFlowAgentService.CaptureMutationTarget(
+            request,
+            new Label { Text = target.Text },
+            target,
+            [target]);
+        using var service = new DevFlowAgentService(new AgentOptions { Enabled = false });
+
+        var observation = await service.CreateMutationObservationAsync(request);
+
+        Assert.NotNull(observation);
+        Assert.Equal("Open details", observation.Text);
+        Assert.Equal("text", observation.Quality);
+        Assert.Equal(1, observation.MatchCount);
+        Assert.Null(observation.Id);
+    }
+
+    [Fact]
+    public async Task CaptureMutationTarget_PreservesPasswordSensitivityAfterFillRemovesTarget()
+    {
+        var request = new HttpRequest
+        {
+            Method = "POST",
+            Path = "/api/v1/ui/actions/fill",
+            Body = """{"elementId":"gone","text":"correct horse battery staple"}"""
+        };
+        var target = new ElementInfo
+        {
+            Id = "gone",
+            Type = "Entry",
+            Text = "previous value"
+        };
+        DevFlowAgentService.CaptureMutationTarget(
+            request,
+            new Entry { IsPassword = true },
+            target,
+            [target],
+            allowTextSelector: false);
+        using var service = new DevFlowAgentService(new AgentOptions { Enabled = false });
+
+        var observation = await service.CreateMutationObservationAsync(request);
+
+        Assert.NotNull(observation);
+        Assert.True(observation.Sensitive);
+        Assert.Null(observation.Value);
+        Assert.Null(observation.Text);
+        Assert.Equal("Entry", observation.Type);
+        Assert.Equal(0, observation.Index);
+        Assert.Null(observation.Id);
+    }
+
+    [Fact]
+    public async Task CaptureMutationTarget_PreservesSelectorAfterSetPropertyRemovesTarget()
+    {
+        var request = new HttpRequest
+        {
+            Method = "PUT",
+            Path = "/api/v1/ui/elements/gone/properties/Text",
+            Body = """{"value":"updated"}"""
+        };
+        request.RouteParams["id"] = "gone";
+        request.RouteParams["name"] = "Text";
+        DevFlowAgentService.CaptureMutationTarget(
+            request,
+            new Label { AutomationId = "StatusLabel" });
+        using var service = new DevFlowAgentService(new AgentOptions { Enabled = false });
+
+        var observation = await service.CreateMutationObservationAsync(request);
+
+        Assert.NotNull(observation);
+        Assert.Equal("setProperty", observation.Action);
+        Assert.Equal("StatusLabel", observation.AutomationId);
+        Assert.Equal("Text", observation.Name);
+        Assert.Equal("updated", observation.Value);
+        Assert.Null(observation.Id);
+    }
+
+    [Fact]
+    public async Task CaptureNativeMutationTarget_ResolvesDialogIdThroughWalker()
+    {
+        using var service = new NativeCaptureTestService(new ElementInfo
+        {
+            Id = "native:hwnd:0x1234:dialog:0:automation:Confirm",
+            Type = "Button",
+            AutomationId = "Confirm"
+        });
+        var request = new HttpRequest();
+
+        await service.CaptureNativeMutationTargetBeforeMutationAsync(
+            request,
+            "native:hwnd:0x1234:dialog:0:automation:Confirm");
+
+        Assert.Equal("native:hwnd:0x1234:dialog:0:automation:Confirm", service.Walker.RequestedId);
+        Assert.Equal(0, service.Walker.NativeWalkCount);
+        Assert.Equal("Confirm", request.MutationTargetAutomationId);
+        Assert.Equal("fragile", request.MutationTargetQuality);
+        Assert.Contains("uniqueness", Assert.Single(request.MutationTargetFragilityReasons!));
+    }
+
+    [Theory]
+    [InlineData(false, false)]
+    [InlineData(true, true)]
+    public void CaptureNativeMutationTarget_UsesNativePasswordState(bool isPassword, bool expectedSensitive)
+    {
+        var request = new HttpRequest();
+        var target = new ElementInfo
+        {
+            Id = "native:entry",
+            Type = "Edit",
+            AutomationId = "NativeEntry",
+            NativeProperties = new Dictionary<string, string?>
+            {
+                ["isPassword"] = isPassword.ToString()
+            }
+        };
+
+        DevFlowAgentService.CaptureNativeMutationTarget(
+            request,
+            target,
+            allowTextSelector: false,
+            protectPotentialSecret: true);
+
+        Assert.Equal(expectedSensitive, request.MutationTargetSensitive);
+    }
+
+    [Fact]
+    public void CaptureNativeMutationTarget_ProtectsValueWhenPasswordStateIsUnavailable()
+    {
+        var request = new HttpRequest();
+
+        DevFlowAgentService.CaptureNativeMutationTarget(
+            request,
+            targetInfo: null,
+            allowTextSelector: false,
+            protectPotentialSecret: true);
+
+        Assert.True(request.MutationTargetSensitive);
+        Assert.Equal("fragile", request.MutationTargetQuality);
+        Assert.Contains("transient", Assert.Single(request.MutationTargetFragilityReasons!));
     }
 
     // ── FlowRecordingStore ──
@@ -566,6 +725,21 @@ public class FlowRecordingTests : System.IDisposable
     }
 
     [Fact]
+    public void BrokerCoordinator_UsesABoundedGateSetAcrossProcessIds()
+    {
+        var coordinator = CreateIsolatedCoordinator();
+        for (var index = 0; index < 500; index++)
+            Assert.False(coordinator.Status($"process-{index}").Recording);
+
+        var field = typeof(BrokerFlowCoordinator)
+            .GetField(
+                "_gates",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic);
+        var gates = Assert.IsType<object[]>(field!.GetValue(coordinator));
+        Assert.Equal(64, gates.Length);
+    }
+
+    [Fact]
     public void BrokerCoordinator_PersistsSyntheticAssertObservation()
     {
         var coordinator = new BrokerFlowCoordinator();
@@ -664,6 +838,19 @@ public class FlowRecordingTests : System.IDisposable
         Assert.Contains(step.Args.SecretEnvironmentVariable!, serialized, StringComparison.Ordinal);
     }
 
+    [Theory]
+    [InlineData("PrivateKeyInput")]
+    [InlineData("AccessKey")]
+    [InlineData("SigningKey")]
+    [InlineData("OneTimeOtp")]
+    [InlineData("PaymentCvv")]
+    [InlineData("CustomerSsn")]
+    [InlineData("MfaCode")]
+    public void CommonSensitiveFieldNames_AreDetected(string name)
+    {
+        Assert.True(FlowSecretReference.LooksSensitive(name));
+    }
+
     [Fact]
     public void SensitiveAssertion_IsRetainedOnlyAsANonVerifyingRedactedNote()
     {
@@ -753,6 +940,102 @@ public class FlowRecordingTests : System.IDisposable
         Assert.True(observed.Ok, observed.Error);
         Assert.Equal(1, coordinator.Status("agent").Steps);
         Assert.True(coordinator.Cancel("agent").Ok);
+    }
+
+    [Fact]
+    public async Task Batch_MutationsAppendEachSuccessfulWorkflowStep()
+    {
+        var brokerPort = GetFreePort();
+        var agentPort = GetFreePort();
+        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var brokerCancellation = new CancellationTokenSource();
+        var brokerTask = broker.RunAsync(brokerCancellation.Token);
+        await WaitForBrokerAsync(brokerPort);
+
+        try
+        {
+            var registration = new BrokerRegistration(
+                "batch-recording",
+                "net10.0",
+                "test",
+                "Batch Recording",
+                sessionId: "batch",
+                packageId: "batch.recording",
+                brokerPort: brokerPort)
+            {
+                CurrentPort = agentPort
+            };
+            Assert.Equal(
+                agentPort,
+                await registration.TryRegisterAsync(TimeSpan.FromSeconds(5)));
+
+            using var service = new DevFlowAgentService(new AgentOptions { Port = agentPort });
+            service.SetBrokerRegistration(registration);
+            service.StartServerOnly(new ImmediateDispatcher());
+            service.BindApp(new RecordingTestApplication(
+            [
+                new Button { AutomationId = "BatchButton", Text = "Tap" },
+                new Entry { AutomationId = "BatchEntry" }
+            ]));
+
+            using var client = new Microsoft.Maui.DevFlow.Driver.AgentClient(
+                "127.0.0.1",
+                agentPort);
+            await WaitForAgentAsync(client);
+            var lease = await client.ControlMutationLeaseAsync("claim");
+            Assert.True(lease.YouHold);
+            var started = await client.ControlMutationRecordingAsync(
+                "start",
+                "batch",
+                "Batch Recording",
+                "test");
+            Assert.True(started.Ok, started.Error);
+
+            var button = Assert.Single(await client.QueryAsync(automationId: "BatchButton"));
+            var entry = Assert.Single(await client.QueryAsync(automationId: "BatchEntry"));
+            var result = await client.BatchAsync(
+            [
+                new System.Text.Json.Nodes.JsonObject
+                {
+                    ["type"] = "tap",
+                    ["elementId"] = button.Id
+                },
+                new System.Text.Json.Nodes.JsonObject
+                {
+                    ["type"] = "fill",
+                    ["elementId"] = entry.Id,
+                    ["text"] = "hello"
+                }
+            ]);
+            Assert.True(result.GetProperty("success").GetBoolean());
+
+            var status = await client.ControlMutationRecordingAsync(
+                "status",
+                null,
+                null,
+                null,
+                null,
+                recordingId: started.RecordingId);
+            Assert.Equal(2, status.Steps);
+            var stopped = await client.ControlMutationRecordingAsync(
+                "stop",
+                null,
+                null,
+                null,
+                null,
+                recordingId: started.RecordingId);
+            Assert.True(stopped.Ok, stopped.Error);
+            var flow = FlowMarkdown.Parse(stopped.Markdown!).Flow!;
+            Assert.Equal(
+                [FlowActions.Tap, FlowActions.Fill],
+                flow.Steps.Select(step => step.Action).ToArray());
+        }
+        finally
+        {
+            brokerCancellation.Cancel();
+            broker.Dispose();
+            await brokerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
     }
 
     [Fact]
@@ -871,4 +1154,118 @@ public class FlowRecordingTests : System.IDisposable
 
     private static int StepCount(string id)
         => FlowRecordingStore.Instance.TryGet(id, out var r) ? r.StepCount : -1;
+
+    private static int GetFreePort()
+    {
+        using var listener = new System.Net.Sockets.TcpListener(
+            System.Net.IPAddress.Loopback,
+            0);
+        listener.Start();
+        return ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
+    }
+
+    private static async Task WaitForBrokerAsync(int port)
+    {
+        using var http = new HttpClient();
+        for (var attempt = 0; attempt < 80; attempt++)
+        {
+            try
+            {
+                using var response = await http.GetAsync(
+                    $"http://127.0.0.1:{port}/api/health");
+                if (response.IsSuccessStatusCode)
+                    return;
+            }
+            catch (HttpRequestException)
+            {
+            }
+            await Task.Delay(25);
+        }
+        throw new InvalidOperationException("Broker did not start.");
+    }
+
+    private static async Task WaitForAgentAsync(
+        Microsoft.Maui.DevFlow.Driver.AgentClient client)
+    {
+        for (var attempt = 0; attempt < 80; attempt++)
+        {
+            if (await client.GetStatusAsync() is not null)
+                return;
+            await Task.Delay(25);
+        }
+        throw new InvalidOperationException("Agent did not start.");
+    }
+
+    private sealed class NativeCaptureTestService : DevFlowAgentService
+    {
+        private static ElementInfo? _nextTarget;
+
+        public NativeCaptureTestService(ElementInfo target)
+            : base(CreateOptions(target))
+        {
+        }
+
+        public NativeCaptureWalker Walker { get; private set; } = null!;
+
+        protected override VisualTreeWalker CreateTreeWalker()
+        {
+            Walker = new NativeCaptureWalker(_nextTarget);
+            _nextTarget = null;
+            return Walker;
+        }
+
+        private static AgentOptions CreateOptions(ElementInfo target)
+        {
+            _nextTarget = target;
+            return new AgentOptions { Enabled = false };
+        }
+    }
+
+    private sealed class NativeCaptureWalker(ElementInfo? target) : VisualTreeWalker
+    {
+        public string? RequestedId { get; private set; }
+        public int NativeWalkCount { get; private set; }
+
+        public override ElementInfo? GetNativeElementInfoById(string id)
+        {
+            RequestedId = id;
+            return target;
+        }
+
+        public override List<ElementInfo> WalkNativeTree(
+            IReadOnlyList<IntPtr> knownWindowHandles,
+            int maxDepth = 0)
+        {
+            NativeWalkCount++;
+            return [];
+        }
+    }
+
+    private sealed class RecordingTestApplication(
+        IEnumerable<IVisualTreeElement> children) : Application, IVisualTreeElement
+    {
+        private readonly IReadOnlyList<IVisualTreeElement> _children = children.ToArray();
+
+        IReadOnlyList<IVisualTreeElement> IVisualTreeElement.GetVisualChildren() => _children;
+        IVisualTreeElement? IVisualTreeElement.GetVisualParent() => null;
+    }
+
+    private sealed class ImmediateDispatcher : Microsoft.Maui.Dispatching.IDispatcher
+    {
+        public bool IsDispatchRequired => false;
+        public bool Dispatch(Action action) { action(); return true; }
+        public bool DispatchDelayed(TimeSpan delay, Action action) { action(); return true; }
+        public Microsoft.Maui.Dispatching.IDispatcherTimer CreateTimer() =>
+            new ImmediateDispatcherTimer();
+    }
+
+    private sealed class ImmediateDispatcherTimer : Microsoft.Maui.Dispatching.IDispatcherTimer
+    {
+        public bool IsRepeating { get; set; }
+        public TimeSpan Interval { get; set; }
+        public bool IsRunning { get; private set; }
+        public event EventHandler? Tick { add { } remove { } }
+        public void Start() => IsRunning = true;
+        public void Stop() => IsRunning = false;
+    }
 }

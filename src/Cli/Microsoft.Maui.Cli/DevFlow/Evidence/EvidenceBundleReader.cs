@@ -327,6 +327,8 @@ internal static class EvidenceBundleReader
         {
             return "manifest.json contains oversized metadata.";
         }
+        if (!ValidFlowRunLink(manifest.FlowRun))
+            return "manifest.json contains invalid flow-run linkage metadata.";
 
         var manifestEntries = new Dictionary<string, EvidenceEntryInfo>(StringComparer.Ordinal);
         foreach (var entry in manifest.Entries)
@@ -370,6 +372,28 @@ internal static class EvidenceBundleReader
         }
 
         return null;
+    }
+
+    private static bool ValidFlowRunLink(EvidenceFlowRunLink? link)
+    {
+        if (link is null)
+            return true;
+        if (InvalidText(link.RunId, 128) ||
+            InvalidText(link.FailedStepId, 128) ||
+            InvalidText(link.FailureCode, 128) ||
+            InvalidText(link.ReportDigest, 160) ||
+            InvalidText(link.ReportReference, 160) ||
+            InvalidText(link.CaptureCompleteness, 128) ||
+            InvalidText(link.ReportPath, 512))
+        {
+            return false;
+        }
+
+        if (string.IsNullOrWhiteSpace(link.ReportPath))
+            return true;
+        return !Path.IsPathRooted(link.ReportPath) &&
+            !link.ReportPath.Contains("..", StringComparison.Ordinal) &&
+            !link.ReportPath.Contains(':', StringComparison.Ordinal);
     }
 
     private static string? ValidateSection(object? value) => value switch

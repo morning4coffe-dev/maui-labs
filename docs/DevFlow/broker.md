@@ -300,6 +300,10 @@ The broker exposes a simple HTTP API on port 19223 for CLI and diagnostic use:
 |----------|--------|-------------|
 | `/api/health` | GET | Health check. Returns `{"status":"ok","agents":N}` |
 | `/api/agents` | GET | List all connected agents with full metadata |
+| `/api/workflow-runs/capabilities` | GET | Discover bounded workflow-run coordination support |
+| `/api/workflow-runs/start` | POST | Start one validated replay for an explicit agent instance |
+| `/api/workflow-runs/{runId}/status` | POST | Read a run using its capability token |
+| `/api/workflow-runs/{runId}/cancel` | POST | Request cancellation using its capability token |
 | `/api/shutdown` | POST | Request graceful shutdown |
 | `/ws/agent` | WebSocket | Agent registration endpoint |
 
@@ -309,6 +313,7 @@ The broker exposes a simple HTTP API on port 19223 for CLI and diagnostic use:
 [
   {
     "id": "7ff0e6fd13d9",
+    "instanceId": "9a0dcb5664d643d3bc49d8ae692c71d6",
     "project": "/Users/dev/MyApp/MyApp.csproj",
     "tfm": "net10.0-maccatalyst",
     "platform": "MacCatalyst",
@@ -318,6 +323,64 @@ The broker exposes a simple HTTP API on port 19223 for CLI and diagnostic use:
   }
 ]
 ```
+
+### Workflow-run API
+
+Workflow runs are broker-owned, bounded replays of a canonical `maui-test` flow. They are
+not a device lifecycle, reset, repair, or source-editing API.
+
+1. Read `GET /api/workflow-runs/capabilities`.
+2. Select an agent from `/api/agents` and send both its `id` and current `instanceId`.
+3. Send `POST /api/workflow-runs/start` with an `idempotencyKey`, one of `markdown` or `flow`,
+   and an optional bounded `timeoutMs`. A safety-aware caller may additionally send a
+   non-executable `plan` and host-observed `context` containing reset, precondition,
+   compensator, and independent-oracle evidence.
+4. Save the returned `capabilityToken`. It is required in the JSON body for status and cancel.
+
+````json
+{
+  "agentId": "7ff0e6fd13d9",
+  "agentInstanceId": "9a0dcb5664d643d3bc49d8ae692c71d6",
+  "idempotencyKey": "caller-generated-opaque-key",
+  "markdown": "# Scenario: smoke\n\n```json maui-test\n{\"schema\":2,\"name\":\"smoke\",\"steps\":[]}\n```",
+  "timeoutMs": 120000
+}
+````
+
+The broker validates the flow and evaluates side-effect admission before taking a lease. A
+successful start returns HTTP 202 with an opaque `runId`, per-run `capabilityToken`, initial
+`queued` state, and an additive `admission` decision. A denied plan/context returns HTTP 409 with
+the same structured reasons and acquires neither a lease nor a mutation path. Repeating the same
+idempotency key and request digest returns the same run and token; the safety context contributes
+to that digest, so using the key with changed evidence returns HTTP 409. One mutating run may
+target an agent instance at a time.
+
+`none` requires matching declared/observed preconditions. `test-tenant-resettable` additionally
+requires successful app and backend reset evidence with matching seed fingerprints.
+`compensated` requires that reset evidence or a successful declared compensator. `non-replayable`
+rejects automatic replay and repair validation; only a distinct
+`context.manualOneShotAuthorization: true` can admit one human run. Status snapshots and terminal
+reports retain the policy, admission reasons, reset/precondition evidence, oracle results, and
+`repairEligibility`. Legacy schema-2 manual starts remain supported, but report
+`sideEffectPolicy: "unspecified"` and `repairEligibility: false`.
+
+Run states are `queued`, `acquiring-lease`, `preparing`, `running`, `passed`, `failed`,
+`cancelled`, `timed-out`, `lease-lost`, and `infrastructure-error`. Terminal status retains the
+structured flow run report and first divergence. A reconnect changes `instanceId`; a request for
+the old instance is rejected, and an active old-instance run becomes `lease-lost`.
+
+Status and cancellation bodies are deliberately small:
+
+```json
+{ "capabilityToken": "returned-only-by-start" }
+```
+
+The token coordinates access to an individual run; it is not authorization for arbitrary app
+mutation. The broker holds and heartbeats the mutation-lease transaction for the run, disables
+mutating transport retries, and ends/releases the lease on every terminal path.
+
+The machine-readable contract is
+[`broker-workflow-runs-v1.yaml`](spec/broker-workflow-runs-v1.yaml).
 
 ## Troubleshooting
 

@@ -187,6 +187,48 @@ public class AgentHttpServerTests : IDisposable
     }
 
     [Fact]
+    public async Task MutationObserverFailure_OverridesSuccessfulMutationResponse()
+    {
+        using var server = new AgentHttpServer(_port);
+        server.MutationLeaseValidator = _ => Task.FromResult(new MutationLeaseStatus
+        {
+            Ok = true,
+            Allowed = true,
+            YouHold = true,
+            LeaseId = "lease"
+        });
+        server.MutationObserver = (_, _) => Task.FromResult<HttpResponse?>(
+            HttpResponse.Error(
+                "The app mutation succeeded, but workflow recording failed.",
+                statusCode: 409,
+                reason: "recording"));
+        server.MapPost(
+            "/api/v1/ui/mutate",
+            _ => Task.FromResult(HttpResponse.Json(new { ok = true })));
+        server.Start();
+        try
+        {
+            using var client = new HttpClient();
+            using var request = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"http://localhost:{_port}/api/v1/ui/mutate");
+            request.Headers.Add("X-DevFlow-Lease", "lease");
+            request.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+
+            using var response = await client.SendAsync(request);
+            var body = await response.Content.ReadAsStringAsync();
+
+            Assert.Equal(HttpStatusCode.Conflict, response.StatusCode);
+            Assert.Contains("\"reason\":\"recording\"", body, StringComparison.Ordinal);
+            Assert.Contains("mutation succeeded", body, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            await server.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task StopAsync_CancelsMutationQueuedBehindAdmissionGate()
     {
         using var server = new AgentHttpServer(_port);

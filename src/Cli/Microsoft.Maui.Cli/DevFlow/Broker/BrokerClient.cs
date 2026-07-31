@@ -379,8 +379,14 @@ public static class BrokerClient
             // Try to kill hung process
             try
             {
-                var process = Process.GetProcessById(state.Pid);
-                if (!process.HasExited)
+                using var process = Process.GetProcessById(state.Pid);
+                var processPath = process.MainModule?.FileName;
+                if (!process.HasExited &&
+                    IsBrokerProcessIdentityMatch(
+                        state,
+                        process.StartTime.ToUniversalTime(),
+                        processPath,
+                        Environment.ProcessPath))
                 {
                     process.Kill();
                     process.WaitForExit(2000);
@@ -391,6 +397,49 @@ public static class BrokerClient
             File.Delete(BrokerPaths.StateFile);
         }
         catch { }
+    }
+
+    internal static bool IsBrokerProcessIdentityMatch(
+        BrokerState state,
+        DateTime processStartedUtc,
+        string? candidateExecutable,
+        string? currentCliExecutable)
+    {
+        if (state.Pid <= 0 ||
+            state.StartedAt == default ||
+            string.IsNullOrWhiteSpace(candidateExecutable) ||
+            string.IsNullOrWhiteSpace(currentCliExecutable))
+        {
+            return false;
+        }
+
+        var elapsed = (processStartedUtc - state.StartedAt.ToUniversalTime()).Duration();
+        if (elapsed > TimeSpan.FromSeconds(30))
+            return false;
+
+        try
+        {
+            var comparison = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+            var candidatePath = Path.GetFullPath(candidateExecutable);
+            var currentPath = Path.GetFullPath(currentCliExecutable);
+            var candidateName = Path.GetFileName(candidatePath);
+            if (candidateName.Equals("dotnet", comparison) ||
+                candidateName.Equals("dotnet.exe", comparison))
+            {
+                // A generic dotnet host cannot be distinguished from an unrelated managed app
+                // without inspecting its command line. Prefer leaving a hung broker behind over
+                // terminating an arbitrary process after PID reuse.
+                return false;
+            }
+            return string.Equals(candidatePath, currentPath, comparison);
+        }
+        catch (Exception ex) when (
+            ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
     }
 
     internal static async Task<int?> StartBrokerAsync()

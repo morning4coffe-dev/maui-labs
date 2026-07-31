@@ -26,6 +26,8 @@ public static class AgentServiceExtensions
         var enabledMetadata = ReadAssemblyMetadata("Microsoft.Maui.DevFlowEnabled");
         var buildMode = ReadAssemblyMetadata("Microsoft.Maui.DevFlowMode");
         options.ApplyBuildMetadata(enabledMetadata, buildMode);
+        options.ApplyPortMetadata(ReadAssemblyMetadataPort());
+        options.ValidateForRegistration();
 
         // Read project identity from assembly metadata (injected by .targets)
         var project = ReadAssemblyMetadataProject() ?? "unknown";
@@ -83,13 +85,7 @@ public static class AgentServiceExtensions
             brokerReg = null;
         }
 
-        // Fall back to assembly metadata port if broker didn't assign one
-        if (!hasCustomPort && brokerReg?.AssignedPort == null)
-        {
-            var metaPort = ReadAssemblyMetadataPort();
-            if (metaPort.HasValue)
-                options.Port = metaPort.Value;
-        }
+        options.ValidateForRegistration();
 
         var service = new PlatformAgentService(options);
         service.SetSessionId(sessionId);
@@ -297,10 +293,7 @@ public static class AgentServiceExtensions
     }
 
     private static int? ReadAssemblyMetadataPort()
-    {
-        var value = ReadAssemblyMetadata("Microsoft.Maui.DevFlowPort");
-        return value != null && int.TryParse(value, out var port) ? port : null;
-    }
+        => AgentOptions.ParsePortMetadata(ReadAssemblyMetadata("Microsoft.Maui.DevFlowPort"));
 
     internal static string? ReadAssemblyMetadataProject() => ReadAssemblyMetadata("Microsoft.Maui.DevFlowProject");
     internal static string? ReadAssemblyMetadataTfm() => ReadAssemblyMetadata("Microsoft.Maui.DevFlowTfm");

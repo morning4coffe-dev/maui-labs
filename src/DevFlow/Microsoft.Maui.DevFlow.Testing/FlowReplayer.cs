@@ -1,7 +1,8 @@
 using Microsoft.Maui.DevFlow.Driver;
 using System.Globalization;
+using System.Text.Json.Serialization;
 
-namespace Microsoft.Maui.Cli.DevFlow.Flows;
+namespace Microsoft.Maui.DevFlow.Testing;
 
 public sealed class FlowAssertResult
 {
@@ -24,6 +25,10 @@ public sealed class FlowStepResult
     public string? FailureKind { get; set; }
     public int? MatchCount { get; set; }
     public string? SelectorQuality { get; set; }
+    public string? CommandId { get; set; }
+    public string? ActionDigest { get; set; }
+    public long? AuthorityEpoch { get; set; }
+    public string? AcknowledgementState { get; set; }
     public List<FlowAssertResult> Asserts { get; set; } = new();
 }
 
@@ -39,6 +44,14 @@ public sealed class FlowReplayReport
     public bool StoppedEarly { get; set; }
     public bool EvidenceAvailable { get; set; }
     public string? EvidencePath { get; set; }
+    /// <summary>Optional v1 structured report; omitted from legacy JSON when unavailable.</summary>
+    [JsonPropertyName("report")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public MauiFlowRunReport? StructuredReport { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReportDigest { get; set; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReportPath { get; set; }
     public List<FlowStepResult> Results { get; set; } = new();
 }
 
@@ -72,11 +85,96 @@ public sealed class FlowReplayer
     {
     }
 
-    internal FlowReplayer(
+    public FlowReplayer(
         AgentClient agent,
-        int pollTries = 4,
-        int pollGapMs = 300,
-        bool continueOnFailure = false,
+        bool continueOnFailure,
+        IFlowReplayEvidenceCapture? evidenceCapture = null,
+        Func<string, string?>? secretResolver = null)
+        : this(
+            agent,
+            pollTries: 4,
+            pollGapMs: 300,
+            continueOnFailure: continueOnFailure,
+            evidenceCapture: evidenceCapture,
+            secretResolver: secretResolver)
+    {
+    }
+
+    public FlowReplayer(
+        AgentClient agent,
+        IFlowReplayEvidenceCapture? evidenceCapture)
+        : this(
+            agent,
+            pollTries: 4,
+            pollGapMs: 300,
+            continueOnFailure: false,
+            evidenceCapture: evidenceCapture,
+            secretResolver: null)
+    {
+    }
+
+    public FlowReplayer(
+        AgentClient agent,
+        Func<string, string?> secretResolver)
+        : this(
+            agent,
+            pollTries: 4,
+            pollGapMs: 300,
+            continueOnFailure: false,
+            evidenceCapture: null,
+            secretResolver: secretResolver)
+    {
+    }
+
+    public FlowReplayer(
+        AgentClient agent,
+        IFlowReplayEvidenceCapture? evidenceCapture,
+        Func<string, string?> secretResolver)
+        : this(
+            agent,
+            pollTries: 4,
+            pollGapMs: 300,
+            continueOnFailure: false,
+            evidenceCapture: evidenceCapture,
+            secretResolver: secretResolver)
+    {
+    }
+
+    public FlowReplayer(
+        AgentClient agent,
+        int pollTries,
+        int pollGapMs,
+        IFlowReplayEvidenceCapture? evidenceCapture)
+        : this(
+            agent,
+            pollTries: pollTries,
+            pollGapMs: pollGapMs,
+            continueOnFailure: false,
+            evidenceCapture: evidenceCapture,
+            secretResolver: null)
+    {
+    }
+
+    public FlowReplayer(
+        AgentClient agent,
+        int pollTries,
+        int pollGapMs,
+        Func<string, string?> secretResolver)
+        : this(
+            agent,
+            pollTries: pollTries,
+            pollGapMs: pollGapMs,
+            continueOnFailure: false,
+            evidenceCapture: null,
+            secretResolver: secretResolver)
+    {
+    }
+
+    public FlowReplayer(
+        AgentClient agent,
+        int pollTries,
+        int pollGapMs,
+        bool continueOnFailure,
         IFlowReplayEvidenceCapture? evidenceCapture = null,
         Func<string, string?>? secretResolver = null)
     {
@@ -89,16 +187,67 @@ public sealed class FlowReplayer
         _secretResolver = secretResolver ?? Environment.GetEnvironmentVariable;
     }
 
+    /// <summary>
+    /// Compatibility entry point. Execution is delegated to <see cref="MauiFlowRunner"/> so every
+    /// host uses the same structured runtime while preserving the original response shape.
+    /// </summary>
     public async Task<FlowReplayReport> ReplayAsync(MauiFlow flow, string? file = null, CancellationToken ct = default)
     {
-        var report = new FlowReplayReport { Name = flow.Name, File = file, Total = flow.Steps.Count };
+        var runner = new MauiFlowRunner(
+            _agent,
+            new MauiFlowRunnerOptions
+            {
+                PollTries = _pollTries,
+                PollGapMs = _pollGapMs,
+                ContinueOnFailure = _continueOnFailure,
+                ThrowOnCancellation = true,
+            },
+            _evidenceCapture,
+            _secretResolver);
+        return (await runner.RunWithLegacyAsync(flow, file, ct).ConfigureAwait(false)).LegacyReport;
+    }
 
-        foreach (var step in flow.Steps)
+    private async Task<FlowReplayReport> ReplayLegacyAsync(MauiFlow flow, string? file = null, CancellationToken ct = default)
+    {
+        var report = new FlowReplayReport
+        {
+            Name = flow.Name,
+            File = file,
+            Total = flow.Steps?.Count ?? 0
+        };
+        var validation = FlowValidator.Validate(flow);
+        if (!validation.Ok)
+        {
+            report.Failed = 1;
+            report.StoppedEarly = true;
+            report.Results.Add(new FlowStepResult
+            {
+                Seq = 0,
+                Action = "validate",
+                Label = "Validate flow",
+                Ok = false,
+                FailureKind = FlowFailureKinds.Validation,
+                Error = string.Join("; ", validation.Errors)
+            });
+            return report;
+        }
+
+        foreach (var step in flow.Steps ?? [])
         {
             ct.ThrowIfCancellationRequested();
-            var res = new FlowStepResult { Seq = step.Seq, Action = step.Action, Label = FlowMarkdown.Label(step) };
+            var replayStep = step ?? throw new InvalidOperationException("A validated flow cannot contain a null step.");
+            var res = new FlowStepResult { Seq = replayStep.Seq, Action = replayStep.Action, Label = FlowMarkdown.Label(replayStep) };
+            var priorCommandSequence = _agent.LastWorkflowCommandReceipt?.Sequence;
 
-            var drive = await DriveAsync(step, ct);
+            var drive = await DriveAsync(replayStep, ct);
+            var receipt = _agent.LastWorkflowCommandReceipt;
+            if (receipt is not null && receipt.Sequence != priorCommandSequence)
+            {
+                res.CommandId = receipt.CommandId;
+                res.ActionDigest = receipt.ActionDigest;
+                res.AuthorityEpoch = receipt.AuthorityEpoch;
+                res.AcknowledgementState = receipt.AcknowledgementState;
+            }
             res.MatchCount = drive.MatchCount;
             res.SelectorQuality = drive.SelectorQuality;
             if (!drive.Ok)
@@ -107,13 +256,13 @@ public sealed class FlowReplayer
                 res.Ok = false;
                 res.Error = drive.Error;
                 res.FailureKind = drive.Kind;
-                foreach (var a in step.Asserts ?? Enumerable.Empty<FlowAssert>())
+                foreach (var a in replayStep.Asserts ?? Enumerable.Empty<FlowAssert>())
                     res.Asserts.Add(new FlowAssertResult { Kind = a.Kind, Skipped = true, Name = a.Name, Expected = a.Expected });
             }
             else
             {
                 res.Ok = true;
-                foreach (var a in step.Asserts ?? Enumerable.Empty<FlowAssert>())
+                foreach (var a in replayStep.Asserts ?? Enumerable.Empty<FlowAssert>())
                 {
                     if (!a.Verify)
                     {
@@ -139,7 +288,7 @@ public sealed class FlowReplayer
                 report.DivergencePoint ??= step.Seq;
                 if (_evidenceCapture is not null)
                 {
-                    try { await _evidenceCapture.CaptureOnFailureAsync(flow, step, res, ct); }
+                    try { await _evidenceCapture.CaptureOnFailureAsync(flow, replayStep, res, ct); }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     catch { /* evidence must never mask the replay failure */ }
                 }
@@ -238,6 +387,14 @@ public sealed class FlowReplayer
         {
             throw;
         }
+        catch (WorkflowCommandException ex)
+        {
+            return DriveResult.Failure(
+                ex.IsUnknownCompletion
+                    ? FlowFailureKinds.UnknownCompletion
+                    : FlowFailureKinds.WorkflowCommandConflict,
+                ex.Message);
+        }
         catch (Exception ex)
         {
             return DriveResult.Failure(FlowFailureKinds.Drive, $"drive failed: {ex.Message}");
@@ -308,7 +465,7 @@ public sealed class FlowReplayer
         return r;
     }
 
-    internal static bool PropertyValuesEqual(string? actual, string? expected)
+    public static bool PropertyValuesEqual(string? actual, string? expected)
     {
         var left = (actual ?? string.Empty).Trim();
         var right = (expected ?? string.Empty).Trim();

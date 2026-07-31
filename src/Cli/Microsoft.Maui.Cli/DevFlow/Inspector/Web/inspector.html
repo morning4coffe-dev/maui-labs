@@ -104,7 +104,7 @@
             <button id="df-retry-connection" class="df-tool-btn" type="button"><svg class="df-ic"><use href="#i-refresh"/></svg><span>Retry now</span></button>
           </div>
         </div>
-        <div id="df-hit-candidates" class="df-hit-candidates df-hidden" role="listbox" aria-label="Elements at selected point"></div>
+        <div id="df-hit-candidates" class="df-hit-candidates df-hidden" role="group" aria-label="Elements at selected point"></div>
         <div id="df-viewport-wrap" role="region" aria-label="Live app viewport">
           <div id="df-stage">
             <div id="app-viewport" data-width="{{VIEWPORT_WIDTH}}" data-height="{{VIEWPORT_HEIGHT}}" data-root-offset-x="{{ROOT_OFFSET_X}}" data-root-offset-y="{{ROOT_OFFSET_Y}}" style="width:{{VIEWPORT_WIDTH}}px; height:{{VIEWPORT_HEIGHT}}px;">
@@ -127,7 +127,7 @@
       <div id="df-timeline-steps" class="df-tl-steps"></div>
       <span id="df-timeline-meta" class="df-tl-meta"></span>
       <button id="df-workflow-file" class="df-tool-btn" type="button" title="Choose a workflow Markdown file"><svg class="df-ic"><use href="#i-file"/></svg><span>Choose file</span></button>
-      <input id="df-workflow-file-input" class="df-sr-only" type="file" accept=".md,text/markdown">
+      <input id="df-workflow-file-input" class="df-sr-only" type="file" accept=".md,text/markdown" tabindex="-1" aria-hidden="true">
       <button id="df-workflow-replay" class="df-tool-btn" type="button" disabled><svg class="df-ic"><use href="#i-replay"/></svg><span>Replay</span></button>
       <button id="df-record-cancel" class="df-tool-btn df-tl-discard df-hidden" title="Discard the active recording without saving" aria-label="Discard active recording"><svg class="df-ic"><use href="#i-close"/></svg><span>Discard</span></button>
       <button id="df-timeline-close" class="df-icon-btn" title="Dismiss timeline"><svg class="df-ic"><use href="#i-close"/></svg></button>
@@ -153,6 +153,7 @@
           <button id="df-tab-alerts" class="df-dock-tab" data-tab="alerts" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Alerts</button>
           <button id="df-tab-webview" class="df-dock-tab" data-tab="webview" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">WebView</button>
         </div>
+        <span id="df-problems-status" class="df-sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
         <span id="df-dock-meta" class="df-dock-meta"></span>
         <button id="df-attach-data" class="df-icon-btn" title="Add the current Data context to Copilot" aria-label="Add current Data context to Copilot" disabled><svg class="df-ic"><use href="#i-attach"/></svg></button>
         <button id="df-dock-collapse" class="df-icon-btn" title="Collapse data panel" aria-expanded="true"><svg class="df-ic"><use href="#i-chevron"/></svg></button>

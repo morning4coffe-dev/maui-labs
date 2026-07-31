@@ -18,6 +18,7 @@ public abstract class AppFixtureBase : IAppFixture
     public int AgentPort { get; private set; }
     public string AgentBaseUrl => $"http://localhost:{AgentPort}";
     public abstract string Platform { get; }
+    public virtual IPlatformFlowTestLifecycle? FlowLifecycle => null;
 
     protected AppFixtureBase()
     {

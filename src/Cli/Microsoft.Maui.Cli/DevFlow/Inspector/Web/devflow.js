@@ -396,8 +396,6 @@ import { createElementTreeController } from './inspector-tree.js';
       if (!candidate || !candidate.id) continue;
       const button = document.createElement('button');
       button.type = 'button';
-      button.setAttribute('role', 'option');
-      button.setAttribute('aria-selected', String(candidate.id === selectedId));
       button.textContent = candidateLabel(candidate);
       button.addEventListener('click', () => {
         selectElement(candidate.id);
@@ -696,11 +694,27 @@ import { createElementTreeController } from './inspector-tree.js';
         if (!document.hidden && !replaying) scheduleRefresh(0);
       };
       eventsWs.onmessage = (event) => {
+        let message = null;
         let type = null;
-        try { type = JSON.parse(event.data).type || null; } catch { }
+        try {
+          message = JSON.parse(event.data);
+          type = message.type || null;
+        } catch { }
         if (type === 'problemsChange') {
           const problemsTab = document.getElementById('df-tab-problems');
+          const problemsStatus = document.getElementById('df-problems-status');
+          const count = Number(message && message.data && message.data.count);
           problemsTab?.classList.add('df-has-update');
+          if (problemsTab) {
+            problemsTab.setAttribute(
+              'aria-label',
+              Number.isFinite(count) ? `Problems, ${count} available` : 'Problems, updated');
+          }
+          if (problemsStatus) {
+            problemsStatus.textContent = Number.isFinite(count)
+              ? `${count} runtime UI problem${count === 1 ? '' : 's'} available.`
+              : 'Runtime UI problems updated.';
+          }
           if (!document.hidden && dockActiveTab === 'problems' && !dockEl.classList.contains('df-hidden'))
             loadTab('problems');
           return;
@@ -1730,10 +1744,16 @@ import { createElementTreeController } from './inspector-tree.js';
     const sel = selectorPayload(el);
     if (!sel.automationId && !sel.text && !sel.id) { setStatus('Cannot assert: element has no durable selector (add an AutomationId).'); return; }
     let assert;
-    const res = await apiPost('/api/getProperty', { elementId: selectedId, name: 'Text' });
-    const text = res && res.value;
-    if (text != null && String(text).length > 0) assert = { kind: 'propEquals', selector: sel, name: 'Text', expected: String(text), verify: true };
-    else assert = { kind: 'exists', selector: sel, verify: true };
+    const passwordResult = await apiPost('/api/getProperty', { elementId: selectedId, name: 'IsPassword' });
+    const isPassword = String(passwordResult?.value ?? '').toLowerCase() === 'true';
+    if (isPassword) {
+      assert = { kind: 'exists', selector: sel, verify: true };
+    } else {
+      const res = await apiPost('/api/getProperty', { elementId: selectedId, name: 'Text' });
+      const text = res && res.value;
+      if (text != null && String(text).length > 0) assert = { kind: 'propEquals', selector: sel, name: 'Text', expected: String(text), verify: true };
+      else assert = { kind: 'exists', selector: sel, verify: true };
+    }
     await recordStep('assert', null, { assertsJson: JSON.stringify([assert]) });
     setStatus(assert.kind === 'propEquals' ? `Asserted Text == "${assert.expected}"` : 'Asserted element is present');
   }
@@ -2332,7 +2352,13 @@ import { createElementTreeController } from './inspector-tree.js';
     const problems = j && j.problems;
     const problemsTab = document.getElementById('df-tab-problems');
     problemsTab?.classList.remove('df-has-update');
-    if (problemsTab) problemsTab.textContent = `Problems${Number.isFinite(j && j.count) ? ` (${j.count})` : ''}`;
+    if (problemsTab) {
+      const count = Number.isFinite(j && j.count) ? j.count : null;
+      problemsTab.textContent = `Problems${count !== null ? ` (${count})` : ''}`;
+      problemsTab.setAttribute(
+        'aria-label',
+        count !== null ? `Problems, ${count} total` : 'Problems');
+    }
 
     if (j && j.enabled === false) {
       clearDockSnapshot();

@@ -1,10 +1,95 @@
-using Microsoft.Maui.Cli.DevFlow.Flows;
+using Microsoft.Maui.DevFlow.Testing;
+using FlowMcpTools = Microsoft.Maui.Cli.DevFlow.Flows.FlowTools;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
 /// <summary>Unit tests for the flow-test <c>.md</c> format (parse/serialize) and validation.</summary>
 public class FlowFormatTests
 {
+    [Fact]
+    public void Validator_RejectsUnsupportedFutureSchema()
+    {
+        var flow = new MauiFlow
+        {
+            Schema = MauiFlow.CurrentSchema + 1,
+            Steps =
+            [
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Tap,
+                    Target = new FlowSelector { AutomationId = "Button" }
+                }
+            ]
+        };
+
+        var validation = FlowValidator.Validate(flow);
+
+        Assert.False(validation.Ok);
+        Assert.Contains(validation.Errors, error =>
+            error.Contains("newer than supported", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Validator_RejectsInvalidLowerSchemas(int schema)
+    {
+        var flow = new MauiFlow
+        {
+            Schema = schema,
+            Steps =
+            [
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Back
+                }
+            ]
+        };
+
+        var validation = FlowValidator.Validate(flow);
+
+        Assert.False(validation.Ok);
+        Assert.Contains(validation.Errors, error =>
+            error.Contains("schema", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void Validator_RejectsEmptyFlow()
+    {
+        var validation = FlowValidator.Validate(new MauiFlow());
+
+        Assert.False(validation.Ok);
+        Assert.Contains(validation.Errors, error =>
+            error.Contains("at least one step", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task McpValidate_RejectsEmptyFlow()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"empty-flow-{Guid.NewGuid():N}.md");
+        await File.WriteAllTextAsync(
+            path,
+            FlowMarkdown.Serialize(new MauiFlow { Name = "empty" }));
+        try
+        {
+            var json = await FlowMcpTools.Validate(null!, path);
+            using var result = System.Text.Json.JsonDocument.Parse(json);
+
+            Assert.False(result.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Contains(
+                result.RootElement.GetProperty("errors").EnumerateArray(),
+                error => error.GetString()?.Contains(
+                    "at least one step",
+                    StringComparison.OrdinalIgnoreCase) == true);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     private const string SampleMd = """
 # Scenario: login
 
@@ -79,6 +164,18 @@ public class FlowFormatTests
         var r = FlowMarkdown.Parse(md);
         Assert.False(r.Ok);
         Assert.Contains("Invalid JSON", r.Error);
+    }
+
+    [Theory]
+    [InlineData("""{"name":"missing schema","steps":[]}""", "schema")]
+    [InlineData("""{"schema":2,"name":"missing steps"}""", "steps")]
+    [InlineData("""{"schema":"2","name":"bad schema","steps":[]}""", "schema")]
+    public void Parse_RequiresExplicitSchemaAndSteps(string json, string expected)
+    {
+        var result = FlowMarkdown.Parse($"```json maui-test\n{json}\n```");
+
+        Assert.False(result.Ok);
+        Assert.Contains(expected, result.Error, StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]

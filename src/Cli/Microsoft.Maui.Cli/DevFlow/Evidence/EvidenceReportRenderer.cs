@@ -74,6 +74,12 @@ internal static class EvidenceReportRenderer
         Definition(html, "Agent", manifest?.Platform?.AgentVersion);
         Definition(html, "Framework", Join(manifest?.Platform?.Framework, manifest?.Platform?.FrameworkVersion));
         Definition(html, "Selected element", manifest?.SelectedElementId);
+        Definition(html, "Flow run", manifest?.FlowRun?.RunId);
+        Definition(html, "Failed step", manifest?.FlowRun?.FailedStepId);
+        Definition(html, "Failure code", manifest?.FlowRun?.FailureCode);
+        Definition(html, "Flow report digest", manifest?.FlowRun?.ReportDigest);
+        Definition(html, "Flow report path", manifest?.FlowRun?.ReportPath ?? manifest?.FlowRun?.ReportReference);
+        Definition(html, "Evidence completeness", manifest?.FlowRun?.CaptureCompleteness);
 
         var device = result.Environment?.Device;
         if (device is not null)
@@ -469,7 +475,15 @@ internal static class EvidenceReportRenderer
     }
 
     /// <summary>HTML-encodes every interpolated value. Null becomes an empty cell.</summary>
-    private static string E(string? value) => value is null ? "" : WebUtility.HtmlEncode(value);
+    private static string E(string? value)
+    {
+        if (value is null)
+            return "";
+        var safe = new string(value.Where(character =>
+            (!char.IsControl(character) || character is '\n' or '\r' or '\t') &&
+            char.GetUnicodeCategory(character) != System.Globalization.UnicodeCategory.Format).ToArray());
+        return WebUtility.HtmlEncode(safe);
+    }
 
     private const string Css = """
         :root { color-scheme: light dark; }

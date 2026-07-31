@@ -1,5 +1,5 @@
 using Microsoft.Maui.Cli.DevFlow.Broker;
-using Microsoft.Maui.Cli.DevFlow.Flows;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -38,6 +38,24 @@ public sealed class FlowRecordingSpoolStoreTests : IDisposable
 
         Assert.Empty(restored);
         Assert.NotEmpty(warnings);
+        Assert.NotEmpty(Directory.EnumerateFiles(_root, "*.corrupt-*", SearchOption.TopDirectoryOnly));
+    }
+
+    [Fact]
+    public void Restore_MismatchedFilenameAndRecordingId_QuarantinesTheSpool()
+    {
+        var recorder = new FlowRecorder("resume", "Demo", "Windows", null);
+        var store = new FlowRecordingSpoolStore(_root);
+        const string contentId = "0123456789abcdef01234567";
+        const string filenameId = "89abcdef0123456701234567";
+        store.Save("agent", "stable", "session", contentId, recorder);
+        File.Move(
+            Path.Combine(_root, contentId + ".json"),
+            Path.Combine(_root, filenameId + ".json"));
+
+        var restored = store.Restore();
+
+        Assert.Empty(restored);
         Assert.NotEmpty(Directory.EnumerateFiles(_root, "*.corrupt-*", SearchOption.TopDirectoryOnly));
     }
 
@@ -127,6 +145,54 @@ public sealed class FlowRecordingSpoolStoreTests : IDisposable
         Assert.False(restoredStatus.Ok);
         Assert.True(restoredStatus.Recording);
         Assert.Contains("not durable", restoredStatus.Error!, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void Coordinator_RestartResumesOnlyWithExactRecordingCapability()
+    {
+        var first = new BrokerFlowCoordinator(
+            new FlowRecordingStore(),
+            new FlowRecordingSpoolStore(_root));
+        var started = first.Start(
+            "process-a",
+            "resume",
+            "Demo",
+            "Windows",
+            null,
+            sessionId: "session",
+            stableAgentId: "stable");
+        Assert.True(started.Ok, started.Error);
+        Assert.True(first.Observe("process-a", new FlowObservation
+        {
+            Action = FlowActions.Tap,
+            AutomationId = "First"
+        }, started.RecordingId).Ok);
+        first.RemoveAgent("process-a");
+
+        var restarted = new BrokerFlowCoordinator(
+            new FlowRecordingStore(),
+            new FlowRecordingSpoolStore(_root));
+        Assert.False(restarted.ConnectAgent(
+            "process-b",
+            "stable",
+            "session",
+            expectedRecordingId: "wrong-recording-id"));
+        Assert.True(restarted.ConnectAgent(
+            "process-b",
+            "stable",
+            "session",
+            started.RecordingId));
+        Assert.Equal(1, restarted.Status("process-b", started.RecordingId).Steps);
+        Assert.True(restarted.Observe("process-b", new FlowObservation
+        {
+            Action = FlowActions.Tap,
+            AutomationId = "Second"
+        }, started.RecordingId).Ok);
+
+        var stopped = restarted.Stop("process-b", started.RecordingId);
+        Assert.True(stopped.Ok, stopped.Error);
+        var flow = FlowMarkdown.Parse(stopped.Markdown!).Flow!;
+        Assert.Equal(2, flow.Steps.Count);
     }
 
     public void Dispose()

@@ -211,6 +211,7 @@ jobs:
             expected_package_ids=(
               Microsoft.Maui.DevFlow.Agent
               Microsoft.Maui.DevFlow.Blazor
+              Microsoft.Maui.DevFlow.Testing
             )
 
             for package_id in "${expected_package_ids[@]}"; do

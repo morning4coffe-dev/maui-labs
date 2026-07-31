@@ -195,6 +195,70 @@ public class ProfilerAgentClientTests
     }
 
     [Fact]
+    public async Task LegacyProfilerStart_StopsTheSessionAndRequestsAnAgentUpgrade()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
+
+        var serverTask = Task.Run(async () =>
+        {
+            using (var client = await listener.AcceptTcpClientAsync())
+            using (var stream = client.GetStream())
+            {
+                var request = await ReadRequestAsync(stream);
+                Assert.Contains("POST /api/v1/profiler/sessions", request, StringComparison.Ordinal);
+                await WriteJsonResponseAsync(stream, """
+                    {
+                      "session": {
+                        "sessionId": "legacy-session",
+                        "startedAtUtc": "2026-01-01T00:00:00Z",
+                        "sampleIntervalMs": 500,
+                        "isActive": true
+                      }
+                    }
+                    """);
+            }
+
+            using (var client = await listener.AcceptTcpClientAsync())
+            using (var stream = client.GetStream())
+            {
+                var request = await ReadRequestAsync(stream);
+                Assert.Contains(
+                    "DELETE /api/v1/profiler/sessions/legacy-session",
+                    request,
+                    StringComparison.Ordinal);
+                Assert.DoesNotContain(
+                    "X-DevFlow-Profiler-Stop-Token",
+                    request,
+                    StringComparison.OrdinalIgnoreCase);
+                await WriteJsonResponseAsync(stream, """
+                    {
+                      "session": {
+                        "sessionId": "legacy-session",
+                        "startedAtUtc": "2026-01-01T00:00:00Z",
+                        "sampleIntervalMs": 500,
+                        "isActive": false
+                      }
+                    }
+                    """);
+            }
+        });
+
+        using var client = new AgentClient("localhost", port)
+        {
+            AutoAcquireMutationLease = false
+        };
+
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => client.StartProfilerAsync(500));
+
+        Assert.Contains("legacy profiler protocol", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("was stopped", error.Message, StringComparison.OrdinalIgnoreCase);
+        await serverTask;
+    }
+
+    [Fact]
     public async Task Profiler_SessionHandlers_RejectUnknownSessionIds()
     {
         using var service = new DevFlowAgentService(new AgentOptions { Enabled = false, EnableProfiler = true });

@@ -3,6 +3,8 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using ModelContextProtocol.Server;
 using Microsoft.Maui.Cli.DevFlow.Mcp;
+using Microsoft.Maui.DevFlow.Testing;
+using Testing = Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Flows;
 
@@ -30,10 +32,10 @@ public sealed class FlowTools
         var read = ReadFlowFile(file);
         if (read.Error is not null) return Error(read.Error);
 
-        var parsed = FlowMarkdown.Parse(read.Text!, read.Path);
+        var parsed = Testing.FlowMarkdown.Parse(read.Text!, read.Path);
         if (!parsed.Ok) return Error(parsed.Error!);
 
-        var validation = FlowValidator.Validate(parsed.Flow!);
+        var validation = Testing.FlowValidator.Validate(parsed.Flow!);
         if (!validation.Ok)
             return Error("Flow failed validation: " + string.Join("; ", validation.Errors));
 
@@ -41,7 +43,7 @@ public sealed class FlowTools
         Evidence.FlowReplayEvidenceCapture? capture = evidenceOnFailure
             ? new Evidence.FlowReplayEvidenceCapture(agent, evidenceOutput, Path.GetDirectoryName(read.Path!), "mcp")
             : null;
-        var replayer = new FlowReplayer(agent, evidenceCapture: capture);
+        var replayer = new Testing.FlowReplayer(agent, evidenceCapture: capture);
         var report = await replayer.ReplayAsync(parsed.Flow!, read.Path);
         report.EvidencePath = capture?.CapturedPath;
         return Json(report);
@@ -56,10 +58,10 @@ public sealed class FlowTools
         var read = ReadFlowFile(file);
         if (read.Error is not null) return Task.FromResult(Error(read.Error));
 
-        var parsed = FlowMarkdown.Parse(read.Text!, read.Path);
+        var parsed = Testing.FlowMarkdown.Parse(read.Text!, read.Path);
         if (!parsed.Ok) return Task.FromResult(Error(parsed.Error!));
 
-        var v = FlowValidator.Validate(parsed.Flow!);
+        var v = Testing.FlowValidator.Validate(parsed.Flow!);
         return Task.FromResult(Json(new
         {
             ok = v.Ok,

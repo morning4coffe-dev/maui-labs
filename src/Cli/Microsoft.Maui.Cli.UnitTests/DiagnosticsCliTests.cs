@@ -1,4 +1,6 @@
 using System.Text.Json;
+using System.Net;
+using System.Net.Sockets;
 using Microsoft.Maui.Cli.UnitTests.Fixtures;
 using Xunit;
 
@@ -86,6 +88,40 @@ public class DiagnosticsCliTests
     }
 
     [Fact]
+    public async Task DiagnosticsLayout_UnreachableAgentReportsConnectivity()
+    {
+        var port = GetUnusedPort();
+        var cli = new CliTestHarness(port);
+
+        var result = await cli.InvokeAsync("devflow", "diagnostics", "layout", "--json");
+
+        Assert.Equal(1, result.ExitCode);
+        using var error = JsonDocument.Parse(result.StdErr);
+        Assert.Equal("ConnectionError", error.RootElement.GetProperty("type").GetString());
+        Assert.Contains($"localhost:{port}", error.RootElement.GetProperty("error").GetString(), StringComparison.Ordinal);
+        Assert.DoesNotContain("older than this CLI", result.StdErr, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("--max-elements", "0")]
+    [InlineData("--max-elements", "5001")]
+    [InlineData("--window", "-1")]
+    public async Task DiagnosticsLayout_RejectsInvalidRangesBeforeCallingTheAgent(
+        string option,
+        string value)
+    {
+        var (server, cli) = await CreateFixturesAsync();
+        await using var _ = server;
+
+        var result = await cli.InvokeAsync(
+            "devflow", "diagnostics", "layout", option, value, "--json");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("InvalidArgument", result.StdErr, StringComparison.Ordinal);
+        Assert.Empty(server.RecordedRequests);
+    }
+
+    [Fact]
     public async Task DiagnosticsPerformance_RecordsAWindowAndSummarizesIt()
     {
         var (server, cli) = await CreateFixturesAsync();
@@ -151,5 +187,32 @@ public class DiagnosticsCliTests
         Assert.Equal(1, result.ExitCode);
         using var error = JsonDocument.Parse(result.StdErr);
         Assert.Contains("sample-interval", error.RootElement.ToString(), StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("--duration", "0")]
+    [InlineData("--duration", "301")]
+    [InlineData("--hotspots", "0")]
+    [InlineData("--hotspots", "51")]
+    public async Task DiagnosticsPerformance_RejectsInvalidRangesBeforeCallingTheAgent(
+        string option,
+        string value)
+    {
+        var (server, cli) = await CreateFixturesAsync();
+        await using var _ = server;
+
+        var result = await cli.InvokeAsync(
+            "devflow", "diagnostics", "performance", option, value, "--json");
+
+        Assert.Equal(1, result.ExitCode);
+        Assert.Contains("InvalidArgument", result.StdErr, StringComparison.Ordinal);
+        Assert.Empty(server.RecordedRequests);
+    }
+
+    private static int GetUnusedPort()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        return ((IPEndPoint)listener.LocalEndpoint).Port;
     }
 }

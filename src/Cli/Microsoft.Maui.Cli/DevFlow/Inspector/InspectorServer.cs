@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Maui.Cli.DevFlow.Broker;
 using Microsoft.Maui.DevFlow.Driver;
+using Testing = Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Inspector;
 
@@ -32,6 +33,11 @@ public sealed class InspectorServer : IDisposable
     private readonly string? _sessionId;
     private readonly AgentRegistration _checkpointRegistration;
     private readonly RouteCheckpointCoordinator _checkpoints;
+    private readonly Func<
+        Testing.MauiFlow,
+        Func<AgentClient, Testing.IFlowReplayEvidenceCapture?>,
+        CancellationToken,
+        Task<Testing.FlowReplayReport>>? _workflowReplay;
     private readonly XamlSourcePropertyEditor _sourcePropertyEditor;
     private readonly InspectorAlertController _alertController;
     // Per-inspector read token gating the data tabs (Logs/Network/Preferences/Device/Sensors/
@@ -102,7 +108,12 @@ public sealed class InspectorServer : IDisposable
         string? project,
         string? sessionId,
         RouteCheckpointCoordinator? checkpoints = null,
-        AgentRegistration? checkpointRegistration = null)
+        AgentRegistration? checkpointRegistration = null,
+        Func<
+            Testing.MauiFlow,
+            Func<AgentClient, Testing.IFlowReplayEvidenceCapture?>,
+            CancellationToken,
+            Task<Testing.FlowReplayReport>>? workflowReplay = null)
     {
         _port = port;
         _agentHost = agentHost;
@@ -124,6 +135,7 @@ public sealed class InspectorServer : IDisposable
             SessionId = sessionId
         };
         _checkpoints = checkpoints ?? new RouteCheckpointCoordinator();
+        _workflowReplay = workflowReplay;
         _sourcePropertyEditor = new XamlSourcePropertyEditor(project, sessionId);
         _alertController = new InspectorAlertController(agentHost, agentPort, appName, platform);
         _client = new AgentClient(agentHost, agentPort)
@@ -1683,10 +1695,10 @@ public sealed class InspectorServer : IDisposable
             }
         }
 
-        var result = string.Equals(action, Flows.FlowActions.Assert, StringComparison.OrdinalIgnoreCase)
+        var result = string.Equals(action, Testing.FlowActions.Assert, StringComparison.OrdinalIgnoreCase)
             ? await _client.ObserveMutationRecordingAsync(new MutationRecordingObservation
             {
-                Action = Flows.FlowActions.Assert,
+                Action = Testing.FlowActions.Assert,
                 AssertsJson = assertsJson
             }, recordingId)
             : await _client.ControlMutationRecordingAsync(
@@ -1767,10 +1779,8 @@ public sealed class InspectorServer : IDisposable
         return (result.Ok ? 200 : 400, "application/json", Encoding.UTF8.GetBytes(payload));
     }
 
-    // Replays a recorded flow (its Markdown) against the live app via the existing FlowReplayer —
-    // the same engine as maui_flow_replay — and returns a per-step pass/fail report. This RE-DRIVES
-    // the app (destructive by nature); the UI gates it behind an explicit button and blocks it while
-    // a recording is active.
+    // Replays a recorded flow through the broker-owned coordinator when this Inspector is broker
+    // hosted. Standalone Inspectors retain the public compatibility runner for existing direct use.
     private static readonly JsonSerializerOptions CamelCase = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     private async Task<(int, string, byte[])> HandleFlowFilesListAsync()
@@ -1859,12 +1869,12 @@ public sealed class InspectorServer : IDisposable
                 return JsonResponse(413, new { ok = false, error = "Workflow test files larger than 1 MB cannot be loaded." });
 
             var markdown = await File.ReadAllTextAsync(path, _lifetimeCts.Token);
-            var parsed = Flows.FlowMarkdown.Parse(markdown, path);
+            var parsed = Testing.FlowMarkdown.Parse(markdown, path);
             if (!parsed.Ok || parsed.Flow is null)
                 return JsonResponse(400, new { ok = false, error = parsed.Error ?? "Could not parse the workflow test." });
             if (parsed.Flow.Steps.Count > MaxReplaySteps)
                 return JsonResponse(400, new { ok = false, error = $"Flow too large (max {MaxReplaySteps} steps)." });
-            var validation = Flows.FlowValidator.Validate(parsed.Flow);
+            var validation = Testing.FlowValidator.Validate(parsed.Flow);
             if (!validation.Ok)
             {
                 return JsonResponse(400, new
@@ -2003,13 +2013,13 @@ public sealed class InspectorServer : IDisposable
         if (string.IsNullOrEmpty(markdown))
             return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"markdown required\"}"));
 
-        var parsed = Flows.FlowMarkdown.Parse(markdown);
+        var parsed = Testing.FlowMarkdown.Parse(markdown);
         if (!parsed.Ok || parsed.Flow is null)
             return (400, "application/json", Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new { ok = false, error = parsed.Error ?? "Could not parse the flow." })));
         if (parsed.Flow.Steps.Count > MaxReplaySteps)
             return (400, "application/json", Encoding.UTF8.GetBytes($"{{\"ok\":false,\"error\":\"Flow too large (max {MaxReplaySteps} steps).\"}}"));
 
-        var validation = Flows.FlowValidator.Validate(parsed.Flow);
+        var validation = Testing.FlowValidator.Validate(parsed.Flow);
         if (!validation.Ok)
         {
             var payload = JsonSerializer.Serialize(new
@@ -2046,14 +2056,21 @@ public sealed class InspectorServer : IDisposable
         {
             using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(2));
             lock (_replayEvidenceGate) _lastReplayEvidence = null;
-            var capture = new InspectorReplayEvidenceCapture(_client, parsed.Flow, bytes =>
-            {
-                lock (_replayEvidenceGate) _lastReplayEvidence = bytes;
-            });
-            var replayer = new Flows.FlowReplayer(_client, evidenceCapture: capture);
-            var report = await replayer.ReplayAsync(parsed.Flow, null, cts.Token);
+            var report = _workflowReplay is null
+                ? await ReplayStandaloneAsync(parsed.Flow, cts.Token)
+                : await _workflowReplay(
+                    parsed.Flow,
+                    client => new InspectorReplayEvidenceCapture(client, parsed.Flow, bytes =>
+                    {
+                        lock (_replayEvidenceGate) _lastReplayEvidence = bytes;
+                    }),
+                    cts.Token);
             lock (_replayEvidenceGate) report.EvidenceAvailable = _lastReplayEvidence is { Length: > 0 };
             return (200, "application/json", Encoding.UTF8.GetBytes(JsonSerializer.Serialize(report, CamelCase)));
+        }
+        catch (WorkflowRunRejectedException ex)
+        {
+            return JsonResponse(ex.StatusCode, new { ok = false, error = ex.Message });
         }
         catch (OperationCanceledException)
         {
@@ -2065,6 +2082,18 @@ public sealed class InspectorServer : IDisposable
         {
             Interlocked.Exchange(ref _replayInProgress, 0);
         }
+    }
+
+    private async Task<Testing.FlowReplayReport> ReplayStandaloneAsync(
+        Testing.MauiFlow flow,
+        CancellationToken cancellationToken)
+    {
+        var capture = new InspectorReplayEvidenceCapture(_client, flow, bytes =>
+        {
+            lock (_replayEvidenceGate) _lastReplayEvidence = bytes;
+        });
+        var replayer = new Testing.FlowReplayer(_client, evidenceCapture: capture);
+        return await replayer.ReplayAsync(flow, null, cancellationToken);
     }
 
     private const int MaxReplaySteps = 2000;
@@ -2079,13 +2108,14 @@ public sealed class InspectorServer : IDisposable
         }
     }
 
-    private sealed class InspectorReplayEvidenceCapture : Flows.IFlowReplayEvidenceCapture
+    private sealed class InspectorReplayEvidenceCapture : Testing.IFlowRunEvidenceCapture
     {
         private readonly AgentClient _client;
-        private readonly Flows.MauiFlow _flow;
+        private readonly Testing.MauiFlow _flow;
         private readonly Action<byte[]> _capture;
+        public Testing.MauiFlowArtifactReference? CapturedArtifact { get; private set; }
 
-        public InspectorReplayEvidenceCapture(AgentClient client, Flows.MauiFlow flow, Action<byte[]> capture)
+        public InspectorReplayEvidenceCapture(AgentClient client, Testing.MauiFlow flow, Action<byte[]> capture)
         {
             _client = client;
             _flow = flow;
@@ -2093,18 +2123,61 @@ public sealed class InspectorServer : IDisposable
         }
 
         public async Task CaptureOnFailureAsync(
-            Flows.MauiFlow flow,
-            Flows.FlowStep failedStep,
-            Flows.FlowStepResult result,
+            Testing.MauiFlow flow,
+            Testing.FlowStep failedStep,
+            Testing.FlowStepResult result,
             CancellationToken cancellationToken)
         {
             var bundle = await Evidence.EvidenceCapture.CaptureToBytesAsync(_client, new Evidence.EvidenceRequest
             {
                 Source = "inspector",
                 IncludeScreenshot = false,
-                WorkflowMarkdown = Flows.FlowMarkdown.Serialize(_flow)
+                WorkflowMarkdown = Testing.FlowMarkdown.Serialize(_flow)
             }, cancellationToken);
             _capture(bundle.Bytes);
+            CapturedArtifact = new Testing.MauiFlowArtifactReference
+            {
+                ArtifactId = "evidence-replay",
+                Kind = "mauitrace",
+                Digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bundle.Bytes)).ToLowerInvariant(),
+                MediaType = "application/vnd.maui.evidence+zip",
+                Redacted = true,
+                CreatedAt = DateTimeOffset.UtcNow,
+            };
+        }
+
+        public async Task CaptureOnRunFailureAsync(
+            Testing.MauiFlowRunEvidenceContext context,
+            CancellationToken cancellationToken)
+        {
+            var bundle = await Evidence.EvidenceCapture.CaptureToBytesAsync(_client, new Evidence.EvidenceRequest
+            {
+                Source = "inspector",
+                IncludeScreenshot = false,
+                WorkflowMarkdown = Testing.FlowMarkdown.Serialize(context.Flow),
+                FlowRun = new Evidence.EvidenceFlowRunLink
+                {
+                    RunId = context.Report.RunId,
+                    FailedStepId = context.Report.DivergenceStepId,
+                    FailureCode = context.Report.Failure?.Code,
+                    ReportDigest = context.ReportDigest,
+                    ReportPath = context.ReportPath,
+                    ReportReference = context.ReportPath is null
+                        ? $"run:{context.Report.RunId}"
+                        : $"flow-run:{context.Report.RunId}",
+                    CaptureCompleteness = "failure-only-redacted",
+                }
+            }, cancellationToken);
+            _capture(bundle.Bytes);
+            CapturedArtifact = new Testing.MauiFlowArtifactReference
+            {
+                ArtifactId = $"evidence-{context.Report.RunId}",
+                Kind = "mauitrace",
+                Digest = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bundle.Bytes)).ToLowerInvariant(),
+                MediaType = "application/vnd.maui.evidence+zip",
+                Redacted = true,
+                CreatedAt = DateTimeOffset.UtcNow,
+            };
         }
     }
 

@@ -121,7 +121,7 @@ public static class PerformanceAggregator
         if (process.Count > 0)
         {
             var processKinds = process
-                .Select(sample => sample.ProcessMemoryKind ?? "unknown")
+                .Select(sample => NormalizeProcessMemoryKind(sample.ProcessMemoryKind))
                 .Distinct(StringComparer.Ordinal)
                 .ToArray();
             if (processKinds.Length == 1)
@@ -132,6 +132,13 @@ public static class PerformanceAggregator
                 memory.ProcessEndBytes = process[^1].ProcessMemoryBytes;
                 memory.ProcessPeakBytes = process.Max(sample => sample.ProcessMemoryBytes!.Value);
                 memory.ProcessDeltaBytes = memory.ProcessEndBytes - memory.ProcessStartBytes;
+            }
+            else
+            {
+                memory.ProcessSupported = false;
+                memory.ProcessKindsMixed = true;
+                memory.ProcessUnsupportedReason =
+                    "Process-memory samples used incompatible measurement kinds, so no start/end/peak/delta was calculated.";
             }
         }
 
@@ -159,6 +166,16 @@ public static class PerformanceAggregator
         memory.NativePeakBytes = native.Max(sample => sample.NativeMemoryBytes!.Value);
         memory.NativeDeltaBytes = memory.NativeEndBytes - memory.NativeStartBytes;
         return memory;
+    }
+
+    private static string NormalizeProcessMemoryKind(string? kind)
+    {
+        var normalized = string.IsNullOrWhiteSpace(kind)
+            ? "unknown"
+            : kind.Trim().ToLowerInvariant();
+        return normalized is "windows.working-set" or "process.working-set"
+            ? "process.working-set"
+            : normalized;
     }
 
     private static PerformanceGc BuildGc(
@@ -403,6 +420,8 @@ public static class PerformanceAggregator
 
         if (summary.Memory.NativeKindsMixed && summary.Memory.NativeUnsupportedReason is { } memoryReason)
             warnings.Add(memoryReason);
+        if (summary.Memory.ProcessKindsMixed && summary.Memory.ProcessUnsupportedReason is { } processMemoryReason)
+            warnings.Add(processMemoryReason);
 
         if (!summary.Capability.LowPerturbation)
         {

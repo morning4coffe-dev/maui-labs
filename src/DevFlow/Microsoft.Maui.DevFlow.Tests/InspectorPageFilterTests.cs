@@ -156,7 +156,8 @@ public class InspectorPageFilterTests
         using var reader = new StreamReader(stream);
         var script = reader.ReadToEnd();
 
-        Assert.Contains("JSON.parse(event.data).type || null", script);
+        Assert.Contains("message = JSON.parse(event.data);", script);
+        Assert.Contains("type = message.type || null;", script);
         Assert.Contains(
             "['treeChange', 'navigation', 'lifecycle', 'themeChange', 'alert'].includes(type)",
             script);

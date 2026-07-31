@@ -1,12 +1,15 @@
 using System.Collections.Concurrent;
-using Microsoft.Maui.Cli.DevFlow.Flows;
+using CliFlows = Microsoft.Maui.Cli.DevFlow.Flows;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Broker;
 
 internal sealed class BrokerFlowCoordinator
 {
     private readonly ConcurrentDictionary<string, ActiveRecording> _active = new(StringComparer.Ordinal);
-    private readonly ConcurrentDictionary<string, object> _gates = new(StringComparer.Ordinal);
+    private readonly object[] _gates = Enumerable.Range(0, 64)
+        .Select(static _ => new object())
+        .ToArray();
     private readonly FlowRecordingStore _recordings;
     private readonly FlowRecordingSpoolStore _spools;
     private readonly object _adoptionGate = new();
@@ -177,7 +180,7 @@ internal sealed class BrokerFlowCoordinator
             (targetValueMayBeSecret && FlowSecretReference.LooksSensitive(
                 observation.AutomationId,
                 observation.Type));
-        var added = FlowRecordTools.AddStepCore(
+        var added = CliFlows.FlowRecordTools.AddStepCore(
             recorder,
             observation.Action,
             observation.AutomationId,
@@ -271,7 +274,7 @@ internal sealed class BrokerFlowCoordinator
             return BrokerFlowResult.Failure(
                 "Recording has validation errors: " + string.Join("; ", finalization.Validation.Errors));
 
-        var finished = FlowRecordTools.FinishToMarkdownCore(recorder);
+        var finished = CliFlows.FlowRecordTools.FinishToMarkdownCore(recorder);
         if (!finished.ok)
             return BrokerFlowResult.Failure(finished.error ?? "Could not serialize recording.");
 
@@ -416,7 +419,6 @@ internal sealed class BrokerFlowCoordinator
         // Broker shutdown must not erase recoverable recordings. Their snapshots have already been
         // persisted after every mutation; release only in-memory indexes for process restart.
         _active.Clear();
-        _gates.Clear();
     }
 
     private string? Persist(string agentId, ActiveRecording active, FlowRecorder recorder)
@@ -491,7 +493,8 @@ internal sealed class BrokerFlowCoordinator
         }
     }
 
-    private object Gate(string agentId) => _gates.GetOrAdd(agentId, static _ => new object());
+    private object Gate(string agentId)
+        => _gates[(int)((uint)StringComparer.Ordinal.GetHashCode(agentId) % (uint)_gates.Length)];
 
     private static bool MatchesExpected(ActiveRecording active, string? expectedRecordingId)
         => string.IsNullOrWhiteSpace(expectedRecordingId) ||

@@ -2,8 +2,8 @@ using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Maui.Cli.DevFlow.Evidence;
-using Microsoft.Maui.Cli.DevFlow.Flows;
 using Microsoft.Maui.DevFlow.Driver;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -77,6 +77,31 @@ public class EvidenceCaptureTests : IDisposable
         Assert.StartsWith("ab", scrubbed, StringComparison.Ordinal);
         Assert.EndsWith("[truncated]", scrubbed, StringComparison.Ordinal);
         Assert.True(scrubbed.Length <= 20);
+    }
+
+    [Fact]
+    public void Scrub_DropsUnicodeFormatCharacters()
+    {
+        var scrubbed = EvidenceRedaction.Scrub("ab\u202Ecd\u200Bef", 20)!;
+
+        Assert.Equal("abcdef", scrubbed);
+    }
+
+    [Theory]
+    [InlineData("sk-live-AAAABBBBCCCCDDDDEEEEFFFF0000")]
+    [InlineData("sk" + "_live_" + "AAAABBBBCCCC" + "DDDDEEEEFFFF0000")]
+    [InlineData("AKIAIOSFODNN7EXAMPLE")]
+    [InlineData("xoxb" + "-1234567890" + "12-abcdefghijklmnop")]
+    [InlineData("https://alice:password@example.com/path")]
+    [InlineData("-----BEGIN RSA PRIVATE KEY-----\nMIIESECRET\n-----END RSA PRIVATE KEY-----")]
+    [InlineData("private_key=super-secret-value")]
+    [InlineData("pwd=super-secret-value")]
+    [InlineData("cookie=session-value")]
+    public void Scrub_MasksCommonBareSecretShapes(string secret)
+    {
+        var scrubbed = EvidenceRedaction.Scrub(secret, EvidenceFormat.MaxLogMessageChars)!;
+
+        Assert.DoesNotContain(secret, scrubbed, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -345,6 +370,37 @@ public class EvidenceCaptureTests : IDisposable
             bundle.Entries.Select(e => e.Name).OrderBy(n => n, StringComparer.Ordinal),
             bundle.Manifest.Entries.Select(e => e.Name).OrderBy(n => n, StringComparer.Ordinal));
         Assert.Contains(bundle.Plan.Included, entry => entry.Name == EvidenceFormat.ManifestEntry);
+    }
+
+    [Fact]
+    public async Task BuildAsync_FlowRunLink_IsManifestOnlyAndRedactsTheLocalPath()
+    {
+        var reportPath = Path.Combine(_root, "artifacts", "run-1", "flow-run.json");
+        var bundle = await EvidenceBuilder.BuildAsync(
+            new FakeEvidenceSource(),
+            Options() with
+            {
+                ProjectRoot = _root,
+                FlowRun = new EvidenceFlowRunLink
+                {
+                    RunId = "run-1",
+                    FailedStepId = "4",
+                    FailureCode = "locator-not-found",
+                    ReportDigest = "sha256:abc",
+                    ReportPath = reportPath,
+                    ReportReference = "flow-run:run-1",
+                    CaptureCompleteness = "failure-only-redacted",
+                },
+            });
+
+        Assert.NotNull(bundle.Manifest.FlowRun);
+        var link = bundle.Manifest.FlowRun!;
+        Assert.Equal("run-1", link.RunId);
+        Assert.Equal("4", link.FailedStepId);
+        Assert.Equal("locator-not-found", link.FailureCode);
+        Assert.Equal("artifacts/run-1/flow-run.json", link.ReportPath);
+        Assert.DoesNotContain(bundle.Entries, entry => entry.Name.Contains("flow-run", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain("flow-run.json", EvidenceFormat.AllowedEntries.Where(entry => entry != EvidenceFormat.ManifestEntry));
     }
 
     [Fact]
@@ -1103,6 +1159,27 @@ public class EvidenceCaptureTests : IDisposable
     }
 
     [Fact]
+    public void Render_DropsTerminalControlAndFormatCharacters()
+    {
+        var read = new EvidenceReadResult
+        {
+            Ok = true,
+            Manifest = new EvidenceManifest
+            {
+                CapturedUtc = "2026-07-31T10:00:00Z"
+            },
+            Warnings = ["before\u001b[31mred\u0007after\u202E"]
+        };
+
+        var html = EvidenceReportRenderer.Render(read);
+
+        Assert.DoesNotContain('\u001b', html);
+        Assert.DoesNotContain('\u0007', html);
+        Assert.DoesNotContain('\u202E', html);
+        Assert.Contains("before[31mredafter", html, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task View_RegeneratesAStaticReportWithoutOpeningIt()
     {
         var bundle = await EvidenceBuilder.BuildAsync(new FakeEvidenceSource(), Options());
@@ -1117,6 +1194,43 @@ public class EvidenceCaptureTests : IDisposable
         Assert.True(File.Exists(reportPath));
         Assert.Contains(EvidenceFormat.ManifestEntry, result.Entries);
         Assert.Contains("Content-Security-Policy", File.ReadAllText(reportPath), StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task View_RefusesExistingReportUnlessOverwriteIsExplicit()
+    {
+        var bundle = await EvidenceBuilder.BuildAsync(new FakeEvidenceSource(), Options());
+        var destination = Path.Combine(_root, "view-overwrite.mauitrace");
+        Assert.True(EvidenceBundleWriter.Write(bundle, destination, overwrite: false).Ok);
+        var reportPath = Path.Combine(_root, "report.html");
+        File.WriteAllText(reportPath, "original");
+
+        var refused = EvidenceCapture.View(destination, reportPath, open: false);
+        Assert.False(refused.Ok);
+        Assert.Equal("original", File.ReadAllText(reportPath));
+
+        var overwritten = EvidenceCapture.View(
+            destination,
+            reportPath,
+            open: false,
+            overwrite: true);
+
+        Assert.True(overwritten.Ok, overwritten.Error);
+        Assert.Contains("Content-Security-Policy", File.ReadAllText(reportPath), StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("report.txt")]
+    [InlineData("report.html:hidden")]
+    [InlineData("NUL")]
+    public void ValidateReportPath_RejectsUnsafeDestinations(string requested)
+    {
+        if (!OperatingSystem.IsWindows() && requested is "report.html:hidden" or "NUL")
+            return;
+
+        var result = EvidencePaths.ValidateReportPath(Path.Combine(_root, requested));
+
+        Assert.False(result.Ok);
     }
 
     [Fact]

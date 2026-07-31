@@ -139,6 +139,12 @@ public class PerformanceMemory
 
     [JsonPropertyName("processDeltaBytes")]
     public long? ProcessDeltaBytes { get; set; }
+
+    [JsonPropertyName("processKindsMixed")]
+    public bool ProcessKindsMixed { get; set; }
+
+    [JsonPropertyName("processUnsupportedReason")]
+    public string? ProcessUnsupportedReason { get; set; }
 }
 
 public class PerformanceGc

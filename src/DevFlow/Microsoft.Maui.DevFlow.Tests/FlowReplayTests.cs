@@ -2,8 +2,8 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Maui.Cli.DevFlow.Flows;
 using Microsoft.Maui.DevFlow.Driver;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -32,6 +32,21 @@ public class FlowReplayTests
             },
         },
     };
+
+    [Fact]
+    public async Task Replay_EmptyFlow_ReturnsValidationFailureWithoutConnecting()
+    {
+        using var client = new AgentClient("127.0.0.1", 1);
+
+        var report = await new FlowReplayer(client).ReplayAsync(new MauiFlow { Name = "empty" });
+
+        Assert.False(report.Ok);
+        Assert.Equal(0, report.Total);
+        Assert.Equal(1, report.Failed);
+        var failure = Assert.Single(report.Results);
+        Assert.Equal(FlowFailureKinds.Validation, failure.FailureKind);
+        Assert.Contains("at least one step", failure.Error, StringComparison.OrdinalIgnoreCase);
+    }
 
     [Fact]
     public async Task Replay_PassingFlow_ReportsAllPassed()

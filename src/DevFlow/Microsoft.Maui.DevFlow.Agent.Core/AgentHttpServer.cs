@@ -29,8 +29,9 @@ public class AgentHttpServer : IDisposable
     public int Port => _port;
     public bool IsRunning => _listenTask != null && !_listenTask.IsCompleted;
     internal Func<HttpRequest, Task<MutationLeaseStatus>>? MutationLeaseValidator { get; set; }
-    internal Func<HttpRequest, HttpResponse, Task>? MutationObserver { get; set; }
+    internal Func<HttpRequest, HttpResponse, Task<HttpResponse?>>? MutationObserver { get; set; }
     internal Func<HttpRequest, HttpResponse?>? MutationGuard { get; set; }
+    internal WorkflowCommandLedger? WorkflowCommandLedger { get; set; }
 
     public AgentHttpServer(int port = 9223)
     {
@@ -348,13 +349,33 @@ public class AgentHttpServer : IDisposable
             if (requiresMutationLease && MutationGuard?.Invoke(request) is { } blocked)
                 return blocked;
 
+            WorkflowCommandReservation? workflowReservation = null;
+            if (requiresMutationLease)
+            {
+                if (WorkflowCommandLedger is null && WorkflowCommandHeaders.HasAny(request))
+                {
+                    return HttpResponse.Error(
+                        "This agent does not support workflow command fencing.",
+                        503,
+                        "workflow-unsupported");
+                }
+
+                if (WorkflowCommandLedger is not null)
+                {
+                    var preparation = await WorkflowCommandLedger.PrepareAsync(request, ct).ConfigureAwait(false);
+                    if (preparation.Response is not null)
+                        return preparation.Response;
+                    workflowReservation = preparation.Reservation;
+                }
+            }
+
             if (requiresMutationLease && MutationLeaseValidator is not null)
             {
                 var status = await MutationLeaseValidator(request).ConfigureAwait(false);
                 request.MutationLease = status;
                 if (!status.Allowed)
                 {
-                    return HttpResponse.Error(
+                    var rejected = HttpResponse.Error(
                         "Another DevFlow session is driving this app. Take control before mutating it.",
                         statusCode: 409,
                         reason: "lease",
@@ -365,18 +386,51 @@ public class AgentHttpServer : IDisposable
                             status.ExpiresInMs,
                             status.Authority
                         });
+                    return workflowReservation is { } reservation && WorkflowCommandLedger is not null
+                        ? WorkflowCommandLedger.Complete(reservation, rejected)
+                        : rejected;
                 }
             }
 
-            var response = await route.Handler(request).ConfigureAwait(false);
-            if (requiresMutationLease &&
-                response.StatusCode is >= 200 and < 300 &&
-                MutationObserver is not null)
+            try
             {
-                try { await MutationObserver(request, response).ConfigureAwait(false); }
-                catch { }
+                var response = await route.Handler(request).ConfigureAwait(false);
+                if (requiresMutationLease &&
+                    response.StatusCode is >= 200 and < 300 &&
+                    MutationObserver is not null)
+                {
+                    try
+                    {
+                        var recordingFailure = await MutationObserver(request, response).ConfigureAwait(false);
+                        if (recordingFailure is not null)
+                            response = recordingFailure;
+                    }
+                    catch
+                    {
+                        response = HttpResponse.Error(
+                            "The app mutation succeeded, but workflow recording could not be updated.",
+                            statusCode: 503,
+                            reason: "recording");
+                    }
+                }
+
+                return workflowReservation is { } reservation && WorkflowCommandLedger is not null
+                    ? WorkflowCommandLedger.Complete(reservation, response)
+                    : response;
             }
-            return response;
+            catch
+            {
+                if (workflowReservation is { } reservation && WorkflowCommandLedger is not null)
+                {
+                    WorkflowCommandLedger.MarkUnknownCompletion(reservation);
+                    return HttpResponse.Error(
+                        "The workflow command completion is unknown.",
+                        409,
+                        "workflow-unknown-completion");
+                }
+
+                throw;
+            }
         }
         finally
         {
@@ -583,6 +637,13 @@ public class HttpRequest
     public string? Body { get; set; }
     internal MutationLeaseStatus? MutationLease { get; set; }
     internal string? MutationTargetAutomationId { get; set; }
+    internal string? MutationTargetText { get; set; }
+    internal string? MutationTargetType { get; set; }
+    internal int? MutationTargetIndex { get; set; }
+    internal int? MutationTargetMatchCount { get; set; }
+    internal string? MutationTargetQuality { get; set; }
+    internal string[]? MutationTargetFragilityReasons { get; set; }
+    internal bool MutationTargetSensitive { get; set; }
 
     private static readonly JsonSerializerOptions _readOptions = new() { PropertyNameCaseInsensitive = true };
 
@@ -637,6 +698,8 @@ public class HttpResponse
                 404 => "Not Found",
                 408 => "Request Timeout",
                 409 => "Conflict",
+                413 => "Payload Too Large",
+                429 => "Too Many Requests",
                 503 => "Service Unavailable",
                 501 => "Not Implemented",
                 500 => "Internal Server Error",

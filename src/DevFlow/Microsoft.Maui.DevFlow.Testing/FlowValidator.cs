@@ -1,4 +1,4 @@
-namespace Microsoft.Maui.Cli.DevFlow.Flows;
+namespace Microsoft.Maui.DevFlow.Testing;
 
 public sealed class FlowValidation
 {
@@ -27,10 +27,15 @@ public static class FlowValidator
     public static FlowValidation Validate(MauiFlow flow)
     {
         var v = new FlowValidation();
-        if (flow.Schema > MauiFlow.CurrentSchema)
-            v.Warnings.Add($"Flow schema {flow.Schema} is newer than supported ({MauiFlow.CurrentSchema}); replay may be incomplete.");
-        if (flow.Steps.Count == 0)
-            v.Warnings.Add("Flow has no steps.");
+        if (flow.Schema < 1)
+            v.Errors.Add($"Flow schema {flow.Schema} is invalid; supported schemas are 1 through {MauiFlow.CurrentSchema}.");
+        else if (flow.Schema > MauiFlow.CurrentSchema)
+            v.Errors.Add($"Flow schema {flow.Schema} is newer than supported ({MauiFlow.CurrentSchema}); upgrade DevFlow before replaying it.");
+        if (flow.Steps is null || flow.Steps.Count == 0)
+        {
+            v.Errors.Add("Flow must contain at least one step.");
+            return v;
+        }
 
         var ordinal = 0;
         foreach (var s in flow.Steps)

@@ -33,12 +33,12 @@ public sealed class RouteRestoreResult
 
 public sealed class RouteCheckpointStatus
 {
-    public bool Ok { get; set; } = true;
-    public bool HasCheckpoint { get; set; }
-    public bool Connected { get; set; }
-    public bool Stale { get; set; }
-    public string? Warning { get; set; }
-    public RouteCheckpoint? Checkpoint { get; set; }
+    [JsonPropertyName("ok")] public bool Ok { get; set; } = true;
+    [JsonPropertyName("hasCheckpoint")] public bool HasCheckpoint { get; set; }
+    [JsonPropertyName("connected")] public bool Connected { get; set; }
+    [JsonPropertyName("stale")] public bool Stale { get; set; }
+    [JsonPropertyName("warning")] public string? Warning { get; set; }
+    [JsonPropertyName("checkpoint")] public RouteCheckpoint? Checkpoint { get; set; }
 }
 
 /// <summary>

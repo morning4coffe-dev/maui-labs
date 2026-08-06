@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using ModelContextProtocol.Server;
 using Microsoft.Maui.Cli.DevFlow.Mcp;
+using Microsoft.Maui.DevFlow.Driver;
 using Microsoft.Maui.DevFlow.Testing;
 using Testing = Microsoft.Maui.DevFlow.Testing;
 
@@ -120,7 +121,8 @@ public sealed class FlowRecordTools
         string? quality = null,
         IReadOnlyList<string>? fragilityReasons = null,
         string? valueSource = null,
-        bool sensitive = false)
+        bool sensitive = false,
+        MauiSelectorObservation? selectorObservation = null)
     {
         if (string.IsNullOrWhiteSpace(action) || !Testing.FlowActions.All.Contains(action))
             return (false, -1, recorder.StepCount, false, $"Unknown action '{action}'. Use one of: {string.Join(", ", Testing.FlowActions.All)}.");
@@ -276,7 +278,45 @@ public sealed class FlowRecordTools
         if (!validation.Ok)
             return (false, -1, recorder.StepCount, false, "Step rejected: " + string.Join("; ", validation.Errors));
 
-        var seq = recorder.AppendStep(action, target, stepValue, args, page, navigated, asserts);
+        MauiSelectorEvidence? selectorEvidence = null;
+        if (selectorObservation?.Target is not null)
+        {
+            if (selectorObservation.Truncated == true)
+            {
+                selectorEvidence = new MauiSelectorEvidence
+                {
+                    Fingerprint = MauiElementFingerprintBuilder.Build(selectorObservation),
+                    Omissions =
+                    [
+                        new MauiSelectorEvidenceOmission
+                        {
+                            Kind = "live-tree",
+                            Reason = "The recording observation tree was capped, so uniqueness-dependent selector candidates were not generated.",
+                        },
+                    ],
+                };
+            }
+            else
+            {
+                var generated = MauiSelectorCandidateGenerator.Generate(selectorObservation);
+                selectorEvidence = new MauiSelectorEvidence
+                {
+                    Fingerprint = generated.Fingerprint,
+                    Candidates = generated.Candidates,
+                    Omissions = generated.Omissions,
+                };
+            }
+        }
+
+        var seq = recorder.AppendStep(
+            action,
+            target,
+            stepValue,
+            args,
+            page,
+            navigated,
+            asserts,
+            selectorEvidence);
         if (seq < 0)
             return (false, -1, recorder.StepCount, false, $"Recording is full (max {Testing.FlowRecorder.MaxSteps} steps).");
 

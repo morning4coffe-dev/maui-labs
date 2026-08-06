@@ -261,13 +261,13 @@ public class WindowsAppDriver : AppDriverBase, IAlertDriver
     {
         EnsureWindows();
         var windows = ResolveTargetWindows();
-        var buttons = FindDialogButtonsCore(windows);
-        if (buttons.Count == 0)
+        var candidate = FindDialogCandidate(windows);
+        if (candidate is null || candidate.Buttons.Count == 0)
             return Task.FromResult<AlertInfo?>(null);
 
+        var buttons = candidate.Buttons;
         var alertButtons = buttons.Select(ToAlertButton).ToList();
-        var texts = FindDialogTextsCore(windows);
-        var info = new AlertInfo(texts.FirstOrDefault(), alertButtons);
+        var info = new AlertInfo(candidate.Title ?? candidate.Texts.FirstOrDefault(), alertButtons);
 
         var target = PickButton(buttons, buttonLabel);
         if (!UIAutomationInterop.InvokeElement(target.element))
@@ -288,13 +288,13 @@ public class WindowsAppDriver : AppDriverBase, IAlertDriver
 
     private static AlertInfo? DetectDialog(IReadOnlyList<IUIAutomationElement> windows)
     {
-        var buttons = FindDialogButtonsCore(windows);
-        if (buttons.Count == 0)
+        var candidate = FindDialogCandidate(windows);
+        if (candidate is null || candidate.Buttons.Count == 0)
             return null;
 
+        var buttons = candidate.Buttons;
         var alertButtons = buttons.Select(ToAlertButton).ToList();
-        var texts = FindDialogTextsCore(windows);
-        return new AlertInfo(texts.FirstOrDefault(), alertButtons);
+        return new AlertInfo(candidate.Title ?? candidate.Texts.FirstOrDefault(), alertButtons);
     }
 
     private static List<(IUIAutomationElement element, string name)> FindDialogButtonsCore(IReadOnlyList<IUIAutomationElement> windows)
@@ -303,22 +303,19 @@ public class WindowsAppDriver : AppDriverBase, IAlertDriver
         return candidate?.Buttons ?? new();
     }
 
-    private static List<string> FindDialogTextsCore(IReadOnlyList<IUIAutomationElement> windows)
-    {
-        var candidate = FindDialogCandidate(windows);
-        return candidate?.Texts ?? new();
-    }
-
     private static DialogCandidate? FindDialogCandidate(IReadOnlyList<IUIAutomationElement> windows)
     {
         var candidate = FindDedicatedDialogCandidate(
             windows,
             UIAutomationInterop.FindChildWindows,
-            UIAutomationInterop.FindButtons,
-            UIAutomationInterop.FindTexts);
+            window => UIAutomationInterop.FindButtons(window)
+                .Where(button => !UIAutomationInterop.IsInTitleBar(button.element))
+                .ToArray(),
+            UIAutomationInterop.FindTexts,
+            UIAutomationInterop.GetName);
         return candidate is null
             ? null
-            : new DialogCandidate(candidate.Buttons.ToList(), candidate.Texts.ToList());
+            : new DialogCandidate(candidate.Title, candidate.Buttons.ToList(), candidate.Texts.ToList());
     }
 
     private static AlertButton ToAlertButton((IUIAutomationElement element, string name) button)
@@ -330,6 +327,7 @@ public class WindowsAppDriver : AppDriverBase, IAlertDriver
     }
 
     private sealed record DialogCandidate(
+        string? Title,
         List<(IUIAutomationElement element, string name)> Buttons,
         List<string> Texts);
 
@@ -365,7 +363,8 @@ public class WindowsAppDriver : AppDriverBase, IAlertDriver
         IReadOnlyList<TElement> rootWindows,
         Func<TElement, IReadOnlyList<TElement>> findChildWindows,
         Func<TElement, IReadOnlyList<(TElement element, string name)>> findButtons,
-        Func<TElement, IReadOnlyList<string>> findTexts)
+        Func<TElement, IReadOnlyList<string>> findTexts,
+        Func<TElement, string?>? findTitle = null)
     {
         foreach (var rootWindow in rootWindows)
         {
@@ -377,7 +376,11 @@ public class WindowsAppDriver : AppDriverBase, IAlertDriver
 
                 var texts = findTexts(childWindow);
                 if (texts.Count > 0)
-                    return new DialogCandidateData<TElement>(buttons, texts);
+                    return new DialogCandidateData<TElement>(
+                        childWindow,
+                        findTitle?.Invoke(childWindow),
+                        buttons,
+                        texts);
             }
         }
 
@@ -385,6 +388,8 @@ public class WindowsAppDriver : AppDriverBase, IAlertDriver
     }
 
     internal sealed record DialogCandidateData<TElement>(
+        TElement Window,
+        string? Title,
         IReadOnlyList<(TElement element, string name)> Buttons,
         IReadOnlyList<string> Texts);
 

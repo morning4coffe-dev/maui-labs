@@ -19,11 +19,19 @@
     <ProjectReference Include="..\Microsoft.Maui.DevFlow.Analyzers\Microsoft.Maui.DevFlow.Analyzers.csproj" />
     <ProjectReference Include="..\Microsoft.Maui.DevFlow.Driver\Microsoft.Maui.DevFlow.Driver.csproj" />
     <ProjectReference Include="..\Microsoft.Maui.DevFlow.Logging\Microsoft.Maui.DevFlow.Logging.csproj" />
+    <ProjectReference Include="..\Microsoft.Maui.DevFlow.TestAgent.Core\Microsoft.Maui.DevFlow.TestAgent.Core.csproj" />
+    <ProjectReference Include="..\Microsoft.Maui.DevFlow.TestAgent.Host\Microsoft.Maui.DevFlow.TestAgent.Host.csproj" />
     <ProjectReference Include="..\Microsoft.Maui.DevFlow.Testing\Microsoft.Maui.DevFlow.Testing.csproj" />
   </ItemGroup>
 
   <ItemGroup>
     <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\Microsoft.Maui.DevFlow.Testing\PublicApiBaseline.txt"
+          Link="TestData\Microsoft.Maui.DevFlow.Testing.PublicApiBaseline.txt"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

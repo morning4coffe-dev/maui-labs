@@ -1,0 +1,199 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A11E00010000000000000001 /* DevFlowAppleTestAgentUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A11E00020000000000000001 /* DevFlowAppleTestAgentUITests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXFileReference section */
+		A11E00020000000000000001 /* DevFlowAppleTestAgentUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DevFlowAppleTestAgentUITests.swift; sourceTree = "<group>"; };
+		A11E00030000000000000001 /* DevFlowAppleTestAgentUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = DevFlowAppleTestAgentUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A11E00040000000000000001 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A11E00050000000000000001 = {
+			isa = PBXGroup;
+			children = (
+				A11E00060000000000000001 /* DevFlowAppleTestAgentUITests */,
+				A11E00070000000000000001 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A11E00060000000000000001 /* DevFlowAppleTestAgentUITests */ = {
+			isa = PBXGroup;
+			children = (
+				A11E00020000000000000001 /* DevFlowAppleTestAgentUITests.swift */,
+			);
+			path = DevFlowAppleTestAgentUITests;
+			sourceTree = "<group>";
+		};
+		A11E00070000000000000001 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A11E00030000000000000001 /* DevFlowAppleTestAgentUITests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A11E00080000000000000001 /* DevFlowAppleTestAgentUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A11E00090000000000000001 /* Build configuration list for PBXNativeTarget "DevFlowAppleTestAgentUITests" */;
+			buildPhases = (
+				A11E000A0000000000000001 /* Sources */,
+				A11E00040000000000000001 /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = DevFlowAppleTestAgentUITests;
+			productName = DevFlowAppleTestAgentUITests;
+			productReference = A11E00030000000000000001 /* DevFlowAppleTestAgentUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A11E000B0000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastSwiftUpdateCheck = 1600;
+				LastUpgradeCheck = 1600;
+				TargetAttributes = {
+					A11E00080000000000000001 = {
+						CreatedOnToolsVersion = 16.0;
+					};
+				};
+			};
+			buildConfigurationList = A11E000C0000000000000001 /* Build configuration list for PBXProject "DevFlowAppleTestAgent" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A11E00050000000000000001;
+			productRefGroup = A11E00070000000000000001 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A11E00080000000000000001 /* DevFlowAppleTestAgentUITests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A11E000A0000000000000001 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A11E00010000000000000001 /* DevFlowAppleTestAgentUITests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A11E000D0000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = auto;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		A11E000E0000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGNING_ALLOWED = YES;
+				CODE_SIGNING_REQUIRED = NO;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = auto;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		A11E000F0000000000000001 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_ENTITLEMENTS = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = DevFlowAppleTestAgent;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = org.dotnet.mauilabs.devflow.appletestagent.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos macosx";
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "";
+			};
+			name = Debug;
+		};
+		A11E0010000000000000001 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES = YES;
+				CODE_SIGN_ENTITLEMENTS = "";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_KEY_CFBundleDisplayName = DevFlowAppleTestAgent;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = org.dotnet.mauilabs.devflow.appletestagent.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphonesimulator iphoneos macosx";
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_TARGET_NAME = "";
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A11E00090000000000000001 /* Build configuration list for PBXNativeTarget "DevFlowAppleTestAgentUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A11E000F0000000000000001 /* Debug */,
+				A11E0010000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		A11E000C0000000000000001 /* Build configuration list for PBXProject "DevFlowAppleTestAgent" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A11E000D0000000000000001 /* Debug */,
+				A11E000E0000000000000001 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A11E000B0000000000000001 /* Project object */;
+}

@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "repair-no-orientation-seed-display",
+  "kind": "repair-negative",
+  "disposition": "no-repair",
+  "fixture": {
+    "failure": "locator-not-found",
+    "checkpointMismatches": ["seed", "backend-state", "orientation", "display"]
+  },
+  "expect": {
+    "diagnosticIds": [],
+    "candidateKinds": [],
+    "repairEligible": false,
+    "ineligibilityCodes": ["checkpoint-seed-mismatch", "checkpoint-backend-state-mismatch", "checkpoint-orientation-mismatch", "checkpoint-display-mismatch"]
+  }
+}

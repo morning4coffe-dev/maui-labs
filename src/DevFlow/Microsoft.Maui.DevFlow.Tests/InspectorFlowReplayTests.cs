@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using Microsoft.Maui.Cli.DevFlow.Broker;
 using Microsoft.Maui.Cli.DevFlow.Inspector;
 using Microsoft.Maui.DevFlow.Testing;
 
@@ -180,7 +181,7 @@ public class InspectorFlowReplayTests
         var delegated = 0;
         await using var inspector = await StartCoordinatedInspectorAsync(
             agent.Port,
-            (flow, _, _) =>
+            (flow, _, _, _) =>
             {
                 Interlocked.Increment(ref delegated);
                 return Task.FromResult(new FlowReplayReport
@@ -350,6 +351,7 @@ public class InspectorFlowReplayTests
         Func<
             MauiFlow,
             Func<Microsoft.Maui.DevFlow.Driver.AgentClient, IFlowReplayEvidenceCapture?>,
+            WorkflowRunLeaseHandoff,
             CancellationToken,
             Task<FlowReplayReport>> workflowReplay)
     {

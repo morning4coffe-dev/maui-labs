@@ -95,6 +95,18 @@ public sealed class FlowStep
 {
     [JsonPropertyName("seq")] public int Seq { get; set; }
     [JsonPropertyName("action")] public string Action { get; set; } = "";
+    /// <summary>
+    /// Human-facing text that describes the intent of this step. It never changes replay behavior.
+    /// </summary>
+    [JsonPropertyName("label")] public string? Label { get; set; }
+    /// <summary>
+    /// A concise authoring intent for review. The runner does not interpret this field.
+    /// </summary>
+    [JsonPropertyName("intent")] public string? Intent { get; set; }
+    /// <summary>
+    /// Plan acceptance criteria this step helps demonstrate. These links are review metadata only.
+    /// </summary>
+    [JsonPropertyName("acceptanceCriterionIds")] public List<string>? AcceptanceCriterionIds { get; set; }
     [JsonPropertyName("target")] public FlowSelector? Target { get; set; }
     [JsonPropertyName("value")] public string? Value { get; set; }
     [JsonPropertyName("args")] public FlowStepArgs? Args { get; set; }
@@ -103,6 +115,11 @@ public sealed class FlowStep
     [JsonPropertyName("fragile")] public bool Fragile { get; set; }
     [JsonPropertyName("screenshot")] public string? Screenshot { get; set; }
     [JsonPropertyName("asserts")] public List<FlowAssert>? Asserts { get; set; }
+    /// <summary>
+    /// Additive recording evidence for selector-health diagnostics. The active selector remains in
+    /// <see cref="Target"/> or <see cref="Args"/> and is never replaced by these candidates.
+    /// </summary>
+    [JsonPropertyName("selectorEvidence")] public MauiSelectorEvidence? SelectorEvidence { get; set; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 

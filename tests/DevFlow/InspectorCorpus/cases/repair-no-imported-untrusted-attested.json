@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "repair-no-imported-untrusted-attested",
+  "kind": "repair-negative",
+  "disposition": "no-repair",
+  "fixture": {
+    "failure": "locator-not-found",
+    "trustStates": ["untrusted", "attested"]
+  },
+  "expect": {
+    "diagnosticIds": [],
+    "candidateKinds": [],
+    "repairEligible": false,
+    "ineligibilityCodes": ["artifact-not-locally-reproduced"]
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "csharp-advisory-missing-automation-id",
+  "kind": "no-repair",
+  "disposition": "diagnostic-only",
+  "fixture": {
+    "language": "CSharp",
+    "source": "var save = new Button { Text = \"Save\" };",
+    "scope": "static-direct-object-initializer"
+  },
+  "expect": {
+    "diagnosticIds": ["DFCS001"],
+    "repairEligible": false,
+    "ineligibilityCodes": ["source-proposal-required"]
+  }
+}

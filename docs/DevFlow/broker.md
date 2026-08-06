@@ -220,6 +220,29 @@ pick the right port.
 4. Single agent connected → auto-select
 5. Multiple agents, ambiguous → print list, fall back to `.mauidevflow` / default
 
+## Imported artifact trust
+
+The broker has a separate, local-only artifact-trust surface for bounded diagnostic imports:
+
+```text
+POST /api/artifact-trust/import?kind=flow-run|mauitrace
+GET  /api/artifact-trust/{imported-artifact-id}/status
+GET  /api/artifact-trust/{imported-artifact-id}/projection
+POST /api/artifact-trust/{imported-artifact-id}/bind-local-reproduction
+```
+
+An import receives a fresh opaque `iat_...` ID and capability token. The token is required in the
+`X-Maui-Artifact-Capability` header for status, projection, and local-reproduction binding. The
+store is memory-only, count/TTL bounded, has no list endpoint, and never returns raw report/ZIP
+bytes. POST import is read-only: it does not execute, replay, write a workspace file, or append
+repair history.
+
+Imports start `untrusted`. Internal report/ZIP hashes establish integrity only. A trusted caller
+can use the provider-neutral Testing policy to verify provenance separately, but an `attested`
+artifact still cannot create a repair/source proposal. Binding requires a newly completed
+broker-owned local run and current flow/app/target/failure expectations; only a matching
+`locally-reproduced` binding passes the future proposal gate.
+
 ## Graceful Fallback
 
 The broker is **optional**. If it can't start or isn't available, everything falls
@@ -289,7 +312,7 @@ online, pass `--device <serial>` or set `ANDROID_SERIAL` so it does not guess.
 
 | File | Purpose |
 |------|---------|
-| `~/.mauidevflow/broker.json` | Broker state (PID, port, start time). Written on start, deleted on stop. |
+| `~/.mauidevflow/broker.json` | Local broker state (PID, port, start time, iframe embed token, and a separate native-host approval token). Written on start, deleted on stop. The approval token must never enter an Inspector URL, DOM, or webview message. |
 | `~/.mauidevflow/broker.log`  | Rolling log file (auto-truncated at 1MB). |
 
 ## Broker HTTP API
@@ -378,6 +401,11 @@ Status and cancellation bodies are deliberately small:
 The token coordinates access to an individual run; it is not authorization for arbitrary app
 mutation. The broker holds and heartbeats the mutation-lease transaction for the run, disables
 mutating transport retries, and ends/releases the lease on every terminal path.
+
+Status snapshots additionally expose bounded `totalSteps`, `completedSteps`, and `currentStepId`
+facts for progress UIs. A runner reports a current step only when it has safely entered that
+canonical step; a missing or retained prior value never proves that an in-flight mutation did not
+complete. Lifecycle messages remain value-free.
 
 The machine-readable contract is
 [`broker-workflow-runs-v1.yaml`](spec/broker-workflow-runs-v1.yaml).

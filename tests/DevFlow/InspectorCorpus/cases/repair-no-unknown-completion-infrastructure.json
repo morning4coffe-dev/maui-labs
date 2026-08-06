@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "repair-no-unknown-completion-infrastructure",
+  "kind": "repair-negative",
+  "disposition": "no-repair",
+  "fixture": {
+    "failure": "locator-not-found",
+    "otherFailures": ["unknown-completion", "infrastructure"]
+  },
+  "expect": {
+    "diagnosticIds": [],
+    "candidateKinds": [],
+    "repairEligible": false,
+    "ineligibilityCodes": ["blocking-failure-unknown-completion", "blocking-failure-infrastructure"]
+  }
+}

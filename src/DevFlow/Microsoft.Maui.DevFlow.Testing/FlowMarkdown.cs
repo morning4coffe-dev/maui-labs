@@ -140,8 +140,32 @@ public static class FlowMarkdown
         return sb.ToString();
     }
 
+    /// <summary>
+    /// Replaces only the authoritative JSON payload in an existing valid flow document. This
+    /// preserves user-authored prose and unknown Markdown outside the fenced payload while using
+    /// the canonical Testing serializer for the executable content.
+    /// </summary>
+    public static string? ReplaceAuthoritativePayload(string? markdown, MauiFlow? flow)
+    {
+        if (string.IsNullOrWhiteSpace(markdown) || flow is null)
+            return null;
+
+        var matches = BlockRegex.Matches(markdown);
+        if (matches.Count != 1)
+            return null;
+
+        var payload = matches[0].Groups[1];
+        var json = JsonSerializer.Serialize(flow, MauiFlowJsonContext.Default.MauiFlow);
+        return string.Concat(
+            markdown.AsSpan(0, payload.Index),
+            json,
+            markdown.AsSpan(payload.Index + payload.Length));
+    }
+
     internal static string Label(FlowStep s)
     {
+        if (!string.IsNullOrWhiteSpace(s.Label))
+            return s.Label.Trim();
         var who = Who(s.Target);
         return s.Action switch
         {

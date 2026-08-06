@@ -1,0 +1,12 @@
+<Project>
+
+  <PropertyGroup>
+    <ManagePackageVersionsCentrally>true</ManagePackageVersionsCentrally>
+    <DevFlowTestingPackageVersion Condition="'$(DevFlowTestingPackageVersion)' == ''">0.0.0-local</DevFlowTestingPackageVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageVersion Include="Microsoft.Maui.DevFlow.Testing" Version="$(DevFlowTestingPackageVersion)" />
+  </ItemGroup>
+
+</Project>

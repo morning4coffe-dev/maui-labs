@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "id": "repair-history-redaction-path-cap",
+  "kind": "repair-negative",
+  "disposition": "no-repair",
+  "fixture": {
+    "history": {
+      "path": "../escape.repair-history.jsonl",
+      "entries": 257,
+      "contains": ["prompt", "source", "secret", "selector-text"]
+    }
+  },
+  "expect": {
+    "diagnosticIds": [],
+    "candidateKinds": [],
+    "repairEligible": false,
+    "ineligibilityCodes": ["repair-history-invalid"]
+  }
+}

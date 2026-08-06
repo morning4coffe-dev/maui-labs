@@ -1,6 +1,9 @@
 using System.CommandLine;
 using System.Text;
+using System.Text.Json;
+using Microsoft.Maui.Cli.DevFlow.Broker;
 using Microsoft.Maui.DevFlow.Driver;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Evidence;
 
@@ -27,6 +30,8 @@ internal static class EvidenceCommands
         command.Add(CreatePreviewCommand(jsonOption, noJsonOption, agentHostOption, agentPortOption, output, clientFactory, onError));
         command.Add(CreateCaptureCommand(jsonOption, noJsonOption, agentHostOption, agentPortOption, output, clientFactory, onError));
         command.Add(CreateViewCommand(jsonOption, noJsonOption, output, onError));
+        command.Add(CreateInspectTrustCommand(jsonOption, noJsonOption, output, onError));
+        command.Add(CreateVerifyAppleQaCommand(jsonOption, noJsonOption, output, onError));
         return command;
     }
 
@@ -249,6 +254,143 @@ internal static class EvidenceCommands
         return command;
     }
 
+    private static Command CreateInspectTrustCommand(
+        Option<bool> jsonOption,
+        Option<bool> noJsonOption,
+        IDevFlowOutputWriter output,
+        Action onError)
+    {
+        var fileArgument = new Argument<string>("file")
+        {
+            Description = "Path to a flow-run.json report or .mauitrace v1 bundle to inspect without importing, opening, or replaying"
+        };
+        var kindOption = new Option<string?>("--kind")
+        {
+            Description = "Artifact kind: flow-run or mauitrace (default: infer from .mauitrace or .json extension)"
+        };
+
+        var command = new Command(
+            "inspect-trust",
+            "Read a bounded artifact trust projection without opening, executing, replaying, or persisting the file")
+        {
+            fileArgument,
+            kindOption,
+        };
+
+        command.SetAction((ctx, ct) =>
+        {
+            var isJson = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+            try
+            {
+                var file = ctx.GetValue(fileArgument)!;
+                var kind = ResolveTrustKind(file, ctx.GetValue(kindOption));
+                if (kind is null)
+                {
+                    output.WriteError(
+                        "Specify --kind flow-run or --kind mauitrace when the file extension is not .json or .mauitrace.",
+                        isJson,
+                        "InvocationError");
+                    onError();
+                    return Task.CompletedTask;
+                }
+
+                using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
+                var result = new ArtifactTrustImportService().Import(stream, kind, cancellationToken: ct);
+                if (!result.Ok || result.Artifact is null)
+                {
+                    output.WriteError(result.Error ?? "Could not inspect artifact trust.", isJson, "InvocationError");
+                    onError();
+                    return Task.CompletedTask;
+                }
+
+                if (isJson)
+                {
+                    output.WriteRawJson(JsonSerializer.Serialize(
+                        result.Artifact,
+                        MauiTestingJsonContext.Default.MauiArtifactTrustRecord));
+                }
+                else
+                {
+                    Console.WriteLine(FormatTrustInspection(result.Artifact));
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+            {
+                output.WriteError("The artifact could not be opened for bounded trust inspection.", isJson, "InvocationError");
+                onError();
+            }
+
+            return Task.CompletedTask;
+        });
+
+        return command;
+    }
+
+    private static Command CreateVerifyAppleQaCommand(
+        Option<bool> jsonOption,
+        Option<bool> noJsonOption,
+        IDevFlowOutputWriter output,
+        Action onError)
+    {
+        var handoffArgument = new Argument<string>("handoff")
+        {
+            Description = "Returned Apple QA .zip or extracted return directory to verify without extracting or executing it"
+        };
+        var importDiagnosticsOption = new Option<bool>("--import-diagnostics")
+        {
+            Description = "Create only bounded untrusted diagnostic projections for manifest-hashed per-flow flow-run.json and .mauitrace entries",
+            DefaultValueFactory = _ => false,
+        };
+
+        var command = new Command(
+            "verify-apple-qa",
+            "Verify a returned Apple QA handoff without extraction, execution, replay, persistence, or proposal authority")
+        {
+            handoffArgument,
+            importDiagnosticsOption,
+        };
+        command.SetAction((ctx, ct) =>
+        {
+            var isJson = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+            var result = new AppleQaArtifactVerifier().Verify(
+                ctx.GetValue(handoffArgument)!,
+                ctx.GetValue(importDiagnosticsOption),
+                ct);
+            if (!result.Ok)
+            {
+                output.WriteError(result.Error ?? "Apple QA handoff could not be verified.", isJson, "InvocationError");
+                onError();
+                return Task.CompletedTask;
+            }
+
+            output.WriteResult(result, isJson, static value =>
+            {
+                Console.WriteLine($"Apple QA handoff verified: {value.Platform ?? "unknown"}");
+                Console.WriteLine($"  {value.VerifiedArtifacts.Count} manifest-hashed artifacts · {value.EntryCount} bounded entries");
+                Console.WriteLine($"  Imported diagnostics: {value.ImportedDiagnostics.Count} (untrusted; no proposal authority)");
+                Console.WriteLine("  No entries were extracted, executed, replayed, or retained.");
+            });
+            return Task.CompletedTask;
+        });
+        return command;
+    }
+
+    private static string? ResolveTrustKind(string file, string? suppliedKind)
+    {
+        if (!string.IsNullOrWhiteSpace(suppliedKind))
+        {
+            var normalized = suppliedKind.Trim().ToLowerInvariant();
+            return ArtifactTrustImportKinds.IsKnown(normalized) ? normalized : null;
+        }
+
+        return Path.GetExtension(file).ToLowerInvariant() switch
+        {
+            ".mauitrace" => ArtifactTrustImportKinds.Evidence,
+            ".json" => ArtifactTrustImportKinds.FlowRun,
+            _ => null,
+        };
+    }
+
     private static Option<bool> CreateScreenshotOption() => new("--include-screenshot")
     {
         Description = "Include a screenshot (off by default — a screenshot may show on-screen data)",
@@ -375,6 +517,19 @@ internal static class EvidenceCommands
             text.AppendLine($"  ! {Terminal(warning)}");
         text.Append(result.Opened ? "  Opened in your default browser." : "  Open it in a browser to read the report.");
         return text.ToString();
+    }
+
+    internal static string FormatTrustInspection(MauiArtifactTrustRecord artifact)
+    {
+        var text = new StringBuilder();
+        text.AppendLine($"Imported artifact: {Terminal(artifact.Identity?.Id)}");
+        text.AppendLine($"  Kind: {Terminal(artifact.ArtifactKind)}");
+        text.AppendLine($"  Trust: {Terminal(artifact.Verification.State)}");
+        text.AppendLine($"  Integrity: {Terminal(artifact.Integrity?.Algorithm)} {Terminal(artifact.Integrity?.ArtifactDigest)}");
+        text.AppendLine("  Raw content was not retained. The artifact was not opened, executed, or replayed.");
+        foreach (var reason in artifact.Verification.Reasons)
+            text.AppendLine($"  - {Terminal(reason.Code)}: {Terminal(reason.Message)}");
+        return text.ToString().TrimEnd();
     }
 
     private static string Terminal(string? value)

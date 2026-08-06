@@ -201,7 +201,8 @@ internal sealed class BrokerFlowCoordinator
             observation.Quality,
             observation.FragilityReasons,
             observation.ValueSource,
-            sensitive);
+            sensitive,
+            observation.SelectorObservation);
         if (added.ok)
         {
             var persistenceError = Persist(agentId, active, recorder);
@@ -554,6 +555,7 @@ internal sealed class FlowObservation
     public string[]? FragilityReasons { get; set; }
     public string? ValueSource { get; set; }
     public bool Sensitive { get; set; }
+    public Microsoft.Maui.DevFlow.Driver.MauiSelectorObservation? SelectorObservation { get; set; }
 }
 
 internal sealed class BrokerFlowResult

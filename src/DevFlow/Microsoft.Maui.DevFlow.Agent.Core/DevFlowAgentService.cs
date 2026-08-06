@@ -6,6 +6,7 @@ using System.Runtime.CompilerServices;
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
 using System.Text;
+using System.Globalization;
 using Microsoft.Maui;
 using Microsoft.Maui.ApplicationModel;
 using Microsoft.Maui.Controls;
@@ -861,6 +862,12 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                 // Current Shell route (null for non-Shell apps). Powers the inspector's
                 // "Return to start route" checkpoint restore. Read here on the UI thread.
                 route = Shell.Current?.CurrentState?.Location?.ToString(),
+                window = $"window-{windowIndex ?? 0}",
+                modal = window?.Navigation?.ModalStack.LastOrDefault()?.GetType().FullName,
+                locale = CultureInfo.CurrentUICulture.Name,
+                theme = _app?.RequestedTheme.ToString(),
+                orientation = TryGetOrientation(),
+                displayProfile = BuildDisplayProfile(w, h, GetWindowDisplayDensity(window)),
                 cdpReady = cdpWebViews.Any(v => v.IsReady),
                 cdpWebViewCount = cdpWebViews.Length,
                 profiler = BuildProfilerCapabilitiesPayload(),
@@ -871,6 +878,17 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
         return HttpResponse.Json(result!);
     }
+
+    private static string? TryGetOrientation()
+    {
+        try { return DeviceDisplay.MainDisplayInfo.Orientation.ToString(); }
+        catch { return null; }
+    }
+
+    private static string BuildDisplayProfile(double width, double height, double density)
+        => string.Create(
+            CultureInfo.InvariantCulture,
+            $"{Math.Max(0, width):0.####}x{Math.Max(0, height):0.####}@{Math.Max(0, density):0.####}");
 
     private static string? TryGetAppInfoString(Func<string?> getter)
     {
@@ -896,6 +914,15 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var capabilities = new Dictionary<string, object>();
 
         capabilities["ui.tree"] = new { version = 1, features = new[] { "css-selector", "type", "text", "accessibility-id" } };
+        capabilities["ui.selectorHealth"] = new
+        {
+            version = 1,
+            features = new[]
+            {
+                "value-free-fingerprint", "topology", "source-anchor", "native-automation-identity",
+                "recording-observation"
+            }
+        };
         capabilities["ui.actions"] = new
         {
             version = 1,
@@ -1394,8 +1421,187 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             Quality = quality,
             FragilityReasons = fragilityReasons?.ToArray(),
             ValueSource = valueSource,
-            Sensitive = sensitive
+            Sensitive = sensitive,
+            SelectorObservation = CreateSelectorObservation(
+                request,
+                target,
+                observedElements,
+                route)
         };
+    }
+
+    private SelectorObservationPayload? CreateSelectorObservation(
+        HttpRequest request,
+        ElementInfo? target,
+        IReadOnlyList<ElementInfo>? elements,
+        string? route)
+    {
+        if (target is null)
+            return null;
+
+        const int maxElements = 256;
+        var source = elements ?? [];
+        var known = IndexSelectorObservationElements(source);
+        var projected = source
+            .Take(maxElements)
+            .Select(element => ToSelectorObservationElement(element, known))
+            .ToList();
+        var targetProjection = ToSelectorObservationElement(target, known);
+        if (!projected.Any(element =>
+                string.Equals(element.Id, targetProjection.Id, StringComparison.Ordinal)))
+        {
+            projected.Insert(0, targetProjection);
+            if (projected.Count > maxElements)
+                projected.RemoveAt(projected.Count - 1);
+        }
+
+        var windowIndex = ParseWindowIndex(request);
+        var window = GetWindow(windowIndex);
+        var width = window?.Width ?? 0;
+        var height = window?.Height ?? 0;
+        var density = GetWindowDisplayDensity(window);
+        return new SelectorObservationPayload
+        {
+            Target = targetProjection,
+            Elements = projected,
+            Truncated = source.Count > maxElements,
+            Context = new SelectorObservationContext
+            {
+                AppId = TryGetAppInfoString(() => AppInfo.Current.PackageName),
+                AppBuild = JoinAppBuild(
+                    TryGetAppInfoString(() => AppInfo.Current.VersionString),
+                    TryGetAppInfoString(() => AppInfo.Current.BuildString)),
+                Platform = PlatformName,
+                Route = route,
+                Window = $"window-{windowIndex ?? 0}",
+                Modal = window?.Navigation?.ModalStack.LastOrDefault()?.GetType().FullName,
+                Locale = CultureInfo.CurrentUICulture.Name,
+                Theme = _app?.RequestedTheme.ToString(),
+                Orientation = TryGetOrientation(),
+                DisplayProfile = BuildDisplayProfile(width, height, density),
+                CapabilityVersion = "selector-observation-v1",
+                ObservedAt = DateTimeOffset.UtcNow,
+            },
+        };
+    }
+
+    internal static Dictionary<string, ElementInfo> IndexSelectorObservationElements(
+        IEnumerable<ElementInfo> elements)
+    {
+        var known = new Dictionary<string, ElementInfo>(StringComparer.Ordinal);
+        var ambiguous = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var element in elements)
+        {
+            if (string.IsNullOrWhiteSpace(element.Id) || ambiguous.Contains(element.Id))
+                continue;
+            if (!known.TryAdd(element.Id, element))
+            {
+                known.Remove(element.Id);
+                ambiguous.Add(element.Id);
+            }
+        }
+        return known;
+    }
+
+    private static string? JoinAppBuild(string? version, string? build)
+        => string.IsNullOrWhiteSpace(version) && string.IsNullOrWhiteSpace(build)
+            ? null
+            : $"{version ?? "unknown"}:{build ?? "unknown"}";
+
+    private static SelectorObservationElement ToSelectorObservationElement(
+        ElementInfo info,
+        IReadOnlyDictionary<string, ElementInfo> known)
+    {
+        var nativeIdentity = info.NativeAutomationIdentity;
+        var nativeKind = info.NativeAutomationIdentityKind;
+        if (string.IsNullOrWhiteSpace(nativeIdentity) && info.NativeProperties is { } properties)
+        {
+            if (properties.TryGetValue("accessibilityIdentifier", out var accessibilityIdentifier) &&
+                !string.IsNullOrWhiteSpace(accessibilityIdentifier))
+            {
+                nativeIdentity = accessibilityIdentifier;
+                nativeKind = "accessibility-identifier";
+            }
+            else if (properties.TryGetValue("automationId", out var automationId) &&
+                !string.IsNullOrWhiteSpace(automationId))
+            {
+                nativeIdentity = automationId;
+                nativeKind = "automation-id";
+            }
+        }
+
+        return new SelectorObservationElement
+        {
+            Id = info.Id,
+            ParentId = info.ParentId,
+            Type = info.Type,
+            FullType = info.FullType,
+            Framework = info.Framework,
+            AutomationId = info.AutomationId,
+            NativeAutomationIdentity = nativeIdentity,
+            NativeAutomationIdentityKind = nativeKind,
+            Role = info.Role,
+            Traits = info.Traits?.OrderBy(static trait => trait, StringComparer.Ordinal).ToList(),
+            IsVisible = info.IsVisible,
+            IsEnabled = info.IsEnabled,
+            IsFocused = info.IsFocused,
+            Bounds = CopyBounds(info.Bounds),
+            WindowBounds = CopyBounds(info.WindowBounds),
+            SourceFile = info.SourceFile,
+            SourceLine = info.SourceLine,
+            SourceColumn = info.SourceColumn,
+            SourceHash = info.SourceHash,
+            SourceConfidence = info.SourceConfidence,
+            StableItemKey = info.StableItemKey,
+            CollectionScope = info.CollectionScope ?? FindCollectionScope(info, known),
+            TemplateKind = info.TemplateKind ?? InferTemplateKind(info),
+            IsVirtualized = info.IsVirtualized ?? IsVirtualizedElement(info, known),
+        };
+    }
+
+    private static BoundsInfo? CopyBounds(BoundsInfo? bounds) => bounds is null
+        ? null
+        : new BoundsInfo
+        {
+            X = bounds.X,
+            Y = bounds.Y,
+            Width = bounds.Width,
+            Height = bounds.Height,
+        };
+
+    private static string? FindCollectionScope(
+        ElementInfo info,
+        IReadOnlyDictionary<string, ElementInfo> known)
+    {
+        var current = info;
+        for (var depth = 0; depth < 32 && !string.IsNullOrWhiteSpace(current.ParentId); depth++)
+        {
+            if (!known.TryGetValue(current.ParentId, out var parent))
+                break;
+            if (parent.Type is "CollectionView" or "ListView" or "CarouselView")
+                return parent.AutomationId;
+            current = parent;
+        }
+        return null;
+    }
+
+    private static string? InferTemplateKind(ElementInfo info)
+    {
+        var fullType = info.FullType ?? info.Type;
+        return fullType?.Contains("ControlTemplate", StringComparison.OrdinalIgnoreCase) == true
+            ? "ControlTemplate"
+            : fullType?.Contains("DataTemplate", StringComparison.OrdinalIgnoreCase) == true
+                ? "DataTemplate"
+                : null;
+    }
+
+    private static bool IsVirtualizedElement(
+        ElementInfo info,
+        IReadOnlyDictionary<string, ElementInfo> known)
+    {
+        if (info.Type is "CollectionView" or "ListView" or "CarouselView")
+            return true;
+        return FindCollectionScope(info, known) is not null;
     }
 
     private static string? ReadJsonString(JsonElement body, string name)
@@ -1795,18 +2001,10 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             // Supplement with bounds-based hit testing — some platforms (e.g. macOS AppKit)
             // don't traverse into all containers via GetVisualTreeElements
             var boundsHits = _treeWalker.HitTestByBounds(x, y, _app!, windowIndex);
-            var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
-            var allHits = new List<IVisualTreeElement>();
-            foreach (var h in platformHits)
-            {
-                seen.Add(h);
-                allHits.Add(h);
-            }
-            foreach (var bh in boundsHits)
-            {
-                if (seen.Add(bh))
-                    allHits.Add(bh);
-            }
+            var allHits = MergeHitTestCandidates(
+                platformHits,
+                boundsHits,
+                ve => _treeWalker.ResolveWindowBoundsPublic(ve));
 
             var elements = new List<object>();
 
@@ -1876,6 +2074,63 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         return result != null
             ? HttpResponse.Json(result)
             : HttpResponse.Error($"Window {windowIndex ?? 0} not found");
+    }
+
+    internal static List<IVisualTreeElement> MergeHitTestCandidates(
+        IEnumerable<IVisualTreeElement> platformCandidates,
+        IEnumerable<IVisualTreeElement> boundsCandidates,
+        Func<VisualElement, BoundsInfo?> resolveWindowBounds)
+    {
+        var seen = new HashSet<object>(ReferenceEqualityComparer.Instance);
+        var ordered = new List<IVisualTreeElement>();
+        foreach (var candidate in platformCandidates)
+        {
+            if (seen.Add(candidate))
+                ordered.Add(candidate);
+        }
+
+        var supplemental = boundsCandidates
+            .Where(candidate => seen.Add(candidate))
+            .OrderByDescending(GetVisualTreeDepth)
+            .ThenBy(candidate =>
+            {
+                if (candidate is not VisualElement visual)
+                    return double.MaxValue;
+                var bounds = resolveWindowBounds(visual);
+                return bounds is { Width: > 0, Height: > 0 }
+                    ? bounds.Width * bounds.Height
+                    : double.MaxValue;
+            })
+            .ToList();
+
+        foreach (var candidate in supplemental)
+        {
+            var ancestorIndex = ordered.FindIndex(existing => IsVisualAncestor(existing, candidate));
+            if (ancestorIndex >= 0)
+                ordered.Insert(ancestorIndex, candidate);
+            else
+                ordered.Add(candidate);
+        }
+
+        return ordered;
+    }
+
+    private static bool IsVisualAncestor(IVisualTreeElement ancestor, IVisualTreeElement candidate)
+    {
+        for (var parent = candidate.GetVisualParent(); parent is not null; parent = parent.GetVisualParent())
+        {
+            if (ReferenceEquals(parent, ancestor))
+                return true;
+        }
+        return false;
+    }
+
+    private static int GetVisualTreeDepth(IVisualTreeElement element)
+    {
+        var depth = 0;
+        for (var parent = element.GetVisualParent(); parent is not null && depth < 256; parent = parent.GetVisualParent())
+            depth++;
+        return depth;
     }
 
     /// <summary>

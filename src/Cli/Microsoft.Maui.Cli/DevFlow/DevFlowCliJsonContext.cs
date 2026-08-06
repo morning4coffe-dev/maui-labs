@@ -42,9 +42,15 @@ namespace Microsoft.Maui.Cli.DevFlow;
 [JsonSerializable(typeof(PropertyMutationResponse))]
 [JsonSerializable(typeof(FlowValidationCliResult))]
 [JsonSerializable(typeof(FlowReplayCliResult))]
+[JsonSerializable(typeof(InspectorLaunchCliResult))]
+[JsonSerializable(typeof(AppleQaArtifactVerificationResult))]
+[JsonSerializable(typeof(AppleQaVerifiedArtifact))]
+[JsonSerializable(typeof(WorkflowRunStartRequest))]
+[JsonSerializable(typeof(WorkflowRunAccessRequest))]
 [JsonSerializable(typeof(Testing.FlowStepResult))]
 [JsonSerializable(typeof(List<Testing.FlowStepResult>))]
 [JsonSerializable(typeof(Testing.MauiFlowRunReport))]
+[JsonSerializable(typeof(Testing.MauiPreviewQualificationReport))]
 internal sealed partial class DevFlowCliJsonContext : JsonSerializerContext;
 
 internal sealed class FlowValidationCliResult
@@ -70,4 +76,16 @@ internal sealed class FlowReplayCliResult
     [JsonPropertyName("report")] public Testing.MauiFlowRunReport? Report { get; init; }
     [JsonPropertyName("reportPath")] public string? ReportPath { get; init; }
     [JsonPropertyName("reportDigest")] public string? ReportDigest { get; init; }
+}
+
+internal sealed class InspectorLaunchCliResult
+{
+    [JsonPropertyName("url")] public string Url { get; init; } = "";
+    [JsonPropertyName("agentId")] public string AgentId { get; init; } = "";
+    [JsonPropertyName("agentPort")] public int AgentPort { get; init; }
+    [JsonPropertyName("appName")] public string AppName { get; init; } = "";
+    [JsonPropertyName("platform")] public string Platform { get; init; } = "";
+    [JsonPropertyName("launched")] public bool Launched { get; init; }
+    [JsonPropertyName("testHint")] public string? TestHint { get; init; }
+    [JsonPropertyName("traceHint")] public string? TraceHint { get; init; }
 }

@@ -16,6 +16,12 @@ maui devflow evidence view ./maui-traces/MyApp-20260729-112233.mauitrace
 
 # Choose the report path; existing reports require explicit replacement
 maui devflow evidence view trace.mauitrace --output-report report.html --overwrite
+
+# Inspect a bounded trust projection only; this does not open, import, persist, or replay the file
+maui devflow evidence inspect-trust ./artifacts/flow-run.json --json
+
+# Verify a returned Apple flow-QA ZIP without extraction or execution; optional diagnostics remain untrusted
+maui devflow evidence verify-apple-qa ./devflow-flow-qa-<run-id>-ios.zip --import-diagnostics --json
 ```
 
 ## What a bundle contains
@@ -146,6 +152,69 @@ characters are removed before rendering. Explicit report paths must use `.html`/
 Windows device/alternate-stream names, and never overwrite unless `--overwrite` is supplied.
 Generated reports live in a dedicated temporary folder and are aged out by TTL and count — only
 files this tool created are deleted.
+
+## Imported artifact trust
+
+`verify-apple-qa` is a separate read-only handoff verifier for the iOS Simulator, Mac Catalyst,
+and experimental AppKit return ZIP/directory described in [platform flow QA](flow-qa.md). It
+accepts only the documented path allowlist, rejects traversal/duplicate/symlink/oversize/bomb
+entries, validates manifest hashes, and never extracts or executes the ZIP. Compatible per-flow
+`flow-run.json` and `.mauitrace` entries can be projected with `--import-diagnostics`, but receive
+fresh isolated `imported-artifact` IDs and remain `untrusted` until a new local reproduction.
+
+When a `.mauitrace` v1 bundle is imported into the broker artifact-trust surface, the existing
+hostile ZIP reader still enforces its entry, size, compression-ratio, UTF-8, manifest, and typed
+shape limits. The broker calculates a whole-artifact SHA-256 and may validate manifest entry
+hashes, but those hashes prove **integrity only**. They never establish producer provenance or make
+the bundle executable.
+
+The broker keeps no raw ZIP after import: only a bounded redacted typed projection, a fresh
+`imported-artifact` ID, and a short-lived capability token remain in memory. There is no broad list
+or raw-download endpoint. Imported content starts `untrusted`; independently verified external
+facts can make it `attested`, but both states remain diagnostic-only. A new local run must match
+the current flow/app/target/failure facts before it can be `locally-reproduced` and eligible for a
+future approvable repair or source proposal. Imports never auto-open, replay, or append repair
+history.
+
+## Prototype-study local journal
+
+The Test Workbench Results card has a separate, file-only **Prototype evidence (local only)**
+export for local authoring studies. It is not a `.mauitrace` entry, broker artifact, or telemetry
+surface. A bounded browser `sessionStorage` journal records only allow-listed timestamps, safe
+provenance enums, booleans, bounded counts/durations, and locally pseudonymized run/proposal
+references. It has no upload, HTTP endpoint, or network egress.
+
+The export is explicitly `localSessionOnly: true` and omits Goal text, flow content, UI text,
+typed values, selectors, source paths/content, screenshots, prompts, reviewer identity, URLs,
+payloads, device serials, and secrets. It summarizes authoring/review/result timing, selector
+durability, in-session replay stability, safe classification counts, repair decisions, Improve
+usage, and explicit gaps. It can be cleared only by an explicit confirmation in the current tab.
+
+This local research-assessment aid complements digest-bound flow-run reports, qualification
+accounting, and device artifacts; it does not alter qualification-v1 requirements, establish
+provenance, or certify a platform or device.
+
+## Qualification privacy and adversarial evidence
+
+The engineering-preview qualification report is an additional **redacted accounting document**,
+not a new evidence bundle format. It stores hashes, counts, fixed reason codes, and safe artifact
+references only. It does not contain raw UI text, Markdown, logs, network content, source,
+absolute paths, grant material, prompt text, secrets, screenshots, model context, or imported ZIP
+contents.
+
+The static adversarial corpus covers prompt injection in UI/log/network/Markdown/artifact fields;
+secret/path/source canaries; hostile JSON/ZIP/traversal/origin/grant/idempotency input; imported
+artifact trust; prohibited test-agent tools; and repair/source non-apply behavior. Canary checks
+fail closed if a canary reaches a report, evidence, audit, model-projection, or artifact
+projection. The corpus validates the local redaction/projection boundary; it is not a claim that
+an untested remote provider or a physical device was exercised.
+
+The Inspector Trace tab uses this same import boundary. It presents only the safe projection and
+trust reasons in captured/read-only mode; it cannot reopen the raw imported ZIP/report after the
+boundary has discarded it. For a local broker run, Trace can download a retained linked
+`.mauitrace` v1 failure bundle and displays its report/evidence digest linkage and completeness.
+The automatic failure capture is redacted and excludes screenshots and flow text unless the human
+explicitly opted into each attachment during the Run check.
 
 ## MCP tools
 

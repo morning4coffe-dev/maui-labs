@@ -18,6 +18,11 @@ on:
         required: false
         type: boolean
         default: false
+      pack-driver:
+        required: false
+        type: boolean
+        default: false
+        description: 'Pack Microsoft.Maui.DevFlow.Driver when the DevFlow package consumer needs its local dependency.'
       install-workloads:
         required: false
         type: boolean
@@ -114,6 +119,7 @@ jobs:
           -prepareMachine
           -projects %CD%\${{ inputs.project-path }}
           /p:VersionSuffix=%CI_PACKAGE_VERSION_SUFFIX%
+          /p:PackDriverNuGet=${{ inputs.pack-driver }}
         shell: cmd
 
       - name: Build and Test (macOS)
@@ -124,6 +130,7 @@ jobs:
           --prepareMachine
           --projects $(pwd)/${{ inputs.project-path }}
           /p:VersionSuffix=$CI_PACKAGE_VERSION_SUFFIX
+          /p:PackDriverNuGet=${{ inputs.pack-driver }}
 
       - name: Build and Test (Linux)
         if: startsWith(matrix.os, 'ubuntu')
@@ -133,6 +140,7 @@ jobs:
           --prepareMachine
           --projects $(pwd)/${{ inputs.project-path }}
           /p:VersionSuffix=$CI_PACKAGE_VERSION_SUFFIX
+          /p:PackDriverNuGet=${{ inputs.pack-driver }}
 
       - name: NativeAOT publish smoke test (macOS)
         if: matrix.os == 'macos-latest' && inputs.project-name == 'cli'
@@ -211,6 +219,7 @@ jobs:
             expected_package_ids=(
               Microsoft.Maui.DevFlow.Agent
               Microsoft.Maui.DevFlow.Blazor
+              Microsoft.Maui.DevFlow.Driver
               Microsoft.Maui.DevFlow.Testing
             )
 
@@ -223,6 +232,13 @@ jobs:
           fi
 
           printf '%s\n' "$produced_packages"
+
+      - name: Validate DevFlow Testing package
+        if: inputs.pack && inputs.project-name == 'devflow'
+        shell: pwsh
+        run: |
+          ./tests/DevFlow/PackageConsumer/Validate-TestingPackage.ps1 `
+            -PackageDirectory "${{ github.workspace }}/artifacts/packages"
 
       - name: Upload packages
         if: inputs.pack

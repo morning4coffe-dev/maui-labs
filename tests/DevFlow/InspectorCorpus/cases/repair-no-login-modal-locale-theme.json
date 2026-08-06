@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "repair-no-login-modal-locale-theme",
+  "kind": "repair-negative",
+  "disposition": "no-repair",
+  "fixture": {
+    "failure": "locator-not-found",
+    "checkpointMismatches": ["route-login", "modal", "locale", "theme"]
+  },
+  "expect": {
+    "diagnosticIds": ["DFSH004"],
+    "candidateKinds": [],
+    "repairEligible": false,
+    "ineligibilityCodes": ["checkpoint-route-mismatch", "checkpoint-modal-mismatch", "checkpoint-locale-mismatch", "checkpoint-theme-mismatch"]
+  }
+}

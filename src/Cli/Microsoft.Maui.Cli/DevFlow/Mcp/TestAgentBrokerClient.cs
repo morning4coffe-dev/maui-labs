@@ -1,0 +1,295 @@
+using System.Net;
+using System.Text;
+using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
+using Microsoft.Maui.Cli.DevFlow.Broker;
+using Microsoft.Maui.DevFlow.Testing;
+
+namespace Microsoft.Maui.Cli.DevFlow.Mcp;
+
+/// <summary>Typed loopback client for the broker-owned restricted test-agent policy boundary.</summary>
+internal static class TestAgentBrokerClient
+{
+    private static readonly HttpClient Http = new()
+    {
+        Timeout = TimeSpan.FromSeconds(35),
+    };
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentSessionResult>> BeginAsync(
+        int brokerPort,
+        MauiTestAgentSessionBeginRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/sessions/begin",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionBeginRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentSessionResult>> StatusAsync(
+        int brokerPort,
+        MauiTestAgentSessionAccessRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/sessions/status",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionAccessRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentSessionResult>> AbandonAsync(
+        int brokerPort,
+        MauiTestAgentSessionAccessRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/sessions/abandon",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionAccessRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentGrantIssueResult>> IssueGrantAsync(
+        int brokerPort,
+        MauiTestAgentGrantIssueRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/grants/issue",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentGrantIssueRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentGrantIssueResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentApprovalResult>> SubmitApprovalAsync(
+        int brokerPort,
+        MauiTestAgentApprovalSubmitRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/approvals/request",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentApprovalSubmitRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentApprovalResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentMutationAuthorizationResult>> AuthorizeAsync(
+        int brokerPort,
+        MauiTestAgentMutationAuthorizationRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/mutations/authorize",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentMutationAuthorizationRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentMutationAuthorizationResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentToolResult>> CompleteAsync(
+        int brokerPort,
+        MauiTestAgentMutationCompletion request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/mutations/complete",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentMutationCompletion,
+            MauiTestingJsonContext.Default.MauiTestAgentToolResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentSessionResult>> AppendActionAsync(
+        int brokerPort,
+        MauiTestAgentActionRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/draft/action",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentActionRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentSessionResult>> AddAssertionAsync(
+        int brokerPort,
+        MauiTestAgentAssertionRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/draft/assertion",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentAssertionRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentSessionResult>> CommitAsync(
+        int brokerPort,
+        MauiTestAgentSessionAccessRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/draft/commit",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionAccessRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentSessionResult>> MigratePreviewAsync(
+        int brokerPort,
+        MauiTestAgentSessionAccessRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/draft/migrate-preview",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionAccessRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentPatchResult>> PatchAsync(
+        int brokerPort,
+        MauiTestAgentPatchRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/patch",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentPatchRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentPatchResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentAuditResult>> AuditAsync(
+        int brokerPort,
+        MauiTestAgentSessionAccessRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/audit",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentSessionAccessRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentAuditResult,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentRunBindingResult>> BindRunAsync(
+        int brokerPort,
+        MauiTestAgentRunBindingRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/runs/bind",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentRunBindingRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentRunBindingResult,
+            cancellationToken);
+
+    internal static string SerializeWorkflowRunRequest<TRequest>(
+        TRequest request,
+        JsonTypeInfo<TRequest> requestType)
+        => JsonSerializer.Serialize(request, requestType);
+
+    internal static Task<TestAgentBrokerRawResponse> PostWorkflowRunAsync<TRequest>(
+        int brokerPort,
+        string path,
+        TRequest request,
+        JsonTypeInfo<TRequest> requestType,
+        CancellationToken cancellationToken = default)
+        => PostWorkflowRunJsonAsync(
+            brokerPort,
+            path,
+            SerializeWorkflowRunRequest(request, requestType),
+            cancellationToken);
+
+    internal static async Task<TestAgentBrokerRawResponse> PostWorkflowRunJsonAsync(
+        int brokerPort,
+        string path,
+        string json,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            using var content = new StringContent(json, Encoding.UTF8, "application/json");
+            using var response = await Http.PostAsync(
+                $"http://localhost:{brokerPort}{path}",
+                content,
+                cancellationToken).ConfigureAwait(false);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                return new TestAgentBrokerRawResponse((int)response.StatusCode, document.RootElement.Clone(), null);
+            }
+            catch (JsonException)
+            {
+                return new TestAgentBrokerRawResponse(
+                    (int)response.StatusCode,
+                    default,
+                    "The broker returned an invalid structured response.");
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (HttpRequestException)
+        {
+            return new TestAgentBrokerRawResponse(0, default, "The local DevFlow broker is unavailable.");
+        }
+        catch (TaskCanceledException)
+        {
+            return new TestAgentBrokerRawResponse(0, default, "The local DevFlow broker did not respond before the bounded deadline.");
+        }
+    }
+
+    private static async Task<TestAgentBrokerResponse<TResponse>> PostAsync<TRequest, TResponse>(
+        int brokerPort,
+        string path,
+        TRequest request,
+        JsonTypeInfo<TRequest> requestType,
+        JsonTypeInfo<TResponse> responseType,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(request, requestType);
+            using var content = new ByteArrayContent(bytes);
+            content.Headers.ContentType = new("application/json");
+            using var response = await Http.PostAsync(
+                $"http://localhost:{brokerPort}{path}",
+                content,
+                cancellationToken).ConfigureAwait(false);
+            var body = await response.Content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false);
+            var value = JsonSerializer.Deserialize(body, responseType);
+            return new TestAgentBrokerResponse<TResponse>((int)response.StatusCode, value, null);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (HttpRequestException)
+        {
+            return new TestAgentBrokerResponse<TResponse>(0, default, "The local DevFlow broker is unavailable.");
+        }
+        catch (TaskCanceledException)
+        {
+            return new TestAgentBrokerResponse<TResponse>(
+                0,
+                default,
+                "The local DevFlow broker did not respond before the bounded deadline.");
+        }
+        catch (JsonException)
+        {
+            return new TestAgentBrokerResponse<TResponse>(
+                0,
+                default,
+                "The local DevFlow broker returned an invalid structured response.");
+        }
+    }
+}
+
+internal sealed record TestAgentBrokerResponse<T>(int StatusCode, T? Value, string? TransportError);
+
+internal sealed record TestAgentBrokerRawResponse(int StatusCode, JsonElement Value, string? TransportError)
+{
+    internal bool HasValue => Value.ValueKind != JsonValueKind.Undefined;
+}

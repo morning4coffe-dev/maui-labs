@@ -11,6 +11,8 @@
       "src\\DevFlow\\Microsoft.Maui.DevFlow.Driver\\Microsoft.Maui.DevFlow.Driver.csproj",
       "src\\DevFlow\\Microsoft.Maui.DevFlow.Logging\\Microsoft.Maui.DevFlow.Logging.csproj",
       "src\\DevFlow\\Microsoft.Maui.DevFlow.Testing\\Microsoft.Maui.DevFlow.Testing.csproj",
+      "src\\DevFlow\\Microsoft.Maui.DevFlow.TestAgent.Core\\Microsoft.Maui.DevFlow.TestAgent.Core.csproj",
+      "src\\DevFlow\\Microsoft.Maui.DevFlow.TestAgent.Host\\Microsoft.Maui.DevFlow.TestAgent.Host.csproj",
       "src\\DevFlow\\Microsoft.Maui.DevFlow.Tests\\Microsoft.Maui.DevFlow.Tests.csproj",
       "src\\DevFlow\\Microsoft.Maui.DevFlow.Inspector.Tests\\Microsoft.Maui.DevFlow.Inspector.Tests.csproj"
     ]

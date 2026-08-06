@@ -26,12 +26,29 @@ public class EvidenceInspectorRouteTests
     }
 
     [Fact]
+    public void WorkbenchRunAndArtifactRoutesAreTokenGatedButDoNotClaimDirectMutationAuthority()
+    {
+        Assert.True(InspectorServer.IsTokenGatedPath("/api/workbench/run/start"));
+        Assert.True(InspectorServer.IsTokenGatedPath("/api/workbench/artifacts/import"));
+        Assert.False(InspectorServer.IsMutation("/api/workbench/run/start"));
+        Assert.False(InspectorServer.IsMutation("/api/workbench/artifacts/import"));
+    }
+
+    [Fact]
     public void EvidenceCaptureIsNotAMutationAndIsNotBlockedDuringReplay()
     {
         // Capturing evidence only READS the app, so it must not claim the writer lease and must
         // stay available while a flow replay is driving the app.
         Assert.False(InspectorServer.IsMutation("/api/evidence/capture"));
         Assert.False(InspectorServer.IsBlockedDuringReplay("/api/evidence/capture"));
+    }
+
+    [Fact]
+    public void WriterHeartbeatAndLegacyReplayAreFencedDuringBrokerRuns()
+    {
+        Assert.True(InspectorServer.IsBlockedDuringReplay("/api/control"));
+        Assert.True(InspectorServer.IsBlockedDuringReplay("/api/flows/replay"));
+        Assert.True(InspectorServer.IsBlockedDuringReplay("/api/checkpoint/restore"));
     }
 
     [Fact]

@@ -1,0 +1,580 @@
+using System.Net;
+using System.Net.Sockets;
+using System.Net.WebSockets;
+using System.Reflection;
+using System.Text;
+using System.Text.Json;
+using Microsoft.Maui.Cli.DevFlow.Broker;
+using Microsoft.Maui.Cli.DevFlow.Inspector;
+using Microsoft.Maui.DevFlow.Agent.Core;
+using Microsoft.Maui.DevFlow.Testing;
+
+namespace Microsoft.Maui.DevFlow.Tests;
+
+public sealed class InspectorWorkbenchBrokerRouteTests
+{
+    [Fact]
+    public async Task WorkbenchImproveRoute_AnalyzesLoadedFlowPlanAndLiveTreeWithoutMutation()
+    {
+        var brokerPort = FreePort();
+        var agentPort = FreePort();
+        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var cancellation = new CancellationTokenSource();
+        var brokerTask = broker.RunAsync(cancellation.Token);
+        await WaitForBrokerAsync(brokerPort);
+
+        using var agent = new AgentHttpServer(agentPort);
+        agent.MapGet("/api/v1/agent/status", _ => Task.FromResult(HttpResponse.Json(new
+        {
+            running = true,
+            agent = new { name = "DevFlow", instanceId = "improve-instance", version = "1" },
+            app = new { name = "Improve Test", build = "build-1", packageId = "com.example.improve", version = "1.0" },
+            device = new { platform = "android", deviceType = "emulator", idiom = "phone" },
+            capabilities = new { ui = true, mutations = true },
+            route = "/orders",
+            locale = "en-US",
+            theme = "light",
+            orientation = "portrait",
+            displayProfile = "320x640"
+        })));
+        agent.MapGet("/api/v1/ui/tree", _ => Task.FromResult(HttpResponse.Json(new[]
+        {
+            new
+            {
+                id = "root",
+                type = "ContentPage",
+                automationId = "orders-page",
+                isVisible = true,
+                isEnabled = true,
+                children = new[]
+                {
+                    new { id = "save-1", parentId = "root", type = "Button", role = "button", automationId = "save", isVisible = true, isEnabled = true },
+                    new { id = "save-2", parentId = "root", type = "Button", role = "button", automationId = "save", isVisible = true, isEnabled = true }
+                }
+            }
+        })));
+        agent.Start();
+
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri($"ws://127.0.0.1:{brokerPort}/ws/agent"), CancellationToken.None);
+        await SendAsync(socket, $$"""
+            {"type":"register","project":"workbench-improve-test","tfm":"net10.0","platform":"android","appName":"Improve Test","currentPort":{{agentPort}}}
+            """);
+        await ReceiveAsync(socket);
+
+        try
+        {
+            using var http = new HttpClient();
+            var embedToken = (string)typeof(BrokerServer)
+                .GetField("_embedToken", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(broker)!;
+            var hostApprovalToken = (string)typeof(BrokerServer)
+                .GetField("_hostApprovalToken", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(broker)!;
+            Assert.NotEqual(embedToken, hostApprovalToken);
+
+            async Task<HttpResponseMessage> ProbeGrantIssueAsync(string token)
+            {
+                using var message = new HttpRequestMessage(
+                    HttpMethod.Post,
+                    $"http://127.0.0.1:{brokerPort}/api/test-agent/grants/issue");
+                message.Headers.TryAddWithoutValidation("X-DevFlow-Host-Approval-Token", token);
+                message.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+                return await http.SendAsync(message);
+            }
+
+            using (var embedProbe = await ProbeGrantIssueAsync(embedToken))
+                Assert.Equal(HttpStatusCode.Forbidden, embedProbe.StatusCode);
+            using (var hostProbe = await ProbeGrantIssueAsync(hostApprovalToken))
+                Assert.NotEqual(HttpStatusCode.Forbidden, hostProbe.StatusCode);
+
+            using var agents = JsonDocument.Parse(await http.GetStringAsync($"http://127.0.0.1:{brokerPort}/api/agents"));
+            var agentId = agents.RootElement[0].GetProperty("id").GetString()!;
+            var inspectorBase = $"http://127.0.0.1:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}";
+            _ = await http.GetAsync($"{inspectorBase}/");
+            var inspector = await GetInspectorAsync(broker, agentId);
+            var token = (string)typeof(InspectorServer)
+                .GetField("_readToken", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(inspector)!;
+            http.DefaultRequestHeaders.Add("X-DevFlow-Inspector-Token", token);
+
+            var response = await PostJsonAsync(http, $"{inspectorBase}/api/workbench/improve/analyze", new
+            {
+                flow = new
+                {
+                    schema = 2,
+                    name = "improve",
+                    steps = new[]
+                    {
+                        new
+                        {
+                            seq = 1,
+                            action = "tap",
+                            args = new { selector = new { automationId = "save" } }
+                        }
+                    }
+                },
+                plan = new
+                {
+                    schema = 1,
+                    requiredPlatforms = new[] { "android", "windows" },
+                    acceptanceCriteria = new[] { new { criterionId = "order-saved", required = true } }
+                },
+                includeLiveTree = true
+            });
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+            Assert.True(body.RootElement.GetProperty("ok").GetBoolean());
+            var findingIds = body.RootElement.GetProperty("analysis").GetProperty("findings")
+                .EnumerateArray()
+                .Select(finding => finding.GetProperty("diagnosticId").GetString())
+                .ToArray();
+            Assert.Contains(MauiSelectorHealthDiagnosticIds.DuplicateAutomationId, findingIds);
+            Assert.Contains(MauiSelectorHealthDiagnosticIds.RequiredPlatform, findingIds);
+            Assert.True(body.RootElement.GetProperty("liveTree").GetProperty("available").GetBoolean());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            broker.Dispose();
+            await brokerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
+    public async Task WorkbenchRoutes_UseBrokerRunAndTrustServicesWithInspectorToken()
+    {
+        var brokerPort = FreePort();
+        var agentPort = FreePort();
+        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var cancellation = new CancellationTokenSource();
+        var brokerTask = broker.RunAsync(cancellation.Token);
+        await WaitForBrokerAsync(brokerPort);
+
+        using var agent = new AgentHttpServer(agentPort);
+        agent.MapGet("/api/v1/agent/status", _ => Task.FromResult(HttpResponse.Json(new
+        {
+            running = true,
+            agent = new { name = "DevFlow", instanceId = "runtime-instance", version = "1" },
+            app = new { name = "Workbench Test", build = "build-1", packageId = "com.example.workbench", version = "1.0" },
+            device = new { platform = "test", deviceType = "emulator", idiom = "phone" },
+            capabilities = new { ui = true, mutations = true, workflowCommandLedger = true },
+            route = "/home",
+        })));
+        agent.MapPost("/api/v1/agent/workflow-runs", _ => Task.FromResult(HttpResponse.Json(new
+        {
+            ok = true,
+            state = "active",
+        })), requiresMutationLease: false);
+        agent.Start();
+
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri($"ws://127.0.0.1:{brokerPort}/ws/agent"), CancellationToken.None);
+        await SendAsync(socket, $$"""
+            {"type":"register","project":"workbench-route-test","tfm":"net10.0","platform":"test","appName":"Workbench Test","currentPort":{{agentPort}}}
+            """);
+        await ReceiveAsync(socket);
+
+        try
+        {
+            using var http = new HttpClient();
+            using var agents = JsonDocument.Parse(await http.GetStringAsync($"http://127.0.0.1:{brokerPort}/api/agents"));
+            var registration = agents.RootElement[0];
+            var agentId = registration.GetProperty("id").GetString()!;
+            var instanceId = registration.GetProperty("instanceId").GetString()!;
+            var inspectorBase = $"http://127.0.0.1:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}";
+
+            // This first request constructs the per-agent Inspector, but cannot read the
+            // token-gated workbench target facts.
+            var denied = await http.GetAsync($"{inspectorBase}/api/workbench/target");
+            Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+
+            var inspector = await GetInspectorAsync(broker, agentId);
+            var inspectorToken = (string)typeof(InspectorServer)
+                .GetField("_readToken", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(inspector)!;
+            var inspectorLeaseId = (string)typeof(InspectorServer)
+                .GetField("_fallbackMutationLeaseId", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(inspector)!;
+            http.DefaultRequestHeaders.Add("X-DevFlow-Inspector-Token", inspectorToken);
+
+            using var leaseClaim = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/leases/{Uri.EscapeDataString(agentId)}",
+                new
+                {
+                    action = "claim",
+                    leaseId = inspectorLeaseId,
+                    holderKind = "web-inspector",
+                    label = "DevFlow Web Inspector",
+                });
+            Assert.Equal(HttpStatusCode.OK, leaseClaim.StatusCode);
+
+            using var target = JsonDocument.Parse(await http.GetStringAsync($"{inspectorBase}/api/workbench/target"));
+            Assert.True(target.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal(instanceId, target.RootElement.GetProperty("target").GetProperty("agentInstanceId").GetString());
+            Assert.Equal("build-1", target.RootElement.GetProperty("target").GetProperty("app").GetProperty("build").GetString());
+
+            var markdown = FlowMarkdown.Serialize(AssertOnlyFlow());
+            using var preflight = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/run/preflight",
+                new
+                {
+                    run = new
+                    {
+                        agentId,
+                        agentInstanceId = instanceId,
+                        idempotencyKey = "inspector-workbench-key",
+                        markdown,
+                    },
+                    evidence = new { includeScreenshot = false, includeWorkflow = false },
+                });
+            Assert.Equal(HttpStatusCode.OK, preflight.StatusCode);
+            using var preflightBody = JsonDocument.Parse(await preflight.Content.ReadAsStringAsync());
+            Assert.True(preflightBody.RootElement.GetProperty("ok").GetBoolean());
+            Assert.False(preflightBody.RootElement.TryGetProperty("capabilityToken", out _));
+
+            using var started = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/run/start",
+                new
+                {
+                    run = new
+                    {
+                        agentId,
+                        agentInstanceId = instanceId,
+                        idempotencyKey = "inspector-workbench-key",
+                        markdown,
+                    },
+                    evidence = new { includeScreenshot = false, includeWorkflow = false },
+                });
+            Assert.Equal(HttpStatusCode.Accepted, started.StatusCode);
+            using var startBody = JsonDocument.Parse(await started.Content.ReadAsStringAsync());
+            var run = startBody.RootElement.GetProperty("run");
+            var runId = run.GetProperty("runId").GetString()!;
+            var runToken = startBody.RootElement.GetProperty("capabilityToken").GetString()!;
+            Assert.False(string.IsNullOrWhiteSpace(runToken));
+
+            // A reload/host handoff gets the server-held journal snapshot without requiring that
+            // the browser echo the token again.
+            using var journal = JsonDocument.Parse(await http.GetStringAsync($"{inspectorBase}/api/workbench/run/journal"));
+            Assert.True(journal.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal(runId, journal.RootElement.GetProperty("run").GetProperty("runId").GetString());
+            Assert.False(journal.RootElement.GetProperty("run").TryGetProperty("capabilityToken", out _));
+
+            JsonDocument? terminal = null;
+            for (var attempt = 0; attempt < 40; attempt++)
+            {
+                using var status = await PostJsonAsync(
+                    http,
+                    $"{inspectorBase}/api/workbench/run/{Uri.EscapeDataString(runId)}/status",
+                    new { capabilityToken = runToken });
+                terminal?.Dispose();
+                terminal = JsonDocument.Parse(await status.Content.ReadAsStringAsync());
+                if (terminal.RootElement.GetProperty("run").GetProperty("terminal").GetBoolean())
+                    break;
+                await Task.Delay(25);
+            }
+            using (terminal)
+            {
+                Assert.NotNull(terminal);
+                Assert.True(terminal!.RootElement.GetProperty("run").GetProperty("terminal").GetBoolean());
+            }
+
+            const string hostile = "CorrectHorseBatteryStaple";
+            using var import = new HttpRequestMessage(
+                HttpMethod.Post,
+                $"{inspectorBase}/api/workbench/artifacts/import?kind=flow-run")
+            {
+                Content = new ByteArrayContent(Encoding.UTF8.GetBytes(FlowRunJson(hostile))),
+            };
+            import.Content.Headers.ContentType = new("application/json");
+            using var imported = await http.SendAsync(import);
+            Assert.Equal(HttpStatusCode.Created, imported.StatusCode);
+            var importedText = await imported.Content.ReadAsStringAsync();
+            Assert.DoesNotContain(hostile, importedText, StringComparison.Ordinal);
+            using var importedBody = JsonDocument.Parse(importedText);
+            Assert.Equal(
+                "imported-artifact",
+                importedBody.RootElement.GetProperty("status").GetProperty("identity").GetProperty("namespace").GetString());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            broker.Dispose();
+            await brokerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
+    public async Task AgentRequest_WorkbenchApprovalDeliversGrantThroughRestrictedSessionStatus()
+    {
+        var brokerPort = FreePort();
+        var agentPort = FreePort();
+        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var cancellation = new CancellationTokenSource();
+        var brokerTask = broker.RunAsync(cancellation.Token);
+        await WaitForBrokerAsync(brokerPort);
+
+        using var agent = new AgentHttpServer(agentPort);
+        agent.MapGet("/api/v1/agent/status", _ => Task.FromResult(HttpResponse.Json(new
+        {
+            running = true,
+            agent = new { name = "DevFlow", instanceId = "approval-instance", version = "1" },
+            app = new { name = "Approval Test", build = "build-approval", packageId = "com.example.approval", version = "1.0" },
+            device = new { platform = "android", deviceType = "emulator", idiom = "phone" },
+            capabilities = new { ui = true, mutations = true },
+            route = "/todos",
+        })));
+        agent.Start();
+
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri($"ws://127.0.0.1:{brokerPort}/ws/agent"), CancellationToken.None);
+        await SendAsync(socket, $$"""
+            {"type":"register","project":"workbench-approval-test","tfm":"net10.0-android","platform":"android","appName":"Approval Test","currentPort":{{agentPort}}}
+            """);
+        await ReceiveAsync(socket);
+
+        try
+        {
+            using var http = new HttpClient();
+            using var agents = JsonDocument.Parse(await http.GetStringAsync($"http://127.0.0.1:{brokerPort}/api/agents"));
+            var registration = agents.RootElement[0];
+            var agentId = registration.GetProperty("id").GetString()!;
+            var instanceId = registration.GetProperty("instanceId").GetString()!;
+            var target = new { agentId, agentInstanceId = instanceId };
+            var provenance = new
+            {
+                actorKind = "agent",
+                actorId = "approval-route-agent",
+                channel = "mcp",
+                provider = "host-owned",
+            };
+
+            using var beginResponse = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/test-agent/sessions/begin",
+                new
+                {
+                    envelope = new
+                    {
+                        schema = 1,
+                        requestId = "begin-approval-route",
+                        idempotencyKey = "begin-approval-route",
+                        target,
+                        correlation = new { },
+                        provenance,
+                        intent = "Add one disposable todo",
+                        deadlineMs = 30_000,
+                        policyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+                    },
+                    targetState = new { agentId, agentInstanceId = instanceId, seedFingerprint = "seed-a" },
+                });
+            Assert.Equal(HttpStatusCode.OK, beginResponse.StatusCode);
+            using var begin = JsonDocument.Parse(await beginResponse.Content.ReadAsStringAsync());
+            var snapshot = begin.RootElement.GetProperty("snapshot");
+            Assert.True(
+                !snapshot.GetProperty("target").TryGetProperty("seedFingerprint", out var echoedTargetSeed) ||
+                echoedTargetSeed.ValueKind == JsonValueKind.Null);
+            Assert.True(
+                !snapshot.GetProperty("targetState").TryGetProperty("seedFingerprint", out var echoedStateSeed) ||
+                echoedStateSeed.ValueKind == JsonValueKind.Null);
+            var sessionId = snapshot.GetProperty("sessionId").GetString()!;
+            var readCapabilityId = snapshot.GetProperty("readCapabilityId").GetString()!;
+            var plan = snapshot.GetProperty("plan");
+            var correlation = new
+            {
+                authoringSessionId = sessionId,
+                planId = plan.GetProperty("planId").GetString(),
+                planRevision = plan.GetProperty("revision").GetInt32(),
+                planDigest = snapshot.GetProperty("planDigest").GetString(),
+                flowId = plan.GetProperty("flow").GetProperty("flowId").GetString(),
+                flowRevision = snapshot.GetProperty("flowRevision").GetInt32(),
+                flowDigest = snapshot.GetProperty("flowDigest").GetString(),
+            };
+
+            using var requestResponse = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/test-agent/approvals/request",
+                new
+                {
+                    envelope = new
+                    {
+                        schema = 1,
+                        requestId = "request-approval-route",
+                        idempotencyKey = "request-approval-route",
+                        target,
+                        correlation,
+                        provenance,
+                        intent = "Fill NewTodoEntry, then tap AddButton",
+                        readCapabilityId,
+                        deadlineMs = 30_000,
+                        policyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+                    },
+                    kind = MauiTestAgentApprovalKinds.DraftChange,
+                    scope = new
+                    {
+                        allowedActions = new[] { MauiTestAgentActions.Fill, MauiTestAgentActions.Tap },
+                        allowedSelectors = new[] { "automationId:NewTodoEntry", "automationId:AddButton" },
+                        allowedSideEffectClasses = new[] { "ui" },
+                        maxActionCount = 2,
+                        maxValueBytes = 64,
+                    },
+                });
+            Assert.Equal(HttpStatusCode.OK, requestResponse.StatusCode);
+            using var submitted = JsonDocument.Parse(await requestResponse.Content.ReadAsStringAsync());
+            var approvalRequestId = submitted.RootElement.GetProperty("request").GetProperty("approvalRequestId").GetString()!;
+
+            var inspectorBase = $"http://127.0.0.1:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}";
+            var denied = await http.GetAsync($"{inspectorBase}/api/workbench/agent-requests");
+            Assert.Equal(HttpStatusCode.Forbidden, denied.StatusCode);
+            var inspector = await GetInspectorAsync(broker, agentId);
+            var inspectorToken = (string)typeof(InspectorServer)
+                .GetField("_readToken", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(inspector)!;
+            http.DefaultRequestHeaders.Add("X-DevFlow-Inspector-Token", inspectorToken);
+
+            using var inbox = JsonDocument.Parse(await http.GetStringAsync($"{inspectorBase}/api/workbench/agent-requests"));
+            var inboxRequest = Assert.Single(inbox.RootElement.GetProperty("requests").EnumerateArray());
+            Assert.Equal(MauiTestAgentApprovalStates.Pending, inboxRequest.GetProperty("state").GetString());
+            Assert.True(
+                !inboxRequest.TryGetProperty("grantId", out var hiddenGrant) ||
+                hiddenGrant.ValueKind == JsonValueKind.Null);
+
+            using var approveResponse = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests/{Uri.EscapeDataString(approvalRequestId)}/approve",
+                new
+                {
+                    humanConfirmed = true,
+                    approvedScope = new
+                    {
+                        allowedActions = new[] { MauiTestAgentActions.Tap },
+                        allowedSelectors = new[] { "automationId:AddButton" },
+                        allowedSideEffectClasses = new[] { "ui" },
+                        maxActionCount = 1,
+                        maxValueBytes = 0,
+                    },
+                    grantDurationSeconds = 60,
+                });
+            Assert.Equal(HttpStatusCode.OK, approveResponse.StatusCode);
+            using var approved = JsonDocument.Parse(await approveResponse.Content.ReadAsStringAsync());
+            Assert.True(approved.RootElement.GetProperty("ok").GetBoolean());
+            Assert.True(
+                !approved.RootElement.GetProperty("request").TryGetProperty("grantId", out var responseGrant) ||
+                responseGrant.ValueKind == JsonValueKind.Null);
+
+            using var statusResponse = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/test-agent/sessions/status",
+                new { sessionId, readCapabilityId });
+            using var status = JsonDocument.Parse(await statusResponse.Content.ReadAsStringAsync());
+            var delivered = Assert.Single(status.RootElement
+                .GetProperty("snapshot")
+                .GetProperty("approvalRequests")
+                .EnumerateArray());
+            Assert.Equal(MauiTestAgentApprovalStates.Approved, delivered.GetProperty("state").GetString());
+            Assert.False(string.IsNullOrWhiteSpace(delivered.GetProperty("grantId").GetString()));
+            Assert.Single(delivered.GetProperty("approvedScope").GetProperty("allowedActions").EnumerateArray());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            broker.Dispose();
+            await brokerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private static MauiFlow AssertOnlyFlow() => new()
+    {
+        Name = "inspector-workbench",
+        Steps =
+        {
+            new FlowStep
+            {
+                Seq = 1,
+                Action = FlowActions.Assert,
+                Asserts = new()
+                {
+                    new FlowAssert
+                    {
+                        Kind = "exists",
+                        Verify = false,
+                        Selector = new FlowSelector { AutomationId = "label" },
+                    },
+                },
+            },
+        },
+    };
+
+    private static string FlowRunJson(string secret)
+        => $$"""
+            {
+              "schema": 1,
+              "runId": "foreign-run",
+              "flowDigest": "flow",
+              "outcome": { "status": "failed" },
+              "failure": {
+                "class": "assertion-failed",
+                "code": "assertion-failed",
+                "message": "{{secret}}"
+              },
+              "steps": [],
+              "events": [],
+              "artifacts": []
+            }
+            """;
+
+    private static async Task<HttpResponseMessage> PostJsonAsync(HttpClient client, string url, object value)
+        => await client.PostAsync(url, new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json"));
+
+    private static async Task<InspectorServer> GetInspectorAsync(BrokerServer broker, string agentId)
+    {
+        var field = typeof(BrokerServer).GetField("_inspectors", BindingFlags.Instance | BindingFlags.NonPublic)!;
+        var inspectors = (IReadOnlyDictionary<string, InspectorServer>)field.GetValue(broker)!;
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            if (inspectors.TryGetValue(agentId, out var inspector))
+                return inspector;
+            await Task.Delay(25);
+        }
+        throw new InvalidOperationException("Broker did not create the Inspector.");
+    }
+
+    private static async Task WaitForBrokerAsync(int port)
+    {
+        using var http = new HttpClient();
+        for (var attempt = 0; attempt < 40; attempt++)
+        {
+            try
+            {
+                using var response = await http.GetAsync($"http://127.0.0.1:{port}/api/health");
+                if (response.IsSuccessStatusCode)
+                    return;
+            }
+            catch (HttpRequestException)
+            {
+            }
+            await Task.Delay(25);
+        }
+        throw new InvalidOperationException("Broker did not start.");
+    }
+
+    private static async Task SendAsync(ClientWebSocket socket, string text)
+        => await socket.SendAsync(Encoding.UTF8.GetBytes(text), WebSocketMessageType.Text, true, CancellationToken.None);
+
+    private static async Task<string> ReceiveAsync(ClientWebSocket socket)
+    {
+        var buffer = new byte[4096];
+        var result = await socket.ReceiveAsync(buffer, CancellationToken.None);
+        return Encoding.UTF8.GetString(buffer, 0, result.Count);
+    }
+
+    private static int FreePort()
+    {
+        using var listener = new TcpListener(IPAddress.Loopback, 0);
+        listener.Start();
+        return ((IPEndPoint)listener.LocalEndpoint).Port;
+    }
+}

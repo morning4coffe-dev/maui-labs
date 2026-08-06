@@ -81,6 +81,27 @@ public class InspectorWriterLockTests
     }
 
     [Fact]
+    public void LeaseTransferAndBegin_IsAtomicAndBlocksInterveningTakeover()
+    {
+        var leases = new MutationLeaseRegistry();
+        Assert.True(leases.Control("agent", "claim", "browser", "web", "Browser", false).YouHold);
+
+        var transferred = leases.TransferAndBegin(
+            "agent",
+            "browser",
+            "workflow",
+            "run-transaction",
+            "workflow-run",
+            "run");
+
+        Assert.True(transferred.YouHold);
+        Assert.Equal("run-transaction", transferred.TransactionId);
+        Assert.False(leases.Control("agent", "status", "browser", "web", "Browser", false).YouHold);
+        Assert.True(leases.Control("agent", "status", "workflow", "workflow-run", "run", false).YouHold);
+        Assert.True(leases.Control("agent", "claim", "other", "mcp", "MCP", force: true).HeldByOther);
+    }
+
+    [Fact]
     public void LeaseTransaction_AbandonedTokenExpires()
     {
         long ticks = 0;

@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.CommandLine.Parsing;
+using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
@@ -32,21 +33,25 @@ public class DevFlowCommands
 
     private static IDevFlowOutputWriter? s_output;
     internal static Func<Task<int?>> ResolveRunningBrokerPortAsync { get; set; } = Broker.BrokerClient.GetRunningBrokerPortAsync;
+    internal static Func<Task<int?>> EnsureBrokerRunningAsync { get; set; } = Broker.BrokerClient.EnsureBrokerRunningAsync;
     internal static Func<int, Task<Broker.AgentRegistration[]?>> ListBrokerAgentsAsync { get; set; } = Broker.BrokerClient.ListAgentsAsync;
     internal static Func<int, string, string, Task<Broker.RouteCheckpointStatus>> ControlBrokerCheckpointAsync { get; set; } =
         Broker.BrokerClient.ControlCheckpointAsync;
     internal static Func<AndroidDevFlowPortForwarder> CreateAndroidPortForwarder { get; set; } = AndroidDevFlowPortForwarder.CreateDefault;
     internal static Func<bool> IsAndroidAdbLikelyAvailable { get; set; } = AndroidDevFlowPortForwarder.IsAdbLikelyAvailable;
+    internal static Func<string, bool> LaunchInspectorUrl { get; set; } = LaunchInspectorUrlInSystemBrowser;
 
     private static IDevFlowOutputWriter Output => s_output ?? throw new InvalidOperationException("DevFlowCommands not initialized. Call CreateDevFlowCommand first.");
 
     internal static void ResetBrokerClientForTests()
     {
         ResolveRunningBrokerPortAsync = Broker.BrokerClient.GetRunningBrokerPortAsync;
+        EnsureBrokerRunningAsync = Broker.BrokerClient.EnsureBrokerRunningAsync;
         ListBrokerAgentsAsync = Broker.BrokerClient.ListAgentsAsync;
         ControlBrokerCheckpointAsync = Broker.BrokerClient.ControlCheckpointAsync;
         CreateAndroidPortForwarder = AndroidDevFlowPortForwarder.CreateDefault;
         IsAndroidAdbLikelyAvailable = AndroidDevFlowPortForwarder.IsAdbLikelyAvailable;
+        LaunchInspectorUrl = LaunchInspectorUrlInSystemBrowser;
         _errorOccurred = false;
         _agentLabelEmitted = false;
     }
@@ -1491,7 +1496,47 @@ public class DevFlowCommands
         });
         flowCommand.Add(flowValidate);
         flowCommand.Add(flowReplay);
+        flowCommand.Add(Flows.FlowQualificationCommands.Create(
+            jsonOption,
+            noJsonOption,
+            platformOption,
+            output,
+            static () => _errorOccurred = true));
         devflowCommand.Add(flowCommand);
+
+        // ===== shared Inspector / Test Workbench =====
+        var inspectCommand = new Command("inspect", "Open the shared DevFlow Inspector and Test Workbench for one connected app");
+        var inspectAgentOption = new Option<string?>("--agent")
+        {
+            Description = "Connected broker agent ID to inspect. Required when more than one app is connected."
+        };
+        var inspectNoLaunchOption = new Option<bool>("--no-launch")
+        {
+            Description = "Print the authenticated per-agent Inspector URL without opening a browser."
+        };
+        var inspectTestOption = new Option<string?>("--test")
+        {
+            Description = "Workflow Markdown path to pass only as a Test Workbench startup hint; it is not loaded or executed."
+        };
+        var inspectTraceOption = new Option<string?>("--trace")
+        {
+            Description = "Run report or evidence artifact path to pass only as a Test Workbench startup hint; it is not imported."
+        };
+        inspectCommand.Add(inspectAgentOption);
+        inspectCommand.Add(inspectNoLaunchOption);
+        inspectCommand.Add(inspectTestOption);
+        inspectCommand.Add(inspectTraceOption);
+        inspectCommand.SetAction(async (ctx, ct) =>
+        {
+            var json = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+            await InspectAsync(
+                ctx.GetValue(inspectAgentOption),
+                ctx.GetValue(inspectNoLaunchOption),
+                ctx.GetValue(inspectTestOption),
+                ctx.GetValue(inspectTraceOption),
+                json);
+        });
+        devflowCommand.Add(inspectCommand);
 
         // ===== init / skills commands =====
         var initCommand = DevFlowSkillCommands.CreateInitCommand(jsonOption, noJsonOption, output);
@@ -1773,7 +1818,19 @@ public class DevFlowCommands
         // ===== MCP server command =====
         var mcpCmd = new Command("mcp", "Start MCP (Model Context Protocol) server for AI agent integration via stdio");
         mcpCmd.Aliases.Add("mcp-serve");
-        mcpCmd.SetAction(async (ctx, ct) => { await Mcp.McpServerHost.RunAsync(); });
+        var mcpProfileOption = new Option<string>("--profile")
+        {
+            Description = "MCP capability profile: full (default, legacy compatible) or test-agent (restricted typed test authoring/run protocol)",
+            DefaultValueFactory = _ => "full",
+        };
+        mcpCmd.Add(mcpProfileOption);
+        mcpCmd.SetAction(async (ctx, ct) =>
+        {
+            var profileValue = ctx.GetValue(mcpProfileOption);
+            if (!Mcp.McpServerHost.TryParseProfile(profileValue, out var profile))
+                throw new ArgumentException("--profile must be either 'full' or 'test-agent'.");
+            await Mcp.McpServerHost.RunAsync(profile);
+        });
         devflowCommand.Add(mcpCmd);
 
         _devflowCommand = devflowCommand;
@@ -1912,6 +1969,173 @@ public class DevFlowCommands
     // ===== CDP Helper: Send command via AgentClient =====
 
     private static readonly string s_cliMutationLeaseId = Guid.NewGuid().ToString("N");
+
+    private static async Task InspectAsync(
+        string? requestedAgentId,
+        bool noLaunch,
+        string? testHint,
+        string? traceHint,
+        bool json)
+    {
+        if (!AreInspectorHintsValid(testHint, traceHint))
+        {
+            Output.WriteError("Inspector startup hints must be 4,096 characters or fewer.", json, "InvalidArgument");
+            _errorOccurred = true;
+            return;
+        }
+
+        var brokerPort = await EnsureBrokerRunningAsync();
+        if (!brokerPort.HasValue)
+        {
+            Output.WriteError("The DevFlow broker could not be started.", json, "BrokerUnavailable", retryable: true);
+            _errorOccurred = true;
+            return;
+        }
+
+        var agents = await ListBrokerAgentsAsync(brokerPort.Value);
+        string? projectPath = null;
+        try
+        {
+            var project = Directory.GetFiles(Directory.GetCurrentDirectory(), "*.csproj").FirstOrDefault();
+            projectPath = project is null ? null : Path.GetFullPath(project);
+        }
+        catch
+        {
+            // Project affinity is optional. The selection still fails closed if it is ambiguous.
+        }
+
+        var agent = ResolveInspectorAgent(agents, requestedAgentId, projectPath, out var selectionError);
+        if (agent is null)
+        {
+            Output.WriteError(selectionError, json, "AgentAmbiguous");
+            _errorOccurred = true;
+            return;
+        }
+
+        var url = BuildInspectorUrl(brokerPort.Value, agent.Id, testHint, traceHint);
+        var launched = false;
+        if (!noLaunch)
+        {
+            launched = LaunchInspectorUrl(url);
+            if (!launched)
+            {
+                Output.WriteError($"Could not open a browser. Open this DevFlow Inspector URL manually: {url}", json, "BrowserLaunchFailed");
+                _errorOccurred = true;
+                return;
+            }
+        }
+
+        Output.WriteResult(new InspectorLaunchCliResult
+        {
+            Url = url,
+            AgentId = agent.Id,
+            AgentPort = agent.Port,
+            AppName = agent.AppName,
+            Platform = agent.Platform,
+            Launched = launched,
+            TestHint = testHint,
+            TraceHint = traceHint,
+        }, json, static result => Console.WriteLine(result.Url));
+    }
+
+    internal static Broker.AgentRegistration? ResolveInspectorAgent(
+        Broker.AgentRegistration[]? agents,
+        string? requestedAgentId,
+        string? projectPath,
+        out string error)
+    {
+        if (agents is not { Length: > 0 })
+        {
+            error = "No DevFlow agents are connected. Launch the app with DevFlow enabled, then retry.";
+            return null;
+        }
+
+        var explicitId = requestedAgentId?.Trim();
+        if (requestedAgentId is not null)
+        {
+            if (string.IsNullOrEmpty(explicitId))
+            {
+                error = "The --agent value must be a connected broker agent ID.";
+                return null;
+            }
+
+            var matches = agents.Where(agent =>
+                string.Equals(agent.Id, explicitId, StringComparison.Ordinal)).ToArray();
+            if (matches.Length != 1 || matches[0].Port <= 0)
+            {
+                error = $"Agent '{explicitId}' is stale or is not connected to the current DevFlow broker.";
+                return null;
+            }
+
+            error = string.Empty;
+            return matches[0];
+        }
+
+        var resolved = Broker.BrokerClient.ResolveAgent(agents, projectPath);
+        if (resolved is not null && resolved.Port > 0)
+        {
+            error = string.Empty;
+            return resolved;
+        }
+
+        error = agents.Length == 1
+            ? "The connected DevFlow agent has no valid Inspector endpoint."
+            : "More than one DevFlow agent is connected. Re-run with --agent <agent-id> to select one explicitly."
+                + Environment.NewLine + Broker.BrokerClient.BuildMultiAgentTargetingMessage(agents);
+        return null;
+    }
+
+    internal static string BuildInspectorUrl(
+        int brokerPort,
+        string agentId,
+        string? testHint = null,
+        string? traceHint = null)
+    {
+        if (brokerPort is < 1 or > 65535)
+            throw new ArgumentOutOfRangeException(nameof(brokerPort));
+        if (string.IsNullOrWhiteSpace(agentId))
+            throw new ArgumentException("An agent ID is required.", nameof(agentId));
+
+        var query = new List<string>();
+        if (!string.IsNullOrWhiteSpace(testHint))
+            query.Add("test=" + Uri.EscapeDataString(testHint));
+        if (!string.IsNullOrWhiteSpace(traceHint))
+            query.Add("trace=" + Uri.EscapeDataString(traceHint));
+
+        var path = $"http://localhost:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}/";
+        return query.Count == 0 ? path : path + "?" + string.Join("&", query);
+    }
+
+    private static bool AreInspectorHintsValid(string? testHint, string? traceHint)
+        => (testHint?.Length ?? 0) <= 4096 && (traceHint?.Length ?? 0) <= 4096;
+
+    private static bool LaunchInspectorUrlInSystemBrowser(string url)
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                return Process.Start(new ProcessStartInfo
+                {
+                    FileName = url,
+                    UseShellExecute = true,
+                }) is not null;
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = OperatingSystem.IsMacOS() ? "open" : "xdg-open",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            startInfo.ArgumentList.Add(url);
+            return Process.Start(startInfo) is not null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
 
     private static async Task<Microsoft.Maui.DevFlow.Driver.AgentClient> CreateAgentClientAsync(
         string host,

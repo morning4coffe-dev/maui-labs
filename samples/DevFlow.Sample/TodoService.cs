@@ -20,8 +20,12 @@ public class TodoService
     public TodoService()
     {
         Items.CollectionChanged += (_, _) => NotifyChanged();
+        ResetToIntegrationSeed();
+    }
 
-        // Seed sample data
+    internal void ResetToIntegrationSeed()
+    {
+        Items.Clear();
         Add("Buy groceries");
         Add("Walk the dog");
         Add("Finish Microsoft.Maui.DevFlow project");

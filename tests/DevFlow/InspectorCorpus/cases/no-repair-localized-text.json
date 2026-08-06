@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "no-repair-localized-text",
+  "kind": "no-repair",
+  "disposition": "no-repair",
+  "fixture": { "locale": "fr-FR", "selector": { "text": "Save" }, "liveText": "Enregistrer" },
+  "expect": { "diagnosticIds": ["DFSH004"], "candidateKinds": [] }
+}

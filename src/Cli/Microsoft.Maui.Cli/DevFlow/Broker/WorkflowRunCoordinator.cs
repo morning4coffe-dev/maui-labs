@@ -53,7 +53,8 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         WorkflowRunStartRequest request,
         WorkflowRunTarget target,
         Func<bool> isTargetCurrent,
-        WorkflowRunExecutionOptions? executionOptions = null)
+        WorkflowRunExecutionOptions? executionOptions = null,
+        WorkflowRunLeaseHandoff? leaseHandoff = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(request);
@@ -121,6 +122,27 @@ internal sealed class WorkflowRunCoordinator : IDisposable
                 isTargetCurrent,
                 executionOptions ?? new WorkflowRunExecutionOptions(),
                 now);
+            if (leaseHandoff is not null)
+            {
+                var transfer = _leases.TransferAndBegin(
+                    target.AgentId,
+                    leaseHandoff.LeaseId,
+                    run.LeaseId,
+                    run.TransactionId,
+                    "workflow-run",
+                    run.RunId);
+                if (!transfer.Allowed ||
+                    !string.Equals(transfer.TransactionId, run.TransactionId, StringComparison.Ordinal))
+                {
+                    return WorkflowRunStartResult.Conflict(
+                        "The Inspector no longer owns the mutation lease required to start this workflow run.");
+                }
+
+                run.LeaseClaimed = true;
+                run.TransactionBegun = true;
+                run.AuthorityEpoch = transfer.AuthorityEpoch;
+                AddEventLocked(run, "lease-transferred", "Inspector authority transferred atomically to the workflow run.");
+            }
             AddEventLocked(run, "queued", "Run accepted and queued.");
             AddEventLocked(
                 run,
@@ -143,6 +165,43 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         WorkflowCommandLedger = _controlLedger is not null
     };
 
+    /// <summary>
+    /// Validates a prospective run without taking a lease, minting a token, or scheduling replay.
+    /// Inspector hosts use this to render the broker's canonical admission decision before a human
+    /// explicitly starts the run.
+    /// </summary>
+    public WorkflowRunPreflightResult Preflight(
+        WorkflowRunStartRequest request,
+        WorkflowRunTarget target,
+        Func<bool> isTargetCurrent)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(request);
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(isTargetCurrent);
+
+        if (!isTargetCurrent())
+        {
+            return WorkflowRunPreflightResult.Rejected(
+                409,
+                "The requested agent instance is no longer connected. Refresh agent discovery and retry.");
+        }
+
+        var prepared = Prepare(request, target);
+        return prepared.Ok
+            ? WorkflowRunPreflightResult.Accepted(
+                prepared.FlowDigest!,
+                (long)prepared.Timeout.TotalMilliseconds,
+                prepared.ValidationWarnings,
+                prepared.Admission!)
+            : WorkflowRunPreflightResult.Rejected(
+                prepared.StatusCode,
+                prepared.Error!,
+                prepared.ValidationErrors,
+                prepared.ValidationWarnings,
+                prepared.Admission);
+    }
+
     public WorkflowRunAccessResult GetStatus(string runId, string? capabilityToken)
     {
         lock (_gate)
@@ -152,6 +211,110 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             if (!HasCapability(run, capabilityToken))
                 return WorkflowRunAccessResult.Unauthorized();
             return WorkflowRunAccessResult.Success(CreateSnapshotLocked(run));
+        }
+    }
+
+    /// <summary>
+    /// Returns facts observed by a broker-owned local run for artifact-trust matching. This is
+    /// deliberately internal: an imported-artifact capability can request only a derived binding,
+    /// never arbitrary local run reports.
+    /// </summary>
+    public WorkflowRunLocalReproductionResult GetLocalReproductionFacts(string runId)
+    {
+        lock (_gate)
+        {
+            if (!_runs.TryGetValue(runId, out var run))
+                return WorkflowRunLocalReproductionResult.NotFound();
+            if (!WorkflowRunStates.IsTerminal(run.State) || run.StructuredReport is null)
+                return WorkflowRunLocalReproductionResult.Unavailable(
+                    "The requested local run has not produced a terminal structured report.");
+
+            var report = run.StructuredReport;
+            var failure = report.Failure;
+            var failedStep = failure?.StepId is { Length: > 0 } stepId
+                ? report.Steps.FirstOrDefault(step => string.Equals(step.StepId, stepId, StringComparison.Ordinal))
+                : null;
+            return WorkflowRunLocalReproductionResult.Success(new Testing.MauiLocalReproductionFacts
+            {
+                LocalRunId = run.RunId,
+                IsNewLocalRun = true,
+                StartedAt = run.StartedAt,
+                FlowDigest = report.FlowDigest,
+                AppBuildFingerprint = report.Target?.AppBuildFingerprint,
+                AppSourceFingerprint = report.Target?.AppSourceFingerprint,
+                PackageDigest = report.Target?.PackageDigest,
+                Platform = report.Target?.Platform,
+                DeviceProfile = report.Target?.DeviceProfile,
+                Failure = failure is null
+                    ? null
+                    : new Testing.MauiLocalFailureFacts
+                    {
+                        Code = failure.Code,
+                        Class = failure.Class,
+                        StepId = failure.StepId,
+                        ExpectedCheckpoint = CloneCheckpoint(failedStep?.ExpectedCheckpoint),
+                        ObservedCheckpoint = CloneCheckpoint(failedStep?.ObservedCheckpoint),
+                    },
+            });
+        }
+    }
+
+    /// <summary>
+    /// Finds broker-owned evidence that the active selector for a source step resolved uniquely in
+    /// a prior successful local run. It returns value-free selector/fingerprint facts only.
+    /// </summary>
+    public WorkflowRunPriorSelectorResolutionResult GetPriorSelectorResolution(
+        string? sourceRunId,
+        string? sourceStepId)
+    {
+        if (string.IsNullOrWhiteSpace(sourceRunId) || string.IsNullOrWhiteSpace(sourceStepId))
+            return WorkflowRunPriorSelectorResolutionResult.Unavailable(
+                "A source run and step are required for prior selector-resolution lookup.");
+
+        lock (_gate)
+        {
+            if (!_runs.TryGetValue(sourceRunId, out var source) || source.StructuredReport is null)
+                return WorkflowRunPriorSelectorResolutionResult.Unavailable(
+                    "The source run has no retained structured report.");
+
+            var sourceReport = source.StructuredReport;
+            var prior = _runs.Values
+                .Where(run =>
+                    !string.Equals(run.RunId, sourceRunId, StringComparison.Ordinal) &&
+                    WorkflowRunStates.IsTerminal(run.State) &&
+                    run.StructuredReport is not null &&
+                    string.Equals(run.StructuredReport.FlowDigest, sourceReport.FlowDigest, StringComparison.Ordinal) &&
+                    string.Equals(run.StructuredReport.Target?.AppBuildFingerprint, sourceReport.Target?.AppBuildFingerprint, StringComparison.Ordinal) &&
+                    string.Equals(run.StructuredReport.Target?.Platform, sourceReport.Target?.Platform, StringComparison.Ordinal) &&
+                    string.Equals(run.StructuredReport.Outcome?.Status, Testing.MauiFlowRunOutcomes.Passed, StringComparison.Ordinal))
+                .OrderByDescending(run => run.EndedAt ?? run.CreatedAt)
+                .Select(run => new
+                {
+                    Run = run,
+                    Step = run.StructuredReport!.Steps.FirstOrDefault(step =>
+                        string.Equals(step.StepId, sourceStepId, StringComparison.Ordinal)),
+                })
+                .FirstOrDefault(item =>
+                    item.Step?.TargetResolution?.MatchCount == 1 &&
+                    string.Equals(item.Step.TargetResolution.Status, "resolved", StringComparison.Ordinal) &&
+                    item.Step.Fingerprint is not null &&
+                    item.Step.Selector is { IsEmpty: false });
+            if (prior is null)
+            {
+                return WorkflowRunPriorSelectorResolutionResult.Unavailable(
+                    "No prior trusted successful run uniquely resolved this selector step.");
+            }
+
+            return WorkflowRunPriorSelectorResolutionResult.Success(
+                new Testing.MauiRepairPriorSelectorResolution
+                {
+                    RunId = prior.Run.RunId,
+                    WasUniquelyResolved = true,
+                    TrustedRun = true,
+                    Trust = "broker-local-run",
+                    ActiveSelector = CloneSelector(prior.Step!.Selector!),
+                    Fingerprint = CloneFingerprint(prior.Step.Fingerprint!),
+                });
         }
     }
 
@@ -296,22 +459,25 @@ internal sealed class WorkflowRunCoordinator : IDisposable
                 return;
             }
 
-            var claim = _leases.Control(
-                run.Target.AgentId,
-                "claim",
-                run.LeaseId,
-                "workflow-run",
-                run.RunId,
-                force: false,
-                transactionId: null);
-            if (!claim.Allowed)
+            if (!run.LeaseClaimed)
             {
-                terminalState = WorkflowRunState.Failed;
-                message = "The target agent is already held by another mutation lease.";
-                failureClass = Testing.MauiFlowFailureClasses.LeaseConflict;
-                return;
+                var claim = _leases.Control(
+                    run.Target.AgentId,
+                    "claim",
+                    run.LeaseId,
+                    "workflow-run",
+                    run.RunId,
+                    force: false,
+                    transactionId: null);
+                if (!claim.Allowed)
+                {
+                    terminalState = WorkflowRunState.Failed;
+                    message = "The target agent is already held by another mutation lease.";
+                    failureClass = Testing.MauiFlowFailureClasses.LeaseConflict;
+                    return;
+                }
+                run.LeaseClaimed = true;
             }
-            run.LeaseClaimed = true;
 
             if (run.Cancellation.IsCancellationRequested)
             {
@@ -321,23 +487,26 @@ internal sealed class WorkflowRunCoordinator : IDisposable
                 return;
             }
 
-            var transaction = _leases.Control(
-                run.Target.AgentId,
-                "begin",
-                run.LeaseId,
-                "workflow-run",
-                run.RunId,
-                force: false,
-                transactionId: run.TransactionId);
-            if (!transaction.Allowed)
+            if (!run.TransactionBegun)
             {
-                terminalState = WorkflowRunState.Failed;
-                message = "The broker could not begin the mutation-lease transaction.";
-                failureClass = Testing.MauiFlowFailureClasses.LeaseConflict;
-                return;
+                var transaction = _leases.Control(
+                    run.Target.AgentId,
+                    "begin",
+                    run.LeaseId,
+                    "workflow-run",
+                    run.RunId,
+                    force: false,
+                    transactionId: run.TransactionId);
+                if (!transaction.Allowed)
+                {
+                    terminalState = WorkflowRunState.Failed;
+                    message = "The broker could not begin the mutation-lease transaction.";
+                    failureClass = Testing.MauiFlowFailureClasses.LeaseConflict;
+                    return;
+                }
+                run.TransactionBegun = true;
+                run.AuthorityEpoch = transaction.AuthorityEpoch;
             }
-            run.TransactionBegun = true;
-            run.AuthorityEpoch = transaction.AuthorityEpoch;
 
             if (_controlLedger is not null)
             {
@@ -398,6 +567,12 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 run.Cancellation.Token,
                 run.TimeoutCancellation.Token);
+            var executionOptions = new WorkflowRunExecutionOptions
+            {
+                EvidenceCaptureFactory = run.ExecutionOptions.EvidenceCaptureFactory,
+                ReproductionExpectation = run.ExecutionOptions.ReproductionExpectation,
+                Progress = progress => ReportProgress(run, progress),
+            };
             compatibilityReport = await _execute(
                 new WorkflowRunExecution(
                     run.RunId,
@@ -408,7 +583,7 @@ internal sealed class WorkflowRunCoordinator : IDisposable
                     run.LeaseId,
                     run.TransactionId,
                     run.AuthorityEpoch,
-                    run.ExecutionOptions),
+                    executionOptions),
                 linkedCancellation.Token).ConfigureAwait(false);
 
             terminalState = compatibilityReport.Ok ? WorkflowRunState.Passed : WorkflowRunState.Failed;
@@ -667,6 +842,8 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         run.EndedAt = _clock.GetUtcNow();
         TransitionLocked(run, terminalState, message);
         run.StructuredReport = BuildStructuredReport(run, terminalState, message, compatibilityReport, failureClass);
+        run.CompletedSteps = Math.Max(run.CompletedSteps, run.StructuredReport.Steps.Count);
+        run.CurrentStepId ??= run.StructuredReport.Steps.LastOrDefault()?.StepId;
         PersistStructuredReportLocked(run);
         if (run.CompatibilityReport is not null)
         {
@@ -695,6 +872,7 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             canonical.FlowDigest = run.FlowDigest;
             canonical.LegacyFlowIdentity ??= run.Flow.Name;
             canonical.Target = MergeTarget(canonical.Target, run.Target);
+            ApplyReproductionExpectation(canonical.Target, run.ExecutionOptions.ReproductionExpectation);
             canonical.StartedAt ??= run.StartedAt ?? run.CreatedAt;
             canonical.EndedAt = run.EndedAt;
             canonical.Outcome = new Testing.MauiFlowRunOutcome
@@ -844,6 +1022,7 @@ internal sealed class WorkflowRunCoordinator : IDisposable
                 At = run.EndedAt
             }
         };
+        ApplyReproductionExpectation(fallback.Target, run.ExecutionOptions.ReproductionExpectation);
         if (run.LifecycleEventsTruncated)
         {
             fallback.Truncated = true;
@@ -928,6 +1107,51 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         return existing;
     }
 
+    private static Testing.MauiFlowCheckpoint? CloneCheckpoint(Testing.MauiFlowCheckpoint? checkpoint)
+        => checkpoint is null
+            ? null
+            : new Testing.MauiFlowCheckpoint
+            {
+                AppBuildFingerprint = checkpoint.AppBuildFingerprint,
+                AgentInstanceId = checkpoint.AgentInstanceId,
+                SeedFingerprint = checkpoint.SeedFingerprint,
+                BackendStateFingerprint = checkpoint.BackendStateFingerprint,
+                Route = checkpoint.Route,
+                Window = checkpoint.Window,
+                Modal = checkpoint.Modal,
+                Locale = checkpoint.Locale,
+                Theme = checkpoint.Theme,
+                Orientation = checkpoint.Orientation,
+                DisplayProfile = checkpoint.DisplayProfile,
+                CollectionItemKey = checkpoint.CollectionItemKey,
+            };
+
+    private static Testing.FlowSelector CloneSelector(Testing.FlowSelector selector)
+        => JsonSerializer.Deserialize(
+            JsonSerializer.Serialize(selector, Testing.MauiFlowJsonContext.Default.FlowSelector),
+            Testing.MauiFlowJsonContext.Default.FlowSelector)
+            ?? throw new InvalidOperationException("Selector clone failed.");
+
+    private static Testing.MauiElementFingerprint CloneFingerprint(Testing.MauiElementFingerprint fingerprint)
+        => JsonSerializer.Deserialize(
+            JsonSerializer.Serialize(fingerprint, Testing.MauiTestingJsonContext.Default.MauiElementFingerprint),
+            Testing.MauiTestingJsonContext.Default.MauiElementFingerprint)
+            ?? throw new InvalidOperationException("Fingerprint clone failed.");
+
+    private static void ApplyReproductionExpectation(
+        Testing.MauiFlowRunTarget? target,
+        Testing.MauiLocalReproductionExpectation? expectation)
+    {
+        if (target is null || expectation is null)
+            return;
+
+        target.AppBuildFingerprint ??= expectation.AppBuildFingerprint;
+        target.AppSourceFingerprint ??= expectation.AppSourceFingerprint;
+        target.PackageDigest ??= expectation.PackageDigest;
+        target.Platform ??= expectation.Platform;
+        target.DeviceProfile ??= expectation.DeviceProfile;
+    }
+
     private static List<Testing.MauiFlowRunEvent> MergeEvents(
         IReadOnlyList<Testing.MauiFlowRunEvent> runnerEvents,
         IReadOnlyList<WorkflowRunLifecycleEvent> brokerEvents)
@@ -993,6 +1217,9 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         CreatedAt = run.CreatedAt,
         StartedAt = run.StartedAt,
         EndedAt = run.EndedAt,
+        TotalSteps = run.TotalSteps,
+        CompletedSteps = run.CompletedSteps,
+        CurrentStepId = run.CurrentStepId,
         FirstDivergence = run.FirstDivergence,
         CancellationRequested = run.CancellationRequested,
         Message = run.Message,
@@ -1038,6 +1265,32 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             Kind = kind,
             Message = message
         });
+    }
+
+    private void ReportProgress(RunRecord run, Testing.MauiFlowRunProgress progress)
+    {
+        if (progress is null)
+            return;
+
+        lock (_gate)
+        {
+            if (WorkflowRunStates.IsTerminal(run.State))
+                return;
+
+            run.CurrentStepId = progress.StepId ?? run.CurrentStepId;
+            run.CompletedSteps = Math.Clamp(progress.CompletedSteps, 0, run.TotalSteps);
+            var kind = progress.Phase is "step-started" or "step-completed"
+                ? progress.Phase
+                : "step-progress";
+            AddEventLocked(
+                run,
+                kind,
+                kind == "step-started"
+                    ? "A canonical flow step started."
+                    : kind == "step-completed"
+                        ? "A canonical flow step completed."
+                        : "Canonical flow progress updated.");
+        }
     }
 
     private PreparedStart Prepare(WorkflowRunStartRequest request, WorkflowRunTarget target)
@@ -1124,7 +1377,27 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         }
 
         var flowDigest = Convert.ToHexString(SHA256.HashData(canonicalFlow)).ToLowerInvariant();
-        var requestDigest = ComputeRequestDigest(target, flowDigest, timeout, ComputeSafetyDigest(safetyRequest));
+        if (!string.IsNullOrWhiteSpace(request.Plan?.Flow?.Digest) &&
+            !string.Equals(request.Plan.Flow.Digest, flowDigest, StringComparison.OrdinalIgnoreCase))
+        {
+            return PreparedStart.Invalid(
+                409,
+                "The plan references a stale flow digest. Refresh or commit the matching flow and plan before replay.");
+        }
+
+        var reproductionError = ValidateReproductionExpectation(
+            request.ReproductionExpectation,
+            target,
+            flowDigest);
+        if (reproductionError is not null)
+            return PreparedStart.Invalid(400, reproductionError);
+
+        var requestDigest = ComputeRequestDigest(
+            target,
+            flowDigest,
+            timeout,
+            ComputeSafetyDigest(safetyRequest),
+            ComputeReproductionDigest(request.ReproductionExpectation));
         var warnings = validation.Warnings
             .Concat(admission.Reasons
                 .Where(static reason => reason.Blocking != true)
@@ -1155,6 +1428,47 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         WriteCanonicalJson(writer, element);
         writer.Flush();
         return Convert.ToHexString(SHA256.HashData(output.ToArray())).ToLowerInvariant();
+    }
+
+    private static string ComputeReproductionDigest(Testing.MauiLocalReproductionExpectation? expectation)
+    {
+        if (expectation is null)
+            return string.Empty;
+
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(
+            expectation,
+            Testing.MauiTestingJsonContext.Default.MauiLocalReproductionExpectation);
+        return Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    }
+
+    private static string? ValidateReproductionExpectation(
+        Testing.MauiLocalReproductionExpectation? expectation,
+        WorkflowRunTarget target,
+        string flowDigest)
+    {
+        if (expectation is null)
+            return null;
+
+        if (string.IsNullOrWhiteSpace(expectation.FlowDigest) ||
+            string.IsNullOrWhiteSpace(expectation.AppBuildFingerprint) ||
+            string.IsNullOrWhiteSpace(expectation.AppSourceFingerprint) ||
+            string.IsNullOrWhiteSpace(expectation.PackageDigest) ||
+            string.IsNullOrWhiteSpace(expectation.Platform) ||
+            string.IsNullOrWhiteSpace(expectation.DeviceProfile))
+        {
+            return "reproductionExpectation requires flow, app build/source, package, platform, and device profile fingerprints.";
+        }
+
+        if (!string.Equals(expectation.FlowDigest, flowDigest, StringComparison.Ordinal))
+            return "reproductionExpectation.flowDigest must match the canonical flow digest.";
+
+        if (!string.IsNullOrWhiteSpace(target.Platform) &&
+            !string.Equals(expectation.Platform, target.Platform, StringComparison.OrdinalIgnoreCase))
+        {
+            return "reproductionExpectation.platform must match the connected agent platform.";
+        }
+
+        return null;
     }
 
     private static bool HasNullFlowMembers(Testing.MauiFlow flow)
@@ -1206,7 +1520,8 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         WorkflowRunTarget target,
         string flowDigest,
         TimeSpan timeout,
-        string safetyDigest)
+        string safetyDigest,
+        string reproductionDigest)
     {
         var material = string.Join(
             "\n",
@@ -1215,7 +1530,8 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             target.AgentPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
             flowDigest,
             ((long)timeout.TotalMilliseconds).ToString(System.Globalization.CultureInfo.InvariantCulture),
-            safetyDigest);
+            safetyDigest,
+            reproductionDigest);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(material))).ToLowerInvariant();
     }
 
@@ -1266,8 +1582,13 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             Target = target;
             Timeout = timeout;
             IsTargetCurrent = isTargetCurrent;
-            ExecutionOptions = executionOptions;
+            ExecutionOptions = new WorkflowRunExecutionOptions
+            {
+                EvidenceCaptureFactory = executionOptions.EvidenceCaptureFactory,
+                ReproductionExpectation = CloneReproductionExpectation(executionOptions.ReproductionExpectation),
+            };
             CreatedAt = createdAt;
+            TotalSteps = flow.Steps.Count;
             LeaseId = CreateOpaqueId("lease");
             TransactionId = CreateOpaqueId("transaction");
         }
@@ -1314,9 +1635,22 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         public Testing.MauiFlowRunReport? StructuredReport { get; set; }
         public string? ReportPath { get; set; }
         public string? ReportDigest { get; set; }
+        public int TotalSteps { get; }
+        public int CompletedSteps { get; set; }
+        public string? CurrentStepId { get; set; }
         public bool LifecycleEventsTruncated { get; set; }
         public long TerminalOrder { get; set; }
     }
+
+    private static Testing.MauiLocalReproductionExpectation? CloneReproductionExpectation(
+        Testing.MauiLocalReproductionExpectation? expectation)
+        => expectation is null
+            ? null
+            : JsonSerializer.Deserialize(
+                JsonSerializer.SerializeToUtf8Bytes(
+                    expectation,
+                    Testing.MauiTestingJsonContext.Default.MauiLocalReproductionExpectation),
+                Testing.MauiTestingJsonContext.Default.MauiLocalReproductionExpectation);
 
     private sealed record IdempotencyEntry(string RequestDigest, string RunId);
 
@@ -1381,7 +1715,20 @@ internal interface IWorkflowMutationLeaseRegistry
         string? label,
         bool force,
         string? transactionId);
+
+    MutationLeaseSnapshot TransferAndBegin(
+        string agentId,
+        string sourceLeaseId,
+        string targetLeaseId,
+        string transactionId,
+        string? holderKind,
+        string? label);
 }
+
+internal sealed record WorkflowRunLeaseHandoff(
+    string LeaseId,
+    string HolderKind,
+    string? Label);
 
 internal sealed record WorkflowRunLedgerControl(
     string Action,
@@ -1491,6 +1838,11 @@ internal sealed class WorkflowRunStartRequest
     [JsonPropertyName("timeoutMs")] public int? TimeoutMs { get; set; }
     [JsonPropertyName("plan")] public Testing.MauiTestPlan? Plan { get; set; }
     [JsonPropertyName("context")] public Testing.MauiFlowRunContext? Context { get; set; }
+    /// <summary>
+    /// Optional host-supplied current-workspace fingerprints recorded with the newly executed
+    /// local run. They are not imported evidence and do not grant proposal authority by themselves.
+    /// </summary>
+    [JsonPropertyName("reproductionExpectation")] public Testing.MauiLocalReproductionExpectation? ReproductionExpectation { get; set; }
 }
 
 internal sealed class WorkflowRunAccessRequest
@@ -1510,6 +1862,50 @@ internal sealed class WorkflowRunCapabilitiesResponse
     [JsonPropertyName("maxTimeoutMs")] public long MaxTimeoutMs { get; init; }
     [JsonPropertyName("maxSteps")] public int MaxSteps { get; init; }
     [JsonPropertyName("workflowCommandLedger")] public bool WorkflowCommandLedger { get; init; }
+}
+
+/// <summary>
+/// A read-only result from canonical admission validation. Unlike a start result this never
+/// reserves a target, mints a run token, or creates journal state.
+/// </summary>
+internal sealed class WorkflowRunPreflightResult
+{
+    [JsonPropertyName("ok")] public bool Ok { get; private init; }
+    [JsonPropertyName("flowDigest")] public string? FlowDigest { get; private init; }
+    [JsonPropertyName("timeoutMs")] public long? TimeoutMs { get; private init; }
+    [JsonPropertyName("error")] public string? Error { get; private init; }
+    [JsonPropertyName("errors")] public IReadOnlyList<string>? Errors { get; private init; }
+    [JsonPropertyName("warnings")] public IReadOnlyList<string>? Warnings { get; private init; }
+    [JsonPropertyName("admission")] public Testing.MauiFlowReplayEligibilityDecision? Admission { get; private init; }
+    [JsonIgnore] public int StatusCode { get; private init; }
+
+    public static WorkflowRunPreflightResult Accepted(
+        string flowDigest,
+        long timeoutMs,
+        IReadOnlyList<string>? warnings,
+        Testing.MauiFlowReplayEligibilityDecision admission) => new()
+    {
+        Ok = true,
+        FlowDigest = flowDigest,
+        TimeoutMs = timeoutMs,
+        Warnings = warnings is { Count: > 0 } ? warnings : null,
+        Admission = admission,
+        StatusCode = 200,
+    };
+
+    public static WorkflowRunPreflightResult Rejected(
+        int statusCode,
+        string error,
+        IReadOnlyList<string>? errors = null,
+        IReadOnlyList<string>? warnings = null,
+        Testing.MauiFlowReplayEligibilityDecision? admission = null) => new()
+    {
+        Error = error,
+        Errors = errors is { Count: > 0 } ? errors : null,
+        Warnings = warnings is { Count: > 0 } ? warnings : null,
+        Admission = admission,
+        StatusCode = statusCode,
+    };
 }
 
 internal sealed class WorkflowRunStartResult
@@ -1573,6 +1969,36 @@ internal sealed class WorkflowRunAccessResult
     public static WorkflowRunAccessResult Unauthorized() => new() { StatusCode = 403, Error = "A valid workflow run capability token is required." };
 }
 
+internal sealed class WorkflowRunLocalReproductionResult
+{
+    public bool Ok { get; private init; }
+    public string? Error { get; private init; }
+    public Testing.MauiLocalReproductionFacts? Facts { get; private init; }
+
+    public static WorkflowRunLocalReproductionResult Success(Testing.MauiLocalReproductionFacts facts)
+        => new() { Ok = true, Facts = facts };
+
+    public static WorkflowRunLocalReproductionResult NotFound()
+        => new() { Error = "The local workflow run was not found." };
+
+    public static WorkflowRunLocalReproductionResult Unavailable(string error)
+        => new() { Error = error };
+}
+
+internal sealed class WorkflowRunPriorSelectorResolutionResult
+{
+    public bool Ok { get; private init; }
+    public string? Error { get; private init; }
+    public Testing.MauiRepairPriorSelectorResolution? Resolution { get; private init; }
+
+    public static WorkflowRunPriorSelectorResolutionResult Success(
+        Testing.MauiRepairPriorSelectorResolution resolution)
+        => new() { Ok = true, Resolution = resolution };
+
+    public static WorkflowRunPriorSelectorResolutionResult Unavailable(string error)
+        => new() { Error = error };
+}
+
 internal sealed class WorkflowRunStatusResponse
 {
     [JsonPropertyName("ok")] public bool Ok { get; init; }
@@ -1626,6 +2052,9 @@ internal sealed class WorkflowRunSnapshot
     [JsonPropertyName("createdAt")] public DateTimeOffset CreatedAt { get; init; }
     [JsonPropertyName("startedAt")] public DateTimeOffset? StartedAt { get; init; }
     [JsonPropertyName("endedAt")] public DateTimeOffset? EndedAt { get; init; }
+    [JsonPropertyName("totalSteps")] public int TotalSteps { get; init; }
+    [JsonPropertyName("completedSteps")] public int CompletedSteps { get; init; }
+    [JsonPropertyName("currentStepId")] public string? CurrentStepId { get; init; }
     [JsonPropertyName("firstDivergence")] public int? FirstDivergence { get; init; }
     [JsonPropertyName("cancellationRequested")] public bool CancellationRequested { get; init; }
     [JsonPropertyName("message")] public string? Message { get; init; }
@@ -1671,6 +2100,8 @@ internal sealed class WorkflowRunTargetSnapshot
 internal sealed class WorkflowRunExecutionOptions
 {
     public Func<AgentClient, Testing.IFlowReplayEvidenceCapture?>? EvidenceCaptureFactory { get; init; }
+    public Testing.MauiLocalReproductionExpectation? ReproductionExpectation { get; init; }
+    public Action<Testing.MauiFlowRunProgress>? Progress { get; init; }
 }
 
 internal sealed record WorkflowRunExecution(

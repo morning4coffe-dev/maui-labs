@@ -25,6 +25,7 @@ internal static class UIAutomationInterop
     private const int UIA_ButtonControlTypeId = 50000;
     private const int UIA_EditControlTypeId = 50004;
     private const int UIA_TextControlTypeId = 50020;
+    private const int UIA_TitleBarControlTypeId = 50037;
 
     private static CUIAutomationClass? _automation;
 
@@ -42,6 +43,24 @@ internal static class UIAutomationInterop
     public static int GetControlType(IUIAutomationElement element)
     {
         try { return element.CurrentControlType; } catch { return 0; }
+    }
+
+    public static bool IsInTitleBar(IUIAutomationElement element)
+    {
+        try
+        {
+            var walker = GetAutomation().ControlViewWalker;
+            for (var current = walker.GetParentElement(element); current is not null; current = walker.GetParentElement(current))
+            {
+                var controlType = GetControlType(current);
+                if (controlType == UIA_TitleBarControlTypeId)
+                    return true;
+                if (controlType == UIA_WindowControlTypeId)
+                    return false;
+            }
+        }
+        catch { }
+        return false;
     }
 
     public static string? GetLocalizedControlType(IUIAutomationElement element)

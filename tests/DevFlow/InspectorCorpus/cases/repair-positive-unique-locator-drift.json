@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "id": "repair-positive-unique-locator-drift",
+  "kind": "repair-positive",
+  "disposition": "repair-eligible",
+  "fixture": {
+    "failure": "locator-not-found",
+    "phase": "pre-dispatch",
+    "trust": "current-local-run",
+    "oldSelector": "save-order",
+    "candidate": "confirm-order",
+    "unique": true,
+    "checkpoint": "all-match",
+    "oracle": "independent-success"
+  },
+  "expect": {
+    "diagnosticIds": [],
+    "candidateKinds": ["automation-id"],
+    "repairEligible": true
+  }
+}

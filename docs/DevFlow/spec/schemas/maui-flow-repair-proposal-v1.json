@@ -19,6 +19,30 @@
       "type": "string",
       "minLength": 1
     },
+    "revision": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "state": {
+      "enum": [
+        "proposed",
+        "previewed",
+        "approved",
+        "applying",
+        "applied",
+        "verified",
+        "rejected",
+        "stale",
+        "approval-expired",
+        "verification-failed",
+        "rollback-required",
+        "reverted",
+        "rollback-failed"
+      ]
+    },
+    "createdAt": {
+      "$ref": "#/$defs/Timestamp"
+    },
     "sourceRunId": {
       "type": "string"
     },
@@ -27,6 +51,12 @@
     },
     "sourceFailureId": {
       "type": "string"
+    },
+    "sourceFailureCode": {
+      "const": "locator-not-found"
+    },
+    "preDispatch": {
+      "const": true
     },
     "baseFlow": {
       "$ref": "#/$defs/FlowReference"
@@ -52,11 +82,32 @@
     "patchDigest": {
       "type": "string"
     },
+    "diff": {
+      "$ref": "#/$defs/SelectorDiff"
+    },
     "unchangedAssertionsProof": {
       "$ref": "#/$defs/AssertionProof"
     },
     "approval": {
       "$ref": "#/$defs/RepairApproval"
+    },
+    "trust": {
+      "enum": [
+        "current-local-run",
+        "locally-reproduced"
+      ]
+    },
+    "expiresAt": {
+      "$ref": "#/$defs/Timestamp"
+    },
+    "reviewer": {
+      "type": "string"
+    },
+    "grantDigest": {
+      "type": "string"
+    },
+    "verificationRunIds": {
+      "$ref": "#/$defs/StringList"
     },
     "riskFlags": {
       "$ref": "#/$defs/StringList"
@@ -260,6 +311,15 @@
         "format": {
           "type": "string"
         },
+        "selectorOnly": {
+          "const": true
+        },
+        "beforeDigest": {
+          "type": "string"
+        },
+        "afterDigest": {
+          "type": "string"
+        },
         "operations": {
           "type": "array",
           "items": {
@@ -291,11 +351,59 @@
         "assertionDigest": {
           "type": "string"
         },
+        "actionsUnchanged": {
+          "const": true
+        },
+        "actionDigest": {
+          "type": "string"
+        },
+        "valuesUnchanged": {
+          "const": true
+        },
+        "valueDigest": {
+          "type": "string"
+        },
+        "orderUnchanged": {
+          "const": true
+        },
+        "orderDigest": {
+          "type": "string"
+        },
         "method": {
           "type": "string"
         },
         "verificationRunIds": {
           "$ref": "#/$defs/StringList"
+        }
+      },
+      "additionalProperties": true
+    },
+    "SelectorDiff": {
+      "type": "object",
+      "properties": {
+        "json": {
+          "type": "string"
+        },
+        "markdown": {
+          "type": "string"
+        },
+        "stepId": {
+          "type": "string"
+        },
+        "selectorPath": {
+          "type": "string"
+        },
+        "assertionsUnchanged": {
+          "const": true
+        },
+        "actionsUnchanged": {
+          "const": true
+        },
+        "valuesUnchanged": {
+          "const": true
+        },
+        "orderUnchanged": {
+          "const": true
         }
       },
       "additionalProperties": true

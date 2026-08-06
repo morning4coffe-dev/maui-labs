@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "baseline-unique-automation-id",
+  "kind": "baseline",
+  "disposition": "diagnostic-only",
+  "fixture": { "route": "/settings", "elements": [{ "type": "Button", "automationId": "save-settings", "visible": true, "enabled": true }] },
+  "expect": { "diagnosticIds": [], "candidateKinds": ["automation-id"] }
+}

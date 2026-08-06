@@ -8,5 +8,8 @@ namespace Microsoft.Maui.DevFlow.Testing;
     PropertyNameCaseInsensitive = true,
     WriteIndented = true)]
 [JsonSerializable(typeof(MauiFlow))]
+[JsonSerializable(typeof(FlowAssert))]
+[JsonSerializable(typeof(FlowSelector))]
 [JsonSerializable(typeof(List<FlowAssert>))]
+[JsonSerializable(typeof(MauiSelectorEvidence))]
 public sealed partial class MauiFlowJsonContext : JsonSerializerContext;

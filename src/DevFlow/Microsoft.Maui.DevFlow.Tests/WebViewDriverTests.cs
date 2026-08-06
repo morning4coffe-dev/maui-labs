@@ -284,8 +284,35 @@ public class WindowsAppDriverTests
         Assert.Equal("Confirm Action", candidate.Texts[0]);
     }
 
+    [Fact]
+    public void AlertCandidate_UsesDialogTitleAndContentButtons()
+    {
+        var dialog = new FakeWindow
+        {
+            Title = "Hello!",
+            Buttons = ["OK", "Close"],
+            Texts = ["This is a simple alert."],
+        };
+        var root = new FakeWindow { Children = [dialog] };
+
+        var candidate = WindowsAppDriver.FindDedicatedDialogCandidate(
+            new[] { root },
+            window => window.Children,
+            window => window.Buttons
+                .Where(button => button != "Close")
+                .Select(name => (window, name))
+                .ToArray(),
+            window => window.Texts,
+            window => window.Title);
+
+        Assert.NotNull(candidate);
+        Assert.Equal("Hello!", candidate.Title);
+        Assert.Equal(["OK"], candidate.Buttons.Select(button => button.name));
+    }
+
     private sealed class FakeWindow
     {
+        public string? Title { get; init; }
         public IReadOnlyList<FakeWindow> Children { get; init; } = [];
         public IReadOnlyList<string> Buttons { get; init; } = [];
         public IReadOnlyList<string> Texts { get; init; } = [];

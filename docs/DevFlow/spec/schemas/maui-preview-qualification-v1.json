@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-preview-qualification-v1.json",
+  "title": "DevFlow preview qualification report v1",
+  "type": "object",
+  "required": [
+    "schema",
+    "kind",
+    "contractVersion",
+    "generatedAt",
+    "status",
+    "platform",
+    "fingerprints",
+    "profiles",
+    "featureFlags",
+    "review",
+    "corpus",
+    "metrics",
+    "thresholds",
+    "gates",
+    "reasons",
+    "artifactRefs",
+    "exclusions"
+  ],
+  "properties": {
+    "schema": { "const": 1 },
+    "kind": { "const": "maui-preview-qualification" },
+    "contractVersion": { "const": "preview-qualification-v1" },
+    "generatedAt": { "type": "string", "format": "date-time" },
+    "status": { "enum": [ "pass", "fail", "not-qualified" ] },
+    "platform": { "type": "string", "minLength": 1 },
+    "fingerprints": { "$ref": "#/$defs/fingerprints" },
+    "profiles": { "type": "array", "items": { "$ref": "#/$defs/profile" } },
+    "appleQa": { "$ref": "#/$defs/appleQa" },
+    "featureFlags": { "$ref": "#/$defs/featureFlags" },
+    "review": { "$ref": "#/$defs/review" },
+    "corpus": { "$ref": "#/$defs/corpus" },
+    "metrics": { "$ref": "#/$defs/metrics" },
+    "thresholds": { "$ref": "#/$defs/thresholds" },
+    "gates": { "type": "array", "items": { "$ref": "#/$defs/gate" } },
+    "reasons": { "type": "array", "items": { "$ref": "#/$defs/reason" } },
+    "artifactRefs": { "type": "array", "items": { "$ref": "#/$defs/artifactRef" } },
+    "exclusions": { "type": "array", "items": { "$ref": "#/$defs/exclusion" } }
+  },
+  "$defs": {
+    "fingerprints": {
+      "type": "object",
+      "required": [ "corpusVersion", "corpusFingerprint", "repositoryCommit", "testingPackageVersion", "packageId", "packageFingerprint", "toolVersion", "toolFingerprint", "policyVersion", "policyFingerprint" ],
+      "additionalProperties": true
+    },
+    "profile": {
+      "type": "object",
+      "required": [ "platform", "deviceEvidenceKind", "realDevice", "deviceFingerprint", "runtimeFingerprint", "buildFingerprint", "packageFingerprint", "seedFingerprint", "backendStateFingerprint", "firstAttemptMode" ],
+      "additionalProperties": true
+    },
+    "appleQa": {
+      "type": "object",
+      "required": [ "contractVersion", "platform", "experimental", "officialCoverage", "macCatalystEquivalent", "foregroundProof", "authenticatedTransport", "receipt", "cancellation", "parity", "appSourceDigest", "packageDigest", "flowDigests", "firstAttemptCount", "cleanAttemptCount", "artifactCount", "omissionCount", "xcodeVersion", "simulatorRuntime", "deviceIdFingerprint", "deviceProfile", "seedFingerprint" ],
+      "additionalProperties": true
+    },
+    "featureFlags": {
+      "type": "object",
+      "required": [ "schema", "policyVersion", "workbenchEnabled", "agentAuthoringEnabled", "repairProposalsEnabled", "sourceProposalsEnabled", "traceImportExportEnabled", "autoApplyRepair", "autoApplySource", "modelProviderEnabled", "telemetryEgressEnabled", "requiredPullRequestGate", "killSwitches" ],
+      "properties": {
+        "schema": { "const": 1 },
+        "autoApplyRepair": { "const": false },
+        "autoApplySource": { "const": false },
+        "modelProviderEnabled": { "const": false },
+        "telemetryEgressEnabled": { "const": false },
+        "requiredPullRequestGate": { "const": false }
+      },
+      "additionalProperties": true
+    },
+    "review": {
+      "type": "object",
+      "required": [ "planReviewStatus", "rubberDuckReviewStatus", "independentReviewStatus", "artifactRefs" ],
+      "additionalProperties": true
+    },
+    "corpus": {
+      "type": "object",
+      "required": [ "staticOnly", "manifestValid", "caseSchemaValid", "curatedCases", "generatedCases", "deviceBackedCases", "mutationSeed", "generatorVersion", "errors" ],
+      "additionalProperties": true
+    },
+    "metrics": {
+      "type": "object",
+      "required": [ "recordingValidity", "selectorStability", "repairPrecision", "repairRecall", "falseHeals", "abstention", "humanDecisionOutcomes", "calibration", "timeToDiagnosis", "traceReportSize", "runtimeOverhead", "flakeFirstAttemptStability", "privacySecurityEscapes" ],
+      "additionalProperties": true
+    },
+    "thresholds": {
+      "type": "object",
+      "required": [ "confidenceLevel", "minimumRepairPrecision", "minimumNoRepairEvaluations", "maximumFalseHeals", "minimumSelectorStability", "maximumCalibrationEce", "minimumCleanFirstAttemptsPerTier1Flow" ],
+      "additionalProperties": true
+    },
+    "gate": {
+      "type": "object",
+      "required": [ "gateId", "status", "message", "reasonCodes", "artifactRefs" ],
+      "properties": {
+        "status": { "enum": [ "pass", "fail", "not-qualified" ] }
+      },
+      "additionalProperties": true
+    },
+    "reason": {
+      "type": "object",
+      "required": [ "code", "severity", "message" ],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "type": "string" },
+        "severity": { "enum": [ "warning", "error" ] },
+        "message": { "type": "string" }
+      }
+    },
+    "artifactRef": {
+      "type": "object",
+      "required": [ "kind", "digest", "reference", "redacted" ],
+      "additionalProperties": false
+    },
+    "exclusion": {
+      "type": "object",
+      "required": [ "kind", "count", "reason" ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

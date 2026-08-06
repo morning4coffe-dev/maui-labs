@@ -6,6 +6,24 @@ namespace Microsoft.Maui.DevFlow.Agent.IntegrationTests.Fixtures;
 
 internal sealed record PlatformProcessResult(string StandardOutput, string StandardError, int ExitCode);
 
+internal sealed class PlatformProcessTimeoutException : TimeoutException
+{
+    public PlatformProcessTimeoutException(int timeoutSeconds, Exception innerException)
+        : base($"The host process timed out after {timeoutSeconds}s.", innerException)
+        => TimeoutSeconds = timeoutSeconds;
+
+    public int TimeoutSeconds { get; }
+}
+
+internal sealed class PlatformAdbCommandException : InvalidOperationException
+{
+    public PlatformAdbCommandException(PlatformFlowLifecycleFailureDetails details, Exception? innerException = null)
+        : base(details.SafeErrorText ?? "The ADB command failed.", innerException)
+        => Details = details;
+
+    public PlatformFlowLifecycleFailureDetails Details { get; }
+}
+
 /// <summary>Small injectable process boundary used by Android lifecycle tests.</summary>
 internal interface IPlatformProcessRunner
 {
@@ -32,7 +50,7 @@ internal sealed class SystemPlatformProcessRunner : IPlatformProcessRunner
         };
 
         using var process = Process.Start(startInfo)
-            ?? throw PlatformFlowLifecycleException.Infrastructure($"Failed to start '{fileName}'.");
+            ?? throw new InvalidOperationException("Failed to start the host process.");
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         timeout.CancelAfter(TimeSpan.FromSeconds(timeoutSeconds));
 
@@ -43,7 +61,7 @@ internal sealed class SystemPlatformProcessRunner : IPlatformProcessRunner
             await Task.WhenAll(stdoutTask, stderrTask, process.WaitForExitAsync(timeout.Token)).ConfigureAwait(false);
             return new PlatformProcessResult(stdoutTask.Result, stderrTask.Result, process.ExitCode);
         }
-        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        catch (OperationCanceledException ex) when (!cancellationToken.IsCancellationRequested)
         {
             try
             {
@@ -54,8 +72,7 @@ internal sealed class SystemPlatformProcessRunner : IPlatformProcessRunner
             {
             }
 
-            throw PlatformFlowLifecycleException.Infrastructure(
-                $"Process timed out after {timeoutSeconds}s: {fileName} {arguments}");
+            throw new PlatformProcessTimeoutException(timeoutSeconds, ex);
         }
     }
 }
@@ -64,6 +81,13 @@ internal enum AndroidResetStrategy
 {
     PmClear,
     UninstallReinstall,
+}
+
+internal sealed class AndroidInstalledPackageInfo
+{
+    public required string ApkFingerprint { get; init; }
+    public string? VersionName { get; init; }
+    public string? VersionCode { get; init; }
 }
 
 /// <summary>
@@ -108,8 +132,14 @@ internal sealed class AndroidDeviceLifecycleOperations
                     .ConfigureAwait(false);
                 if (!clear.StandardOutput.Contains(Success, StringComparison.OrdinalIgnoreCase))
                 {
-                    throw PlatformFlowLifecycleException.Infrastructure(
-                        $"adb pm clear did not confirm success for '{_packageId}': {TrimOutput(clear.StandardOutput, clear.StandardError)}");
+                    throw CreateAdbFailure(
+                        "clear Android app data",
+                        $"shell pm clear {_packageId}",
+                        timeoutSeconds: 30,
+                        exitCode: 0,
+                        timedOut: false,
+                        cancellationRequested: false,
+                        errorText: TrimOutput(clear.StandardOutput, clear.StandardError));
                 }
 
                 return CreateResetResult("pm-clear", requirement, appStateSucceeded: true);
@@ -145,8 +175,14 @@ internal sealed class AndroidDeviceLifecycleOperations
 
         if (!await IsAgentPortForwardEstablishedAsync(cancellationToken).ConfigureAwait(false))
         {
-            throw PlatformFlowLifecycleException.Infrastructure(
-                $"ADB forward tcp:{_agentPort}->tcp:{_agentPort} was not visible after creation on '{_serialNumber}'.");
+            throw CreateAdbFailure(
+                "verify the DevFlow ADB forward",
+                $"forward tcp:{_agentPort} tcp:{_agentPort}",
+                timeoutSeconds: 30,
+                exitCode: null,
+                timedOut: false,
+                cancellationRequested: false,
+                errorText: "The requested DevFlow port forward was not visible after creation.");
         }
     }
 
@@ -191,8 +227,14 @@ internal sealed class AndroidDeviceLifecycleOperations
 
         if (string.IsNullOrWhiteSpace(activity))
         {
-            throw PlatformFlowLifecycleException.Infrastructure(
-                $"Could not resolve a launcher activity for '{_packageId}': {TrimOutput(resolution.StandardOutput, resolution.StandardError)}");
+            throw CreateAdbFailure(
+                "resolve the Android launch activity",
+                $"shell cmd package resolve-activity --brief -c android.intent.category.LAUNCHER {_packageId}",
+                timeoutSeconds: 30,
+                exitCode: 0,
+                timedOut: false,
+                cancellationRequested: false,
+                errorText: TrimOutput(resolution.StandardOutput, resolution.StandardError));
         }
 
         await RunCheckedAsync($"shell am force-stop {_packageId}", "terminate the Android app before launch", 15, cancellationToken)
@@ -201,8 +243,14 @@ internal sealed class AndroidDeviceLifecycleOperations
             .ConfigureAwait(false);
         if (launched.StandardOutput.Contains("Error:", StringComparison.OrdinalIgnoreCase))
         {
-            throw PlatformFlowLifecycleException.Infrastructure(
-                $"Android launch returned an error: {TrimOutput(launched.StandardOutput, launched.StandardError)}");
+            throw CreateAdbFailure(
+                "launch the Android app",
+                $"shell am start -W -n {activity}",
+                timeoutSeconds: 45,
+                exitCode: 0,
+                timedOut: false,
+                cancellationRequested: false,
+                errorText: TrimOutput(launched.StandardOutput, launched.StandardError));
         }
 
         return await WaitForAppProcessAsync(TimeSpan.FromSeconds(45), cancellationToken).ConfigureAwait(false);
@@ -236,6 +284,57 @@ internal sealed class AndroidDeviceLifecycleOperations
         return int.TryParse(value, out var processId) ? processId : null;
     }
 
+    public async Task<AndroidInstalledPackageInfo> GetInstalledPackageInfoAsync(CancellationToken cancellationToken = default)
+    {
+        var packagePath = await RunCheckedAsync(
+            $"shell pm path {_packageId}",
+            "read the installed Android package path",
+            30,
+            cancellationToken).ConfigureAwait(false);
+        var apkPath = packagePath.StandardOutput
+            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static value => value.StartsWith("package:", StringComparison.Ordinal) ? value["package:".Length..] : null)
+            .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value));
+        if (string.IsNullOrWhiteSpace(apkPath))
+        {
+            throw PlatformFlowLifecycleException.Infrastructure(
+                $"adb pm path did not return an installed APK for '{_packageId}'.");
+        }
+
+        var hash = await RunAsync($"shell sha256sum {apkPath}", 30, cancellationToken).ConfigureAwait(false);
+        if (hash.ExitCode != 0)
+        {
+            hash = await RunCheckedAsync(
+                $"shell toybox sha256sum {apkPath}",
+                "hash the installed Android APK",
+                30,
+                cancellationToken).ConfigureAwait(false);
+        }
+        var fingerprint = hash.StandardOutput
+            .Split([' ', '\r', '\n', '\t'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(fingerprint) ||
+            fingerprint.Any(static character => !char.IsAsciiHexDigit(character)))
+        {
+            throw PlatformFlowLifecycleException.Infrastructure(
+                $"adb sha256sum did not return an APK hash for '{_packageId}'.");
+        }
+
+        var dump = await RunCheckedAsync(
+            $"shell dumpsys package {_packageId}",
+            "read the installed Android package metadata",
+            30,
+            cancellationToken).ConfigureAwait(false);
+        var versionName = Regex.Match(dump.StandardOutput, @"\bversionName=(?<value>[^\s]+)");
+        var versionCode = Regex.Match(dump.StandardOutput, @"\bversionCode=(?<value>\d+)");
+        return new AndroidInstalledPackageInfo
+        {
+            ApkFingerprint = $"sha256:{fingerprint.ToLowerInvariant()}",
+            VersionName = versionName.Success ? versionName.Groups["value"].Value : null,
+            VersionCode = versionCode.Success ? versionCode.Groups["value"].Value : null,
+        };
+    }
+
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
         await RunAsync($"shell am force-stop {_packageId}", 15, cancellationToken).ConfigureAwait(false);
@@ -246,7 +345,7 @@ internal sealed class AndroidDeviceLifecycleOperations
     {
         var facts = new Dictionary<string, string>(StringComparer.Ordinal)
         {
-            ["serial"] = _serialNumber,
+            ["deviceIdFingerprint"] = AndroidLifecycleDiagnosticRedactor.Fingerprint(_serialNumber),
             ["packageId"] = _packageId,
             ["agentPort"] = _agentPort.ToString(System.Globalization.CultureInfo.InvariantCulture),
         };
@@ -255,7 +354,8 @@ internal sealed class AndroidDeviceLifecycleOperations
         await AddFactAsync(facts, "forwards", "forward --list", cancellationToken).ConfigureAwait(false);
         await AddFactAsync(facts, "locale", "shell getprop persist.sys.locale", cancellationToken).ConfigureAwait(false);
         await AddFactAsync(facts, "orientation", "shell dumpsys input", cancellationToken).ConfigureAwait(false);
-        await AddFactAsync(facts, "display", "shell wm size; wm density", cancellationToken).ConfigureAwait(false);
+        await AddFactAsync(facts, "displaySize", "shell wm size", cancellationToken).ConfigureAwait(false);
+        await AddFactAsync(facts, "displayDensity", "shell wm density", cancellationToken).ConfigureAwait(false);
         return facts;
     }
 
@@ -281,8 +381,12 @@ internal sealed class AndroidDeviceLifecycleOperations
 
     public async Task<string?> GetDisplayProfileAsync(CancellationToken cancellationToken = default)
     {
-        var display = await RunAsync("shell wm size; wm density", 20, cancellationToken).ConfigureAwait(false);
-        return display.ExitCode == 0 ? NullIfWhiteSpace(NormalizeDisplay(display.StandardOutput)) : null;
+        var size = await RunAsync("shell wm size", 20, cancellationToken).ConfigureAwait(false);
+        var density = await RunAsync("shell wm density", 20, cancellationToken).ConfigureAwait(false);
+        if (size.ExitCode != 0 || density.ExitCode != 0)
+            return null;
+
+        return NullIfWhiteSpace(NormalizeDisplay($"{size.StandardOutput}\n{density.StandardOutput}"));
     }
 
     private MauiFlowResetResult CreateResetResult(
@@ -348,11 +452,46 @@ internal sealed class AndroidDeviceLifecycleOperations
         int timeoutSeconds,
         CancellationToken cancellationToken)
     {
-        var result = await RunAsync(arguments, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        PlatformProcessResult result;
+        try
+        {
+            result = await RunAsync(arguments, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException ex)
+        {
+            throw CreateAdbFailure(
+                action,
+                arguments,
+                timeoutSeconds,
+                exitCode: null,
+                timedOut: false,
+                cancellationRequested: true,
+                errorText: ex.Message,
+                innerException: ex);
+        }
+        catch (Exception ex)
+        {
+            throw CreateAdbFailure(
+                action,
+                arguments,
+                timeoutSeconds,
+                exitCode: null,
+                timedOut: ex is PlatformProcessTimeoutException or TimeoutException,
+                cancellationRequested: cancellationToken.IsCancellationRequested,
+                errorText: ex.Message,
+                innerException: ex);
+        }
+
         if (result.ExitCode != 0)
         {
-            throw PlatformFlowLifecycleException.Infrastructure(
-                $"Failed to {action} (adb exit {result.ExitCode}): {TrimOutput(result.StandardOutput, result.StandardError)}");
+            throw CreateAdbFailure(
+                action,
+                arguments,
+                timeoutSeconds,
+                result.ExitCode,
+                timedOut: false,
+                cancellationRequested: false,
+                errorText: TrimOutput(result.StandardOutput, result.StandardError));
         }
 
         return result;
@@ -367,9 +506,72 @@ internal sealed class AndroidDeviceLifecycleOperations
             value.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .Select(static item => Regex.Replace(item, @"\s+", " ")));
 
-    private static string TrimOutput(string stdout, string stderr)
+    private PlatformFlowLifecycleException CreateAdbFailure(
+        string action,
+        string arguments,
+        int timeoutSeconds,
+        int? exitCode,
+        bool timedOut,
+        bool cancellationRequested,
+        string? errorText,
+        Exception? innerException = null)
     {
-        var value = $"{stdout}\n{stderr}".Trim();
-        return value.Length <= 512 ? value : value[..512];
+        var details = new PlatformFlowLifecycleFailureDetails
+        {
+            LifecyclePhase = "android-device-lifecycle",
+            ActionName = AndroidLifecycleDiagnosticRedactor.Sanitize(action, 128),
+            AdbCommandCategory = GetAdbCommandCategory(arguments),
+            ExitCode = exitCode,
+            TimeoutSeconds = timeoutSeconds,
+            TimedOut = timedOut,
+            CancellationRequested = cancellationRequested,
+            SafeErrorText = AndroidLifecycleDiagnosticRedactor.Sanitize(
+                errorText,
+                AndroidFixtureInitializationDiagnostics.MaxSafeErrorTextCharacters,
+                _serialNumber),
+        };
+        var failure = new PlatformAdbCommandException(details, innerException);
+        var suffix = exitCode is { } code ? $" (adb exit {code})" : string.Empty;
+        return PlatformFlowLifecycleException.Infrastructure($"Failed to {details.ActionName}{suffix}.", failure, details);
     }
+
+    private static string GetAdbCommandCategory(string arguments)
+    {
+        var command = arguments.TrimStart();
+        if (command.StartsWith("install", StringComparison.Ordinal))
+            return "install";
+        if (command.StartsWith("uninstall", StringComparison.Ordinal))
+            return "uninstall";
+        if (command.StartsWith("forward", StringComparison.Ordinal))
+            return "port-forward";
+        if (command.StartsWith("shell pm clear", StringComparison.Ordinal))
+            return "package-data";
+        if (command.StartsWith("shell cmd package", StringComparison.Ordinal))
+            return "package-manager";
+        if (command.StartsWith("shell am ", StringComparison.Ordinal))
+            return "activity";
+        if (command.StartsWith("shell pidof", StringComparison.Ordinal))
+            return "process-query";
+        if (command.StartsWith("shell pm ", StringComparison.Ordinal))
+            return "package-query";
+        if (command.StartsWith("shell sha256sum", StringComparison.Ordinal) ||
+            command.StartsWith("shell toybox sha256sum", StringComparison.Ordinal))
+        {
+            return "package-hash";
+        }
+        if (command.StartsWith("shell dumpsys", StringComparison.Ordinal) ||
+            command.StartsWith("shell wm ", StringComparison.Ordinal) ||
+            command.StartsWith("shell getprop", StringComparison.Ordinal))
+        {
+            return "device-query";
+        }
+
+        return "adb";
+    }
+
+    string TrimOutput(string stdout, string stderr)
+        => AndroidLifecycleDiagnosticRedactor.Sanitize(
+            $"{stderr}\n{stdout}",
+            AndroidFixtureInitializationDiagnostics.MaxSafeErrorTextCharacters,
+            _serialNumber);
 }

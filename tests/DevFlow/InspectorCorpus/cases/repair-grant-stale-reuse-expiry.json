@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "repair-grant-stale-reuse-expiry",
+  "kind": "repair-negative",
+  "disposition": "no-repair",
+  "fixture": {
+    "grantFailures": ["reused", "expired", "stale-flow-digest", "concurrent-edit"]
+  },
+  "expect": {
+    "diagnosticIds": [],
+    "candidateKinds": [],
+    "repairEligible": false,
+    "ineligibilityCodes": ["approval-grant-invalid", "proposal-stale"]
+  }
+}

@@ -109,6 +109,36 @@ internal sealed class MutationLeaseRegistry : IWorkflowMutationLeaseRegistry
         return snapshot;
     }
 
+    public MutationLeaseSnapshot TransferAndBegin(
+        string agentId,
+        string sourceLeaseId,
+        string targetLeaseId,
+        string transactionId,
+        string? holderKind,
+        string? label)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceLeaseId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetLeaseId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(transactionId);
+
+        var state = _leases.GetOrAdd(agentId, static _ => new LeaseState());
+        lock (state.Gate)
+        {
+            ExpireIfNeeded(state);
+            if (!string.Equals(state.LeaseId, sourceLeaseId, StringComparison.Ordinal) ||
+                state.TransactionIds.Count != 0)
+            {
+                return Snapshot(state, targetLeaseId, transactionId);
+            }
+
+            SetHolder(state, targetLeaseId, holderKind, label);
+            state.TransactionLeaseId = targetLeaseId;
+            state.TransactionIds[transactionId] = _getTicks();
+            state.LastSeenTicks = _getTicks();
+            return Snapshot(state, targetLeaseId, transactionId);
+        }
+    }
+
     public void Remove(string agentId) => _leases.TryRemove(agentId, out _);
 
     public void Clear() => _leases.Clear();

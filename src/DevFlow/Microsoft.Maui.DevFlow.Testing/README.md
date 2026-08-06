@@ -16,6 +16,35 @@ Inspector, MCP, a test framework, or app/device lifecycle orchestration.
 The package targets `net9.0` and references `Microsoft.Maui.DevFlow.Driver`. It can be consumed by
 `net9.0`, `net10.0`, and compatible MAUI test hosts.
 
+The public API is previewed with a committed compatibility baseline. See the
+[DevFlow preview compatibility policy](../../../docs/DevFlow/compatibility.md) before updating a
+public signature or versioned contract.
+
+## Test-framework-neutral quick start
+
+The package contains no xUnit, NUnit, MSTest, CLI, broker, or provider dependency. Put the
+framework-neutral method below behind the assertion/attribute mechanism your test host already
+uses:
+
+```csharp
+using Microsoft.Maui.DevFlow.Testing;
+
+static void ValidateLoginFlow()
+{
+    var result = FlowMarkdown.Parse(File.ReadAllText("maui-tests/login.md"));
+    if (!result.Ok)
+        throw new InvalidOperationException(result.Error);
+
+    var validation = MauiFlowValidator.Validate(result.Flow!);
+    if (!validation.Ok)
+        throw new InvalidOperationException(string.Join(Environment.NewLine, validation.Errors));
+}
+```
+
+For example, xUnit calls it from a `[Fact]`, NUnit calls it from a `[Test]`, and MSTest calls it
+from a `[TestMethod]`. Each framework owns its own async lifecycle, fixture, reset, and assertion
+policy; the package supplies the same contracts and runner to all of them.
+
 ## Use a flow contract
 
 ```csharp
@@ -120,8 +149,13 @@ The formal contracts are maintained with the DevFlow protocol specification:
 - [Executable flow v2](../../../docs/DevFlow/spec/schemas/maui-flow-v2.json)
 - [Test plan v1](../../../docs/DevFlow/spec/schemas/maui-test-plan-v1.json)
 - [Flow run report v1](../../../docs/DevFlow/spec/schemas/maui-flow-run-report-v1.json)
+- [Preview qualification report v1](../../../docs/DevFlow/spec/schemas/maui-preview-qualification-v1.json)
+- [Artifact trust v1](../../../docs/DevFlow/spec/schemas/maui-artifact-trust-v1.json)
 - [Repair proposal v1](../../../docs/DevFlow/spec/schemas/maui-flow-repair-proposal-v1.json)
   and [repair outcome v1](../../../docs/DevFlow/spec/schemas/maui-flow-repair-outcome-v1.json)
+- [XAML source proposal v1](../../../docs/DevFlow/spec/schemas/maui-xaml-source-proposal-v1.json)
+- [C# source proposal v1](../../../docs/DevFlow/spec/schemas/maui-csharp-source-proposal-v1.json)
+- [Restricted test-agent protocol v1](../../../docs/DevFlow/spec/schemas/maui-test-agent-protocol-v1.json)
 
 Schema 1 and schema 2 executable flows remain readable. Schema 2 is current; use
 `MauiFlowMigration.Preview` to inspect a schema-1-to-schema-2 normalization without writing a
@@ -137,8 +171,8 @@ if (preview.WriteRequired)
 }
 ```
 
-`MauiTestPlan`, `MauiFlowRunReport`, `MauiFlowRepairProposal`, and
-`MauiFlowRepairOutcome` are provider-neutral data contracts. Plans declare side-effect policy,
+`MauiTestPlan`, `MauiFlowRunReport`, `MauiFlowRepairProposal`, `MauiFlowRepairOutcome`, and
+`MauiXamlSourceProposal`, and `MauiCSharpSourceProposal` are provider-neutral data contracts. Plans declare side-effect policy,
 reset expectations, capability requirements, and approval metadata, but they do not expose a
 public reset, launch, install, broker, or device lifecycle interface. Validate future required
 semantics explicitly before a run:
@@ -155,19 +189,187 @@ writers retain unknown extension fields to support future additive versions.
 
 `MauiFlowFailureClassifier` is pure and deterministic: it maps observed terminal state,
 precondition facts, and legacy `FailureKind` strings to one typed code/category/phase. It does not
-retry mutations or generate selector repairs. Only a pre-dispatch `locator-not-found` with a
-verified matching checkpoint is marked repair-eligible; the package does not generate proposals.
+retry mutations. `MauiFlowRepairEligibilityEvaluator` and
+`MauiFlowRepairProposalGenerator` are also pure: they accept only a pre-dispatch
+`locator-not-found` with every matching checkpoint/trust/side-effect/oracle/prior-resolution
+fact, consume only the deterministic selector-health list, and produce a separate selector-only
+patch with invariant proof. They do not query a device, call a model, activate a candidate, write
+a flow, apply a patch, or weaken assertions/actions/values/order. Hosts own validation grants,
+lifecycle reset, compare-and-swap persistence, verification, and rollback.
+
+`MauiXamlSourceEligibilityAnalyzer` is also pure and provider-neutral. It accepts supplied
+source text, mapping, filesystem-safety, runtime-scope, and uniqueness facts and returns explicit
+ineligibility codes plus an exact declaration identity/span. It reads no workspace files, calls no
+device/provider/model, issues no source grant, and never writes source. A CLI/IDE local host owns
+the separate AutomationId-only proposal, approval, atomic CAS, verification, and rollback
+lifecycle. Source and flow-repair approval are intentionally not interchangeable.
+
+`MauiCSharpSourceEligibilityAnalyzer` consumes the same source identity, safe-ID, and uniqueness
+policy plus supplied Roslyn semantic facts. It accepts only a direct initializer or direct literal
+assignment and reports explicit template/repeater/factory/dynamic/conditional/generated/linked
+rejections. It never loads a workspace, applies a patch, or invokes a model. A host-owned Roslyn
+adapter creates the exact forward/inverse proposal; the broker records only an IDE host's
+pre-hash/post-hash/patch-digest acknowledgment and never writes C# source.
+
+## Restricted test-agent protocol contracts
+
+`MauiTestAgentRequestEnvelope`, target/correlation/provenance records, broker-owned approval
+request/decision projections, mutation scope/grant requests, typed errors, patch records, and audit entries are provider-neutral public data
+contracts. They are used by the CLI's optional `maui devflow mcp --profile test-agent` boundary;
+they do not invoke providers, launch/reset devices, read workspace source, or apply a repair.
+
+A host issues an opaque mutation grant only after explicit human approval. The broker validates
+the exact target process, app build, optional host-attested seed/backend state, actor/provider, plan/flow revision/digest, allowed
+typed action/selector/route/side-effect/value/count scope, expiration, nonce, and policy version
+before dispatch. Read-only structural operations use a distinct read capability. The contracts
+represent opaque IDs and safe digests only; they never require a consumer to retain prompts,
+secrets, UI text, screenshots, raw logs, raw network content, or source.
+
+`MauiTestingJsonContext` includes source-generated metadata for every test-agent protocol contract
+and retains additive extension fields. See
+[Restricted test-agent protocol](../../../docs/DevFlow/test-agent.md) for the tool inventory and
+approval workflow.
+
+## Selector health and fingerprints
+
+`MauiElementFingerprint` is versioned, value-free evidence captured at recording and run
+resolution points. It records app/build/platform and route/window/modal/locale/theme/orientation/
+display context, managed and authoritative native identity, source-anchor state, topology,
+collection scope/key, normalized bounds, observation time, and capability version. It does **not**
+store rendered text, entered values, screenshots, or raw runtime object ids.
+
+`MauiSelectorCandidateGenerator` uses fixed priority: unique app-owned AutomationId; stable item
+key scoped to one collection; authoritative native identity; role/type under a stable ancestor;
+current source anchor corroborated by topology; then explicit-locale exact text with an explicit
+unique live-match proof. Runtime ids,
+coordinates, type/index alone, screenshots, ambiguous matches, and unscoped virtualized rows are
+rejected. Candidates are diagnostic evidence; exactly one committed flow selector still drives
+normal replay, and ambiguity still fails.
+
+The displayed `deterministicRankScore` is a transparent rule score, **not a probability**.
+Components use rule version `selector-ranker-v1`: app-owned identifier (0.45), scope (0.20),
+managed/native agreement (0.12), source anchor (0.10), topology (0.08), and geometry (0.05),
+minus localization, virtualization, stale-source, platform-divergence, and ambiguity penalties.
+`calibration.state` remains `uncalibrated` until a future benchmark gate.
+
+`MauiSelectorHealthAnalyzer` is pure and emits these stable IDs:
+
+| ID | Meaning |
+|---|---|
+| `DFSH001` | Duplicate reachable actionable AutomationId |
+| `DFSH002` | Recorded actionable target lacks a durable identity |
+| `DFSH003` | Runtime-id or type/index selector |
+| `DFSH004` | Localized/dynamic exact-text selector risk |
+| `DFSH005` | Template, CollectionView, or virtualization/index risk |
+| `DFSH006` | Missing, stale, or ambiguous source anchor |
+| `DFSH007` | Managed/native automation identity divergence |
+| `DFSH008` | Required-platform candidate missing or divergent |
+| `DFSH009` | Action lacks a meaningful hard postcondition |
+| `DFSH010` | Required plan criterion lacks hard-assertion coverage |
+| `DFSH011` | Route/platform selector coverage summary |
+
+Selector health never changes a committed selector, applies a repair, writes source, invokes a
+model, or falls back to another candidate during replay.
+
+## Imported artifact trust
+
+`MauiArtifactTrustEvaluator` classifies imported `flow-run.json` reports and `.mauitrace` v1
+evidence with three explicit states:
+
+| State | Meaning |
+|---|---|
+| `untrusted` | Default for every import. It may create bounded diagnostics only. |
+| `attested` | A trusted host supplied independently verified provenance facts matching its configured repository, workflow, commit, and digest policy. It is still diagnostic-only. |
+| `locally-reproduced` | A new local run matched the current flow digest, app build/source and package fingerprints, target profile, and relevant failure code, step, and checkpoints. |
+
+The public `MauiArtifactProvenanceSubject`, `MauiArtifactTrustPolicy`, and
+`MauiArtifactVerifiedProvenanceFacts` contracts are provider-neutral. The package performs no
+network calls or issuer verification: a host must verify facts first and pass them to the pure
+evaluator. ZIP/report-internal hashes establish integrity only; embedded IDs, digests, or
+provenance fields never upgrade trust by themselves.
+
+Imported identities use the distinct `imported-artifact` namespace. Bind a qualifying local run
+with `MauiLocalReproductionFacts` and `MauiLocalReproductionExpectation`; the resulting
+`MauiLocalReproductionBinding` refers to the imported failure by a generated opaque key, never an
+embedded run/flow/proposal ID. Future repair and source services must call
+`MauiArtifactProposalPolicy.CanCreateProposal` (or the repair/source forwarding gates), which
+fails closed unless the record is `locally-reproduced`.
 
 The CLI's `maui devflow flow validate <flow.md>` command uses this same parser and validator
 without connecting to or driving an app.
 
-## Platform support
+## Human-authored plan sidecars
 
-| Host | Status |
-|---|---|
-| .NET 9 / .NET 10 test hosts | Preview |
-| Android, iOS, Mac Catalyst, Windows MAUI hosts | Preview through the DevFlow Driver |
-| CLI, broker, Inspector, MCP | Adapters; not package dependencies |
+The canonical executable artifact remains `maui-tests/<name>.md`. A local host may store its
+non-executable human plan next to it as `maui-tests/<name>.maui-plan.json`, using
+[test-plan-v1](../../../docs/DevFlow/spec/schemas/maui-test-plan-v1.json). A plan includes its
+`planId`, revision, bound flow path/digest, goal, scenarios, assumptions, preconditions, reset and
+side-effect policy, acceptance criteria, requirements, provenance, and reviews.
+
+`MauiTestPlanValidator.Validate` and `ValidateJson` validate the package-owned contract without
+performing I/O. Hosts must additionally check their workspace boundary, current flow digest,
+revision/digest compare-and-swap values, symlinks/reparse points, and atomic write behavior. The
+Testing package intentionally never writes a workspace file.
+
+Use `MauiFlowValidator.Validate` for the public canonical flow validation name (the established
+`FlowValidator` facade remains compatible). An authoring host can use
+`MauiFlowAssertionVerifier.VerifyAsync` for optional current-state feedback. It applies the same
+strict selector resolution and scalar comparison behavior as `MauiFlowRunner`; `pageChanged`
+remains observation-only and is never verified as a hard assertion.
+
+## Platform support and qualification boundary
+
+The package's local-feed consumer project compiles the matrix below when the host and workload are
+available. A successful compile means only that the `net9.0` package asset can be referenced; it
+does not launch an app, simulator, or device and is not runtime QA.
+
+| Consumer | Compile coverage | Runtime qualification status |
+|---|---|---|
+| .NET 9 / .NET 10 test host and CLI | Required local-feed consumer and CLI builds | Preview API compatibility coverage only |
+| Android | Windows host/workload consumer compile | Engineering pilot; **not-qualified** without the required real-device first-attempt evidence |
+| iOS | macOS host/workload consumer compile | Required all-platform gate; not yet qualified |
+| Mac Catalyst | macOS host/workload consumer compile | Required all-platform gate; not yet qualified |
+| Windows | Windows host consumer compile | Required all-platform gate; not yet qualified |
+| macOS AppKit | macOS host/workload consumer compile | Experimental AppKit fixture; `backend=appkit` artifacts are separately reported and never substitute for Mac Catalyst |
+| WPF and GTK | No Testing package runtime claim | Experimental; separately reported and never substitutes for Windows or another required gate |
+
+All-platform completion requires Android, iOS, Mac Catalyst, and Windows to pass their declared
+runtime, reset, oracle, privacy, repair/source-review, and artifact gates. The Android engineering
+preview is not all-platform completion. The experimental AppKit host handoff is separately
+documented in [platform flow QA](../../../docs/DevFlow/flow-qa.md); its artifacts explicitly state
+`backend=appkit` and never qualify Mac Catalyst.
 
 The package deliberately does not publish reset, install, launch, broker, or device orchestration
 interfaces. Hosts own those operations and invoke the same flow runtime after the app is ready.
+
+The repository's Android integration fixture is the first host implementation. It performs
+build/install/reset/seed/forward/launch and checkpoint verification internally, then passes the
+verified context to `MauiFlowRunner`; it does not add a second runner or expose lifecycle APIs from
+this package. Its `Category=FlowPilot` integration selector executes the committed Tier-1 corpus
+three times from clean state and emits a redacted artifact manifest without changing the first
+attempt outcome during later diagnostics. See `src/DevFlow/README.md` for emulator prerequisites,
+workflow dispatch, artifact interpretation, and the explicit local commands.
+
+## Preview qualification gates
+
+`MauiPreviewQualificationGateEvaluator` is a pure, provider-neutral accounting component for the
+Android engineering preview. `MauiPreviewQualificationCorpusRunner` validates
+`tests/DevFlow/InspectorCorpus`, evaluates its static selector/repair/source-policy fixtures, and
+deterministically creates at least 300 generated no-repair evaluations. Generated samples retain
+`source: "generated"` and `realDevice: false`; they are never treated as independent physical or
+device-backed executions.
+
+The versioned output is [preview qualification v1](../../../docs/DevFlow/spec/schemas/maui-preview-qualification-v1.json).
+It records fingerprints, profiles, review/flag state, thresholds, sample counts, Wilson 95%
+intervals, ECE/Brier buckets when a probability-like confidence exists, report/trace/diagnosis
+sizes, host p50/p95 measurements, device-overhead absence, exclusions, and artifact hashes.
+`MauiPreviewQualificationArtifactManifestReader` consumes only the manifest's bounded metadata:
+it never follows report paths, extracts ZIPs, trusts embedded provenance, or upgrades an emulator
+to a real device.
+
+The evaluator returns `not-qualified` for missing evidence rather than assuming success. Android
+qualification requires approved plan/rubber-duck/independent review records, complete report and
+first-attempt evidence, zero security/privacy escapes, 95% conservative repair precision, zero
+false heals over 300 no-repair cases, 99% selector stability, calibrated ECE at or below 0.05
+before probability-like display, and 100 clean real-device first attempts per Tier-1 flow. It has
+no model provider, telemetry egress, automatic repair/source apply, or required-PR-gate behavior.

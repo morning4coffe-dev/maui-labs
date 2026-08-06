@@ -85,6 +85,21 @@ public sealed class FlowRecorder
     /// <c>fragile</c> (only an AutomationId is a durable selector).
     /// </summary>
     public int AppendStep(string action, FlowSelector? target, string? value, FlowStepArgs? args, string? page, bool navigated, List<FlowAssert>? asserts)
+        => AppendStep(action, target, value, args, page, navigated, asserts, selectorEvidence: null);
+
+    /// <summary>
+    /// Appends a host-reported step together with value-free selector evidence. The evidence is
+    /// diagnostic only and cannot alter the active replay selector.
+    /// </summary>
+    public int AppendStep(
+        string action,
+        FlowSelector? target,
+        string? value,
+        FlowStepArgs? args,
+        string? page,
+        bool navigated,
+        List<FlowAssert>? asserts,
+        MauiSelectorEvidence? selectorEvidence)
     {
         lock (_gate)
         {
@@ -104,6 +119,7 @@ public sealed class FlowRecorder
                 Navigated = navigated,
                 Fragile = FlowSelector.IsFragile(target),
                 Asserts = asserts is { Count: > 0 } ? asserts : null,
+                SelectorEvidence = selectorEvidence,
             });
             return seq;
         }

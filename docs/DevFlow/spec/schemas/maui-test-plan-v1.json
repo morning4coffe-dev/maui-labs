@@ -32,6 +32,10 @@
     "flow": {
       "$ref": "#/$defs/FlowReference"
     },
+    "title": {
+      "type": "string",
+      "maxLength": 512
+    },
     "goal": {
       "type": "string",
       "minLength": 1
@@ -62,6 +66,9 @@
       "items": {
         "$ref": "#/$defs/AcceptanceCriterion"
       }
+    },
+    "requiredPlatforms": {
+      "$ref": "#/$defs/StringList"
     },
     "requirements": {
       "$ref": "#/$defs/Requirements"
@@ -95,6 +102,9 @@
         "non-replayable"
       ]
     },
+    "repairPolicy": {
+      "$ref": "#/$defs/RepairPolicy"
+    },
     "businessOracles": {
       "type": "array",
       "items": {
@@ -121,6 +131,42 @@
       "items": {
         "type": "string"
       }
+    },
+    "RepairPolicy": {
+      "type": "object",
+      "properties": {
+        "allowedCandidateKinds": {
+          "type": "array",
+          "items": {
+            "enum": [
+              "automation-id",
+              "exact-text"
+            ]
+          }
+        },
+        "allowedRiskFlags": {
+          "type": "array",
+          "items": {
+            "const": "localization"
+          }
+        },
+        "maxCandidates": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "minimumScore": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "minimumScoreGap": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        }
+      },
+      "additionalProperties": true
     },
     "FlowReference": {
       "type": "object",

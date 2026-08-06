@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <IsPackable>false</IsPackable>
+    <IsShipping>false</IsShipping>
+    <Description>Internal macOS host transport and proof harness for the experimental DevFlow Apple XCTest test agent.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\Microsoft.Maui.DevFlow.Driver\Microsoft.Maui.DevFlow.Driver.csproj" />
+    <ProjectReference Include="..\Microsoft.Maui.DevFlow.Testing\Microsoft.Maui.DevFlow.Testing.csproj" />
+    <ProjectReference Include="..\Microsoft.Maui.DevFlow.TestAgent.Core\Microsoft.Maui.DevFlow.TestAgent.Core.csproj" />
+  </ItemGroup>
+
+</Project>

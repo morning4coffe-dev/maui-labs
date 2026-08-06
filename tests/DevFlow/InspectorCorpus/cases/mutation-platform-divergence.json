@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "mutation-platform-divergence",
+  "kind": "mutation",
+  "disposition": "diagnostic-only",
+  "fixture": { "requiredPlatforms": ["android", "windows"], "androidCandidateKinds": ["automation-id"], "windowsCandidateKinds": ["native-automation-id"] },
+  "expect": { "diagnosticIds": ["DFSH008"], "candidateKinds": [] }
+}

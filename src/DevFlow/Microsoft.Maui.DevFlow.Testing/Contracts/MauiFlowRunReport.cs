@@ -31,6 +31,7 @@ public sealed class MauiFlowRunReport
     [JsonPropertyName("steps")] public List<MauiFlowStepAttempt> Steps { get; set; } = [];
     [JsonPropertyName("failure")] public MauiFlowFailure? Failure { get; set; }
     [JsonPropertyName("artifacts")] public List<MauiFlowArtifactReference> Artifacts { get; set; } = [];
+    [JsonPropertyName("selectorHealth")] public MauiFlowSelectorHealthSummary? SelectorHealth { get; set; }
     [JsonPropertyName("reportDigest")] public string? ReportDigest { get; set; }
     [JsonPropertyName("reportPath")] public string? ReportPath { get; set; }
     [JsonPropertyName("truncated")] public bool? Truncated { get; set; }
@@ -48,6 +49,8 @@ public sealed class MauiFlowRunTarget
     [JsonPropertyName("deviceProfile")] public string? DeviceProfile { get; set; }
     [JsonPropertyName("appId")] public string? AppId { get; set; }
     [JsonPropertyName("appBuildFingerprint")] public string? AppBuildFingerprint { get; set; }
+    [JsonPropertyName("appSourceFingerprint")] public string? AppSourceFingerprint { get; set; }
+    [JsonPropertyName("packageDigest")] public string? PackageDigest { get; set; }
     [JsonPropertyName("agentId")] public string? AgentId { get; set; }
     [JsonPropertyName("agentInstanceId")] public string? AgentInstanceId { get; set; }
     [JsonPropertyName("locale")] public string? Locale { get; set; }
@@ -154,8 +157,22 @@ public sealed class MauiFlowStepAttempt
     [JsonPropertyName("acknowledgementState")] public string? AcknowledgementState { get; set; }
     [JsonPropertyName("completionCertainty")] public string? CompletionCertainty { get; set; }
     [JsonPropertyName("failureClass")] public string? FailureClass { get; set; }
+    [JsonPropertyName("fingerprint")] public MauiElementFingerprint? Fingerprint { get; set; }
+    [JsonPropertyName("selectorCandidates")] public List<MauiSelectorCandidate> SelectorCandidates { get; set; } = [];
+    [JsonPropertyName("selectorCandidateOmissions")] public List<MauiSelectorEvidenceOmission> SelectorCandidateOmissions { get; set; } = [];
     [JsonPropertyName("artifacts")] public List<MauiFlowArtifactReference> Artifacts { get; set; } = [];
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+/// <summary>Bounded summary of value-free selector evidence captured during a run.</summary>
+public sealed class MauiFlowSelectorHealthSummary
+{
+    [JsonPropertyName("ruleVersion")] public string RuleVersion { get; set; } = MauiSelectorHealthRules.RuleVersion;
+    [JsonPropertyName("rankerRuleVersion")] public string RankerRuleVersion { get; set; } = MauiSelectorHealthRules.RankerRuleVersion;
+    [JsonPropertyName("calibrationState")] public string CalibrationState { get; set; } = MauiSelectorHealthRules.Uncalibrated;
+    [JsonPropertyName("capturedSteps")] public int CapturedSteps { get; set; }
+    [JsonPropertyName("candidateCount")] public int CandidateCount { get; set; }
+    [JsonPropertyName("omissionCount")] public int OmissionCount { get; set; }
 }
 
 /// <summary>A selector request projected without retaining sensitive typed text.</summary>

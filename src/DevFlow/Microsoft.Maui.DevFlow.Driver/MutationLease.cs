@@ -88,6 +88,11 @@ public sealed class MutationRecordingObservation
     public string? AssertsJson { get; set; }
     [JsonPropertyName("sensitive")]
     public bool Sensitive { get; set; }
+    /// <summary>
+    /// Value-free structural facts observed with the mutation. Older agents omit this field.
+    /// </summary>
+    [JsonPropertyName("selectorObservation")]
+    public MauiSelectorObservation? SelectorObservation { get; set; }
 }
 
 public sealed class MutationRecordingStatus

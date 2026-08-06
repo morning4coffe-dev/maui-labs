@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "id": "csharp-advisory-duplicate-automation-id",
+  "kind": "no-repair",
+  "disposition": "diagnostic-only",
+  "fixture": {
+    "language": "CSharp",
+    "source": "first.AutomationId = \"SaveButton\"; second.AutomationId = \"SaveButton\";",
+    "scope": "direct-literal-assignment"
+  },
+  "expect": {
+    "diagnosticIds": ["DFCS002"],
+    "repairEligible": false,
+    "ineligibilityCodes": ["automation-id-duplicate-project"]
+  }
+}

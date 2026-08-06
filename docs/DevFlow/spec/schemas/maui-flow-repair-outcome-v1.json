@@ -19,11 +19,19 @@
     },
     "state": {
       "enum": [
+        "proposed",
+        "previewed",
+        "approved",
+        "applying",
         "rejected",
         "stale",
+        "approval-expired",
         "applied",
         "verified",
-        "reverted"
+        "verification-failed",
+        "rollback-required",
+        "reverted",
+        "rollback-failed"
       ]
     },
     "newFlowRevision": {

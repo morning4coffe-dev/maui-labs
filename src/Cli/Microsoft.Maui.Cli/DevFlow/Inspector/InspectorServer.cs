@@ -5,6 +5,7 @@ using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using Microsoft.Maui.Cli.DevFlow.Broker;
 using Microsoft.Maui.DevFlow.Driver;
 using Testing = Microsoft.Maui.DevFlow.Testing;
@@ -27,6 +28,7 @@ public sealed class InspectorServer : IDisposable
     private readonly AgentClient _client;
     private readonly string? _embedToken;
     private readonly string? _agentId;
+    private readonly string? _agentInstanceId;
     private readonly string? _appName;
     private readonly string? _platform;
     private readonly string? _project;
@@ -36,9 +38,21 @@ public sealed class InspectorServer : IDisposable
     private readonly Func<
         Testing.MauiFlow,
         Func<AgentClient, Testing.IFlowReplayEvidenceCapture?>,
+        WorkflowRunLeaseHandoff,
         CancellationToken,
         Task<Testing.FlowReplayReport>>? _workflowReplay;
+    // Broker mode supplies a target-bound adapter. Standalone Inspector servers deliberately do
+    // not emulate workflow coordination or artifact trust with direct agent calls.
+    private readonly InspectorWorkflowServices? _workflowServices;
+    private readonly TestAgentSessionService? _testAgentSessions;
+    private readonly Func<
+        Testing.MauiTestAgentTargetState,
+        Task<Testing.MauiTestAgentTargetState?>>? _testAgentTargetStateRefresh;
+    private readonly WorkflowRepairValidationService _repairValidation;
+    private readonly bool _repairValidationAvailable;
     private readonly XamlSourcePropertyEditor _sourcePropertyEditor;
+    private readonly XamlAutomationIdProposalService _xamlSourceProposalService;
+    private readonly CSharpAutomationIdProposalService _csharpSourceProposalService;
     private readonly InspectorAlertController _alertController;
     // Per-inspector read token gating the data tabs (Logs/Network/Preferences/Device/Sensors/
     // Files) — the app data these expose (tokens in network, secrets in prefs/logs) exceeds the
@@ -54,6 +68,9 @@ public sealed class InspectorServer : IDisposable
     // 0 = idle, 1 = a flow replay is driving the app. Guards against interleaving a replay with
     // user mutations / recording (a replay can be triggered from any embedding host or tab).
     private int _replayInProgress;
+    private int _workbenchRunStarting;
+    private string? _workbenchRunStartingIdempotencyKey;
+    private string? _activeWorkbenchRunId;
     private readonly SemaphoreSlim _flowAdmissionGate = new(1, 1);
     private readonly SemaphoreSlim _frameCreationGate = new(1, 1);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> PersistTransactionGates =
@@ -69,6 +86,13 @@ public sealed class InspectorServer : IDisposable
     private long _cacheGeneration;
     private readonly Dictionary<string, InspectorFrame> _frames = new(StringComparer.Ordinal);
     private readonly object _replayEvidenceGate = new();
+    private readonly object _workbenchRunGate = new();
+    private readonly Dictionary<string, WorkbenchRunCapability> _workbenchRunCapabilities =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, WorkbenchEvidence> _workbenchEvidence =
+        new(StringComparer.Ordinal);
+    private readonly Dictionary<string, WorkbenchRepairClassification> _workbenchRepairClassifications =
+        new(StringComparer.Ordinal);
     private PerformanceOwnership? _performanceOwnership;
     private byte[]? _lastReplayEvidence;
     private static readonly TimeSpan ScreenshotCacheDuration = TimeSpan.FromMilliseconds(200);
@@ -82,6 +106,11 @@ public sealed class InspectorServer : IDisposable
     private const long MaxRequestBodyBytes = 1_048_576; // 1 MB
     private const long MaxWorkflowFileBytes = 1_048_576;
     private const int MaxWorkflowFiles = 100;
+    private const int MaxRetainedWorkbenchRuns = 16;
+    private const int MaxRetainedWorkbenchEvidence = 8;
+    private const int MaxRetainedWorkbenchRepairClassifications = 32;
+    private const int MaxCachedWorkbenchEvidenceBytes = 16 * 1024 * 1024;
+    private const int MaxSelectorVerifyAmbiguityMatches = 20;
 
     public int Port => _port;
 
@@ -91,6 +120,8 @@ public sealed class InspectorServer : IDisposable
     /// the cached InspectorServer's AgentClient is now pointing at a dead port.
     /// </summary>
     public int AgentPort => _agentPort;
+
+    internal string? AgentInstanceId => _agentInstanceId;
 
     public InspectorServer(int port, string agentHost, int agentPort, string? embedToken = null)
         : this(port, agentHost, agentPort, embedToken, agentId: null, appName: null, platform: null, project: null, sessionId: null)
@@ -112,14 +143,23 @@ public sealed class InspectorServer : IDisposable
         Func<
             Testing.MauiFlow,
             Func<AgentClient, Testing.IFlowReplayEvidenceCapture?>,
+            WorkflowRunLeaseHandoff,
             CancellationToken,
-            Task<Testing.FlowReplayReport>>? workflowReplay = null)
+            Task<Testing.FlowReplayReport>>? workflowReplay = null,
+        string? agentInstanceId = null,
+        InspectorWorkflowServices? workflowServices = null,
+        IWorkflowRepairValidationHost? repairValidationHost = null,
+        TestAgentSessionService? testAgentSessions = null,
+        Func<
+            Testing.MauiTestAgentTargetState,
+            Task<Testing.MauiTestAgentTargetState?>>? testAgentTargetStateRefresh = null)
     {
         _port = port;
         _agentHost = agentHost;
         _agentPort = agentPort;
         _embedToken = embedToken;
         _agentId = agentId;
+        _agentInstanceId = agentInstanceId;
         _appName = appName;
         _platform = platform;
         _project = string.IsNullOrWhiteSpace(project) ? null : project;
@@ -136,7 +176,15 @@ public sealed class InspectorServer : IDisposable
         };
         _checkpoints = checkpoints ?? new RouteCheckpointCoordinator();
         _workflowReplay = workflowReplay;
+        _workflowServices = workflowServices;
+        _testAgentSessions = testAgentSessions;
+        _testAgentTargetStateRefresh = testAgentTargetStateRefresh;
+        _repairValidationAvailable = repairValidationHost is not null;
+        _repairValidation = new WorkflowRepairValidationService(
+            repairValidationHost ?? UnavailableWorkflowRepairValidationHost.Instance);
         _sourcePropertyEditor = new XamlSourcePropertyEditor(project, sessionId);
+        _xamlSourceProposalService = new XamlAutomationIdProposalService(project, sessionId);
+        _csharpSourceProposalService = new CSharpAutomationIdProposalService(project);
         _alertController = new InspectorAlertController(agentHost, agentPort, appName, platform);
         _client = new AgentClient(agentHost, agentPort)
         {
@@ -274,27 +322,56 @@ public sealed class InspectorServer : IDisposable
             }
 
             string? body = null;
+            byte[]? bodyBytes = null;
             if (method == "POST" && context.Request.HasEntityBody)
             {
-                // Reject oversize bodies to prevent local DoS.
-                var contentLength = context.Request.ContentLength64;
-                if (contentLength > MaxRequestBodyBytes)
+                var isArtifactImport = string.Equals(
+                    path.TrimEnd('/'),
+                    "/api/workbench/artifacts/import",
+                    StringComparison.OrdinalIgnoreCase);
+                var kind = context.Request.QueryString["kind"];
+                var maximum = string.Equals(kind, ArtifactTrustImportKinds.FlowRun, StringComparison.Ordinal)
+                    ? ArtifactTrustImportService.MaxFlowRunBytes
+                    : string.Equals(kind, ArtifactTrustImportKinds.Evidence, StringComparison.Ordinal)
+                        ? (int)Evidence.EvidenceFormat.MaxBundleFileBytes
+                        : 0;
+
+                if (isArtifactImport && maximum > 0)
                 {
-                    context.Response.StatusCode = 413;
-                    context.Response.Close();
-                    return;
+                    bodyBytes = await ReadBoundedBytesAsync(
+                        context.Request.InputStream,
+                        context.Request.ContentLength64,
+                        maximum,
+                        _lifetimeCts.Token);
+                    if (bodyBytes is null)
+                    {
+                        context.Response.StatusCode = 413;
+                        context.Response.Close();
+                        return;
+                    }
                 }
-
-                body = await ReadBoundedBodyAsync(
-                    context.Request.InputStream,
-                    contentLength >= 0 ? contentLength : MaxRequestBodyBytes,
-                    _lifetimeCts.Token);
-
-                if (body == null)
+                else
                 {
-                    context.Response.StatusCode = 413;
-                    context.Response.Close();
-                    return;
+                    // Reject oversize bodies to prevent local DoS.
+                    var contentLength = context.Request.ContentLength64;
+                    if (contentLength > MaxRequestBodyBytes)
+                    {
+                        context.Response.StatusCode = 413;
+                        context.Response.Close();
+                        return;
+                    }
+
+                    body = await ReadBoundedBodyAsync(
+                        context.Request.InputStream,
+                        contentLength >= 0 ? contentLength : MaxRequestBodyBytes,
+                        _lifetimeCts.Token);
+
+                    if (body == null)
+                    {
+                        context.Response.StatusCode = 413;
+                        context.Response.Close();
+                        return;
+                    }
                 }
             }
 
@@ -303,6 +380,7 @@ public sealed class InspectorServer : IDisposable
                 Method = method,
                 Path = path,
                 Body = body,
+                BodyBytes = bodyBytes,
                 // Carry the read-token header through to RouteAsync so the data-tab gate works in
                 // broker mode too (the standalone path already parses all headers).
                 Headers = new Dictionary<string, string>
@@ -647,8 +725,14 @@ public sealed class InspectorServer : IDisposable
             // While a replay is driving the app, reject concurrent user mutations + record steps so
             // the replay isn't interleaved (a replay may be triggered from any embedding host/tab).
             // Read-only endpoints and the replay itself are unaffected.
-            if (request.Method == "POST" && Volatile.Read(ref _replayInProgress) == 1 && IsBlockedDuringReplay(request.Path))
-                return (409, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"A replay is in progress — try again when it finishes.\"}"));
+            var brokerRunActive = Volatile.Read(ref _workbenchRunStarting) == 1 || HasActiveWorkbenchRun();
+            if (request.Method == "POST" &&
+                (Volatile.Read(ref _replayInProgress) == 1 || brokerRunActive) &&
+                IsBlockedDuringReplay(request.Path))
+            {
+                return (409, "application/json", Encoding.UTF8.GetBytes(
+                    "{\"ok\":false,\"error\":\"A workflow run is in progress — try again when it finishes.\"}"));
+            }
 
             // Data tabs expose more than the visible tree (network/preferences/logs/files), so gate
             // them on the per-inspector read token that only same-origin devflow.js can echo back.
@@ -657,6 +741,26 @@ public sealed class InspectorServer : IDisposable
                 var token = request.Headers.TryGetValue("x-devflow-inspector-token", out var t) ? t : null;
                 if (string.IsNullOrEmpty(token) || !string.Equals(token, _readToken, StringComparison.Ordinal))
                     return (403, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"forbidden\"}"));
+            }
+
+            // Workbench run and trust routes are intentionally thin adapters over broker-owned
+            // services. They never fall back to the legacy direct replay path.
+            if (request.Path.StartsWith("/api/workbench/", StringComparison.OrdinalIgnoreCase))
+            {
+                if (request.Method == "POST" &&
+                    string.Equals(
+                        request.Path.TrimEnd('/'),
+                        "/api/workbench/run/start",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    Volatile.Read(ref _replayInProgress) == 1)
+                {
+                    return JsonResponse(409, new
+                    {
+                        ok = false,
+                        error = "A legacy replay is in progress. Wait for it to finish before starting a broker workflow run."
+                    });
+                }
+                return await HandleWorkbenchRouteAsync(request, leaseId, holderKind, holderLabel);
             }
 
             // Mutations share the agent-enforced global lease with Canvas, MCP, CLI, and other hosts.
@@ -700,9 +804,21 @@ public sealed class InspectorServer : IDisposable
                     "/inspector-data-context.js" => HandleEmbeddedFile("inspector-data-context.js", "application/javascript"),
                     "/inspector-diagnostics.js" => HandleEmbeddedFile("inspector-diagnostics.js", "application/javascript"),
                     "/inspector-evidence.js" => HandleEmbeddedFile("inspector-evidence.js", "application/javascript"),
+                    "/inspector-study.js" => HandleEmbeddedFile("inspector-study.js", "application/javascript"),
+                    "/inspector-agent-requests.js" => HandleEmbeddedFile("inspector-agent-requests.js", "application/javascript"),
+                    "/inspector-host-bridge.js" => HandleEmbeddedFile("inspector-host-bridge.js", "application/javascript"),
+                    "/inspector-workbench.js" => HandleEmbeddedFile("inspector-workbench.js", "application/javascript"),
+                    "/inspector-plan.js" => HandleEmbeddedFile("inspector-plan.js", "application/javascript"),
+                    "/inspector-steps.js" => HandleEmbeddedFile("inspector-steps.js", "application/javascript"),
+                    "/inspector-run.js" => HandleEmbeddedFile("inspector-run.js", "application/javascript"),
+                    "/inspector-trace.js" => HandleEmbeddedFile("inspector-trace.js", "application/javascript"),
+                    "/inspector-repair.js" => HandleEmbeddedFile("inspector-repair.js", "application/javascript"),
+                    "/inspector-improve.js" => HandleEmbeddedFile("inspector-improve.js", "application/javascript"),
+                    "/inspector-source.js" => HandleEmbeddedFile("inspector-source.js", "application/javascript"),
                     "/inspector-properties.js" => HandleEmbeddedFile("inspector-properties.js", "application/javascript"),
                     "/inspector-tree.js" => HandleEmbeddedFile("inspector-tree.js", "application/javascript"),
                     "/devflow.css" => HandleEmbeddedFile("devflow.css", "text/css"),
+                    "/inspector-workbench.css" => HandleEmbeddedFile("inspector-workbench.css", "text/css"),
                     _ => (404, "text/plain", Encoding.UTF8.GetBytes("Not Found"))
                 },
                 "POST" => request.Path switch
@@ -731,7 +847,20 @@ public sealed class InspectorServer : IDisposable
                     "/api/flows/record/status" => await HandleFlowRecordStatusAsync(request.Body),
                     "/api/flows/files/list" => await HandleFlowFilesListAsync(),
                     "/api/flows/files/load" => await HandleFlowFileLoadAsync(request.Body),
-                    "/api/flows/replay" => await HandleFlowReplayAsync(request.Body),
+                    "/api/plans/list" => await HandlePlanListAsync(),
+                    "/api/plans/load" => await HandlePlanLoadAsync(request.Body),
+                    "/api/plans/validate" => await HandlePlanValidateAsync(request.Body),
+                    "/api/plans/save" => await HandlePlanSaveAsync(request.Body),
+                    "/api/flows/validate" => await HandleFlowValidateAsync(request.Body),
+                    "/api/flows/diff" => await HandleFlowDiffAsync(request.Body),
+                    "/api/flows/commit" => await HandleFlowCommitAsync(request.Body),
+                    "/api/flows/selector/verify" => await HandleSelectorVerifyAsync(request.Body),
+                    "/api/flows/assert/verify" => await HandleAssertionVerifyAsync(request.Body),
+                    "/api/flows/replay" => await HandleFlowReplayAsync(
+                        request.Body,
+                        leaseId,
+                        holderKind,
+                        holderLabel),
                     "/api/logs" => await HandleLogsAsync(request.Body),
                     "/api/network" => await HandleNetworkAsync(request.Body),
                     "/api/network/detail" => await HandleNetworkDetailAsync(request.Body),
@@ -800,6 +929,7 @@ public sealed class InspectorServer : IDisposable
         var tokenMeta = $"<meta name=\"devflow-inspector-token\" content=\"{_readToken}\">";
         var agentMeta = new StringBuilder()
             .Append(BuildMeta("devflow-agent-id", _agentId))
+            .Append(BuildMeta("devflow-agent-instance-id", _agentInstanceId))
             .Append(BuildMeta("devflow-app-name", _appName))
             .Append(BuildMeta("devflow-platform", _platform))
             .Append(BuildMeta("devflow-agent-port", _agentPort.ToString(System.Globalization.CultureInfo.InvariantCulture)))
@@ -1985,10 +2115,3788 @@ public sealed class InspectorServer : IDisposable
         return true;
     }
 
+    // ── Human authoring: plan sidecars and explicit flow+plan bundle commits ──
+
+    private async Task<WorkflowPlanStore?> ResolveWorkflowPlanStoreAsync()
+    {
+        var workflowRoot = await ResolveWorkflowRootAsync();
+        var projectRoot = workflowRoot is null ? null : Path.GetDirectoryName(workflowRoot);
+        return string.IsNullOrWhiteSpace(projectRoot) ? null : new WorkflowPlanStore(projectRoot);
+    }
+
+    private async Task<(int, string, byte[])> HandlePlanListAsync()
+    {
+        var store = await ResolveWorkflowPlanStoreAsync();
+        if (store is null)
+        {
+            return JsonResponse(200, new
+            {
+                ok = true,
+                supported = false,
+                error = "Workspace persistence is unavailable. Download the plan bundle or use a host bridge."
+            });
+        }
+        return AuthoringResponse(store.List());
+    }
+
+    private async Task<(int, string, byte[])> HandlePlanLoadAsync(string? body)
+    {
+        if (!TryReadAuthoringRequest(body, out var request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var store = await ResolveWorkflowPlanStoreAsync();
+        if (store is null)
+            return JsonResponse(200, new { ok = true, supported = false, error = "Workspace persistence is unavailable." });
+        return AuthoringResponse(store.Load(request.FlowName));
+    }
+
+    private async Task<(int, string, byte[])> HandlePlanValidateAsync(string? body)
+    {
+        if (!TryReadAuthoringRequest(body, out var request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var store = await ResolveWorkflowPlanStoreAsync();
+        if (store is null)
+            return JsonResponse(200, new { ok = true, supported = false, error = "Workspace persistence is unavailable." });
+        var current = store.Load(request.FlowName);
+        var markdown = request.Markdown ?? current.Snapshot?.Markdown;
+        return AuthoringResponse(store.Validate(request.FlowName, markdown, request.PlanJson));
+    }
+
+    private async Task<(int, string, byte[])> HandlePlanSaveAsync(string? body)
+    {
+        if (!TryReadAuthoringRequest(body, out var request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var store = await ResolveWorkflowPlanStoreAsync();
+        if (store is null)
+            return JsonResponse(200, new { ok = true, supported = false, error = "Workspace persistence is unavailable." });
+        return AuthoringResponse(store.Save(request));
+    }
+
+    private async Task<(int, string, byte[])> HandleFlowValidateAsync(string? body)
+    {
+        if (!TryReadAuthoringRequest(body, out var request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var store = await ResolveWorkflowPlanStoreAsync();
+        if (store is null)
+            return JsonResponse(200, new { ok = true, supported = false, error = "Workspace persistence is unavailable." });
+        var current = store.Load(request.FlowName);
+        var markdown = request.Markdown ?? current.Snapshot?.Markdown;
+        return AuthoringResponse(store.Validate(request.FlowName, markdown, request.PlanJson));
+    }
+
+    private async Task<(int, string, byte[])> HandleFlowDiffAsync(string? body)
+    {
+        if (!TryReadAuthoringRequest(body, out var request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var store = await ResolveWorkflowPlanStoreAsync();
+        if (store is null)
+            return JsonResponse(200, new { ok = true, supported = false, error = "Workspace persistence is unavailable." });
+        var current = store.Load(request.FlowName);
+        var markdown = request.Markdown ?? current.Snapshot?.Markdown;
+        return AuthoringResponse(store.Diff(request.FlowName, markdown, request.PlanJson));
+    }
+
+    private async Task<(int, string, byte[])> HandleFlowCommitAsync(string? body)
+    {
+        if (!TryReadAuthoringRequest(body, out var request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (string.IsNullOrWhiteSpace(request.Markdown))
+            return JsonResponse(400, new { ok = false, error = "markdown is required for an explicit flow commit." });
+        var store = await ResolveWorkflowPlanStoreAsync();
+        if (store is null)
+            return JsonResponse(200, new { ok = true, supported = false, error = "Workspace persistence is unavailable." });
+        var commit = new WorkflowBundleCommitRequest
+        {
+            FlowName = request.FlowName,
+            Markdown = request.Markdown,
+            PlanJson = request.PlanJson,
+            ExpectedPlanRevision = request.ExpectedPlanRevision,
+            ExpectedPlanDigest = request.ExpectedPlanDigest,
+            ExpectedFlowDigest = request.ExpectedFlowDigest,
+            ConfirmOverwrite = request.ConfirmOverwrite,
+        };
+        return AuthoringResponse(store.Commit(commit));
+    }
+
+    private async Task<(int, string, byte[])> HandleAssertionVerifyAsync(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return JsonResponse(400, new { ok = false, error = "Body required." });
+
+        Testing.FlowAssert? assertion;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("assertion", out var assertionNode))
+            {
+                return JsonResponse(400, new { ok = false, error = "assertion is required." });
+            }
+            assertion = JsonSerializer.Deserialize(
+                assertionNode.GetRawText(),
+                Testing.MauiFlowJsonContext.Default.FlowAssert);
+        }
+        catch (JsonException)
+        {
+            return JsonResponse(400, new { ok = false, error = "Invalid assertion JSON." });
+        }
+        if (assertion is null)
+            return JsonResponse(400, new { ok = false, error = "assertion is required." });
+
+        var probe = new Testing.MauiFlow
+        {
+            Steps =
+            [
+                new Testing.FlowStep
+                {
+                    Seq = 1,
+                    Action = Testing.FlowActions.Assert,
+                    Asserts = [assertion],
+                },
+            ],
+        };
+        var validation = Testing.MauiFlowValidator.Validate(probe);
+        if (!validation.Ok)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "Assertion is invalid.",
+                errors = validation.Errors,
+                warnings = validation.Warnings,
+            });
+        }
+        if (IsRawRuntimeSelector(assertion.Selector))
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "A raw runtime ID cannot be promoted into an authored assertion selector."
+            });
+        }
+        if (assertion.Kind == "propEquals" &&
+            Testing.FlowSecretReference.LooksSensitive(
+                assertion.Name,
+                assertion.Selector?.AutomationId,
+                assertion.Selector?.Text,
+                assertion.Selector?.Type,
+                assertion.Selector?.Id))
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "Sensitive properties cannot be persisted or verified as value assertions."
+            });
+        }
+
+        var verification = await Testing.MauiFlowAssertionVerifier.VerifyAsync(
+            new Testing.AgentClientMauiFlowDriver(_client),
+            assertion,
+            pollTries: 1,
+            pollGapMs: 0,
+            _lifetimeCts.Token);
+        return JsonResponse(200, new
+        {
+            ok = true,
+            passed = verification.Passed,
+            observationOnly = verification.ObservationOnly,
+            skipped = verification.Skipped,
+            matchCount = verification.MatchCount,
+            quality = verification.Quality,
+            // Authoring-time verification only reports the comparison outcome. Returning the
+            // live property value here could disclose a value that looked non-sensitive from its
+            // element metadata but is actually secret at runtime.
+            actual = verification.Actual is null ? null : "<redacted>",
+            error = verification.Error,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleSelectorVerifyAsync(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return JsonResponse(400, new { ok = false, error = "Body required." });
+
+        Testing.FlowSelector? selector;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("selector", out var selectorNode))
+            {
+                return JsonResponse(400, new { ok = false, error = "selector is required." });
+            }
+            selector = JsonSerializer.Deserialize(
+                selectorNode.GetRawText(),
+                Testing.MauiFlowJsonContext.Default.FlowSelector);
+        }
+        catch (JsonException)
+        {
+            return JsonResponse(400, new { ok = false, error = "Invalid selector JSON." });
+        }
+        if (selector is null || selector.IsEmpty)
+            return JsonResponse(400, new { ok = false, error = "A selector is required." });
+        if (IsRawRuntimeSelector(selector))
+            return JsonResponse(400, new { ok = false, error = "A raw runtime ID cannot be promoted into an authored selector." });
+
+        var forms = (string.IsNullOrWhiteSpace(selector.AutomationId) ? 0 : 1) +
+            (string.IsNullOrWhiteSpace(selector.Text) ? 0 : 1) +
+            (string.IsNullOrWhiteSpace(selector.Id) ? 0 : 1) +
+            (selector.TypeIndex is not null ? 1 : 0);
+        if (forms != 1)
+            return JsonResponse(400, new { ok = false, error = "Exactly one active selector is required." });
+
+        var resolution = await new Testing.FlowActionabilityEngine(
+            new Testing.AgentClientMauiFlowDriver(_client),
+            tries: 1,
+            gapMs: 0)
+            .ResolveAsync(selector, _lifetimeCts.Token);
+
+        // A unique verification keeps its established response shape, including its compact
+        // target summary. Ambiguity gets a separate value-free, bounded projection so a human can
+        // inspect candidates without exposing rendered text, control values, property bags, or
+        // source paths.
+        if (string.Equals(resolution.Kind, Testing.FlowFailureKinds.Ambiguous, StringComparison.Ordinal))
+        {
+            var candidates = resolution.Candidates ?? [];
+            var matches = candidates
+                .Take(MaxSelectorVerifyAmbiguityMatches)
+                .Select(CreateSelectorVerifyAmbiguityMatch)
+                .ToArray();
+            var totalCount = Math.Max(resolution.MatchCount, candidates.Count);
+            var truncated = totalCount > matches.Length;
+            return JsonResponse(200, new
+            {
+                ok = resolution.Ok,
+                matchCount = resolution.MatchCount,
+                quality = resolution.Quality,
+                error = resolution.Error,
+                element = (object?)null,
+                // Flat aliases make the additive details straightforward for older lightweight
+                // Inspector clients. The nested object is the Workbench's named ambiguity
+                // context; both projections contain the exact same safe summaries.
+                totalCount,
+                truncated,
+                matches,
+                ambiguity = new
+                {
+                    totalCount,
+                    truncated,
+                    matches,
+                },
+            });
+        }
+
+        return JsonResponse(200, new
+        {
+            ok = resolution.Ok,
+            matchCount = resolution.MatchCount,
+            quality = resolution.Quality,
+            error = resolution.Error,
+            element = resolution.Element is null
+                ? null
+                : new
+                {
+                    type = resolution.Element.Type,
+                    automationId = resolution.Element.AutomationId,
+                    text = resolution.Element.Text,
+                    hasSource = !string.IsNullOrWhiteSpace(resolution.Element.SourceFile),
+                },
+        });
+    }
+
+    private static object CreateSelectorVerifyAmbiguityMatch(ElementInfo element)
+    {
+        var hasSource = !string.IsNullOrWhiteSpace(element.SourceFile);
+        return new
+        {
+            id = element.Id,
+            type = element.Type,
+            role = element.Role,
+            automationId = element.AutomationId,
+            isVisible = element.IsVisible,
+            isEnabled = element.IsEnabled,
+            bounds = CreateSelectorVerifyBounds(element.Bounds),
+            windowBounds = CreateSelectorVerifyBounds(element.WindowBounds),
+            hasSource,
+            sourceLine = hasSource ? element.SourceLine : null,
+        };
+    }
+
+    private static object? CreateSelectorVerifyBounds(BoundsInfo? bounds)
+        => bounds is null
+            ? null
+            : new
+            {
+                x = bounds.X,
+                y = bounds.Y,
+                width = bounds.Width,
+                height = bounds.Height,
+            };
+
+    private static bool IsRawRuntimeSelector(Testing.FlowSelector? selector)
+        => selector is not null &&
+           !string.IsNullOrWhiteSpace(selector.Id) &&
+           string.IsNullOrWhiteSpace(selector.AutomationId) &&
+           string.IsNullOrWhiteSpace(selector.Text) &&
+           selector.TypeIndex is null;
+
+    private static bool TryReadAuthoringRequest(
+        string? body,
+        out WorkflowPlanSaveRequest request,
+        out string? error)
+    {
+        request = new WorkflowPlanSaveRequest();
+        error = null;
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            error = "Body required.";
+            return false;
+        }
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                error = "Body must be a JSON object.";
+                return false;
+            }
+            var root = document.RootElement;
+            var planJson = ReadJsonOrString(root, "planJson") ?? ReadJsonOrString(root, "plan");
+            request = new WorkflowPlanSaveRequest
+            {
+                FlowName = ReadJsonString(root, "name"),
+                PlanJson = planJson,
+                ExpectedPlanRevision = ReadJsonInt(root, "expectedPlanRevision"),
+                ExpectedPlanDigest = ReadJsonString(root, "expectedPlanDigest"),
+                ExpectedFlowDigest = ReadJsonString(root, "expectedFlowDigest"),
+                ConfirmOverwrite = ReadJsonBool(root, "confirmOverwrite"),
+            };
+            if (root.TryGetProperty("markdown", out var markdown) && markdown.ValueKind == JsonValueKind.String)
+            {
+                request = request with { Markdown = markdown.GetString() };
+            }
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "Invalid JSON body.";
+            return false;
+        }
+    }
+
+    private static string? ReadJsonString(JsonElement root, string name)
+        => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    private static string? ReadJsonOrString(JsonElement root, string name)
+    {
+        if (!root.TryGetProperty(name, out var value))
+            return null;
+        return value.ValueKind == JsonValueKind.String ? value.GetString() : value.GetRawText();
+    }
+
+    private static int? ReadJsonInt(JsonElement root, string name)
+        => root.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var parsed)
+            ? parsed
+            : null;
+
+    private static bool ReadJsonBool(JsonElement root, string name)
+        => root.TryGetProperty(name, out var value) && value.ValueKind is JsonValueKind.True;
+
+    private static (int, string, byte[]) AuthoringResponse(WorkflowPlanStoreResult result)
+    {
+        var snapshot = result.Snapshot;
+        var status = result.Ok ? 200 : result.Stale ? 409 : result.Code is "flow-not-found" ? 404 : 400;
+        return JsonResponse(status, new
+        {
+            ok = result.Ok,
+            code = result.Code,
+            error = result.Error,
+            stale = result.Stale,
+            requiresOverwriteConfirmation = result.RequiresOverwriteConfirmation,
+            items = result.Items,
+            errors = result.Errors,
+            warnings = result.Warnings,
+            diff = result.Diff,
+            flow = snapshot is null ? null : new
+            {
+                name = snapshot.Name,
+                markdown = snapshot.Markdown,
+                document = snapshot.Flow,
+                digest = snapshot.FlowDigest,
+            },
+            plan = snapshot is null ? null : new
+            {
+                json = snapshot.PlanJson,
+                document = snapshot.Plan,
+                digest = snapshot.PlanDigest,
+                revision = snapshot.Plan?.Revision,
+            },
+        });
+    }
+
     private static (int, string, byte[]) JsonResponse(int status, object value)
         => (status, "application/json", Encoding.UTF8.GetBytes(JsonSerializer.Serialize(value, CamelCase)));
 
-    private async Task<(int, string, byte[])> HandleFlowReplayAsync(string? body)
+    // ── Test Workbench run and trace adapters ────────────────────────────────────────────────
+    // These routes intentionally do no replay, artifact parsing, or trust evaluation themselves.
+    // Broker mode supplies the target-bound service; standalone Inspector mode reports that the
+    // feature is unavailable rather than falling back to direct JavaScript/agent execution.
+
+    private async Task<(int, string, byte[])> HandleWorkbenchRouteAsync(
+        HttpRequestInfo request,
+        string leaseId,
+        string holderKind,
+        string holderLabel)
+    {
+        var path = request.Path.TrimEnd('/');
+        if (string.Equals(path, "/api/workbench/improve/analyze", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? await HandleWorkbenchImproveAnalyzeAsync(request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/agent-requests", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "GET"
+                ? HandleWorkbenchAgentRequests()
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        var agentRequestSegments = path.Trim('/').Split('/');
+        if (agentRequestSegments.Length == 5 &&
+            string.Equals(agentRequestSegments[0], "api", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(agentRequestSegments[1], "workbench", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(agentRequestSegments[2], "agent-requests", StringComparison.OrdinalIgnoreCase))
+        {
+            if (request.Method != "POST")
+                return JsonResponse(405, new { ok = false, error = "Method not allowed." });
+
+            var approvalRequestId = Uri.UnescapeDataString(agentRequestSegments[3]);
+            return agentRequestSegments[4].ToLowerInvariant() switch
+            {
+                "approve" => await HandleWorkbenchAgentRequestApproveAsync(approvalRequestId, request.Body),
+                "reject" => HandleWorkbenchAgentRequestReject(approvalRequestId, request.Body),
+                _ => JsonResponse(404, new { ok = false, error = "Not found." }),
+            };
+        }
+
+        var services = _workflowServices;
+        if (services is null)
+        {
+            return JsonResponse(503, new
+            {
+                ok = false,
+                error = "Broker-owned workflow runs and trace imports are unavailable in this Inspector."
+            });
+        }
+
+        if (string.Equals(path, "/api/workbench/repair/classify", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? await HandleWorkbenchRepairClassifyAsync(services, request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/repair/propose", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? await HandleWorkbenchRepairProposeAsync(services, request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/repair/grant", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? HandleWorkbenchRepairGrant(services, request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/source/analyze", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? await HandleWorkbenchXamlSourceAnalyzeAsync(request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/source/propose", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? await HandleWorkbenchXamlSourceProposeAsync(services, request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/source/grant", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? HandleWorkbenchXamlSourceGrant(services, request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/source/csharp/analyze", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? await HandleWorkbenchCSharpSourceAnalyzeAsync(request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/source/csharp/propose", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? await HandleWorkbenchCSharpSourceProposeAsync(services, request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/source/csharp/grant", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? HandleWorkbenchCSharpSourceGrant(services, request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/target", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "GET"
+                ? await HandleWorkbenchTargetAsync(services)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/run/capabilities", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "GET"
+                ? JsonResponse(200, new { ok = true, capabilities = services.GetCapabilities() })
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/run/journal", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "GET"
+                ? HandleWorkbenchRunJournal(
+                    services,
+                    request.Query.GetValueOrDefault("idempotencyKey"))
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/run/preflight", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? await HandleWorkbenchPreflightAsync(services, request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/run/start", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? await HandleWorkbenchRunStartAsync(
+                    services,
+                    request.Body,
+                    leaseId,
+                    holderKind,
+                    holderLabel)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
+        if (string.Equals(path, "/api/workbench/artifacts/import", StringComparison.OrdinalIgnoreCase))
+        {
+            if (request.Method != "POST")
+                return JsonResponse(405, new { ok = false, error = "Method not allowed." });
+            if (request.BodyBytes is null)
+                return JsonResponse(400, new { ok = false, error = "A binary artifact body is required." });
+
+            var imported = services.ImportArtifact(
+                request.BodyBytes,
+                request.Query.GetValueOrDefault("kind"));
+            return JsonResponse(imported.StatusCode, imported.Response);
+        }
+
+        var segments = path.Trim('/').Split('/');
+        if (segments.Length == 5 &&
+            string.Equals(segments[0], "api", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[1], "workbench", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[2], "repair", StringComparison.OrdinalIgnoreCase))
+        {
+            var proposalId = Uri.UnescapeDataString(segments[3]);
+            var action = segments[4];
+            if (!request.Method.Equals("POST", StringComparison.OrdinalIgnoreCase))
+                return JsonResponse(405, new { ok = false, error = "Method not allowed." });
+
+            return action.ToLowerInvariant() switch
+            {
+                "status" => HandleWorkbenchRepairStatus(services, proposalId),
+                "preview" => await HandleWorkbenchRepairPreviewAsync(services, proposalId),
+                "reject" => await HandleWorkbenchRepairRejectAsync(services, proposalId, request.Body),
+                "validate" => await HandleWorkbenchRepairValidateAsync(services, proposalId, request.Body),
+                "approve" => await HandleWorkbenchRepairApproveAsync(services, proposalId, request.Body),
+                "apply" => await HandleWorkbenchRepairApplyAsync(services, proposalId, request.Body),
+                "verify" => await HandleWorkbenchRepairVerifyAsync(services, proposalId, request.Body),
+                "rollback" => await HandleWorkbenchRepairRollbackAsync(services, proposalId, request.Body),
+                _ => JsonResponse(404, new { ok = false, error = "Not found." }),
+            };
+        }
+
+        if (segments.Length == 6 &&
+            string.Equals(segments[0], "api", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[1], "workbench", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[2], "source", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[3], "csharp", StringComparison.OrdinalIgnoreCase))
+        {
+            var proposalId = Uri.UnescapeDataString(segments[4]);
+            var action = segments[5];
+            if (!request.Method.Equals("POST", StringComparison.OrdinalIgnoreCase))
+                return JsonResponse(405, new { ok = false, error = "Method not allowed." });
+
+            return action.ToLowerInvariant() switch
+            {
+                "status" => HandleWorkbenchCSharpSourceStatus(services, proposalId),
+                "preview" => await HandleWorkbenchCSharpSourcePreviewAsync(services, proposalId),
+                "reject" => await HandleWorkbenchCSharpSourceRejectAsync(services, proposalId, request.Body),
+                "approve" => await HandleWorkbenchCSharpSourceApproveAsync(services, proposalId, request.Body),
+                "await-host-apply" => await HandleWorkbenchCSharpSourceAwaitHostApplyAsync(services, proposalId, request.Body),
+                "begin-host-apply" => await HandleWorkbenchCSharpSourceBeginHostApplyAsync(services, proposalId, request.Body),
+                "apply-ack" => await HandleWorkbenchCSharpSourceApplyAckAsync(services, proposalId, request.Body),
+                "verify" => await HandleWorkbenchCSharpSourceVerifyAsync(services, proposalId, request.Body),
+                "begin-rollback" => await HandleWorkbenchCSharpSourceBeginRollbackAsync(services, proposalId, request.Body),
+                "rollback-ack" => await HandleWorkbenchCSharpSourceRollbackAckAsync(services, proposalId, request.Body),
+                _ => JsonResponse(404, new { ok = false, error = "Not found." }),
+            };
+        }
+
+        if (segments.Length == 5 &&
+            string.Equals(segments[0], "api", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[1], "workbench", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[2], "source", StringComparison.OrdinalIgnoreCase))
+        {
+            var proposalId = Uri.UnescapeDataString(segments[3]);
+            var action = segments[4];
+            if (!request.Method.Equals("POST", StringComparison.OrdinalIgnoreCase))
+                return JsonResponse(405, new { ok = false, error = "Method not allowed." });
+
+            return action.ToLowerInvariant() switch
+            {
+                "status" => HandleWorkbenchXamlSourceStatus(services, proposalId),
+                "preview" => await HandleWorkbenchXamlSourcePreviewAsync(services, proposalId),
+                "reject" => await HandleWorkbenchXamlSourceRejectAsync(services, proposalId, request.Body),
+                "approve" => await HandleWorkbenchXamlSourceApproveAsync(services, proposalId, request.Body),
+                "await-host-apply" => await HandleWorkbenchXamlSourceAwaitHostApplyAsync(services, proposalId, request.Body),
+                "apply" => await HandleWorkbenchXamlSourceApplyAsync(services, proposalId, request.Body),
+                "apply-result" => HandleWorkbenchXamlSourceApplyResult(services, proposalId, request.Body),
+                "verify" => await HandleWorkbenchXamlSourceVerifyAsync(services, proposalId, request.Body),
+                "rollback" => await HandleWorkbenchXamlSourceRollbackAsync(services, proposalId, request.Body),
+                _ => JsonResponse(404, new { ok = false, error = "Not found." }),
+            };
+        }
+
+        if (segments.Length == 5 &&
+            string.Equals(segments[0], "api", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[1], "workbench", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[2], "run", StringComparison.OrdinalIgnoreCase))
+        {
+            var runId = Uri.UnescapeDataString(segments[3]);
+            var action = segments[4];
+            if (string.Equals(action, "status", StringComparison.OrdinalIgnoreCase))
+            {
+                return request.Method == "POST"
+                    ? HandleWorkbenchRunStatus(services, runId, request.Body)
+                    : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+            }
+            if (string.Equals(action, "cancel", StringComparison.OrdinalIgnoreCase))
+            {
+                return request.Method == "POST"
+                    ? HandleWorkbenchRunCancel(services, runId, request.Body)
+                    : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+            }
+            if (string.Equals(action, "evidence", StringComparison.OrdinalIgnoreCase))
+            {
+                return request.Method == "POST"
+                    ? HandleWorkbenchEvidenceDownload(services, runId, request.Body)
+                    : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+            }
+        }
+
+        if (segments.Length == 5 &&
+            string.Equals(segments[0], "api", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[1], "workbench", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[2], "artifacts", StringComparison.OrdinalIgnoreCase))
+        {
+            var artifactId = Uri.UnescapeDataString(segments[3]);
+            var action = segments[4];
+            if (request.Method != "POST")
+                return JsonResponse(405, new { ok = false, error = "Method not allowed." });
+
+            return string.Equals(action, "status", StringComparison.OrdinalIgnoreCase)
+                ? HandleWorkbenchArtifactStatus(services, artifactId, request.Body)
+                : string.Equals(action, "projection", StringComparison.OrdinalIgnoreCase)
+                    ? HandleWorkbenchArtifactProjection(services, artifactId, request.Body)
+                    : string.Equals(action, "bind-local-reproduction", StringComparison.OrdinalIgnoreCase)
+                        ? HandleWorkbenchArtifactLocalReproduction(services, artifactId, request.Body)
+                        : JsonResponse(404, new { ok = false, error = "Not found." });
+        }
+
+        return JsonResponse(404, new { ok = false, error = "Not found." });
+    }
+
+    private (int, string, byte[]) HandleWorkbenchAgentRequests()
+    {
+        if (_testAgentSessions is null ||
+            string.IsNullOrWhiteSpace(_agentId) ||
+            string.IsNullOrWhiteSpace(_agentInstanceId))
+        {
+            return JsonResponse(503, new
+            {
+                ok = false,
+                error = "Broker-owned test-agent approvals are unavailable in this Inspector."
+            });
+        }
+
+        var requests = _testAgentSessions.ListApprovalRequests(
+            _agentId,
+            _agentInstanceId,
+            includeGrant: false);
+        return JsonResponse(200, new
+        {
+            ok = true,
+            appName = _appName,
+            platform = _platform,
+            pendingCount = requests.Count(request =>
+                string.Equals(request.State, Testing.MauiTestAgentApprovalStates.Pending, StringComparison.Ordinal)),
+            requests,
+            note = "Approve here; typing approval in agent chat never issues a grant.",
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchAgentRequestApproveAsync(
+        string approvalRequestId,
+        string? body)
+    {
+        if (_testAgentSessions is null || _testAgentTargetStateRefresh is null)
+            return JsonResponse(503, new { ok = false, error = "Broker-owned test-agent approvals are unavailable." });
+        if (!TryReadWorkbenchAgentRequestDecision(body, out var decision, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!decision!.HumanConfirmed)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "Review the exact scope and confirm it before approving the agent request."
+            });
+        }
+
+        var lookup = _testAgentSessions.GetApprovalRequest(approvalRequestId, includeGrant: false);
+        if (!lookup.Ok || lookup.Request?.TargetState is null)
+            return JsonResponse(WorkbenchTestAgentStatusCode(lookup.Error), new { ok = false, error = lookup.Error });
+        if (!ApprovalTargetsThisInspector(lookup.Request))
+            return JsonResponse(404, new { ok = false, error = "The approval request does not target this Inspector." });
+
+        var currentTargetState = await _testAgentTargetStateRefresh(lookup.Request.TargetState).ConfigureAwait(false);
+        if (currentTargetState is null)
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = "The exact target app instance is no longer connected. Refresh the agent request."
+            });
+        }
+
+        DateTimeOffset? grantExpiresAt = null;
+        if (decision.GrantDurationSeconds is { } seconds)
+        {
+            if (seconds is < 1 or > 900)
+                return JsonResponse(400, new { ok = false, error = "grantDurationSeconds must be between 1 and 900." });
+            grantExpiresAt = DateTimeOffset.UtcNow.AddSeconds(seconds);
+        }
+
+        var result = _testAgentSessions.ApproveApprovalRequest(
+            approvalRequestId,
+            decision.ApprovedScope,
+            currentTargetState,
+            WorkbenchHumanDecision(approved: true),
+            grantExpiresAt);
+        return JsonResponse(WorkbenchTestAgentStatusCode(result.Error), new
+        {
+            ok = result.Ok,
+            request = result.Request,
+            error = result.Error,
+            message = result.Ok
+                ? "Approved. The broker delivered the opaque grant through the agent's authoring-session status; nothing needs to be pasted into chat."
+                : null,
+        });
+    }
+
+    private (int, string, byte[]) HandleWorkbenchAgentRequestReject(
+        string approvalRequestId,
+        string? body)
+    {
+        if (_testAgentSessions is null)
+            return JsonResponse(503, new { ok = false, error = "Broker-owned test-agent approvals are unavailable." });
+        if (!TryReadWorkbenchAgentRequestDecision(body, out var decision, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!decision!.HumanConfirmed)
+            return JsonResponse(400, new { ok = false, error = "Explicit human confirmation is required." });
+
+        var lookup = _testAgentSessions.GetApprovalRequest(approvalRequestId, includeGrant: false);
+        if (!lookup.Ok || lookup.Request is null)
+            return JsonResponse(WorkbenchTestAgentStatusCode(lookup.Error), new { ok = false, error = lookup.Error });
+        if (!ApprovalTargetsThisInspector(lookup.Request))
+            return JsonResponse(404, new { ok = false, error = "The approval request does not target this Inspector." });
+
+        var result = _testAgentSessions.RejectApprovalRequest(
+            approvalRequestId,
+            WorkbenchHumanDecision(approved: false),
+            decision.ReasonCode);
+        return JsonResponse(WorkbenchTestAgentStatusCode(result.Error), new
+        {
+            ok = result.Ok,
+            request = result.Request,
+            error = result.Error,
+            message = result.Ok ? "Rejected. No grant was issued and no app or test state changed." : null,
+        });
+    }
+
+    private bool ApprovalTargetsThisInspector(Testing.MauiTestAgentApprovalRecord request)
+        => string.Equals(request.Target?.AgentId, _agentId, StringComparison.Ordinal) &&
+           string.Equals(request.Target?.AgentInstanceId, _agentInstanceId, StringComparison.Ordinal);
+
+    private static Testing.MauiTestAgentHumanApproval WorkbenchHumanDecision(bool approved)
+        => new()
+        {
+            Approved = approved,
+            ApprovalChannel = "workbench",
+            ApprovedAt = DateTimeOffset.UtcNow,
+            Actor = new Testing.MauiActorProvenance
+            {
+                ActorKind = "human",
+                ActorId = "workbench-user",
+                Channel = "workbench",
+                Provider = "inspector-server",
+            },
+        };
+
+    private static int WorkbenchTestAgentStatusCode(Testing.MauiTestAgentError? error)
+    {
+        if (error is null)
+            return 200;
+        if (error.Code == Testing.MauiTestAgentErrorCodes.ApprovalRequestNotFound)
+            return 404;
+        return error.Category switch
+        {
+            Testing.MauiTestAgentErrorCategories.Authorization => 403,
+            Testing.MauiTestAgentErrorCategories.Target or
+            Testing.MauiTestAgentErrorCategories.State or
+            Testing.MauiTestAgentErrorCategories.Conflict => 409,
+            Testing.MauiTestAgentErrorCategories.Capability => 429,
+            _ => 400,
+        };
+    }
+
+    private static bool TryReadWorkbenchAgentRequestDecision(
+        string? body,
+        out WorkbenchAgentRequestDecision? request,
+        out string? error)
+    {
+        request = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            error = "A human decision body is required.";
+            return false;
+        }
+
+        try
+        {
+            request = JsonSerializer.Deserialize<WorkbenchAgentRequestDecision>(body, CamelCase);
+        }
+        catch (JsonException)
+        {
+            error = "The human decision body is invalid.";
+            return false;
+        }
+
+        if (request is null)
+        {
+            error = "The human decision body is invalid.";
+            return false;
+        }
+        return true;
+    }
+
+    // ── Reviewed XAML AutomationId source proposals ─────────────────────────────────────────
+    // These adapters deliberately do not share the selector-repair path. Source application is
+    // local-host-only, source and flow approvals are independent, and no flow selector is changed.
+
+    private async Task<(int, string, byte[])> HandleWorkbenchXamlSourceAnalyzeAsync(string? body)
+    {
+        if (!TryReadWorkbenchXamlSourceRequest(body, out WorkbenchXamlSourceProposalRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+
+        var built = await BuildXamlSourceProposalAsync(request!).ConfigureAwait(false);
+        return JsonResponse(built.Ok ? 200 : 422, new
+        {
+            ok = built.Ok,
+            eligibility = built.Analysis?.Decision,
+            uniqueness = built.Analysis?.Uniqueness,
+            preview = built.Proposal,
+            code = built.Code,
+            error = built.Error,
+            sourceApply = "requires-separate-human-source-approval",
+            flowFollowUp = "requires-separate-flow-repair-approval",
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchXamlSourceProposeAsync(
+        InspectorWorkflowServices services,
+        string? body)
+    {
+        if (!TryReadWorkbenchXamlSourceRequest(body, out WorkbenchXamlSourceProposalRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+
+        var built = await BuildXamlSourceProposalAsync(request!).ConfigureAwait(false);
+        if (!built.Ok || built.Proposal is null)
+        {
+            return JsonResponse(422, new
+            {
+                ok = false,
+                eligibility = built.Analysis?.Decision,
+                uniqueness = built.Analysis?.Uniqueness,
+                code = built.Code,
+                error = built.Error,
+            });
+        }
+
+        // Browser/Inspector proposals are human-authored review objects. MCP test-agent tools are
+        // intentionally not routed here and cannot create a source-writing authority.
+        var stored = services.ProposeXamlSource(built.Proposal, agentOriginated: false);
+        var history = stored.Ok
+            ? await AppendXamlSourceHistoryAsync(stored.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(stored.Ok ? 201 : 409, new
+        {
+            ok = stored.Ok,
+            proposal = stored.Proposal,
+            history,
+            code = stored.Code,
+            error = stored.Error,
+            flowChanged = false,
+        });
+    }
+
+    private (int, string, byte[]) HandleWorkbenchXamlSourceGrant(
+        InspectorWorkflowServices services,
+        string? body)
+    {
+        if (!TryReadWorkbenchXamlSourceRequest(body, out WorkbenchXamlSourceGrantRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "Explicit human confirmation is required before issuing a source proposal grant."
+            });
+        }
+
+        var lookup = services.GetXamlSource(request.ProposalId ?? string.Empty);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var capability = ToXamlSourceHostCapability(request.HostCapability);
+        var binding = CreateXamlSourceBinding(lookup.Proposal, capability);
+        if (binding is null)
+            return JsonResponse(409, new { ok = false, error = "A trusted local project identity and host capability are required." });
+
+        var issued = services.IssueXamlSourceGrant(new WorkflowXamlSourceGrantIssueRequest
+        {
+            ProposalId = lookup.Proposal.Proposal.ProposalId,
+            Kind = string.Equals(request.Kind, WorkflowXamlSourceGrantKinds.Rollback, StringComparison.Ordinal)
+                ? WorkflowXamlSourceGrantKinds.Rollback
+                : WorkflowXamlSourceGrantKinds.Apply,
+            Reviewer = request.Reviewer,
+            HumanConfirmed = true,
+            ExpiresAt = request.ExpiresAt,
+            Binding = binding,
+        });
+        return JsonResponse(issued.Ok ? 200 : 409, new
+        {
+            ok = issued.Ok,
+            grant = issued.Grant,
+            grantDigest = issued.GrantDigest,
+            expiresAt = issued.ExpiresAt,
+            proposal = issued.Proposal,
+            code = issued.Code,
+            error = issued.Error,
+            flowChanged = false,
+        });
+    }
+
+    private (int, string, byte[]) HandleWorkbenchXamlSourceStatus(
+        InspectorWorkflowServices services,
+        string proposalId)
+    {
+        var result = services.GetXamlSource(proposalId);
+        return JsonResponse(result.Ok ? 200 : 404, new
+        {
+            ok = result.Ok,
+            proposal = result.Proposal,
+            code = result.Code,
+            error = result.Error,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchXamlSourcePreviewAsync(
+        InspectorWorkflowServices services,
+        string proposalId)
+    {
+        var result = services.PreviewXamlSource(proposalId);
+        var history = result.Ok
+            ? await AppendXamlSourceHistoryAsync(result.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(result.Ok ? 200 : 409, new
+        {
+            ok = result.Ok,
+            proposal = result.Proposal,
+            history,
+            code = result.Code,
+            error = result.Error,
+            sourceApply = "not-applied",
+            flowChanged = false,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchXamlSourceRejectAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchXamlSourceRequest(body, out WorkbenchXamlSourceRejectRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var result = services.RejectXamlSource(proposalId, request!.Reviewer, request.ReasonCode);
+        var history = result.Ok
+            ? await AppendXamlSourceHistoryAsync(result.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(result.Ok ? 200 : 409, new
+        {
+            ok = result.Ok,
+            proposal = result.Proposal,
+            history,
+            code = result.Code,
+            error = result.Error,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchXamlSourceApproveAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchXamlSourceRequest(body, out WorkbenchXamlSourceGrantRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "Explicit human confirmation is required before source approval."
+            });
+        }
+        var lookup = services.GetXamlSource(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var capability = ToXamlSourceHostCapability(request.HostCapability);
+        var binding = CreateXamlSourceBinding(lookup.Proposal, capability);
+        if (binding is null)
+            return JsonResponse(409, new { ok = false, error = "A trusted local project identity and host capability are required." });
+
+        var issued = services.IssueXamlSourceGrant(new WorkflowXamlSourceGrantIssueRequest
+        {
+            ProposalId = proposalId,
+            Kind = WorkflowXamlSourceGrantKinds.Apply,
+            Reviewer = request.Reviewer,
+            HumanConfirmed = true,
+            ExpiresAt = request.ExpiresAt,
+            Binding = binding,
+        });
+        var history = issued.Ok
+            ? await AppendXamlSourceHistoryAsync(issued.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(issued.Ok ? 200 : 409, new
+        {
+            ok = issued.Ok,
+            grant = issued.Grant,
+            grantDigest = issued.GrantDigest,
+            expiresAt = issued.ExpiresAt,
+            proposal = issued.Proposal,
+            history,
+            code = issued.Code,
+            error = issued.Error,
+            flowChanged = false,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchXamlSourceAwaitHostApplyAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchXamlSourceRequest(body, out WorkbenchXamlSourceHostRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var lookup = services.GetXamlSource(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var capability = ToXamlSourceHostCapability(request!.HostCapability);
+        var binding = CreateXamlSourceBinding(lookup.Proposal, capability);
+        if (binding is null)
+            return JsonResponse(409, new { ok = false, error = "A trusted local project identity and host capability are required." });
+
+        var result = services.AwaitXamlSourceHostApply(proposalId, binding, capability);
+        var history = result.Ok
+            ? await AppendXamlSourceHistoryAsync(result.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(result.Ok ? 200 : 409, new
+        {
+            ok = result.Ok,
+            proposal = result.Proposal,
+            history,
+            code = result.Code,
+            error = result.Error,
+            hostCapability = request.HostCapability,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchXamlSourceApplyAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchXamlSourceRequest(body, out WorkbenchXamlSourceApplyRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "Explicit human confirmation is required for a local source apply."
+            });
+        }
+        var lookup = services.GetXamlSource(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var capability = ToXamlSourceHostCapability(request.HostCapability);
+        var binding = CreateXamlSourceBinding(lookup.Proposal, capability);
+        if (binding is null)
+            return JsonResponse(409, new { ok = false, error = "A trusted local project identity and host capability are required." });
+
+        var begun = services.BeginXamlSourceApply(
+            proposalId,
+            request.ApprovalGrant ?? string.Empty,
+            binding,
+            capability);
+        if (!begun.Ok || begun.Proposal is null)
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                proposal = begun.Proposal,
+                code = begun.Code,
+                error = begun.Error,
+            });
+        }
+
+        // This is the only Inspector route that writes source. It is reached only after the
+        // source-specific human grant has been consumed, on an explicitly capable local host.
+        var write = await _xamlSourceProposalService.ApplyAsync(
+            begun.Proposal.Proposal,
+            _lifetimeCts.Token).ConfigureAwait(false);
+        var completed = services.CompleteXamlSourceApply(proposalId, new WorkflowXamlSourceApplyRecord
+        {
+            Applied = write.Ok,
+            AppliedContentDigest = write.ContentDigest,
+            OriginalBytes = write.OriginalBytes,
+            OriginalContentDigest = write.OriginalContentDigest,
+            ErrorCode = write.Code,
+            Error = write.Error,
+        });
+        var history = completed.Proposal is not null
+            ? await AppendXamlSourceHistoryAsync(completed.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(write.Ok && completed.Ok ? 200 : 409, new
+        {
+            ok = write.Ok && completed.Ok,
+            proposal = completed.Proposal,
+            history,
+            code = completed.Code ?? write.Code,
+            error = completed.Error ?? write.Error,
+            sourceChanged = write.Ok,
+            flowChanged = false,
+            next = write.Ok ? "build-remap-uniqueness-replay-and-oracle-verification-required" : null,
+        });
+    }
+
+    private (int, string, byte[]) HandleWorkbenchXamlSourceApplyResult(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        // External/agent callers cannot turn an arbitrary apply result into a source change. A
+        // local bounded host must use /apply, which performs the CAS write itself.
+        return JsonResponse(409, new
+        {
+            ok = false,
+            error = "Source apply results are accepted only from the explicit local host action. Use the bounded /apply route after human approval.",
+            proposal = services.GetXamlSource(proposalId).Proposal,
+            sourceChanged = false,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchXamlSourceVerifyAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchXamlSourceRequest(body, out WorkbenchXamlSourceVerificationRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "Explicit human confirmation is required to record source verification."
+            });
+        }
+        var record = new WorkflowXamlSourceVerificationRecord
+        {
+            Platforms = request.Platforms?.Take(16).Select(platform => new WorkflowXamlSourcePlatformVerificationResult
+            {
+                Platform = platform.Platform,
+                TargetFramework = platform.TargetFramework,
+                BuildSucceeded = platform.BuildSucceeded,
+                PendingExternalQa = platform.PendingExternalQa,
+                RuntimeRemapConfirmed = platform.RuntimeRemapConfirmed,
+                AutomationIdUnique = platform.AutomationIdUnique,
+                ReplaySucceeded = platform.ReplaySucceeded,
+                IndependentOracleSucceeded = platform.IndependentOracleSucceeded,
+                ReasonCode = platform.ReasonCode,
+            }).ToList() ?? [],
+            AffectedFlowsReplayed = request.AffectedFlowsReplayed,
+            IndependentOracleSucceeded = request.IndependentOracleSucceeded,
+            VerificationRunIds = request.VerificationRunIds?.Where(static id => !string.IsNullOrWhiteSpace(id)).Take(64).ToList() ?? [],
+            CompletedAt = DateTimeOffset.UtcNow,
+        };
+        var result = services.RecordXamlSourceVerification(proposalId, record);
+        var history = result.Proposal is not null
+            ? await AppendXamlSourceHistoryAsync(result.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(result.Ok ? 200 : 409, new
+        {
+            ok = result.Ok,
+            proposal = result.Proposal,
+            verification = record,
+            history,
+            code = result.Code,
+            error = result.Error,
+            required = new
+            {
+                affectedOfficialTargetBuilds = true,
+                runtimeRemap = true,
+                runtimeUniqueness = true,
+                affectedFlowReplay = true,
+                independentOracle = true,
+                appleOnWindows = "pending-external-qa",
+                flowSelectorFollowUp = "separate-reviewed-flow-repair-proposal",
+            },
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchXamlSourceRollbackAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchXamlSourceRequest(body, out WorkbenchXamlSourceRollbackRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+        {
+            return JsonResponse(400, new { ok = false, error = "Explicit human confirmation is required for source rollback." });
+        }
+        var lookup = services.GetXamlSource(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var capability = ToXamlSourceHostCapability(request.HostCapability);
+        var binding = CreateXamlSourceBinding(lookup.Proposal, capability);
+        if (binding is null)
+            return JsonResponse(409, new { ok = false, error = "A trusted local project identity and host capability are required." });
+        var begun = services.BeginXamlSourceRollback(
+            proposalId,
+            request.RollbackGrant ?? string.Empty,
+            binding,
+            capability);
+        if (!begun.Ok || begun.Proposal is null)
+            return JsonResponse(409, new { ok = false, proposal = begun.Proposal, code = begun.Code, error = begun.Error });
+        if (!services.TryGetXamlSourceRollbackBytes(
+                proposalId,
+                out var original,
+                out var expectedApplied) ||
+            original is null ||
+            string.IsNullOrWhiteSpace(expectedApplied))
+        {
+            var unavailable = services.CompleteXamlSourceRollback(proposalId, new WorkflowXamlSourceRollbackRecord
+            {
+                Reverted = false,
+                ErrorCode = "rollback-data-unavailable",
+                Error = "The original source bytes are unavailable for an atomic rollback.",
+            });
+            return JsonResponse(409, new { ok = false, proposal = unavailable.Proposal, code = unavailable.Code, error = unavailable.Error });
+        }
+
+        var write = await _xamlSourceProposalService.RollbackAsync(
+            begun.Proposal.Proposal,
+            original,
+            expectedApplied,
+            _lifetimeCts.Token).ConfigureAwait(false);
+        var completed = services.CompleteXamlSourceRollback(proposalId, new WorkflowXamlSourceRollbackRecord
+        {
+            Reverted = write.Ok,
+            ContentDigest = write.ContentDigest,
+            ErrorCode = write.Code,
+            Error = write.Error,
+        });
+        var history = completed.Proposal is not null
+            ? await AppendXamlSourceHistoryAsync(completed.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(write.Ok && completed.Ok ? 200 : 409, new
+        {
+            ok = write.Ok && completed.Ok,
+            proposal = completed.Proposal,
+            history,
+            code = completed.Code ?? write.Code,
+            error = completed.Error ?? write.Error,
+            sourceChanged = write.Ok,
+            flowChanged = false,
+        });
+    }
+
+    private async Task<XamlSourceProposalBuildResult> BuildXamlSourceProposalAsync(
+        WorkbenchXamlSourceProposalRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.ElementId) ||
+            string.IsNullOrWhiteSpace(request.ProposedAutomationId))
+        {
+            return XamlSourceProposalBuildResult.Failure(
+                "source-request-invalid",
+                "elementId and proposedAutomationId are required.");
+        }
+
+        ElementInfo? element;
+        List<ElementInfo> tree;
+        try
+        {
+            element = await _client.GetElementAsync(request.ElementId).ConfigureAwait(false);
+            tree = await _client.GetTreeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            return XamlSourceProposalBuildResult.Failure(
+                "source-runtime-unavailable",
+                "The current runtime element and live uniqueness scope could not be resolved.");
+        }
+        if (element is null)
+        {
+            return XamlSourceProposalBuildResult.Failure(
+                "source-element-not-found",
+                "The selected runtime element no longer exists.");
+        }
+
+        return await _xamlSourceProposalService.BuildAsync(
+            element,
+            request.ProposedAutomationId,
+            tree,
+            request.AffectedFlows,
+            request.AffectedPlatforms is { Count: > 0 }
+                ? request.AffectedPlatforms
+                : DefaultXamlSourcePlatforms(),
+            _lifetimeCts.Token).ConfigureAwait(false);
+    }
+
+    private WorkflowXamlSourceGrantBinding? CreateXamlSourceBinding(
+        WorkflowXamlSourceProposalSnapshot snapshot,
+        WorkflowXamlSourceHostCapability capability)
+    {
+        var projectIdentity = ComputeXamlSourceProjectIdentity();
+        if (projectIdentity is null ||
+            string.IsNullOrWhiteSpace(capability.HostKind))
+        {
+            return null;
+        }
+        return new WorkflowXamlSourceGrantBinding
+        {
+            FileRelativePath = snapshot.Proposal.Operation.FileRelativePath,
+            BaseContentDigest = snapshot.AppliedContentDigest ?? snapshot.Proposal.BaseContentDigest,
+            SourceHash = snapshot.Proposal.Operation.SourceHash,
+            PatchDigest = snapshot.Proposal.PatchDigest,
+            ProjectIdentity = projectIdentity,
+            FlowReferencesDigest = WorkflowXamlSourceProposalStore.ComputeFlowReferencesDigest(
+                snapshot.Proposal.AffectedFlows),
+            HostKind = capability.HostKind,
+        };
+    }
+
+    private string? ComputeXamlSourceProjectIdentity()
+    {
+        if (string.IsNullOrWhiteSpace(_project) || !Path.IsPathFullyQualified(_project))
+            return null;
+        try
+        {
+            var full = Path.GetFullPath(_project);
+            var root = Directory.Exists(full) ? full : Path.GetDirectoryName(full);
+            return string.IsNullOrWhiteSpace(root) ? null :
+                "sha256:" + Convert.ToHexString(
+                    System.Security.Cryptography.SHA256.HashData(
+                        Encoding.UTF8.GetBytes(root))).ToLowerInvariant();
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private async Task<WorkflowXamlSourceHistoryAppendResult?> AppendXamlSourceHistoryAsync(
+        WorkflowXamlSourceProposalSnapshot? snapshot)
+    {
+        if (snapshot is null || string.IsNullOrWhiteSpace(_project) || !Path.IsPathFullyQualified(_project))
+            return null;
+        try
+        {
+            var full = Path.GetFullPath(_project);
+            var root = Directory.Exists(full) ? full : Path.GetDirectoryName(full);
+            return string.IsNullOrWhiteSpace(root)
+                ? null
+                : new WorkflowXamlSourceHistoryStore(root).Append(snapshot);
+        }
+        catch
+        {
+            return WorkflowXamlSourceHistoryAppendResult.Failure(
+                "source-history-unavailable",
+                "A trusted local project root is unavailable for source proposal history.");
+        }
+    }
+
+    private static WorkflowXamlSourceHostCapability ToXamlSourceHostCapability(
+        WorkbenchXamlSourceHostCapability? value)
+        => new()
+        {
+            HostKind = value?.HostKind?.Trim().ToLowerInvariant() ?? "browser",
+            CanOpenNativeDiff = value?.CanOpenNativeDiff == true,
+            CanDownloadPatch = value?.CanDownloadPatch == true,
+            CanApplySource = value?.CanApplySource == true,
+            IsExplicitLocalHostAction = value?.IsExplicitLocalHostAction == true,
+        };
+
+    private static List<Testing.MauiXamlSourcePlatformVerification> DefaultXamlSourcePlatforms()
+    {
+        var appleExternal = OperatingSystem.IsWindows();
+        return
+        [
+            new Testing.MauiXamlSourcePlatformVerification
+            {
+                Platform = "android",
+                TargetFramework = "net10.0-android",
+                BuildState = "pending-host-build",
+                RuntimeRemapState = "pending-runtime-remap",
+                UniquenessState = "pending-runtime-uniqueness",
+                ReplayState = "pending-flow-replay",
+                OracleState = "pending-independent-oracle",
+            },
+            new Testing.MauiXamlSourcePlatformVerification
+            {
+                Platform = "windows",
+                TargetFramework = "net10.0-windows10.0.19041.0",
+                BuildState = "pending-host-build",
+                RuntimeRemapState = "pending-runtime-remap",
+                UniquenessState = "pending-runtime-uniqueness",
+                ReplayState = "pending-flow-replay",
+                OracleState = "pending-independent-oracle",
+            },
+            new Testing.MauiXamlSourcePlatformVerification
+            {
+                Platform = "ios",
+                TargetFramework = "net10.0-ios",
+                BuildState = appleExternal ? "pending-external-qa" : "pending-host-build",
+                RuntimeRemapState = "pending-external-qa",
+                UniquenessState = "pending-external-qa",
+                ReplayState = "pending-external-qa",
+                OracleState = "pending-external-qa",
+                ReasonCode = appleExternal ? "apple-target-unavailable-on-windows" : null,
+            },
+            new Testing.MauiXamlSourcePlatformVerification
+            {
+                Platform = "maccatalyst",
+                TargetFramework = "net10.0-maccatalyst",
+                BuildState = appleExternal ? "pending-external-qa" : "pending-host-build",
+                RuntimeRemapState = "pending-external-qa",
+                UniquenessState = "pending-external-qa",
+                ReplayState = "pending-external-qa",
+                OracleState = "pending-external-qa",
+                ReasonCode = appleExternal ? "apple-target-unavailable-on-windows" : null,
+            },
+        ];
+    }
+
+    private static bool TryReadWorkbenchXamlSourceRequest<T>(
+        string? body,
+        out T? request,
+        out string? error)
+        where T : class
+    {
+        request = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            error = "A JSON XAML source proposal request body is required.";
+            return false;
+        }
+        try
+        {
+            request = JsonSerializer.Deserialize<T>(body, CamelCase);
+            if (request is null)
+            {
+                error = "The XAML source proposal request is invalid.";
+                return false;
+            }
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "The XAML source proposal request is not valid JSON.";
+            return false;
+        }
+    }
+
+    // ── Reviewed Roslyn C# AutomationId source proposals ─────────────────────────────────────
+    // These handlers intentionally have no broker-side source write. A native IDE host receives
+    // the exact patch after begin-host-apply and must acknowledge pre/post hashes afterward.
+
+    private async Task<(int, string, byte[])> HandleWorkbenchCSharpSourceAnalyzeAsync(string? body)
+    {
+        if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceProposalRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+
+        var built = await BuildCSharpSourceProposalAsync(request!).ConfigureAwait(false);
+        return JsonResponse(built.Ok ? 200 : 422, new
+        {
+            ok = built.Ok,
+            language = "CSharp",
+            eligibility = built.Analysis?.Decision,
+            uniqueness = built.Analysis?.Uniqueness,
+            preview = built.Proposal,
+            code = built.Code,
+            error = built.Error,
+            sourceApply = "ide-mediated-host-acknowledgment-required",
+            brokerSourceWrite = false,
+            flowFollowUp = "requires-separate-flow-repair-approval",
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchCSharpSourceProposeAsync(
+        InspectorWorkflowServices services,
+        string? body)
+    {
+        if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceProposalRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+
+        var built = await BuildCSharpSourceProposalAsync(request!).ConfigureAwait(false);
+        if (!built.Ok || built.Proposal is null)
+        {
+            return JsonResponse(422, new
+            {
+                ok = false,
+                language = "CSharp",
+                eligibility = built.Analysis?.Decision,
+                uniqueness = built.Analysis?.Uniqueness,
+                code = built.Code,
+                error = built.Error,
+            });
+        }
+
+        var stored = services.ProposeCSharpSource(built.Proposal);
+        var history = stored.Ok
+            ? await AppendCSharpSourceHistoryAsync(stored.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(stored.Ok ? 201 : 409, new
+        {
+            ok = stored.Ok,
+            language = "CSharp",
+            proposal = stored.Proposal,
+            history,
+            code = stored.Code,
+            error = stored.Error,
+            sourceChanged = false,
+            brokerSourceWrite = false,
+            flowChanged = false,
+        });
+    }
+
+    private (int, string, byte[]) HandleWorkbenchCSharpSourceGrant(
+        InspectorWorkflowServices services,
+        string? body)
+    {
+        if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceGrantRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "Explicit human confirmation is required before issuing a C# source proposal grant."
+            });
+        }
+
+        var lookup = services.GetCSharpSource(request.ProposalId ?? string.Empty);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var capability = ToCSharpSourceHostCapability(request.HostCapability);
+        var binding = CreateCSharpSourceBinding(lookup.Proposal, capability);
+        if (binding is null)
+            return JsonResponse(409, new { ok = false, error = "A trusted local project identity and native IDE host capability are required." });
+
+        var issued = services.IssueCSharpSourceGrant(new WorkflowCSharpSourceGrantIssueRequest
+        {
+            ProposalId = lookup.Proposal.Proposal.ProposalId,
+            Kind = string.Equals(request.Kind, WorkflowCSharpSourceGrantKinds.Rollback, StringComparison.Ordinal)
+                ? WorkflowCSharpSourceGrantKinds.Rollback
+                : WorkflowCSharpSourceGrantKinds.Apply,
+            Reviewer = request.Reviewer,
+            HumanConfirmed = true,
+            ExpiresAt = request.ExpiresAt,
+            Binding = binding,
+        });
+        return JsonResponse(issued.Ok ? 200 : 409, new
+        {
+            ok = issued.Ok,
+            language = "CSharp",
+            grant = issued.Grant,
+            grantDigest = issued.GrantDigest,
+            expiresAt = issued.ExpiresAt,
+            proposal = issued.Proposal,
+            code = issued.Code,
+            error = issued.Error,
+            brokerSourceWrite = false,
+        });
+    }
+
+    private (int, string, byte[]) HandleWorkbenchCSharpSourceStatus(
+        InspectorWorkflowServices services,
+        string proposalId)
+    {
+        var result = services.GetCSharpSource(proposalId);
+        return JsonResponse(result.Ok ? 200 : 404, new
+        {
+            ok = result.Ok,
+            language = "CSharp",
+            proposal = result.Proposal,
+            code = result.Code,
+            error = result.Error,
+            brokerSourceWrite = false,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchCSharpSourcePreviewAsync(
+        InspectorWorkflowServices services,
+        string proposalId)
+    {
+        var result = services.PreviewCSharpSource(proposalId);
+        var history = result.Ok
+            ? await AppendCSharpSourceHistoryAsync(result.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(result.Ok ? 200 : 409, new
+        {
+            ok = result.Ok,
+            language = "CSharp",
+            proposal = result.Proposal,
+            history,
+            code = result.Code,
+            error = result.Error,
+            sourceChanged = false,
+            brokerSourceWrite = false,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchCSharpSourceRejectAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceRejectRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var result = services.RejectCSharpSource(proposalId, request!.Reviewer, request.ReasonCode);
+        var history = result.Ok
+            ? await AppendCSharpSourceHistoryAsync(result.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(result.Ok ? 200 : 409, new
+        {
+            ok = result.Ok,
+            language = "CSharp",
+            proposal = result.Proposal,
+            history,
+            code = result.Code,
+            error = result.Error,
+            sourceChanged = false,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchCSharpSourceApproveAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceGrantRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+            return JsonResponse(400, new { ok = false, error = "Explicit human confirmation is required before C# source approval." });
+
+        var lookup = services.GetCSharpSource(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var capability = ToCSharpSourceHostCapability(request.HostCapability);
+        var binding = CreateCSharpSourceBinding(lookup.Proposal, capability);
+        if (binding is null)
+            return JsonResponse(409, new { ok = false, error = "A trusted local project identity and native IDE host capability are required." });
+
+        var issued = services.IssueCSharpSourceGrant(new WorkflowCSharpSourceGrantIssueRequest
+        {
+            ProposalId = proposalId,
+            Kind = WorkflowCSharpSourceGrantKinds.Apply,
+            Reviewer = request.Reviewer,
+            HumanConfirmed = true,
+            ExpiresAt = request.ExpiresAt,
+            Binding = binding,
+        });
+        var history = issued.Ok
+            ? await AppendCSharpSourceHistoryAsync(issued.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(issued.Ok ? 200 : 409, new
+        {
+            ok = issued.Ok,
+            language = "CSharp",
+            grant = issued.Grant,
+            grantDigest = issued.GrantDigest,
+            expiresAt = issued.ExpiresAt,
+            proposal = issued.Proposal,
+            history,
+            code = issued.Code,
+            error = issued.Error,
+            brokerSourceWrite = false,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchCSharpSourceAwaitHostApplyAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceHostRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var lookup = services.GetCSharpSource(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var capability = ToCSharpSourceHostCapability(request!.HostCapability);
+        var binding = CreateCSharpSourceBinding(lookup.Proposal, capability);
+        if (binding is null)
+            return JsonResponse(409, new { ok = false, error = "A trusted local project identity and native IDE host capability are required." });
+
+        var result = services.AwaitCSharpSourceHostApply(proposalId, binding, capability);
+        var history = result.Ok
+            ? await AppendCSharpSourceHistoryAsync(result.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(result.Ok ? 200 : 409, new
+        {
+            ok = result.Ok,
+            language = "CSharp",
+            proposal = result.Proposal,
+            history,
+            code = result.Code,
+            error = result.Error,
+            hostCapability = request.HostCapability,
+            brokerSourceWrite = false,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchCSharpSourceBeginHostApplyAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceBeginApplyRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+            return JsonResponse(400, new { ok = false, error = "Explicit human confirmation is required before IDE C# source apply." });
+
+        var lookup = services.GetCSharpSource(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var capability = ToCSharpSourceHostCapability(request.HostCapability);
+        var binding = CreateCSharpSourceBinding(lookup.Proposal, capability);
+        if (binding is null)
+            return JsonResponse(409, new { ok = false, error = "A trusted local project identity and native IDE host capability are required." });
+
+        var begun = services.BeginCSharpSourceHostApply(
+            proposalId,
+            request.ApprovalGrant ?? string.Empty,
+            binding,
+            capability);
+        var history = begun.Ok
+            ? await AppendCSharpSourceHistoryAsync(begun.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(begun.Ok ? 200 : 409, new
+        {
+            ok = begun.Ok,
+            language = "CSharp",
+            proposal = begun.Proposal,
+            history,
+            code = begun.Code,
+            error = begun.Error,
+            sourceChanged = false,
+            brokerSourceWrite = false,
+            next = begun.Ok ? "ide-apply-exact-patch-and-acknowledge-hashes" : null,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchCSharpSourceApplyAckAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceApplyAckRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var lookup = services.GetCSharpSource(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        if (!string.Equals(lookup.Proposal.HostKind, request!.HostKind?.Trim().ToLowerInvariant(), StringComparison.Ordinal))
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = "The IDE host acknowledgment does not match the host bound to the approved C# patch."
+            });
+        }
+
+        var completed = services.CompleteCSharpSourceHostApply(proposalId, new WorkflowCSharpSourceHostApplyRecord
+        {
+            Applied = request.Applied,
+            PreContentDigest = request.PreContentDigest,
+            AppliedContentDigest = request.AppliedContentDigest,
+            PatchDigest = request.PatchDigest,
+            ApplyRunId = request.ApplyRunId,
+            ErrorCode = request.ErrorCode,
+            Error = request.Error,
+        });
+        var history = completed.Proposal is not null
+            ? await AppendCSharpSourceHistoryAsync(completed.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(completed.Ok ? 200 : 409, new
+        {
+            ok = completed.Ok,
+            language = "CSharp",
+            proposal = completed.Proposal,
+            history,
+            code = completed.Code,
+            error = completed.Error,
+            sourceChanged = completed.Ok,
+            brokerSourceWrite = false,
+            next = completed.Ok ? "build-remap-uniqueness-replay-and-oracle-verification-required" : null,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchCSharpSourceVerifyAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceVerificationRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+            return JsonResponse(400, new { ok = false, error = "Explicit human confirmation is required to record C# source verification." });
+
+        var record = new WorkflowCSharpSourceVerificationRecord
+        {
+            Platforms = request.Platforms?.Take(16).Select(platform => new WorkflowCSharpSourcePlatformVerificationResult
+            {
+                Platform = platform.Platform,
+                TargetFramework = platform.TargetFramework,
+                BuildSucceeded = platform.BuildSucceeded,
+                PendingExternalQa = platform.PendingExternalQa,
+                RuntimeRemapConfirmed = platform.RuntimeRemapConfirmed,
+                AutomationIdUnique = platform.AutomationIdUnique,
+                ReplaySucceeded = platform.ReplaySucceeded,
+                IndependentOracleSucceeded = platform.IndependentOracleSucceeded,
+                ReasonCode = platform.ReasonCode,
+            }).ToList() ?? [],
+            AffectedFlowsReplayed = request.AffectedFlowsReplayed,
+            IndependentOracleSucceeded = request.IndependentOracleSucceeded,
+            VerificationRunIds = request.VerificationRunIds?.Where(static id => !string.IsNullOrWhiteSpace(id)).Take(64).ToList() ?? [],
+            CompletedAt = DateTimeOffset.UtcNow,
+        };
+        var result = services.RecordCSharpSourceVerification(proposalId, record);
+        var history = result.Proposal is not null
+            ? await AppendCSharpSourceHistoryAsync(result.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(result.Ok ? 200 : 409, new
+        {
+            ok = result.Ok,
+            language = "CSharp",
+            proposal = result.Proposal,
+            verification = record,
+            history,
+            code = result.Code,
+            error = result.Error,
+            required = new
+            {
+                affectedOfficialTargetBuilds = true,
+                runtimeRemap = true,
+                runtimeUniqueness = true,
+                affectedFlowReplay = true,
+                independentOracle = true,
+                appleOnWindows = "pending-external-qa",
+                flowSelectorFollowUp = "separate-reviewed-flow-repair-proposal",
+            },
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchCSharpSourceBeginRollbackAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceRollbackRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+            return JsonResponse(400, new { ok = false, error = "Explicit human confirmation is required before C# source rollback." });
+
+        var lookup = services.GetCSharpSource(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var capability = ToCSharpSourceHostCapability(request.HostCapability);
+        var binding = CreateCSharpSourceBinding(lookup.Proposal, capability);
+        if (binding is null)
+            return JsonResponse(409, new { ok = false, error = "A trusted local project identity and native IDE host capability are required." });
+
+        var begun = services.BeginCSharpSourceRollback(
+            proposalId,
+            request.RollbackGrant ?? string.Empty,
+            binding,
+            capability);
+        var history = begun.Ok
+            ? await AppendCSharpSourceHistoryAsync(begun.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(begun.Ok ? 200 : 409, new
+        {
+            ok = begun.Ok,
+            language = "CSharp",
+            proposal = begun.Proposal,
+            history,
+            code = begun.Code,
+            error = begun.Error,
+            sourceChanged = false,
+            brokerSourceWrite = false,
+            next = begun.Ok ? "ide-apply-exact-rollback-patch-and-acknowledge-hashes" : null,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchCSharpSourceRollbackAckAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceRollbackAckRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var lookup = services.GetCSharpSource(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        if (!string.Equals(lookup.Proposal.HostKind, request!.HostKind?.Trim().ToLowerInvariant(), StringComparison.Ordinal))
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = "The IDE rollback acknowledgment does not match the host bound to the C# proposal."
+            });
+        }
+
+        var completed = services.CompleteCSharpSourceRollback(proposalId, new WorkflowCSharpSourceRollbackRecord
+        {
+            Reverted = request.Reverted,
+            PreContentDigest = request.PreContentDigest,
+            ContentDigest = request.ContentDigest,
+            PatchDigest = request.PatchDigest,
+            ErrorCode = request.ErrorCode,
+            Error = request.Error,
+        });
+        var history = completed.Proposal is not null
+            ? await AppendCSharpSourceHistoryAsync(completed.Proposal).ConfigureAwait(false)
+            : null;
+        return JsonResponse(completed.Ok ? 200 : 409, new
+        {
+            ok = completed.Ok,
+            language = "CSharp",
+            proposal = completed.Proposal,
+            history,
+            code = completed.Code,
+            error = completed.Error,
+            sourceChanged = completed.Ok,
+            brokerSourceWrite = false,
+        });
+    }
+
+    private async Task<CSharpSourceProposalBuildResult> BuildCSharpSourceProposalAsync(
+        WorkbenchCSharpSourceProposalRequest request)
+    {
+        if (string.IsNullOrWhiteSpace(request.ElementId) ||
+            string.IsNullOrWhiteSpace(request.ProposedAutomationId))
+        {
+            return CSharpSourceProposalBuildResult.Failure(
+                "source-request-invalid",
+                "elementId and proposedAutomationId are required.");
+        }
+
+        ElementInfo? element;
+        List<ElementInfo> tree;
+        try
+        {
+            element = await _client.GetElementAsync(request.ElementId).ConfigureAwait(false);
+            tree = await _client.GetTreeAsync().ConfigureAwait(false);
+        }
+        catch
+        {
+            return CSharpSourceProposalBuildResult.Failure(
+                "source-runtime-unavailable",
+                "The current runtime element and live uniqueness scope could not be resolved.");
+        }
+        if (element is null)
+        {
+            return CSharpSourceProposalBuildResult.Failure(
+                "source-element-not-found",
+                "The selected runtime element no longer exists.");
+        }
+        if (request.SourceFile is not null ||
+            request.SourceLine is not null ||
+            request.SourceColumn is not null ||
+            request.SourceHash is not null ||
+            request.SourceConfidence is not null)
+        {
+            if (string.IsNullOrWhiteSpace(request.SourceFile) ||
+                request.SourceLine is not > 0 ||
+                request.SourceColumn is not > 0 ||
+                request.SourceHash is not { Length: 16 } hash ||
+                !hash.All(Uri.IsHexDigit) ||
+                !string.Equals(request.SourceConfidence, "roslyn-proven", StringComparison.OrdinalIgnoreCase))
+            {
+                return CSharpSourceProposalBuildResult.Failure(
+                    "source-request-invalid",
+                    "A native IDE C# source selection must include an absolute file, line, column, short hash, and roslyn-proven confidence.");
+            }
+
+            // The semantic service still confines this path to the registered project, recomputes
+            // the hash, and compares the resolved MAUI type to the selected runtime element.
+            element.SourceFile = request.SourceFile;
+            element.SourceLine = request.SourceLine;
+            element.SourceColumn = request.SourceColumn;
+            element.SourceHash = request.SourceHash;
+            element.SourceConfidence = request.SourceConfidence;
+        }
+
+        return await _csharpSourceProposalService.BuildAsync(
+            element,
+            request.ProposedAutomationId,
+            tree,
+            request.AffectedFlows,
+            request.AffectedPlatforms,
+            _lifetimeCts.Token).ConfigureAwait(false);
+    }
+
+    private WorkflowCSharpSourceGrantBinding? CreateCSharpSourceBinding(
+        WorkflowCSharpSourceProposalSnapshot snapshot,
+        WorkflowCSharpSourceHostCapability capability)
+    {
+        var projectIdentity = ComputeXamlSourceProjectIdentity();
+        if (projectIdentity is null || string.IsNullOrWhiteSpace(capability.HostKind))
+            return null;
+        return new WorkflowCSharpSourceGrantBinding
+        {
+            FileRelativePath = snapshot.Proposal.Operation.FileRelativePath,
+            BaseContentDigest = snapshot.AppliedContentDigest ?? snapshot.Proposal.BaseContentDigest,
+            SourceHash = snapshot.Proposal.Operation.SourceHash,
+            PatchDigest = snapshot.Proposal.PatchDigest,
+            RollbackPatchDigest = snapshot.Proposal.RollbackPatchDigest,
+            ProjectIdentity = projectIdentity,
+            FlowReferencesDigest = WorkflowCSharpSourceProposalStore.ComputeFlowReferencesDigest(
+                snapshot.Proposal.AffectedFlows),
+            HostKind = capability.HostKind,
+        };
+    }
+
+    private async Task<WorkflowCSharpSourceHistoryAppendResult?> AppendCSharpSourceHistoryAsync(
+        WorkflowCSharpSourceProposalSnapshot? snapshot)
+    {
+        if (snapshot is null || string.IsNullOrWhiteSpace(_project) || !Path.IsPathFullyQualified(_project))
+            return null;
+        try
+        {
+            var full = Path.GetFullPath(_project);
+            var root = Directory.Exists(full) ? full : Path.GetDirectoryName(full);
+            return string.IsNullOrWhiteSpace(root)
+                ? null
+                : new WorkflowCSharpSourceHistoryStore(root).Append(snapshot);
+        }
+        catch
+        {
+            return WorkflowCSharpSourceHistoryAppendResult.Failure(
+                "source-history-unavailable",
+                "A trusted local project root is unavailable for C# source proposal history.");
+        }
+    }
+
+    private static WorkflowCSharpSourceHostCapability ToCSharpSourceHostCapability(
+        WorkbenchCSharpSourceHostCapability? value)
+        => new()
+        {
+            HostKind = value?.HostKind?.Trim().ToLowerInvariant() ?? "browser",
+            CanOpenNativeDiff = value?.CanOpenNativeDiff == true,
+            CanDownloadPatch = value?.CanDownloadPatch == true,
+            CanApplyCSharpSource = value?.CanApplyCSharpSource == true,
+            IsExplicitLocalHostAction = value?.IsExplicitLocalHostAction == true,
+        };
+
+    private static bool TryReadWorkbenchCSharpSourceRequest<T>(
+        string? body,
+        out T? request,
+        out string? error)
+        where T : class
+    {
+        request = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            error = "A JSON C# source proposal request body is required.";
+            return false;
+        }
+        try
+        {
+            request = JsonSerializer.Deserialize<T>(body, CamelCase);
+            if (request is null)
+            {
+                error = "The C# source proposal request is invalid.";
+                return false;
+            }
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "The C# source proposal request is not valid JSON.";
+            return false;
+        }
+    }
+
+    // ── Human-approved selector repair adapters ─────────────────────────────────────────────
+
+    private async Task<(int, string, byte[])> HandleWorkbenchRepairClassifyAsync(
+        InspectorWorkflowServices services,
+        string? body)
+    {
+        if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairClassifyRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+
+        try
+        {
+            var status = await _client.GetStatusAsync().ConfigureAwait(false);
+            var current = request!.CurrentCheckpoint ?? new Testing.MauiFlowCheckpoint();
+            current.AppBuildFingerprint = SafeWorkbenchText(status?.App?.Build) ?? current.AppBuildFingerprint;
+            current.AgentInstanceId = _agentInstanceId ?? current.AgentInstanceId;
+            current.Route = SafeWorkbenchText(status?.Route) ?? current.Route;
+            current.Window = SafeWorkbenchText(status?.Window) ?? current.Window;
+            current.Modal = SafeWorkbenchText(status?.Modal) ?? current.Modal;
+            current.Locale = SafeWorkbenchText(status?.Locale) ?? current.Locale;
+            current.Theme = SafeWorkbenchText(status?.Theme) ?? current.Theme;
+            current.Orientation = SafeWorkbenchText(status?.Orientation) ?? current.Orientation;
+            current.DisplayProfile = SafeWorkbenchText(status?.DisplayProfile) ?? current.DisplayProfile;
+
+            var prior = request.PriorActiveSelectorResolution;
+            if (prior is null &&
+                request.Run?.RunId is { Length: > 0 } sourceRunId &&
+                (request.Run.Failure?.StepId ?? request.Run.DivergenceStepId) is { Length: > 0 } sourceStepId)
+            {
+                prior = services.GetPriorSelectorResolution(sourceRunId, sourceStepId).Resolution;
+            }
+            var decision = Testing.MauiFlowRepairEligibilityEvaluator.Evaluate(
+                new Testing.MauiFlowRepairEligibilityInput
+                {
+                    Run = request.Run,
+                    Plan = request.Plan,
+                    ReplayEligibility = request.ReplayEligibility,
+                    ExpectedCheckpoint = request.ExpectedCheckpoint,
+                    CurrentCheckpoint = current,
+                    BeforeDispatch = request.BeforeDispatch,
+                    IsCurrentLocalRun = request.IsCurrentLocalRun,
+                    ArtifactTrust = request.ArtifactTrust,
+                    PriorActiveSelectorResolution = prior,
+                    TargetFingerprint = request.TargetFingerprint,
+                    AdditionalFailureCodes = request.AdditionalFailureCodes ?? [],
+                });
+            var classificationToken = RememberWorkbenchRepairClassification(
+                decision,
+                reportRunId: request.Run?.RunId,
+                flowDigest: request.Run?.FlowDigest,
+                prior);
+            return JsonResponse(200, new
+            {
+                ok = true,
+                eligibility = decision,
+                classificationToken,
+                currentCheckpoint = current,
+                repairAuthority = "human-approved-only",
+            });
+        }
+        catch (Exception exception) when (IsAgentUnavailableException(exception))
+        {
+            return JsonResponse(503, new
+            {
+                ok = false,
+                error = "The selected agent is unavailable to establish current repair checkpoint facts."
+            });
+        }
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchRepairProposeAsync(
+        InspectorWorkflowServices services,
+        string? body)
+    {
+        if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairProposeRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+
+        var classification = GetWorkbenchRepairClassification(request!.ClassificationToken);
+        if (classification is null)
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = "Repair eligibility must be freshly classified by this Inspector target before candidate generation."
+            });
+        }
+        if (!string.IsNullOrWhiteSpace(classification.ReportRunId) &&
+            !string.Equals(classification.ReportRunId, request.Input?.SourceRunId, StringComparison.Ordinal))
+        {
+            return JsonResponse(409, new { ok = false, error = "The proposal source run does not match the classified repair." });
+        }
+        request.Input ??= new Testing.MauiFlowRepairProposalGenerationInput();
+        request.Input.Eligibility = classification.Decision;
+        request.Input.PriorActiveSelectorResolution = classification.PriorActiveSelectorResolution;
+        var generated = Testing.MauiFlowRepairProposalGenerator.Generate(request!.Input);
+        var stored = new List<WorkflowRepairProposalSnapshot>();
+        foreach (var proposal in generated.Proposals)
+        {
+            var result = services.ProposeRepair(proposal, request.AgentOriginated);
+            if (!result.Ok || result.Proposal is null)
+            {
+                return JsonResponse(409, new
+                {
+                    ok = false,
+                    error = result.Error,
+                    code = result.Code,
+                    generation = generated,
+                });
+            }
+            stored.Add(result.Proposal);
+        }
+
+        var history = new List<WorkflowRepairHistoryAppendResult>();
+        foreach (var proposal in stored)
+        {
+            var appended = await AppendRepairHistoryAsync(proposal, Testing.MauiFlowRepairOutcomeStates.Proposed)
+                .ConfigureAwait(false);
+            if (appended is not null)
+                history.Add(appended);
+        }
+        return JsonResponse(200, new
+        {
+            ok = stored.Count > 0,
+            generation = generated,
+            proposals = stored,
+            history,
+            automaticApply = false,
+            sourceWrite = false,
+        });
+    }
+
+    private (int, string, byte[]) HandleWorkbenchRepairGrant(
+        InspectorWorkflowServices services,
+        string? body)
+    {
+        if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairGrantRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "Explicit human confirmation is required before issuing a repair grant."
+            });
+        }
+
+        var lookup = services.GetRepair(request.ProposalId ?? string.Empty);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+
+        var binding = CreateRepairBinding(services, lookup.Proposal, request.Policy);
+        var issued = services.IssueRepairGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = request.ProposalId,
+            Kind = request.Kind,
+            Reviewer = request.Reviewer,
+            HumanConfirmed = request.HumanConfirmed,
+            ExpiresAt = request.ExpiresAt,
+            Binding = binding,
+        });
+        return JsonResponse(issued.Ok ? 200 : 409, new
+        {
+            ok = issued.Ok,
+            grant = issued.Grant,
+            grantDigest = issued.GrantDigest,
+            expiresAt = issued.ExpiresAt,
+            proposal = issued.Proposal,
+            code = issued.Code,
+            error = issued.Error,
+        });
+    }
+
+    private (int, string, byte[]) HandleWorkbenchRepairStatus(
+        InspectorWorkflowServices services,
+        string proposalId)
+    {
+        var result = services.GetRepair(proposalId);
+        return JsonResponse(result.Ok ? 200 : 404, new
+        {
+            ok = result.Ok,
+            proposal = result.Proposal,
+            code = result.Code,
+            error = result.Error,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchRepairPreviewAsync(
+        InspectorWorkflowServices services,
+        string proposalId)
+    {
+        var result = services.PreviewRepair(proposalId);
+        var history = result.Ok
+            ? await AppendRepairHistoryAsync(result.Proposal, Testing.MauiFlowRepairOutcomeStates.Previewed)
+                .ConfigureAwait(false)
+            : null;
+        return JsonResponse(result.Ok ? 200 : 409, new
+        {
+            ok = result.Ok,
+            proposal = result.Proposal,
+            history,
+            code = result.Code,
+            error = result.Error,
+            selectorOnly = result.Proposal?.Proposal.Patch?.SelectorOnly == true,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchRepairRejectAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairRejectRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var result = services.RejectRepair(proposalId, request!.Reviewer, request.ReasonCode);
+        var history = result.Ok
+            ? await AppendRepairHistoryAsync(result.Proposal, Testing.MauiFlowRepairOutcomeStates.Rejected)
+                .ConfigureAwait(false)
+            : null;
+        return JsonResponse(result.Ok ? 200 : 409, new
+        {
+            ok = result.Ok,
+            proposal = result.Proposal,
+            history,
+            code = result.Code,
+            error = result.Error,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchRepairValidateAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairValidationRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!_repairValidationAvailable)
+        {
+            return JsonResponse(503, new
+            {
+                ok = false,
+                error = "No platform lifecycle host is connected for transient repair validation. No flow was changed.",
+                hostFallback = true,
+            });
+        }
+
+        var lookup = services.GetRepair(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var validation = await _repairValidation.ValidateAsync(
+            new WorkflowRepairTransientValidationRequest
+            {
+                Proposal = lookup.Proposal.Proposal,
+                ReplaySafety = request!.ReplaySafety,
+                ValidationGrantDigest = request.ValidationGrant,
+                InMemorySelectorOverrideOnly = true,
+                AllowDownstreamContinuation = request.ReplaySafety?.DownstreamContinuationAllowed == true,
+            },
+            _lifetimeCts.Token).ConfigureAwait(false);
+        var recorded = services.RecordRepairValidation(proposalId, request.ValidationGrant ?? string.Empty, validation);
+        var history = recorded.Ok
+            ? await AppendRepairHistoryAsync(recorded.Proposal, Testing.MauiFlowRepairOutcomeStates.Previewed)
+                .ConfigureAwait(false)
+            : null;
+        return JsonResponse(recorded.Ok ? 200 : 409, new
+        {
+            ok = recorded.Ok,
+            proposal = recorded.Proposal,
+            validation,
+            history,
+            code = recorded.Code,
+            error = recorded.Error,
+            flowChanged = false,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchRepairApproveAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairGrantRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "Explicit human confirmation is required before approval."
+            });
+        }
+        var lookup = services.GetRepair(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+
+        var issued = services.IssueRepairGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposalId,
+            Kind = WorkflowRepairGrantKinds.Apply,
+            Reviewer = request.Reviewer,
+            HumanConfirmed = true,
+            ExpiresAt = request.ExpiresAt,
+            Binding = CreateRepairBinding(services, lookup.Proposal, request.Policy),
+        });
+        var history = issued.Ok
+            ? await AppendRepairHistoryAsync(issued.Proposal, Testing.MauiFlowRepairOutcomeStates.Approved)
+                .ConfigureAwait(false)
+            : null;
+        return JsonResponse(issued.Ok ? 200 : 409, new
+        {
+            ok = issued.Ok,
+            grant = issued.Grant,
+            grantDigest = issued.GrantDigest,
+            expiresAt = issued.ExpiresAt,
+            proposal = issued.Proposal,
+            history,
+            code = issued.Code,
+            error = issued.Error,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchRepairApplyAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairApplyRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var store = await ResolveWorkflowPlanStoreAsync().ConfigureAwait(false);
+        if (store is null)
+        {
+            return JsonResponse(503, new
+            {
+                ok = false,
+                error = "A trusted project workspace is required before an approved repair can be applied."
+            });
+        }
+
+        var lookup = services.GetRepair(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var binding = CreateRepairBinding(services, lookup.Proposal, request!.Policy);
+        var begun = services.BeginRepairApply(proposalId, request.ApprovalGrant ?? string.Empty, binding);
+        if (!begun.Ok || begun.Proposal is null)
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                proposal = begun.Proposal,
+                code = begun.Code,
+                error = begun.Error,
+            });
+        }
+
+        var applied = store.ApplySelectorRepair(new WorkflowRepairFlowApplyRequest
+        {
+            Proposal = begun.Proposal.Proposal,
+            ExpectedFlowDigest = binding.FlowDigest,
+            ExpectedFlowRevision = binding.FlowRevision,
+            Reviewer = begun.Proposal.Reviewer,
+            GrantDigest = begun.Proposal.GrantDigest,
+            ValidationRunIds = begun.Proposal.ValidationRunIds,
+        });
+        var completed = services.CompleteRepairApply(proposalId, new WorkflowRepairApplyRecord
+        {
+            Applied = applied.Ok,
+            NewFlowRevision = applied.FlowRevision,
+            AppliedFlowDigest = applied.FlowDigest,
+            ErrorCode = applied.Code,
+            Error = applied.Error,
+        });
+        return JsonResponse(applied.Ok && completed.Ok ? 200 : 409, new
+        {
+            ok = applied.Ok && completed.Ok,
+            proposal = completed.Proposal,
+            apply = applied,
+            code = completed.Code ?? applied.Code,
+            error = completed.Error ?? applied.Error,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchRepairVerifyAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairVerificationRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        if (!request!.HumanConfirmed)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = "Explicit human confirmation is required to record host verification results."
+            });
+        }
+
+        var result = services.RecordRepairVerification(proposalId, request.VerificationRuns ?? []);
+        var history = result.Ok
+            ? await AppendRepairHistoryAsync(result.Proposal, result.Proposal?.State ?? Testing.MauiFlowRepairOutcomeStates.RollbackRequired)
+                .ConfigureAwait(false)
+            : null;
+        return JsonResponse(result.Ok ? 200 : 409, new
+        {
+            ok = result.Ok,
+            proposal = result.Proposal,
+            history,
+            code = result.Code,
+            error = result.Error,
+            requiredCleanReplays = 3,
+        });
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchRepairRollbackAsync(
+        InspectorWorkflowServices services,
+        string proposalId,
+        string? body)
+    {
+        if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairRollbackRequest? request, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var store = await ResolveWorkflowPlanStoreAsync().ConfigureAwait(false);
+        if (store is null)
+            return JsonResponse(503, new { ok = false, error = "A trusted project workspace is required for rollback." });
+
+        var lookup = services.GetRepair(proposalId);
+        if (!lookup.Ok || lookup.Proposal is null)
+            return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var binding = CreateRepairBinding(services, lookup.Proposal, request!.Policy);
+        var begun = services.BeginRepairRollback(proposalId, request.RollbackGrant ?? string.Empty, binding);
+        if (!begun.Ok || begun.Proposal is null)
+            return JsonResponse(409, new { ok = false, proposal = begun.Proposal, code = begun.Code, error = begun.Error });
+
+        var reverted = store.RollbackSelectorRepair(new WorkflowRepairFlowRollbackRequest
+        {
+            Proposal = begun.Proposal.Proposal,
+            ExpectedAppliedFlowDigest = begun.Proposal.AppliedFlowDigest,
+            ExpectedAppliedFlowRevision = begun.Proposal.NewFlowRevision,
+            Reviewer = begun.Proposal.Reviewer,
+            GrantDigest = begun.Proposal.GrantDigest,
+            VerificationRunIds = begun.Proposal.VerificationRunIds,
+        });
+        var completed = services.CompleteRepairRollback(proposalId, new WorkflowRepairRollbackRecord
+        {
+            Reverted = reverted.Ok,
+            RollbackRevision = reverted.FlowRevision,
+            ErrorCode = reverted.Code,
+            Error = reverted.Error,
+        });
+        return JsonResponse(reverted.Ok && completed.Ok ? 200 : 409, new
+        {
+            ok = reverted.Ok && completed.Ok,
+            proposal = completed.Proposal,
+            rollback = reverted,
+            code = completed.Code ?? reverted.Code,
+            error = completed.Error ?? reverted.Error,
+        });
+    }
+
+    private async Task<WorkflowRepairHistoryAppendResult?> AppendRepairHistoryAsync(
+        WorkflowRepairProposalSnapshot? snapshot,
+        string state)
+    {
+        if (snapshot is null)
+            return null;
+        var store = await ResolveWorkflowPlanStoreAsync().ConfigureAwait(false);
+        if (store is null)
+        {
+            return WorkflowRepairHistoryAppendResult.Failure(
+                "workspace-unavailable",
+                "A trusted workspace is unavailable for repair history persistence.");
+        }
+        return store.AppendRepairHistory(new WorkflowRepairHistoryAppendRequest
+        {
+            Proposal = snapshot.Proposal,
+            State = state,
+            NewFlowRevision = snapshot.NewFlowRevision,
+            RollbackRevision = snapshot.RollbackRevision,
+            Reviewer = snapshot.Reviewer,
+            GrantDigest = snapshot.GrantDigest,
+            ValidationRunIds = snapshot.ValidationRunIds,
+            VerificationRunIds = snapshot.VerificationRunIds,
+            ReasonCode = snapshot.ReasonCode,
+        });
+    }
+
+    private static WorkflowRepairGrantBinding CreateRepairBinding(
+        InspectorWorkflowServices services,
+        WorkflowRepairProposalSnapshot snapshot,
+        string? requestedPolicy)
+    {
+        var baseFlow = snapshot.BaseFlow ?? snapshot.Proposal.BaseFlow;
+        return new WorkflowRepairGrantBinding
+        {
+            FlowPath = baseFlow?.Path,
+            FlowDigest = snapshot.AppliedFlowDigest ?? baseFlow?.Digest,
+            FlowRevision = snapshot.NewFlowRevision ?? baseFlow?.Revision,
+            PatchDigest = snapshot.PatchDigest,
+            TargetId = services.Target.AgentId + ":" + services.Target.AgentInstanceId,
+            Policy = string.IsNullOrWhiteSpace(requestedPolicy) ? "repair-policy-v1" : requestedPolicy.Trim(),
+        };
+    }
+
+    private static bool TryReadWorkbenchRepairRequest<T>(
+        string? body,
+        out T? request,
+        out string? error)
+        where T : class
+    {
+        request = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            error = "A JSON repair request body is required.";
+            return false;
+        }
+        try
+        {
+            request = JsonSerializer.Deserialize<T>(body, CamelCase);
+            if (request is null)
+            {
+                error = "The repair request is invalid.";
+                return false;
+            }
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "The repair request is not valid JSON.";
+            return false;
+        }
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchImproveAnalyzeAsync(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return JsonResponse(400, new { ok = false, error = "A flow is required for selector-health analysis." });
+
+        Testing.MauiFlow? flow;
+        Testing.MauiTestPlan? plan = null;
+        var reports = new List<Testing.MauiFlowRunReport>();
+        var includeLiveTree = true;
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object ||
+                !document.RootElement.TryGetProperty("flow", out var flowElement) ||
+                flowElement.ValueKind != JsonValueKind.Object)
+            {
+                return JsonResponse(400, new { ok = false, error = "A flow object is required." });
+            }
+
+            flow = JsonSerializer.Deserialize(
+                flowElement.GetRawText(),
+                Testing.MauiFlowJsonContext.Default.MauiFlow);
+            if (flow is null)
+                return JsonResponse(400, new { ok = false, error = "The flow is not valid." });
+
+            if (document.RootElement.TryGetProperty("plan", out var planElement) &&
+                planElement.ValueKind == JsonValueKind.Object)
+            {
+                plan = JsonSerializer.Deserialize(
+                    planElement.GetRawText(),
+                    Testing.MauiTestingJsonContext.Default.MauiTestPlan);
+            }
+            if (document.RootElement.TryGetProperty("includeLiveTree", out var liveTreeElement) &&
+                liveTreeElement.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                includeLiveTree = liveTreeElement.GetBoolean();
+            }
+            if (document.RootElement.TryGetProperty("runHistory", out var historyElement) &&
+                historyElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var reportElement in historyElement.EnumerateArray().Take(16))
+                {
+                    if (reportElement.ValueKind != JsonValueKind.Object)
+                        continue;
+                    var report = JsonSerializer.Deserialize(
+                        reportElement.GetRawText(),
+                        Testing.MauiTestingJsonContext.Default.MauiFlowRunReport);
+                    if (report is not null)
+                        reports.Add(report);
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            return JsonResponse(400, new { ok = false, error = "The selector-health request is not valid JSON." });
+        }
+
+        try
+        {
+            var status = await _client.GetStatusAsync().ConfigureAwait(false);
+            var context = new MauiSelectorObservationContext
+            {
+                AppId = SafeWorkbenchText(status?.App?.PackageId ?? status?.App?.Name),
+                AppBuild = SafeWorkbenchText(status?.App?.Build),
+                Platform = SafeWorkbenchText(status?.Device?.Platform),
+                Route = SafeWorkbenchText(status?.Route),
+                Window = SafeWorkbenchText(status?.Window),
+                Modal = SafeWorkbenchText(status?.Modal),
+                Locale = SafeWorkbenchText(status?.Locale),
+                Theme = SafeWorkbenchText(status?.Theme),
+                Orientation = SafeWorkbenchText(status?.Orientation),
+                DisplayProfile = SafeWorkbenchText(status?.DisplayProfile),
+                CapabilityVersion = "inspector-selector-health-v1",
+                ObservedAt = DateTimeOffset.UtcNow,
+            };
+
+            List<MauiSelectorObservationElement> liveElements = [];
+            var liveTreeTruncated = false;
+            if (includeLiveTree)
+            {
+                var tree = await _client.GetTreeAsync().ConfigureAwait(false);
+                if (tree.Count > 0)
+                {
+                    var observation = Testing.MauiSelectorObservationFactory.Create(tree[0], tree, context);
+                    liveTreeTruncated = observation.Elements.Count > 2_000;
+                    liveElements = observation.Elements.Take(2_000).ToList();
+                }
+            }
+
+            var platforms = reports
+                .GroupBy(report => report.Target?.Platform, StringComparer.OrdinalIgnoreCase)
+                .Where(static group => !string.IsNullOrWhiteSpace(group.Key))
+                .Select(group => new Testing.MauiSelectorHealthPlatformSnapshot
+                {
+                    Platform = group.Key,
+                    Fingerprints = group.SelectMany(report => report.Steps)
+                        .Select(static step => step.Fingerprint)
+                        .Where(static fingerprint => fingerprint is not null)
+                        .Cast<Testing.MauiElementFingerprint>()
+                        .ToList(),
+                    Candidates = group.SelectMany(report => report.Steps)
+                        .SelectMany(static step => step.SelectorCandidates)
+                        .ToList(),
+                })
+                .ToList();
+            var analysis = Testing.MauiSelectorHealthAnalyzer.Analyze(new Testing.MauiSelectorHealthAnalysisInput
+            {
+                Flow = flow!,
+                Plan = plan,
+                LiveElements = liveElements,
+                Context = context,
+                PlatformSnapshots = platforms,
+                RunHistory = reports,
+                LiveTreeComplete = !liveTreeTruncated,
+            });
+            return JsonResponse(200, new
+            {
+                ok = true,
+                analysis,
+                liveTree = new
+                {
+                    requested = includeLiveTree,
+                    available = includeLiveTree && liveElements.Count > 0,
+                    truncated = liveTreeTruncated,
+                    elementCount = liveElements.Count,
+                },
+            });
+        }
+        catch (Exception exception) when (IsAgentUnavailableException(exception))
+        {
+            return JsonResponse(503, new { ok = false, error = "The selected agent is unavailable for live selector analysis." });
+        }
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchTargetAsync(InspectorWorkflowServices services)
+    {
+        if (!services.IsTargetCurrent())
+            return JsonResponse(409, new { ok = false, error = "The selected agent instance is no longer connected." });
+
+        try
+        {
+            var status = await _client.GetStatusAsync().ConfigureAwait(false);
+            if (status is null)
+                return JsonResponse(503, new { ok = false, error = "The selected agent did not return target status." });
+
+            var target = services.Target;
+            return JsonResponse(200, new
+            {
+                ok = true,
+                broker = services.GetCapabilities(),
+                target = new
+                {
+                    agentId = target.AgentId,
+                    agentInstanceId = target.AgentInstanceId,
+                    agentPort = target.AgentPort,
+                    appName = SafeWorkbenchText(status.App?.Name ?? target.AppName),
+                    platform = SafeWorkbenchText(status.Device?.Platform ?? target.Platform),
+                    app = new
+                    {
+                        build = SafeWorkbenchText(status.App?.Build),
+                        packageId = SafeWorkbenchText(status.App?.PackageId),
+                        version = SafeWorkbenchText(status.App?.Version),
+                    },
+                    device = new
+                    {
+                        deviceType = SafeWorkbenchText(status.Device?.DeviceType),
+                        idiom = SafeWorkbenchText(status.Device?.Idiom),
+                    },
+                    observedCheckpoint = new
+                    {
+                        agentInstanceId = target.AgentInstanceId,
+                        appBuildFingerprint = SafeWorkbenchText(status.App?.Build),
+                        route = SafeWorkbenchText(status.Route),
+                    },
+                    capabilities = status.Capabilities,
+                },
+            });
+        }
+        catch (Exception exception) when (IsAgentUnavailableException(exception))
+        {
+            return JsonResponse(503, new { ok = false, error = "The selected agent is unavailable." });
+        }
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchPreflightAsync(
+        InspectorWorkflowServices services,
+        string? body)
+    {
+        if (!TryReadWorkbenchRunEnvelope(body, out var envelope, out var error))
+            return JsonResponse(400, new { ok = false, error });
+
+        var enriched = await EnrichWorkbenchRunRequestAsync(envelope!.Run!, services).ConfigureAwait(false);
+        if (enriched.Error is not null)
+            return JsonResponse(enriched.StatusCode, new { ok = false, error = enriched.Error });
+
+        var preflight = services.Preflight(enriched.Request!);
+        return JsonResponse(preflight.StatusCode, preflight);
+    }
+
+    private async Task<(int, string, byte[])> HandleWorkbenchRunStartAsync(
+        InspectorWorkflowServices services,
+        string? body,
+        string leaseId,
+        string holderKind,
+        string holderLabel)
+    {
+        if (Interlocked.CompareExchange(ref _workbenchRunStarting, 1, 0) != 0)
+            return JsonResponse(409, new { ok = false, error = "A workflow run is already starting." });
+
+        CancellationTokenSource? heartbeatCancellation = null;
+        Task? heartbeatTask = null;
+        try
+        {
+            if (!TryReadWorkbenchRunEnvelope(body, out var envelope, out var error))
+                return JsonResponse(400, new { ok = false, error });
+            Volatile.Write(
+                ref _workbenchRunStartingIdempotencyKey,
+                envelope!.Run!.IdempotencyKey);
+
+            var claim = await _client.ControlMutationLeaseAsync(
+                "claim",
+                force: false,
+                leaseId,
+                holderKind,
+                holderLabel).ConfigureAwait(false);
+            if (!claim.YouHold)
+            {
+                return JsonResponse(409, new
+                {
+                    ok = false,
+                    reason = "writer",
+                    error = "Another session is driving this app.",
+                    holderKind = claim.HolderKind,
+                    label = claim.Label,
+                    expiresInMs = claim.ExpiresInMs,
+                    authority = claim.Authority,
+                });
+            }
+
+            heartbeatCancellation = new CancellationTokenSource();
+            heartbeatTask = HeartbeatStartingLeaseAsync(
+                leaseId,
+                holderKind,
+                holderLabel,
+                heartbeatCancellation.Token);
+
+            var enriched = await EnrichWorkbenchRunRequestAsync(envelope.Run, services).ConfigureAwait(false);
+            if (enriched.Error is not null)
+                return JsonResponse(enriched.StatusCode, new { ok = false, error = enriched.Error });
+
+            var consent = WorkbenchEvidenceConsent.From(envelope.Evidence);
+            var result = services.Start(
+                enriched.Request!,
+                client => new InspectorReplayEvidenceCapture(
+                    client,
+                    consent,
+                    StoreWorkbenchEvidence),
+                new WorkflowRunLeaseHandoff(leaseId, holderKind, holderLabel));
+            if (result.Ok && result.Run is not null && !string.IsNullOrWhiteSpace(result.CapabilityToken))
+            {
+                RememberWorkbenchRun(
+                    result.Run.RunId,
+                    result.CapabilityToken!,
+                    consent,
+                    enriched.Request!.IdempotencyKey);
+                if (!result.Run.Terminal)
+                    Volatile.Write(ref _activeWorkbenchRunId, result.Run.RunId);
+            }
+
+            return JsonResponse(result.StatusCode, result);
+        }
+        finally
+        {
+            if (heartbeatCancellation is not null)
+            {
+                heartbeatCancellation.Cancel();
+                if (heartbeatTask is not null)
+                {
+                    try { await heartbeatTask.ConfigureAwait(false); }
+                    catch (OperationCanceledException) { }
+                }
+                heartbeatCancellation.Dispose();
+            }
+            Volatile.Write(ref _workbenchRunStartingIdempotencyKey, null);
+            Volatile.Write(ref _workbenchRunStarting, 0);
+        }
+    }
+
+    private async Task HeartbeatStartingLeaseAsync(
+        string leaseId,
+        string holderKind,
+        string holderLabel,
+        CancellationToken cancellationToken)
+    {
+        using var timer = new PeriodicTimer(TimeSpan.FromSeconds(2));
+        while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
+        {
+            MutationLeaseStatus status;
+            try
+            {
+                status = await _client.ControlMutationLeaseAsync(
+                    "heartbeat",
+                    force: false,
+                    leaseId,
+                    holderKind,
+                    holderLabel).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (IsAgentUnavailableException(exception))
+            {
+                return;
+            }
+            if (!status.YouHold)
+                return;
+        }
+    }
+
+    private (int, string, byte[]) HandleWorkbenchRunStatus(
+        InspectorWorkflowServices services,
+        string runId,
+        string? body)
+    {
+        if (!TryReadWorkbenchAccess(body, out var access, out var error))
+            return JsonResponse(400, new { ok = false, error });
+
+        var token = ResolveWorkbenchRunToken(runId, access!.CapabilityToken);
+        var result = services.GetRunStatus(runId, token);
+        if (result.Run is not null && !string.IsNullOrWhiteSpace(token))
+            RememberWorkbenchRun(runId, token!, null);
+        if (result.Run?.Terminal == true)
+            ClearActiveWorkbenchRun(runId);
+
+        return JsonResponse(
+            result.StatusCode,
+            result.Run is null
+                ? WorkflowRunStatusResponse.Failure(result.Error ?? "Workflow run was not found.")
+                : WorkflowRunStatusResponse.Success(result.Run));
+    }
+
+    private (int, string, byte[]) HandleWorkbenchRunCancel(
+        InspectorWorkflowServices services,
+        string runId,
+        string? body)
+    {
+        if (!TryReadWorkbenchAccess(body, out var access, out var error))
+            return JsonResponse(400, new { ok = false, error });
+
+        var token = ResolveWorkbenchRunToken(runId, access!.CapabilityToken);
+        var result = services.CancelRun(runId, token);
+        if (result.Run is not null && !string.IsNullOrWhiteSpace(token))
+            RememberWorkbenchRun(runId, token!, null);
+        if (result.Run?.Terminal == true)
+            ClearActiveWorkbenchRun(runId);
+        return JsonResponse(result.StatusCode, result);
+    }
+
+    private (int, string, byte[]) HandleWorkbenchRunJournal(
+        InspectorWorkflowServices services,
+        string? idempotencyKey)
+    {
+        var pending = !string.IsNullOrWhiteSpace(idempotencyKey) &&
+            string.Equals(
+                Volatile.Read(ref _workbenchRunStartingIdempotencyKey),
+                idempotencyKey,
+                StringComparison.Ordinal);
+        List<WorkbenchRunCapability> known;
+        lock (_workbenchRunGate)
+        {
+            known = _workbenchRunCapabilities.Values
+                .Where(entry => string.IsNullOrWhiteSpace(idempotencyKey) ||
+                    string.Equals(entry.IdempotencyKey, idempotencyKey, StringComparison.Ordinal))
+                .OrderBy(entry => entry.CreatedAt)
+                .ToList();
+        }
+
+        WorkflowRunSnapshot? latestTerminal = null;
+        foreach (var knownRun in known.OrderByDescending(entry => entry.CreatedAt))
+        {
+            var result = services.GetRunStatus(knownRun.RunId, knownRun.CapabilityToken);
+            if (result.StatusCode == 404)
+            {
+                ForgetWorkbenchRun(knownRun.RunId);
+                continue;
+            }
+
+            if (result.Run is null)
+                continue;
+            if (!result.Run.Terminal)
+                return JsonResponse(200, new { ok = true, restored = true, pending = false, run = result.Run });
+            latestTerminal ??= result.Run;
+        }
+
+        return JsonResponse(200, new { ok = true, restored = false, pending, run = latestTerminal });
+    }
+
+    private (int, string, byte[]) HandleWorkbenchEvidenceDownload(
+        InspectorWorkflowServices services,
+        string runId,
+        string? body)
+    {
+        if (!TryReadWorkbenchAccess(body, out var access, out var error))
+            return JsonResponse(400, new { ok = false, error });
+
+        var token = ResolveWorkbenchRunToken(runId, access!.CapabilityToken);
+        var accessResult = services.GetRunStatus(runId, token);
+        if (accessResult.Run is null)
+            return JsonResponse(accessResult.StatusCode, WorkflowRunStatusResponse.Failure(accessResult.Error ?? "Workflow run was not found."));
+
+        lock (_workbenchRunGate)
+        {
+            if (!_workbenchEvidence.TryGetValue(runId, out var evidence))
+            {
+                return JsonResponse(404, new
+                {
+                    ok = false,
+                    error = "No cached failure evidence is available for this run."
+                });
+            }
+
+            return (200, "application/vnd.maui.evidence+zip", evidence.Bytes);
+        }
+    }
+
+    private (int, string, byte[]) HandleWorkbenchArtifactStatus(
+        InspectorWorkflowServices services,
+        string artifactId,
+        string? body)
+    {
+        if (!TryReadWorkbenchArtifactAccess(body, out var access, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var result = services.GetArtifactStatus(artifactId, access!.CapabilityToken);
+        return JsonResponse(
+            result.StatusCode,
+            result.StatusCode == 200
+                ? new ArtifactTrustRouteResponse { Ok = true, Status = result.Status }
+                : ArtifactTrustRouteResponse.Failure(result.Error ?? "Imported artifact was not found."));
+    }
+
+    private (int, string, byte[]) HandleWorkbenchArtifactProjection(
+        InspectorWorkflowServices services,
+        string artifactId,
+        string? body)
+    {
+        if (!TryReadWorkbenchArtifactAccess(body, out var access, out var error))
+            return JsonResponse(400, new { ok = false, error });
+        var result = services.GetArtifactProjection(artifactId, access!.CapabilityToken);
+        return JsonResponse(
+            result.StatusCode,
+            result.StatusCode == 200
+                ? new ArtifactTrustRouteResponse { Ok = true, Projection = result.Projection }
+                : ArtifactTrustRouteResponse.Failure(result.Error ?? "Imported artifact was not found."));
+    }
+
+    private (int, string, byte[]) HandleWorkbenchArtifactLocalReproduction(
+        InspectorWorkflowServices services,
+        string artifactId,
+        string? body)
+    {
+        if (!TryReadWorkbenchArtifactAccess(body, out var access, out var error) ||
+            string.IsNullOrWhiteSpace(access!.LocalRunId) ||
+            access.Current is null)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = error ?? "An artifact capability token, local run ID, and current reproduction facts are required."
+            });
+        }
+
+        var result = services.BindLocalReproduction(
+            artifactId,
+            access.CapabilityToken,
+            access.Current,
+            access.LocalRunId);
+        return JsonResponse(
+            result.StatusCode,
+            result.StatusCode == 200
+                ? new ArtifactTrustRouteResponse
+                {
+                    Ok = true,
+                    Status = result.Status,
+                    Reproduction = result.Evaluation,
+                }
+                : ArtifactTrustRouteResponse.Failure(result.Error ?? "The reproduction binding was rejected."));
+    }
+
+    private async Task<WorkbenchRunRequestResult> EnrichWorkbenchRunRequestAsync(
+        WorkflowRunStartRequest request,
+        InspectorWorkflowServices services)
+    {
+        if (!services.IsTargetCurrent())
+            return WorkbenchRunRequestResult.Failure(409, "The selected agent instance is no longer connected.");
+
+        try
+        {
+            var status = await _client.GetStatusAsync().ConfigureAwait(false);
+            if (status is null)
+                return WorkbenchRunRequestResult.Failure(503, "The selected agent did not return target status.");
+
+            // Browser/host input may request only a normal human one-shot acknowledgement. Reset,
+            // backend, compensator, and oracle evidence must come from a lifecycle host and is never
+            // trusted when posted by the Inspector browser.
+            var requested = request.Context;
+            request.Context = new Testing.MauiFlowRunContext
+            {
+                Intent = Testing.MauiFlowReplayIntents.OrdinaryReplay,
+                ManualOneShotAuthorization = requested?.ManualOneShotAuthorization == true,
+                PriorMutationCompletionCertain = requested?.PriorMutationCompletionCertain == false
+                    ? false
+                    : null,
+                Preconditions = new Testing.MauiFlowReplayPreconditions
+                {
+                    Observed = new Testing.MauiFlowCheckpoint
+                    {
+                        AgentInstanceId = services.Target.AgentInstanceId,
+                        AppBuildFingerprint = SafeWorkbenchText(status.App?.Build),
+                        Route = SafeWorkbenchText(status.Route),
+                    },
+                    CheckedAt = DateTimeOffset.UtcNow,
+                    EvidenceReference = "inspector-live-target",
+                },
+            };
+            return WorkbenchRunRequestResult.Success(request);
+        }
+        catch (Exception exception) when (IsAgentUnavailableException(exception))
+        {
+            return WorkbenchRunRequestResult.Failure(503, "The selected agent is unavailable.");
+        }
+    }
+
+    private static bool TryReadWorkbenchRunEnvelope(
+        string? body,
+        out WorkbenchRunEnvelope? envelope,
+        out string? error)
+    {
+        envelope = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            error = "A run request is required.";
+            return false;
+        }
+
+        try
+        {
+            envelope = JsonSerializer.Deserialize<WorkbenchRunEnvelope>(body, WorkbenchJsonOptions);
+        }
+        catch (JsonException)
+        {
+            error = "The run request is not valid JSON.";
+            return false;
+        }
+
+        if (envelope?.Run is null)
+        {
+            error = "A run request is required.";
+            return false;
+        }
+        return true;
+    }
+
+    private static bool TryReadWorkbenchAccess(
+        string? body,
+        out WorkflowRunAccessRequest? access,
+        out string? error)
+    {
+        access = null;
+        error = null;
+        try
+        {
+            access = JsonSerializer.Deserialize<WorkflowRunAccessRequest>(
+                string.IsNullOrWhiteSpace(body) ? "{}" : body,
+                WorkbenchJsonOptions);
+            return access is not null;
+        }
+        catch (JsonException)
+        {
+            error = "The run capability request is not valid JSON.";
+            return false;
+        }
+    }
+
+    private static bool TryReadWorkbenchArtifactAccess(
+        string? body,
+        out WorkbenchArtifactAccess? access,
+        out string? error)
+    {
+        access = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            error = "An imported-artifact capability request is required.";
+            return false;
+        }
+        try
+        {
+            access = JsonSerializer.Deserialize<WorkbenchArtifactAccess>(body, WorkbenchJsonOptions);
+            if (access is null || string.IsNullOrWhiteSpace(access.CapabilityToken))
+            {
+                error = "A valid imported-artifact capability token is required.";
+                return false;
+            }
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "The imported-artifact request is not valid JSON.";
+            return false;
+        }
+    }
+
+    private void RememberWorkbenchRun(
+        string runId,
+        string capabilityToken,
+        WorkbenchEvidenceConsent? consent,
+        string? idempotencyKey = null)
+    {
+        if (string.IsNullOrWhiteSpace(runId) || string.IsNullOrWhiteSpace(capabilityToken))
+            return;
+
+        lock (_workbenchRunGate)
+        {
+            var existing = _workbenchRunCapabilities.TryGetValue(runId, out var known) ? known : null;
+            _workbenchRunCapabilities[runId] = new WorkbenchRunCapability(
+                runId,
+                capabilityToken,
+                existing?.CreatedAt ?? DateTimeOffset.UtcNow,
+                consent ?? existing?.EvidenceConsent ?? WorkbenchEvidenceConsent.None,
+                idempotencyKey ?? existing?.IdempotencyKey);
+            while (_workbenchRunCapabilities.Count > MaxRetainedWorkbenchRuns)
+            {
+                var evicted = _workbenchRunCapabilities.Values
+                    .OrderBy(entry => entry.CreatedAt)
+                    .First();
+                _workbenchRunCapabilities.Remove(evicted.RunId);
+                _workbenchEvidence.Remove(evicted.RunId);
+            }
+        }
+    }
+
+    private string RememberWorkbenchRepairClassification(
+        Testing.MauiFlowRepairEligibilityDecision decision,
+        string? reportRunId,
+        string? flowDigest,
+        Testing.MauiRepairPriorSelectorResolution? priorActiveSelectorResolution)
+    {
+        var token = "repairclass_" + Guid.NewGuid().ToString("N");
+        lock (_workbenchRunGate)
+        {
+            _workbenchRepairClassifications[token] = new WorkbenchRepairClassification(
+                decision,
+                reportRunId,
+                flowDigest,
+                priorActiveSelectorResolution,
+                DateTimeOffset.UtcNow);
+            while (_workbenchRepairClassifications.Count > MaxRetainedWorkbenchRepairClassifications)
+            {
+                var oldest = _workbenchRepairClassifications
+                    .OrderBy(static pair => pair.Value.CreatedAt)
+                    .First();
+                _workbenchRepairClassifications.Remove(oldest.Key);
+            }
+        }
+        return token;
+    }
+
+    private WorkbenchRepairClassification? GetWorkbenchRepairClassification(string? token)
+    {
+        if (string.IsNullOrWhiteSpace(token))
+            return null;
+        lock (_workbenchRunGate)
+        {
+            return _workbenchRepairClassifications.TryGetValue(token, out var classification) &&
+                classification.CreatedAt >= DateTimeOffset.UtcNow.AddMinutes(-10)
+                ? classification
+                : null;
+        }
+    }
+
+    private string? ResolveWorkbenchRunToken(string runId, string? supplied)
+    {
+        if (!string.IsNullOrWhiteSpace(supplied))
+            return supplied;
+        lock (_workbenchRunGate)
+            return _workbenchRunCapabilities.TryGetValue(runId, out var known)
+                ? known.CapabilityToken
+                : null;
+    }
+
+    private bool HasActiveWorkbenchRun()
+    {
+        var runId = Volatile.Read(ref _activeWorkbenchRunId);
+        var services = _workflowServices;
+        if (string.IsNullOrWhiteSpace(runId) || services is null)
+            return false;
+
+        var token = ResolveWorkbenchRunToken(runId, supplied: null);
+        var result = services.GetRunStatus(runId, token);
+        if (result.Run is { Terminal: false })
+            return true;
+
+        ClearActiveWorkbenchRun(runId);
+        return false;
+    }
+
+    private void ClearActiveWorkbenchRun(string runId)
+        => Interlocked.CompareExchange(ref _activeWorkbenchRunId, null, runId);
+
+    private void ForgetWorkbenchRun(string runId)
+    {
+        lock (_workbenchRunGate)
+        {
+            _workbenchRunCapabilities.Remove(runId);
+            _workbenchEvidence.Remove(runId);
+            foreach (var token in _workbenchRepairClassifications
+                         .Where(pair => string.Equals(pair.Value.ReportRunId, runId, StringComparison.Ordinal))
+                         .Select(static pair => pair.Key)
+                         .ToArray())
+            {
+                _workbenchRepairClassifications.Remove(token);
+            }
+        }
+    }
+
+    private void StoreWorkbenchEvidence(
+        string runId,
+        byte[] bytes,
+        WorkbenchEvidenceConsent consent)
+    {
+        if (string.IsNullOrWhiteSpace(runId) || bytes.Length == 0 || bytes.Length > MaxCachedWorkbenchEvidenceBytes)
+            return;
+
+        lock (_workbenchRunGate)
+        {
+            _workbenchEvidence[runId] = new WorkbenchEvidence(bytes, consent, DateTimeOffset.UtcNow);
+            while (_workbenchEvidence.Count > MaxRetainedWorkbenchEvidence)
+            {
+                var evicted = _workbenchEvidence
+                    .OrderBy(pair => pair.Value.CapturedAt)
+                    .First();
+                _workbenchEvidence.Remove(evicted.Key);
+            }
+        }
+    }
+
+    private static string? SafeWorkbenchText(string? value, int maximum = 256)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        var builder = new StringBuilder(Math.Min(value.Length, maximum));
+        foreach (var character in value)
+        {
+            if (!char.IsControl(character) || character is '\t' or '\n')
+                builder.Append(character);
+            if (builder.Length == maximum)
+                break;
+        }
+        return builder.ToString();
+    }
+
+    private sealed class WorkbenchRunEnvelope
+    {
+        [JsonPropertyName("run")] public WorkflowRunStartRequest? Run { get; set; }
+        [JsonPropertyName("evidence")] public WorkbenchEvidenceRequest? Evidence { get; set; }
+    }
+
+    private sealed class WorkbenchAgentRequestDecision
+    {
+        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("approvedScope")] public Testing.MauiTestAgentMutationScope? ApprovedScope { get; set; }
+        [JsonPropertyName("grantDurationSeconds")] public int? GrantDurationSeconds { get; set; }
+        [JsonPropertyName("reasonCode")] public string? ReasonCode { get; set; }
+    }
+
+    private sealed class WorkbenchEvidenceRequest
+    {
+        [JsonPropertyName("includeScreenshot")] public bool? IncludeScreenshot { get; set; }
+        [JsonPropertyName("includeWorkflow")] public bool? IncludeWorkflow { get; set; }
+    }
+
+    private sealed class WorkbenchArtifactAccess
+    {
+        [JsonPropertyName("capabilityToken")] public string? CapabilityToken { get; set; }
+        [JsonPropertyName("localRunId")] public string? LocalRunId { get; set; }
+        [JsonPropertyName("current")] public Testing.MauiLocalReproductionExpectation? Current { get; set; }
+    }
+
+    private sealed class WorkbenchRepairClassifyRequest
+    {
+        [JsonPropertyName("run")] public Testing.MauiFlowRunReport? Run { get; set; }
+        [JsonPropertyName("plan")] public Testing.MauiTestPlan? Plan { get; set; }
+        [JsonPropertyName("replayEligibility")] public Testing.MauiFlowReplayEligibilityDecision? ReplayEligibility { get; set; }
+        [JsonPropertyName("expectedCheckpoint")] public Testing.MauiFlowCheckpoint? ExpectedCheckpoint { get; set; }
+        [JsonPropertyName("currentCheckpoint")] public Testing.MauiFlowCheckpoint? CurrentCheckpoint { get; set; }
+        [JsonPropertyName("beforeDispatch")] public bool? BeforeDispatch { get; set; }
+        [JsonPropertyName("isCurrentLocalRun")] public bool IsCurrentLocalRun { get; set; }
+        [JsonPropertyName("artifactTrust")] public string? ArtifactTrust { get; set; }
+        [JsonPropertyName("priorActiveSelectorResolution")] public Testing.MauiRepairPriorSelectorResolution? PriorActiveSelectorResolution { get; set; }
+        [JsonPropertyName("targetFingerprint")] public Testing.MauiElementFingerprint? TargetFingerprint { get; set; }
+        [JsonPropertyName("additionalFailureCodes")] public List<string>? AdditionalFailureCodes { get; set; }
+    }
+
+    private sealed class WorkbenchRepairProposeRequest
+    {
+        [JsonPropertyName("classificationToken")] public string? ClassificationToken { get; set; }
+        [JsonPropertyName("input")] public Testing.MauiFlowRepairProposalGenerationInput? Input { get; set; }
+        [JsonPropertyName("agentOriginated")] public bool AgentOriginated { get; set; }
+    }
+
+    private sealed record WorkbenchRepairClassification(
+        Testing.MauiFlowRepairEligibilityDecision Decision,
+        string? ReportRunId,
+        string? FlowDigest,
+        Testing.MauiRepairPriorSelectorResolution? PriorActiveSelectorResolution,
+        DateTimeOffset CreatedAt);
+
+    private sealed class WorkbenchRepairGrantRequest
+    {
+        [JsonPropertyName("proposalId")] public string? ProposalId { get; set; }
+        [JsonPropertyName("kind")] public string? Kind { get; set; }
+        [JsonPropertyName("reviewer")] public string? Reviewer { get; set; }
+        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("expiresAt")] public DateTimeOffset? ExpiresAt { get; set; }
+        [JsonPropertyName("policy")] public string? Policy { get; set; }
+    }
+
+    private sealed class WorkbenchRepairRejectRequest
+    {
+        [JsonPropertyName("reviewer")] public string? Reviewer { get; set; }
+        [JsonPropertyName("reasonCode")] public string? ReasonCode { get; set; }
+    }
+
+    private sealed class WorkbenchRepairValidationRequest
+    {
+        [JsonPropertyName("validationGrant")] public string? ValidationGrant { get; set; }
+        [JsonPropertyName("replaySafety")] public Testing.MauiFlowReplayEligibilityDecision? ReplaySafety { get; set; }
+    }
+
+    private sealed class WorkbenchRepairApplyRequest
+    {
+        [JsonPropertyName("approvalGrant")] public string? ApprovalGrant { get; set; }
+        [JsonPropertyName("policy")] public string? Policy { get; set; }
+    }
+
+    private sealed class WorkbenchRepairVerificationRequest
+    {
+        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("verificationRuns")] public List<WorkflowRepairVerificationRun>? VerificationRuns { get; set; }
+    }
+
+    private sealed class WorkbenchRepairRollbackRequest
+    {
+        [JsonPropertyName("rollbackGrant")] public string? RollbackGrant { get; set; }
+        [JsonPropertyName("policy")] public string? Policy { get; set; }
+    }
+
+    private sealed class WorkbenchCSharpSourceProposalRequest
+    {
+        [JsonPropertyName("elementId")] public string? ElementId { get; set; }
+        [JsonPropertyName("proposedAutomationId")] public string? ProposedAutomationId { get; set; }
+        [JsonPropertyName("sourceFile")] public string? SourceFile { get; set; }
+        [JsonPropertyName("sourceLine")] public int? SourceLine { get; set; }
+        [JsonPropertyName("sourceColumn")] public int? SourceColumn { get; set; }
+        [JsonPropertyName("sourceHash")] public string? SourceHash { get; set; }
+        [JsonPropertyName("sourceConfidence")] public string? SourceConfidence { get; set; }
+        [JsonPropertyName("affectedFlows")] public List<Testing.MauiCSharpSourceFlowFollowUp>? AffectedFlows { get; set; }
+        [JsonPropertyName("affectedPlatforms")] public List<Testing.MauiCSharpSourcePlatformVerification>? AffectedPlatforms { get; set; }
+    }
+
+    private sealed class WorkbenchCSharpSourceGrantRequest
+    {
+        [JsonPropertyName("proposalId")] public string? ProposalId { get; set; }
+        [JsonPropertyName("kind")] public string? Kind { get; set; }
+        [JsonPropertyName("reviewer")] public string? Reviewer { get; set; }
+        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("expiresAt")] public DateTimeOffset? ExpiresAt { get; set; }
+        [JsonPropertyName("hostCapability")] public WorkbenchCSharpSourceHostCapability? HostCapability { get; set; }
+    }
+
+    private sealed class WorkbenchCSharpSourceRejectRequest
+    {
+        [JsonPropertyName("reviewer")] public string? Reviewer { get; set; }
+        [JsonPropertyName("reasonCode")] public string? ReasonCode { get; set; }
+    }
+
+    private sealed class WorkbenchCSharpSourceHostRequest
+    {
+        [JsonPropertyName("hostCapability")] public WorkbenchCSharpSourceHostCapability? HostCapability { get; set; }
+    }
+
+    private sealed class WorkbenchCSharpSourceBeginApplyRequest
+    {
+        [JsonPropertyName("approvalGrant")] public string? ApprovalGrant { get; set; }
+        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("hostCapability")] public WorkbenchCSharpSourceHostCapability? HostCapability { get; set; }
+    }
+
+    private sealed class WorkbenchCSharpSourceApplyAckRequest
+    {
+        [JsonPropertyName("applied")] public bool Applied { get; set; }
+        [JsonPropertyName("hostKind")] public string? HostKind { get; set; }
+        [JsonPropertyName("preContentDigest")] public string? PreContentDigest { get; set; }
+        [JsonPropertyName("appliedContentDigest")] public string? AppliedContentDigest { get; set; }
+        [JsonPropertyName("patchDigest")] public string? PatchDigest { get; set; }
+        [JsonPropertyName("applyRunId")] public string? ApplyRunId { get; set; }
+        [JsonPropertyName("errorCode")] public string? ErrorCode { get; set; }
+        [JsonPropertyName("error")] public string? Error { get; set; }
+    }
+
+    private sealed class WorkbenchCSharpSourceVerificationRequest
+    {
+        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("platforms")] public List<WorkbenchCSharpSourcePlatformVerification>? Platforms { get; set; }
+        [JsonPropertyName("affectedFlowsReplayed")] public bool AffectedFlowsReplayed { get; set; }
+        [JsonPropertyName("independentOracleSucceeded")] public bool IndependentOracleSucceeded { get; set; }
+        [JsonPropertyName("verificationRunIds")] public List<string>? VerificationRunIds { get; set; }
+    }
+
+    private sealed class WorkbenchCSharpSourcePlatformVerification
+    {
+        [JsonPropertyName("platform")] public string? Platform { get; set; }
+        [JsonPropertyName("targetFramework")] public string? TargetFramework { get; set; }
+        [JsonPropertyName("buildSucceeded")] public bool BuildSucceeded { get; set; }
+        [JsonPropertyName("pendingExternalQa")] public bool PendingExternalQa { get; set; }
+        [JsonPropertyName("runtimeRemapConfirmed")] public bool RuntimeRemapConfirmed { get; set; }
+        [JsonPropertyName("automationIdUnique")] public bool AutomationIdUnique { get; set; }
+        [JsonPropertyName("replaySucceeded")] public bool ReplaySucceeded { get; set; }
+        [JsonPropertyName("independentOracleSucceeded")] public bool IndependentOracleSucceeded { get; set; }
+        [JsonPropertyName("reasonCode")] public string? ReasonCode { get; set; }
+    }
+
+    private sealed class WorkbenchCSharpSourceRollbackRequest
+    {
+        [JsonPropertyName("rollbackGrant")] public string? RollbackGrant { get; set; }
+        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("hostCapability")] public WorkbenchCSharpSourceHostCapability? HostCapability { get; set; }
+    }
+
+    private sealed class WorkbenchCSharpSourceRollbackAckRequest
+    {
+        [JsonPropertyName("reverted")] public bool Reverted { get; set; }
+        [JsonPropertyName("hostKind")] public string? HostKind { get; set; }
+        [JsonPropertyName("preContentDigest")] public string? PreContentDigest { get; set; }
+        [JsonPropertyName("contentDigest")] public string? ContentDigest { get; set; }
+        [JsonPropertyName("patchDigest")] public string? PatchDigest { get; set; }
+        [JsonPropertyName("errorCode")] public string? ErrorCode { get; set; }
+        [JsonPropertyName("error")] public string? Error { get; set; }
+    }
+
+    private sealed class WorkbenchCSharpSourceHostCapability
+    {
+        [JsonPropertyName("hostKind")] public string? HostKind { get; set; }
+        [JsonPropertyName("canOpenNativeDiff")] public bool CanOpenNativeDiff { get; set; }
+        [JsonPropertyName("canDownloadPatch")] public bool CanDownloadPatch { get; set; }
+        [JsonPropertyName("canApplyCSharpSource")] public bool CanApplyCSharpSource { get; set; }
+        [JsonPropertyName("isExplicitLocalHostAction")] public bool IsExplicitLocalHostAction { get; set; }
+    }
+
+    private sealed class WorkbenchXamlSourceProposalRequest
+    {
+        [JsonPropertyName("elementId")] public string? ElementId { get; set; }
+        [JsonPropertyName("proposedAutomationId")] public string? ProposedAutomationId { get; set; }
+        [JsonPropertyName("affectedFlows")] public List<Testing.MauiXamlSourceFlowFollowUp>? AffectedFlows { get; set; }
+        [JsonPropertyName("affectedPlatforms")] public List<Testing.MauiXamlSourcePlatformVerification>? AffectedPlatforms { get; set; }
+    }
+
+    private sealed class WorkbenchXamlSourceGrantRequest
+    {
+        [JsonPropertyName("proposalId")] public string? ProposalId { get; set; }
+        [JsonPropertyName("kind")] public string? Kind { get; set; }
+        [JsonPropertyName("reviewer")] public string? Reviewer { get; set; }
+        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("expiresAt")] public DateTimeOffset? ExpiresAt { get; set; }
+        [JsonPropertyName("hostCapability")] public WorkbenchXamlSourceHostCapability? HostCapability { get; set; }
+    }
+
+    private sealed class WorkbenchXamlSourceRejectRequest
+    {
+        [JsonPropertyName("reviewer")] public string? Reviewer { get; set; }
+        [JsonPropertyName("reasonCode")] public string? ReasonCode { get; set; }
+    }
+
+    private sealed class WorkbenchXamlSourceHostRequest
+    {
+        [JsonPropertyName("hostCapability")] public WorkbenchXamlSourceHostCapability? HostCapability { get; set; }
+    }
+
+    private sealed class WorkbenchXamlSourceApplyRequest
+    {
+        [JsonPropertyName("approvalGrant")] public string? ApprovalGrant { get; set; }
+        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("hostCapability")] public WorkbenchXamlSourceHostCapability? HostCapability { get; set; }
+    }
+
+    private sealed class WorkbenchXamlSourceRollbackRequest
+    {
+        [JsonPropertyName("rollbackGrant")] public string? RollbackGrant { get; set; }
+        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("hostCapability")] public WorkbenchXamlSourceHostCapability? HostCapability { get; set; }
+    }
+
+    private sealed class WorkbenchXamlSourceVerificationRequest
+    {
+        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("platforms")] public List<WorkbenchXamlSourcePlatformVerification>? Platforms { get; set; }
+        [JsonPropertyName("affectedFlowsReplayed")] public bool AffectedFlowsReplayed { get; set; }
+        [JsonPropertyName("independentOracleSucceeded")] public bool IndependentOracleSucceeded { get; set; }
+        [JsonPropertyName("verificationRunIds")] public List<string>? VerificationRunIds { get; set; }
+    }
+
+    private sealed class WorkbenchXamlSourcePlatformVerification
+    {
+        [JsonPropertyName("platform")] public string? Platform { get; set; }
+        [JsonPropertyName("targetFramework")] public string? TargetFramework { get; set; }
+        [JsonPropertyName("buildSucceeded")] public bool BuildSucceeded { get; set; }
+        [JsonPropertyName("pendingExternalQa")] public bool PendingExternalQa { get; set; }
+        [JsonPropertyName("runtimeRemapConfirmed")] public bool RuntimeRemapConfirmed { get; set; }
+        [JsonPropertyName("automationIdUnique")] public bool AutomationIdUnique { get; set; }
+        [JsonPropertyName("replaySucceeded")] public bool ReplaySucceeded { get; set; }
+        [JsonPropertyName("independentOracleSucceeded")] public bool IndependentOracleSucceeded { get; set; }
+        [JsonPropertyName("reasonCode")] public string? ReasonCode { get; set; }
+    }
+
+    private sealed class WorkbenchXamlSourceHostCapability
+    {
+        [JsonPropertyName("hostKind")] public string? HostKind { get; set; }
+        [JsonPropertyName("canOpenNativeDiff")] public bool CanOpenNativeDiff { get; set; }
+        [JsonPropertyName("canDownloadPatch")] public bool CanDownloadPatch { get; set; }
+        [JsonPropertyName("canApplySource")] public bool CanApplySource { get; set; }
+        [JsonPropertyName("isExplicitLocalHostAction")] public bool IsExplicitLocalHostAction { get; set; }
+    }
+
+    private sealed class WorkbenchRunRequestResult
+    {
+        public int StatusCode { get; private init; }
+        public string? Error { get; private init; }
+        public WorkflowRunStartRequest? Request { get; private init; }
+
+        public static WorkbenchRunRequestResult Success(WorkflowRunStartRequest request)
+            => new() { StatusCode = 200, Request = request };
+
+        public static WorkbenchRunRequestResult Failure(int statusCode, string error)
+            => new() { StatusCode = statusCode, Error = error };
+    }
+
+    private sealed record WorkbenchEvidenceConsent(bool IncludeScreenshot, bool IncludeWorkflow)
+    {
+        public static WorkbenchEvidenceConsent None { get; } = new(false, false);
+
+        public static WorkbenchEvidenceConsent From(WorkbenchEvidenceRequest? request)
+            => new(request?.IncludeScreenshot == true, request?.IncludeWorkflow == true);
+    }
+
+    private sealed record WorkbenchRunCapability(
+        string RunId,
+        string CapabilityToken,
+        DateTimeOffset CreatedAt,
+        WorkbenchEvidenceConsent EvidenceConsent,
+        string? IdempotencyKey);
+
+    private sealed record WorkbenchEvidence(
+        byte[] Bytes,
+        WorkbenchEvidenceConsent Consent,
+        DateTimeOffset CapturedAt);
+
+    private static readonly JsonSerializerOptions WorkbenchJsonOptions = new()
+    {
+        PropertyNameCaseInsensitive = true,
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+    };
+
+    private async Task<(int, string, byte[])> HandleFlowReplayAsync(
+        string? body,
+        string leaseId,
+        string holderKind,
+        string holderLabel)
     {
         if (string.IsNullOrEmpty(body))
             return (400, "application/json", Encoding.UTF8.GetBytes("{\"error\":\"Body required\"}"));
@@ -2060,10 +5968,11 @@ public sealed class InspectorServer : IDisposable
                 ? await ReplayStandaloneAsync(parsed.Flow, cts.Token)
                 : await _workflowReplay(
                     parsed.Flow,
-                    client => new InspectorReplayEvidenceCapture(client, parsed.Flow, bytes =>
+                    client => new InspectorReplayEvidenceCapture(client, WorkbenchEvidenceConsent.None, (_, bytes, _) =>
                     {
                         lock (_replayEvidenceGate) _lastReplayEvidence = bytes;
                     }),
+                    new WorkflowRunLeaseHandoff(leaseId, holderKind, holderLabel),
                     cts.Token);
             lock (_replayEvidenceGate) report.EvidenceAvailable = _lastReplayEvidence is { Length: > 0 };
             return (200, "application/json", Encoding.UTF8.GetBytes(JsonSerializer.Serialize(report, CamelCase)));
@@ -2088,7 +5997,7 @@ public sealed class InspectorServer : IDisposable
         Testing.MauiFlow flow,
         CancellationToken cancellationToken)
     {
-        var capture = new InspectorReplayEvidenceCapture(_client, flow, bytes =>
+        var capture = new InspectorReplayEvidenceCapture(_client, WorkbenchEvidenceConsent.None, (_, bytes, _) =>
         {
             lock (_replayEvidenceGate) _lastReplayEvidence = bytes;
         });
@@ -2111,14 +6020,17 @@ public sealed class InspectorServer : IDisposable
     private sealed class InspectorReplayEvidenceCapture : Testing.IFlowRunEvidenceCapture
     {
         private readonly AgentClient _client;
-        private readonly Testing.MauiFlow _flow;
-        private readonly Action<byte[]> _capture;
+        private readonly WorkbenchEvidenceConsent _consent;
+        private readonly Action<string, byte[], WorkbenchEvidenceConsent> _capture;
         public Testing.MauiFlowArtifactReference? CapturedArtifact { get; private set; }
 
-        public InspectorReplayEvidenceCapture(AgentClient client, Testing.MauiFlow flow, Action<byte[]> capture)
+        public InspectorReplayEvidenceCapture(
+            AgentClient client,
+            WorkbenchEvidenceConsent consent,
+            Action<string, byte[], WorkbenchEvidenceConsent> capture)
         {
             _client = client;
-            _flow = flow;
+            _consent = consent;
             _capture = capture;
         }
 
@@ -2131,10 +6043,10 @@ public sealed class InspectorServer : IDisposable
             var bundle = await Evidence.EvidenceCapture.CaptureToBytesAsync(_client, new Evidence.EvidenceRequest
             {
                 Source = "inspector",
-                IncludeScreenshot = false,
-                WorkflowMarkdown = Testing.FlowMarkdown.Serialize(_flow)
+                IncludeScreenshot = _consent.IncludeScreenshot,
+                WorkflowMarkdown = _consent.IncludeWorkflow ? Testing.FlowMarkdown.Serialize(flow) : null,
             }, cancellationToken);
-            _capture(bundle.Bytes);
+            _capture("legacy-evidence", bundle.Bytes, _consent);
             CapturedArtifact = new Testing.MauiFlowArtifactReference
             {
                 ArtifactId = "evidence-replay",
@@ -2153,8 +6065,8 @@ public sealed class InspectorServer : IDisposable
             var bundle = await Evidence.EvidenceCapture.CaptureToBytesAsync(_client, new Evidence.EvidenceRequest
             {
                 Source = "inspector",
-                IncludeScreenshot = false,
-                WorkflowMarkdown = Testing.FlowMarkdown.Serialize(context.Flow),
+                IncludeScreenshot = _consent.IncludeScreenshot,
+                WorkflowMarkdown = _consent.IncludeWorkflow ? Testing.FlowMarkdown.Serialize(context.Flow) : null,
                 FlowRun = new Evidence.EvidenceFlowRunLink
                 {
                     RunId = context.Report.RunId,
@@ -2168,7 +6080,7 @@ public sealed class InspectorServer : IDisposable
                     CaptureCompleteness = "failure-only-redacted",
                 }
             }, cancellationToken);
-            _capture(bundle.Bytes);
+            _capture(context.Report.RunId ?? "unknown-run", bundle.Bytes, _consent);
             CapturedArtifact = new Testing.MauiFlowArtifactReference
             {
                 ArtifactId = $"evidence-{context.Report.RunId}",
@@ -2182,15 +6094,30 @@ public sealed class InspectorServer : IDisposable
     }
 
     // POST paths rejected (409) while a replay is driving the app.
-    internal static bool IsBlockedDuringReplay(string path) => path switch
+    internal static bool IsBlockedDuringReplay(string path)
     {
-        "/api/tap" or "/api/scroll" or "/api/gesture" or "/api/back" or "/api/fill" or "/api/key"
-            or "/api/setProperty" or "/api/persistProperty" or "/api/navigate" or "/api/cdp/eval"
-            or "/api/alerts/dismiss" or "/api/flows/record/start" or "/api/flows/record/step" => true,
-        // A profiler session started from the inspector would perturb the run being replayed.
-        "/api/performance/start" or "/api/performance/stop" => true,
-        _ => false,
-    };
+        if (path.StartsWith("/api/workbench/source/", StringComparison.OrdinalIgnoreCase) &&
+            (path.EndsWith("/apply", StringComparison.OrdinalIgnoreCase) ||
+             path.EndsWith("/rollback", StringComparison.OrdinalIgnoreCase) ||
+             path.EndsWith("/begin-host-apply", StringComparison.OrdinalIgnoreCase) ||
+             path.EndsWith("/apply-ack", StringComparison.OrdinalIgnoreCase) ||
+             path.EndsWith("/begin-rollback", StringComparison.OrdinalIgnoreCase) ||
+             path.EndsWith("/rollback-ack", StringComparison.OrdinalIgnoreCase)))
+        {
+            return true;
+        }
+
+        return path switch
+        {
+            "/api/tap" or "/api/scroll" or "/api/gesture" or "/api/back" or "/api/fill" or "/api/key"
+                or "/api/setProperty" or "/api/persistProperty" or "/api/navigate" or "/api/cdp/eval"
+                or "/api/alerts/dismiss" or "/api/flows/record/start" or "/api/flows/record/step"
+                or "/api/flows/replay" or "/api/control" or "/api/checkpoint/restore" => true,
+            // A profiler session started from the inspector would perturb the run being replayed.
+            "/api/performance/start" or "/api/performance/stop" => true,
+            _ => false,
+        };
+    }
 
     // Proxies a Shell navigation to the agent — powers the "Return to start route" checkpoint restore.
     private async Task<(int, string, byte[])> HandleProxyNavigateAsync(string? body)
@@ -2273,8 +6200,13 @@ public sealed class InspectorServer : IDisposable
     private const int MaxNetworkLimit = 200;
 
     // Paths whose responses expose more than the visible tree and therefore require the read token.
-    internal static bool IsTokenGatedPath(string path) => path switch
+    internal static bool IsTokenGatedPath(string path)
     {
+        if (path.StartsWith("/api/workbench/", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return path switch
+        {
         "/api/checkpoint/status" or "/api/checkpoint/save" or "/api/checkpoint/restore" or "/api/checkpoint/clear"
             or
         "/api/source" or "/api/persistProperty" or "/api/logs" or "/api/network" or "/api/network/detail" or "/api/problems" or "/api/preferences"
@@ -2283,11 +6215,14 @@ public sealed class InspectorServer : IDisposable
             or "/api/performance/start" or "/api/performance/snapshot" or "/api/performance/stop"
             or "/api/files/roots" or "/api/files/list"
             or "/api/flows/files/list" or "/api/flows/files/load" or "/api/flows/replay/evidence"
+            or "/api/plans/list" or "/api/plans/load" or "/api/plans/validate" or "/api/plans/save"
+            or "/api/flows/validate" or "/api/flows/diff" or "/api/flows/commit" or "/api/flows/selector/verify" or "/api/flows/assert/verify"
             or "/api/alerts" or "/api/alerts/dismiss"
             or "/api/evidence/preview" or "/api/evidence/capture"
             or "/api/cdp/webviews" or "/api/cdp/source" or "/api/cdp/eval" => true,
         _ => false,
-    };
+        };
+    }
 
     private async Task<(int, string, byte[])> HandleAlertsAsync()
     {
@@ -2910,6 +6845,48 @@ public sealed class InspectorServer : IDisposable
         return Encoding.UTF8.GetString(ms.GetBuffer(), 0, (int)ms.Length);
     }
 
+    /// <summary>
+    /// Reads a binary Inspector artifact import without decoding foreign bytes as text. The caller
+    /// supplies the format-specific maximum; raw bytes are passed immediately to the broker trust
+    /// importer and are never retained by the Inspector.
+    /// </summary>
+    private static async Task<byte[]?> ReadBoundedBytesAsync(
+        Stream input,
+        long declaredLength,
+        int maximumBytes,
+        CancellationToken ct = default)
+    {
+        if (declaredLength > maximumBytes)
+            return null;
+
+        using var output = new MemoryStream(Math.Min(maximumBytes, 64 * 1024));
+        var buffer = new byte[16 * 1024];
+        var total = 0;
+        while (true)
+        {
+            using var perReadCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            perReadCts.CancelAfter(TimeSpan.FromSeconds(10));
+            int read;
+            try
+            {
+                read = await input.ReadAsync(buffer.AsMemory(), perReadCts.Token);
+            }
+            catch
+            {
+                return null;
+            }
+
+            if (read <= 0)
+                break;
+            total += read;
+            if (total > maximumBytes)
+                return null;
+            await output.WriteAsync(buffer.AsMemory(0, read), ct);
+        }
+
+        return output.ToArray();
+    }
+
     private static async Task<(HttpRequestInfo? Request, bool Oversized)> ReadRequestAsync(NetworkStream stream, CancellationToken ct)
     {
         // Accumulate reads until we find the end-of-headers sentinel (\r\n\r\n)
@@ -2987,6 +6964,7 @@ public sealed class InspectorServer : IDisposable
 
         // Read body as raw bytes, then decode as UTF-8 once.
         string? body = null;
+        byte[]? rawBody = null;
         if (headers.TryGetValue("content-length", out var clStr) && int.TryParse(clStr, out var contentLength) && contentLength > 0)
         {
             if (contentLength > MaxRequestBodyBytes)
@@ -3013,7 +6991,8 @@ public sealed class InspectorServer : IDisposable
                 if (extra == 0) break;
                 totalBodyRead += extra;
             }
-            body = Encoding.UTF8.GetString(bodyBytes, 0, totalBodyRead);
+            rawBody = bodyBytes[..totalBodyRead];
+            body = Encoding.UTF8.GetString(rawBody);
         }
 
         return (new HttpRequestInfo
@@ -3022,7 +7001,8 @@ public sealed class InspectorServer : IDisposable
             Path = path,
             Query = query,
             Headers = headers,
-            Body = body
+            Body = body,
+            BodyBytes = rawBody
         }, false);
     }
 
@@ -3060,5 +7040,6 @@ public sealed class InspectorServer : IDisposable
         public Dictionary<string, string> Query { get; init; } = new(StringComparer.OrdinalIgnoreCase);
         public Dictionary<string, string> Headers { get; init; } = new();
         public string? Body { get; init; }
+        public byte[]? BodyBytes { get; init; }
     }
 }

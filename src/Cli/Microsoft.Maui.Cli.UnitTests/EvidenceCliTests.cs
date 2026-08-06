@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.IO.Compression;
 using System.Net;
 using System.Net.Sockets;
 using Microsoft.Maui.Cli.DevFlow;
@@ -61,6 +62,68 @@ public class EvidenceCliTests : IDisposable
         Assert.Single(server.RecordedRequests, r => r.Path == "/api/v1/ui/tree");
         // A preview must never take a screenshot.
         Assert.DoesNotContain(server.RecordedRequests, r => r.Path == "/api/v1/ui/screenshot");
+    }
+
+    [Fact]
+    public async Task EvidenceInspectTrust_ReadsOnlyRedactedBoundedProjection()
+    {
+        const string secret = "inspect-trust-secret";
+        var (server, cli) = await CreateFixturesAsync();
+        await using var _ = server;
+        var input = Path.Combine(_root, "flow-run.json");
+        await File.WriteAllTextAsync(input, $$"""
+            {
+              "schema": 1,
+              "runId": "embedded-local-looking-run",
+              "flowDigest": "flow",
+              "failure": {
+                "failureId": "embedded-failure",
+                "code": "locator-not-found",
+                "class": "locator-not-found",
+                "stepId": "tap-save",
+                "message": "{{secret}}"
+              },
+              "steps": [],
+              "events": [],
+              "artifacts": []
+            }
+            """);
+
+        var result = await cli.InvokeRawAsync(
+            "devflow", "evidence", "inspect-trust", input, "--json");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.DoesNotContain(secret, result.StdOut, StringComparison.Ordinal);
+        var json = result.ParseJsonOutput();
+        Assert.Equal("imported-artifact", json.GetProperty("identity").GetProperty("namespace").GetString());
+        Assert.Equal("untrusted", json.GetProperty("verification").GetProperty("state").GetString());
+        Assert.Empty(server.RecordedRequests);
+    }
+
+    [Fact]
+    public async Task EvidenceVerifyAppleQa_ReportsBoundedUntrustedDiagnosticImportWithoutContactingAnAgent()
+    {
+        var (server, cli) = await CreateFixturesAsync();
+        await using var _ = server;
+        var archive = Path.Combine(_root, "apple-qa-return.zip");
+        await File.WriteAllBytesAsync(archive, CreateAppleQaReturnArchive());
+
+        var result = await cli.InvokeRawAsync(
+            "devflow", "evidence", "verify-apple-qa", archive, "--import-diagnostics", "--json");
+
+        Assert.True(
+            result.ExitCode == 0,
+            $"verify-apple-qa failed: stdout={result.StdOut}; stderr={result.StdErr}");
+        var json = result.ParseJsonOutput();
+        Assert.True(json.GetProperty("ok").GetBoolean());
+        Assert.Equal("ios", json.GetProperty("platform").GetString());
+        Assert.False(json.GetProperty("executed").GetBoolean());
+        Assert.False(json.GetProperty("rawContentRetained").GetBoolean());
+        Assert.False(json.GetProperty("repairProposalAuthority").GetBoolean());
+        var imported = Assert.Single(json.GetProperty("importedDiagnostics").EnumerateArray());
+        Assert.Equal("imported-artifact", imported.GetProperty("identity").GetProperty("namespace").GetString());
+        Assert.Equal("untrusted", imported.GetProperty("verification").GetProperty("state").GetString());
+        Assert.Empty(server.RecordedRequests);
     }
 
     [Fact]
@@ -262,5 +325,130 @@ public class EvidenceCliTests : IDisposable
         using var listener = new TcpListener(IPAddress.Loopback, 0);
         listener.Start();
         return ((IPEndPoint)listener.LocalEndpoint).Port;
+    }
+
+    private static byte[] CreateAppleQaReturnArchive()
+    {
+        const string prefix = "artifacts/devflow/run-1/ios";
+        var flowPath = $"{prefix}/apple-flow-runs/tier-one/flow-run.json";
+        var flowRun = System.Text.Encoding.UTF8.GetBytes("""
+            {
+              "schema": 1,
+              "runId": "foreign-run-id",
+              "flowDigest": "flow",
+              "target": { "platform": "ios" },
+              "outcome": { "status": "failed", "terminal": true },
+              "steps": [],
+              "events": [],
+              "artifacts": []
+            }
+            """);
+        var digest = "sha256:" + Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(flowRun)).ToLowerInvariant();
+        var hashA = "sha256:" + new string('a', 64);
+        var manifest = $$"""
+            {
+              "schema": 1,
+              "kind": "devflow-flow-qa",
+              "repository": { "commit": "commit" },
+              "workflow": { "runId": "run-1" },
+              "experimental": false,
+              "backend": null,
+              "officialCoverage": true,
+              "macCatalystEquivalent": null,
+              "testing": { "packageVersion": "testing" },
+              "platform": {
+                "name": "ios",
+                "host": {
+                  "xcode": "Xcode 26.3",
+                  "runtime": "iOS 18.0",
+                  "deviceEvidence": {
+                    "kind": "simulator",
+                    "realDevice": false,
+                    "deviceIdFingerprint": "{{hashA}}",
+                    "profile": "iPhone"
+                  }
+                }
+              },
+              "app": {
+                "project": "samples/DevFlow.Sample/DevFlow.Sample.csproj",
+                "sourceDigest": "{{hashA}}",
+                "buildFingerprint": "{{hashA}}",
+                "packageDigest": "{{hashA}}"
+              },
+              "flows": [
+                { "path": "samples/DevFlow.Sample/maui-tests/tier-one.md", "sha256": "{{hashA}}" }
+              ],
+              "appleQa": {
+                "schema": 1,
+                "kind": "devflow-apple-flow-qa",
+                "platform": "ios",
+                "experimental": false,
+                "backend": null,
+                "officialCoverage": true,
+                "macCatalystEquivalent": null,
+                "spike": {
+                  "status": "proved",
+                  "foregroundProof": true,
+                  "authenticatedTransport": true,
+                  "receipt": true,
+                  "cancellation": true,
+                  "parity": true
+                },
+                "checkpoint": {
+                  "resetFingerprint": "{{hashA}}",
+                  "seedFingerprint": "{{hashA}}",
+                  "backendStateFingerprint": "{{hashA}}"
+                },
+                "apple": {
+                  "xcodeVersion": "Xcode 26.3",
+                  "simulatorRuntime": "iOS 18.0",
+                  "simulatorDeviceFingerprint": "{{hashA}}",
+                  "simulatorDeviceProfile": "iPhone"
+                },
+                "flows": [
+                  {
+                    "name": "tier-one",
+                    "firstAttempt": {
+                      "status": "failed",
+                      "report": "{{flowPath}}",
+                      "reportDigest": "{{hashA}}"
+                    },
+                    "cleanAttempts": [
+                      {
+                        "status": "failed",
+                        "report": "{{flowPath}}",
+                        "reportDigest": "{{hashA}}"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "artifacts": [
+                {
+                  "kind": "flow-run-report",
+                  "path": "{{flowPath}}",
+                  "sha256": "{{digest}}",
+                  "sizeBytes": {{flowRun.Length}},
+                  "redacted": true
+                }
+              ],
+              "omissions": []
+            }
+            """;
+
+        using var output = new MemoryStream();
+        using (var zip = new ZipArchive(output, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            WriteArchiveEntry(zip, $"{prefix}/manifest.json", System.Text.Encoding.UTF8.GetBytes(manifest));
+            WriteArchiveEntry(zip, flowPath, flowRun);
+        }
+        return output.ToArray();
+    }
+
+    private static void WriteArchiveEntry(ZipArchive archive, string path, byte[] content)
+    {
+        var entry = archive.CreateEntry(path, CompressionLevel.NoCompression);
+        using var stream = entry.Open();
+        stream.Write(content);
     }
 }

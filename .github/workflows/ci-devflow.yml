@@ -6,9 +6,12 @@ on:
     branches: [main]
     paths:
       - 'src/DevFlow/**'
+      - 'tests/DevFlow/**'
       - 'src/Cli/Microsoft.Maui.Cli/DevFlow/**'
       - '.github/extensions/maui-devflow-canvas/**'
       - '.github/workflows/ci-devflow.yml'
+      - 'docs/DevFlow/**'
+      - 'README.md'
       - 'eng/**'
       - 'Directory.Build.props'
       - 'Directory.Build.targets'
@@ -20,9 +23,12 @@ on:
     branches: [main]
     paths:
       - 'src/DevFlow/**'
+      - 'tests/DevFlow/**'
       - 'src/Cli/Microsoft.Maui.Cli/DevFlow/**'
       - '.github/extensions/maui-devflow-canvas/**'
       - '.github/workflows/ci-devflow.yml'
+      - 'docs/DevFlow/**'
+      - 'README.md'
       - 'eng/**'
       - 'Directory.Build.props'
       - 'Directory.Build.targets'
@@ -38,6 +44,7 @@ jobs:
       project-name: devflow
       run-tests: true
       pack: true
+      pack-driver: true
       os: '["windows-latest"]'
 
   hosts:

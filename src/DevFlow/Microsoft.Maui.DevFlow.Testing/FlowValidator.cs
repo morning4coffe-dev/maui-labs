@@ -173,3 +173,12 @@ public static class FlowValidator
             || !string.IsNullOrEmpty(a?.Position);
     }
 }
+
+/// <summary>
+/// Publicly named facade for the canonical flow validator. <see cref="FlowValidator"/> remains
+/// available for existing callers.
+/// </summary>
+public static class MauiFlowValidator
+{
+    public static FlowValidation Validate(MauiFlow flow) => FlowValidator.Validate(flow);
+}

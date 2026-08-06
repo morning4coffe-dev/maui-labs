@@ -13,6 +13,8 @@ public sealed class MauiFlowRunReportLimits
     public int MaxSteps { get; set; } = 2_000;
     public int MaxActionabilityAttemptsPerStep { get; set; } = 64;
     public int MaxAssertionsPerStep { get; set; } = 64;
+    public int MaxSelectorCandidatesPerStep { get; set; } = 8;
+    public int MaxSelectorCandidateOmissionsPerStep { get; set; } = 16;
     public int MaxArtifacts { get; set; } = 64;
     public int MaxTextLength { get; set; } = 512;
     public int MaxJsonBytes { get; set; } = 1_048_576;
@@ -186,6 +188,8 @@ public static class MauiFlowRunReportSerializer
         limits.MaxSteps = Math.Max(1, limits.MaxSteps);
         limits.MaxActionabilityAttemptsPerStep = Math.Max(1, limits.MaxActionabilityAttemptsPerStep);
         limits.MaxAssertionsPerStep = Math.Max(1, limits.MaxAssertionsPerStep);
+        limits.MaxSelectorCandidatesPerStep = Math.Clamp(limits.MaxSelectorCandidatesPerStep, 1, 32);
+        limits.MaxSelectorCandidateOmissionsPerStep = Math.Clamp(limits.MaxSelectorCandidateOmissionsPerStep, 1, 64);
         limits.MaxArtifacts = Math.Max(1, limits.MaxArtifacts);
         limits.MaxTextLength = Math.Max(32, limits.MaxTextLength);
         limits.MaxJsonBytes = Math.Max(4_096, limits.MaxJsonBytes);
@@ -201,9 +205,19 @@ public static class MauiFlowRunReportSerializer
                 "An actionability-attempt limit was reached.");
             Trim(step.Assertions, limits.MaxAssertionsPerStep, report, "assertions",
                 "An assertion-result limit was reached.");
+            Trim(step.SelectorCandidates, limits.MaxSelectorCandidatesPerStep, report, "selector-candidates",
+                "The selector-candidate limit was reached.");
+            Trim(step.SelectorCandidateOmissions, limits.MaxSelectorCandidateOmissionsPerStep, report, "selector-candidate-omissions",
+                "The selector-candidate-omission limit was reached.");
             Trim(step.Artifacts, limits.MaxArtifacts, report, "step-artifacts",
                 "A step artifact-reference limit was reached.");
             BoundStepText(step, limits.MaxTextLength);
+        }
+        if (report.SelectorHealth is not null)
+        {
+            report.SelectorHealth.CapturedSteps = report.Steps.Count(step => step.Fingerprint is not null);
+            report.SelectorHealth.CandidateCount = report.Steps.Sum(step => step.SelectorCandidates.Count);
+            report.SelectorHealth.OmissionCount = report.Steps.Sum(step => step.SelectorCandidateOmissions.Count);
         }
 
         foreach (var item in report.Events)
@@ -283,6 +297,7 @@ public static class MauiFlowRunReportSerializer
             step.AcknowledgementState = MauiFlowReportRedactor.SafeIdentifier(step.AcknowledgementState);
             step.CompletionCertainty = MauiFlowReportRedactor.SafeIdentifier(step.CompletionCertainty);
             step.FailureClass = MauiFlowReportRedactor.SafeIdentifier(step.FailureClass);
+            SanitizeSelectorEvidence(step);
             step.TargetResolution?.Let(value =>
             {
                 value.Status = MauiFlowReportRedactor.SafeIdentifier(value.Status);
@@ -335,6 +350,114 @@ public static class MauiFlowRunReportSerializer
         SanitizeArtifacts(report.Artifacts, maxTextLength);
     }
 
+    private static void SanitizeSelectorEvidence(MauiFlowStepAttempt step)
+    {
+        if (step.Fingerprint is { } fingerprint)
+        {
+            fingerprint.ExtensionData = null;
+            fingerprint.FingerprintId = MauiFlowReportRedactor.SafeIdentifier(fingerprint.FingerprintId);
+            fingerprint.Context.AppId = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.AppId);
+            fingerprint.Context.AppBuild = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.AppBuild);
+            fingerprint.Context.Platform = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.Platform);
+            fingerprint.Context.Route = MauiFlowReportRedactor.SafeRoute(fingerprint.Context.Route);
+            fingerprint.Context.Window = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.Window);
+            fingerprint.Context.Modal = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.Modal);
+            fingerprint.Context.Locale = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.Locale);
+            fingerprint.Context.Theme = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.Theme);
+            fingerprint.Context.Orientation = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.Orientation);
+            fingerprint.Context.DisplayProfile = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.DisplayProfile);
+            fingerprint.Managed.Type = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Managed.Type);
+            fingerprint.Managed.FullType = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Managed.FullType);
+            fingerprint.Managed.Framework = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Managed.Framework);
+            fingerprint.Managed.Role = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Managed.Role);
+            fingerprint.Managed.AutomationId = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Managed.AutomationId);
+            fingerprint.Managed.Traits = fingerprint.Managed.Traits
+                .Select(static trait => MauiFlowReportRedactor.SafeIdentifier(trait) ?? "trait")
+                .Take(16)
+                .ToList();
+            if (fingerprint.Native is not null)
+            {
+                fingerprint.Native.Identity = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Native.Identity);
+                fingerprint.Native.Kind = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Native.Kind);
+            }
+            if (fingerprint.Source is not null)
+            {
+                fingerprint.Source.File = MauiFlowReportRedactor.SafeMessage(fingerprint.Source.File);
+                fingerprint.Source.BuildHash = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Source.BuildHash);
+                fingerprint.Source.CurrentHash = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Source.CurrentHash);
+                fingerprint.Source.State = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Source.State);
+                fingerprint.Source.Confidence = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Source.Confidence);
+            }
+            fingerprint.Topology.AncestorHash = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Topology.AncestorHash);
+            fingerprint.Topology.SiblingHash = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Topology.SiblingHash);
+            fingerprint.Topology.ChildHash = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Topology.ChildHash);
+            fingerprint.Topology.StableAncestorAutomationId = MauiFlowReportRedactor.SafeIdentifier(
+                fingerprint.Topology.StableAncestorAutomationId);
+            if (fingerprint.Collection is not null)
+            {
+                fingerprint.Collection.Scope = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Collection.Scope);
+                fingerprint.Collection.ItemKey = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Collection.ItemKey);
+                fingerprint.Collection.TemplateKind = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Collection.TemplateKind);
+            }
+            fingerprint.NormalizedBounds?.Let(value => value.ExtensionData = null);
+            fingerprint.EvidenceRefs = fingerprint.EvidenceRefs
+                .Select(static value => MauiFlowReportRedactor.SafeIdentifier(value) ?? "evidence")
+                .Take(32)
+                .ToList();
+        }
+
+        foreach (var candidate in step.SelectorCandidates)
+        {
+            candidate.ExtensionData = null;
+            candidate.CandidateId = MauiFlowReportRedactor.SafeIdentifier(candidate.CandidateId);
+            candidate.Origin = MauiFlowReportRedactor.SafeIdentifier(candidate.Origin);
+            candidate.Selector = MauiFlowReportRedactor.SanitizeSelector(candidate.Selector);
+            candidate.SelectorDescriptor.Kind = MauiFlowReportRedactor.SafeIdentifier(candidate.SelectorDescriptor.Kind);
+            candidate.SelectorDescriptor.AutomationId = MauiFlowReportRedactor.SafeIdentifier(candidate.SelectorDescriptor.AutomationId);
+            candidate.SelectorDescriptor.StableItemKey = MauiFlowReportRedactor.SafeIdentifier(candidate.SelectorDescriptor.StableItemKey);
+            candidate.SelectorDescriptor.NativeAutomationIdentity = MauiFlowReportRedactor.SafeIdentifier(candidate.SelectorDescriptor.NativeAutomationIdentity);
+            candidate.SelectorDescriptor.Role = MauiFlowReportRedactor.SafeIdentifier(candidate.SelectorDescriptor.Role);
+            candidate.SelectorDescriptor.Type = MauiFlowReportRedactor.SafeIdentifier(candidate.SelectorDescriptor.Type);
+            candidate.SelectorDescriptor.AncestorAutomationId = MauiFlowReportRedactor.SafeIdentifier(candidate.SelectorDescriptor.AncestorAutomationId);
+            candidate.SelectorDescriptor.SourceAnchor = MauiFlowReportRedactor.SafeMessage(candidate.SelectorDescriptor.SourceAnchor);
+            // Run reports never retain raw exact text, even if an external caller populated it.
+            candidate.SelectorDescriptor.ExactText = null;
+            candidate.ScopeDescriptor.Route = MauiFlowReportRedactor.SafeRoute(candidate.ScopeDescriptor.Route);
+            candidate.ScopeDescriptor.Window = MauiFlowReportRedactor.SafeIdentifier(candidate.ScopeDescriptor.Window);
+            candidate.ScopeDescriptor.Modal = MauiFlowReportRedactor.SafeIdentifier(candidate.ScopeDescriptor.Modal);
+            candidate.ScopeDescriptor.CollectionScope = MauiFlowReportRedactor.SafeIdentifier(candidate.ScopeDescriptor.CollectionScope);
+            candidate.ScopeDescriptor.LocaleAssumption = MauiFlowReportRedactor.SafeIdentifier(candidate.ScopeDescriptor.LocaleAssumption);
+            var sanitizedRationale = candidate.RationaleCodes
+                .Select(static value => MauiFlowReportRedactor.SafeIdentifier(value) ?? "rationale")
+                .Take(16)
+                .ToList();
+            candidate.RationaleCodes.Clear();
+            candidate.RationaleCodes.AddRange(sanitizedRationale);
+            var sanitizedRisks = candidate.RiskFlags
+                .Select(static value => MauiFlowReportRedactor.SafeIdentifier(value) ?? "risk")
+                .Take(16)
+                .ToList();
+            candidate.RiskFlags.Clear();
+            candidate.RiskFlags.AddRange(sanitizedRisks);
+            candidate.Validation.PlatformState = MauiFlowReportRedactor.SafeIdentifier(candidate.Validation.PlatformState);
+            candidate.Validation.SourceState = MauiFlowReportRedactor.SafeIdentifier(candidate.Validation.SourceState);
+            candidate.Validation.RejectionReason = MauiFlowReportRedactor.SafeMessage(candidate.Validation.RejectionReason);
+            candidate.Calibration.State = MauiFlowReportRedactor.SafeIdentifier(candidate.Calibration.State) ??
+                MauiSelectorHealthRules.Uncalibrated;
+            candidate.Calibration.RuleVersion = MauiFlowReportRedactor.SafeIdentifier(candidate.Calibration.RuleVersion) ??
+                MauiSelectorHealthRules.RankerRuleVersion;
+            candidate.EvidenceRefs = candidate.EvidenceRefs
+                .Select(static value => MauiFlowReportRedactor.SafeIdentifier(value) ?? "evidence")
+                .Take(32)
+                .ToList();
+        }
+        foreach (var omission in step.SelectorCandidateOmissions)
+        {
+            omission.Kind = MauiFlowReportRedactor.SafeIdentifier(omission.Kind);
+            omission.Reason = MauiFlowReportRedactor.SafeMessage(omission.Reason);
+        }
+    }
+
     private static void SanitizeTarget(MauiFlowRunTarget? target)
     {
         if (target is null)
@@ -345,6 +468,8 @@ public static class MauiFlowRunReportSerializer
         target.DeviceProfile = MauiFlowReportRedactor.SafeIdentifier(target.DeviceProfile);
         target.AppId = MauiFlowReportRedactor.SafeIdentifier(target.AppId);
         target.AppBuildFingerprint = MauiFlowReportRedactor.SafeIdentifier(target.AppBuildFingerprint);
+        target.AppSourceFingerprint = MauiFlowReportRedactor.SafeIdentifier(target.AppSourceFingerprint);
+        target.PackageDigest = MauiFlowReportRedactor.SafeIdentifier(target.PackageDigest);
         target.AgentId = MauiFlowReportRedactor.SafeIdentifier(target.AgentId);
         target.AgentInstanceId = MauiFlowReportRedactor.SafeIdentifier(target.AgentInstanceId);
         target.Locale = MauiFlowReportRedactor.SafeIdentifier(target.Locale);

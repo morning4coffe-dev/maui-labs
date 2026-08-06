@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "baseline-assertion-gap",
+  "kind": "baseline",
+  "disposition": "diagnostic-only",
+  "fixture": { "action": "tap", "selector": { "automationId": "save" }, "assertions": [] },
+  "expect": { "diagnosticIds": ["DFSH009"], "candidateKinds": ["automation-id"] }
+}

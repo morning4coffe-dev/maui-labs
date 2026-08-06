@@ -288,7 +288,13 @@ public class AgentClient : IDisposable
             ["position"] = observation.Position,
             ["page"] = observation.Page,
             ["navigated"] = observation.Navigated,
-            ["assertsJson"] = observation.AssertsJson
+            ["assertsJson"] = observation.AssertsJson,
+            ["sensitive"] = observation.Sensitive,
+            ["selectorObservation"] = observation.SelectorObservation is null
+                ? null
+                : JsonSerializer.SerializeToNode(
+                    observation.SelectorObservation,
+                    DevFlowDriverJsonContext.Default.MauiSelectorObservation)
         };
         var body = new JsonObject
         {
@@ -2230,6 +2236,18 @@ public class AgentStatus
 
     [System.Text.Json.Serialization.JsonPropertyName("route")]
     public string? Route { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("window")]
+    public string? Window { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("modal")]
+    public string? Modal { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("locale")]
+    public string? Locale { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("theme")]
+    public string? Theme { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("orientation")]
+    public string? Orientation { get; set; }
+    [System.Text.Json.Serialization.JsonPropertyName("displayProfile")]
+    public string? DisplayProfile { get; set; }
 
     [System.Text.Json.Serialization.JsonIgnore]
     public string? Version => Agent?.Version;

@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/dotnet/maui-labs/main/tests/DevFlow/InspectorCorpus/schemas/selector-health-corpus-v1.json",
+  "title": "DevFlow Inspector selector-health corpus case v1",
+  "type": "object",
+  "required": ["schema", "id", "kind", "disposition", "fixture", "expect"],
+  "properties": {
+    "schema": { "const": 1 },
+    "id": { "type": "string", "minLength": 1 },
+    "kind": { "enum": ["baseline", "mutation", "no-repair", "product-regression", "repair-positive", "repair-negative"] },
+    "disposition": { "enum": ["diagnostic-only", "no-repair", "repair-eligible"] },
+    "fixture": { "type": "object" },
+    "expect": {
+      "type": "object",
+      "required": ["diagnosticIds"],
+      "properties": {
+        "diagnosticIds": { "type": "array", "items": { "pattern": "^(?:DFSH|DFXAML|DFCS)[0-9]{3}$" } },
+        "candidateKinds": { "type": "array", "items": { "type": "string" } },
+        "repairEligible": { "type": "boolean" },
+        "ineligibilityCodes": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "additionalProperties": false
+}

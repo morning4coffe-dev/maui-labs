@@ -27,6 +27,13 @@ public interface IMauiFlowDriver
     Task<ThemeResult> SetThemeAsync(DevFlowTheme theme);
     Task<string?> GetPropertyAsync(string elementId, string propertyName);
     Task<AgentStatus?> GetStatusAsync();
+    /// <summary>
+    /// Optional value-free tree source used only for diagnostic selector evidence. Existing driver
+    /// implementations may omit it; selector capture then records an explicit omission without
+    /// changing selector resolution or replay.
+    /// </summary>
+    Task<List<ElementInfo>> GetTreeAsync(int maxDepth = 0)
+        => Task.FromResult(new List<ElementInfo>());
 }
 
 /// <summary>Adapter that allows the public runner to consume the existing <see cref="AgentClient"/> API.</summary>
@@ -69,4 +76,5 @@ public sealed class AgentClientMauiFlowDriver : IMauiFlowDriver
     public Task<string?> GetPropertyAsync(string elementId, string propertyName)
         => _client.GetPropertyAsync(elementId, propertyName);
     public Task<AgentStatus?> GetStatusAsync() => _client.GetStatusAsync();
+    public Task<List<ElementInfo>> GetTreeAsync(int maxDepth = 0) => _client.GetTreeAsync(maxDepth);
 }

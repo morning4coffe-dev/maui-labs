@@ -89,7 +89,7 @@ public class VisualTreeWalker
         }
 
         if (app is not IVisualTreeElement appElement) return null;
-        foreach (var child in appElement.GetVisualChildren())
+        foreach (var child in GetTraversalChildren(appElement))
         {
             var result = FindByIdRecursive(child, id, null);
             if (result != null) return result;
@@ -219,7 +219,7 @@ public class VisualTreeWalker
 
         if (element is IVisualTreeElement vte)
         {
-            foreach (var child in vte.GetVisualChildren())
+            foreach (var child in GetTraversalChildren(vte))
             {
                 if (child is Element childEl)
                     HitTestByBoundsRecursive(childEl, x, y, hits);
@@ -419,7 +419,7 @@ public class VisualTreeWalker
                 return results;
             }
 
-            foreach (var child in appElement.GetVisualChildren())
+            foreach (var child in GetTraversalChildren(appElement))
             {
                 var info = WalkElement(child, null, 1, maxDepth);
                 if (info != null)
@@ -678,6 +678,7 @@ public class VisualTreeWalker
         info.SourceLine = entry.Line;
         info.SourceColumn = entry.Column;
         info.SourceHash = map.ContentHash;
+        info.SourceConfidence = "mapped";
     }
 
     /// <summary>
@@ -882,7 +883,7 @@ public class VisualTreeWalker
 
         info.Children ??= new List<ElementInfo>();
 
-        var children = element.GetVisualChildren();
+        var children = GetTraversalChildren(element);
         foreach (var child in children)
         {
             var childInfo = WalkElement(child, id, currentDepth + 1, maxDepth);
@@ -890,17 +891,6 @@ public class VisualTreeWalker
                 info.Children.Add(childInfo);
             if (WalkWasTruncated)
                 break;
-        }
-
-        // ShellContent-specific: ensure content page is included even if
-        // GetVisualChildren() doesn't expose it (common on GTK/Linux after navigation).
-        if (!WalkWasTruncated &&
-            element is ShellContent sc && sc.Content is IVisualTreeElement scPage
-            && !children.Contains(scPage))
-        {
-            var pageInfo = WalkElement(scPage, id, currentDepth + 1, maxDepth);
-            if (pageInfo != null)
-                info.Children.Add(pageInfo);
         }
 
         // Add ToolbarItems as synthetic children of Pages
@@ -965,63 +955,13 @@ public class VisualTreeWalker
     /// </summary>
     public List<ElementInfo> Query(Application app, string? type = null, string? automationId = null, string? text = null)
     {
-        var results = new List<ElementInfo>();
-        if (app is not IVisualTreeElement appElement)
-            return results;
-
-        QueryRecursive(appElement, type, automationId, text, null, results);
+        var elements = FlattenElementInfos(WalkTree(app)).ToList();
+        var results = elements
+            .Where(info => MatchesElementInfo(info, type, automationId, text))
+            .ToList();
+        foreach (var result in results)
+            result.Children = null;
         return results;
-    }
-
-    private void QueryRecursive(IVisualTreeElement element, string? type, string? automationId, string? text, string? parentId, List<ElementInfo> results)
-    {
-        var id = GenerateId(element);
-        var info = CreateElementInfo(element, id, parentId);
-
-        MatchAndAdd(info, type, automationId, text, results);
-
-        var children = element.GetVisualChildren();
-        foreach (var child in children)
-            QueryRecursive(child, type, automationId, text, id, results);
-
-        // ShellContent-specific: include content page if not already traversed
-        if (element is ShellContent sc && sc.Content is IVisualTreeElement scPage
-            && !children.Contains(scPage))
-        {
-            QueryRecursive(scPage, type, automationId, text, id, results);
-        }
-
-        // Also query ToolbarItems and back button on Pages
-        if (element is Page page)
-        {
-            foreach (var toolbarItem in page.ToolbarItems)
-            {
-                var tiInfo = CreateToolbarItemInfo(toolbarItem, id);
-                MatchAndAdd(tiInfo, type, automationId, text, results);
-            }
-
-            var backInfo = CreateBackButtonInfo(page, id);
-            if (backInfo != null)
-                MatchAndAdd(backInfo, type, automationId, text, results);
-        }
-    }
-
-    private static void MatchAndAdd(ElementInfo info, string? type, string? automationId, string? text, List<ElementInfo> results)
-    {
-        bool matches = true;
-
-        if (type != null && !info.Type.Equals(type, StringComparison.OrdinalIgnoreCase)
-            && !info.FullType.Equals(type, StringComparison.OrdinalIgnoreCase))
-            matches = false;
-
-        if (automationId != null && !string.Equals(info.AutomationId, automationId, StringComparison.OrdinalIgnoreCase))
-            matches = false;
-
-        if (text != null && (info.Text == null || !info.Text.Contains(text, StringComparison.OrdinalIgnoreCase)))
-            matches = false;
-
-        if (matches && (type != null || automationId != null || text != null))
-            results.Add(info);
     }
 
     /// <summary>
@@ -1191,7 +1131,7 @@ public class VisualTreeWalker
         var id = GenerateId(element);
         if (id == targetId) return element;
 
-        var children = element.GetVisualChildren();
+        var children = GetTraversalChildren(element);
 
         // Check synthetics on Pages
         if (element is Page page)
@@ -1251,15 +1191,45 @@ public class VisualTreeWalker
             if (result != null) return result;
         }
 
-        // ShellContent special case
-        if (element is ShellContent sc && sc.Content is IVisualTreeElement scPage
-            && !children.Contains(scPage))
+        return null;
+    }
+
+    private static IReadOnlyList<IVisualTreeElement> GetTraversalChildren(IVisualTreeElement element)
+    {
+        var children = element.GetVisualChildren();
+        List<IVisualTreeElement>? expanded = null;
+
+        void Add(IVisualTreeElement? child)
         {
-            var result = FindByIdRecursive(scPage, targetId, id);
-            if (result != null) return result;
+            if (child is null)
+                return;
+
+            var current = expanded ?? children;
+            if (current.Any(existing => ReferenceEquals(existing, child)))
+                return;
+
+            expanded ??= children.ToList();
+            expanded.Add(child);
         }
 
-        return null;
+        switch (element)
+        {
+            case ShellContent shellContent:
+                Add(shellContent.Content as IVisualTreeElement);
+                break;
+            case NavigationPage navigationPage:
+                Add(navigationPage.CurrentPage);
+                break;
+            case FlyoutPage flyoutPage:
+                Add(flyoutPage.Flyout);
+                Add(flyoutPage.Detail);
+                break;
+            case TabbedPage tabbedPage:
+                Add(tabbedPage.CurrentPage);
+                break;
+        }
+
+        return expanded ?? children;
     }
 
     private object? FindNavBarTitleById(Page page, string parentId, string targetId)

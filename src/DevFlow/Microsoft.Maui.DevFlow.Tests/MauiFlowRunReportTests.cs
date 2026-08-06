@@ -20,6 +20,19 @@ public sealed class MauiFlowRunReportTests : IDisposable
     }
 
     [Fact]
+    public void BuildFingerprint_UnknownPlaceholdersDoNotCreateFalsePreconditions()
+    {
+        Assert.Null(MauiFlowRunner.BuildFingerprint(new AgentStatus
+        {
+            App = new AppDescriptor { Version = "unknown", Build = "unknown" },
+        }));
+        Assert.Equal("unknown:42", MauiFlowRunner.BuildFingerprint(new AgentStatus
+        {
+            App = new AppDescriptor { Build = "42" },
+        }));
+    }
+
+    [Fact]
     public async Task RunAsync_Mutation_RecordsOrderedActionabilityAndWorkflowReceipt()
     {
         var driver = new FakeDriver { EmitReceipt = true };
@@ -240,6 +253,39 @@ public sealed class MauiFlowRunReportTests : IDisposable
         Assert.False(legacy.Ok);
         Assert.Equal(4, legacy.DivergencePoint);
         Assert.Equal(FlowFailureKinds.NotFound, legacy.Results[0].FailureKind);
+        Assert.Same(report, legacy.StructuredReport);
+    }
+
+    [Fact]
+    public void LegacyAdapter_PreStepFailure_ExplainsWhyNoStepsRan()
+    {
+        var report = new MauiFlowRunReport
+        {
+            RunId = "run-admission-failure",
+            FlowDigest = new string('d', 64),
+            Outcome = new MauiFlowRunOutcome
+            {
+                Status = MauiFlowRunOutcomes.Failed,
+                Summary = "The target agent is already held by another mutation lease.",
+                Terminal = true,
+            },
+            Failure = new MauiFlowFailure
+            {
+                Class = MauiFlowFailureClasses.LeaseConflict,
+                Message = "The target agent is already held by another mutation lease.",
+            },
+        };
+
+        var legacy = FlowReplayReportAdapter.ToLegacy(report, "legacy");
+
+        Assert.False(legacy.Ok);
+        Assert.Equal(1, legacy.Total);
+        Assert.Equal(1, legacy.Failed);
+        var result = Assert.Single(legacy.Results);
+        Assert.Equal("run", result.Action);
+        Assert.Equal("Prepare run", result.Label);
+        Assert.Equal(FlowFailureKinds.Drive, result.FailureKind);
+        Assert.Contains("mutation lease", result.Error);
         Assert.Same(report, legacy.StructuredReport);
     }
 

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "mutation-duplicate-automation-id",
+  "kind": "mutation",
+  "disposition": "diagnostic-only",
+  "fixture": { "route": "/settings", "elements": [{ "type": "Button", "automationId": "save" }, { "type": "Button", "automationId": "save" }] },
+  "expect": { "diagnosticIds": ["DFSH001"], "candidateKinds": [] }
+}

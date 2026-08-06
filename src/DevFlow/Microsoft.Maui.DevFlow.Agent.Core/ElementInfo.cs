@@ -111,6 +111,18 @@ public class ElementInfo
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? NativeType { get; set; }
 
+    /// <summary>
+    /// A platform-provided accessibility identity, emitted only when it is authoritative rather
+    /// than an ephemeral native object or generated runtime id.
+    /// </summary>
+    [JsonPropertyName("nativeAutomationIdentity")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? NativeAutomationIdentity { get; set; }
+
+    [JsonPropertyName("nativeAutomationIdentityKind")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? NativeAutomationIdentityKind { get; set; }
+
     [JsonPropertyName("nativeProperties")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Dictionary<string, string?>? NativeProperties { get; set; }
@@ -164,6 +176,30 @@ public class ElementInfo
     [JsonPropertyName("sourceHash")]
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? SourceHash { get; set; }
+
+    [JsonPropertyName("sourceConfidence")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? SourceConfidence { get; set; }
+
+    /// <summary>
+    /// Optional app-provided stable collection item key. DevFlow does not infer this from bound
+    /// values because those values can be user data.
+    /// </summary>
+    [JsonPropertyName("stableItemKey")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? StableItemKey { get; set; }
+
+    [JsonPropertyName("collectionScope")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CollectionScope { get; set; }
+
+    [JsonPropertyName("templateKind")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? TemplateKind { get; set; }
+
+    [JsonPropertyName("isVirtualized")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public bool? IsVirtualized { get; set; }
 
     [JsonPropertyName("children")]
     public List<ElementInfo>? Children { get; set; }

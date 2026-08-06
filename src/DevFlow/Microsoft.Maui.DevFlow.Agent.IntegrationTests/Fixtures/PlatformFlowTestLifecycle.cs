@@ -27,25 +27,67 @@ internal interface IPlatformFlowTestLifecycle : IAsyncDisposable
     Task StopAsync(CancellationToken cancellationToken = default);
 }
 
+internal interface IFlowLifecycleFixture
+{
+    IPlatformFlowTestLifecycle? FlowLifecycle { get; }
+}
+
 internal enum PlatformFlowLifecycleFailureKind
 {
     Infrastructure,
     Precondition,
+    Capability,
+}
+
+/// <summary>
+/// Bounded, command-safe context retained with a lifecycle failure for host diagnostics.
+/// It intentionally contains no command line, device identifier, environment, or raw output.
+/// </summary>
+internal sealed class PlatformFlowLifecycleFailureDetails
+{
+    public string? LifecyclePhase { get; init; }
+    public string? ActionName { get; init; }
+    public string? AdbCommandCategory { get; init; }
+    public int? ExitCode { get; init; }
+    public int? TimeoutSeconds { get; init; }
+    public bool? TimedOut { get; init; }
+    public bool? CancellationRequested { get; init; }
+    public string? SafeErrorText { get; init; }
 }
 
 internal sealed class PlatformFlowLifecycleException : InvalidOperationException
 {
-    public PlatformFlowLifecycleException(PlatformFlowLifecycleFailureKind kind, string message, Exception? innerException = null)
+    public PlatformFlowLifecycleException(
+        PlatformFlowLifecycleFailureKind kind,
+        string message,
+        Exception? innerException = null,
+        PlatformFlowLifecycleFailureDetails? details = null)
         : base(message, innerException)
-        => Kind = kind;
+    {
+        Kind = kind;
+        Details = details;
+    }
 
     public PlatformFlowLifecycleFailureKind Kind { get; }
+    public PlatformFlowLifecycleFailureDetails? Details { get; }
 
-    public static PlatformFlowLifecycleException Infrastructure(string message, Exception? innerException = null)
-        => new(PlatformFlowLifecycleFailureKind.Infrastructure, message, innerException);
+    public static PlatformFlowLifecycleException Infrastructure(
+        string message,
+        Exception? innerException = null,
+        PlatformFlowLifecycleFailureDetails? details = null)
+        => new(PlatformFlowLifecycleFailureKind.Infrastructure, message, innerException, details);
 
-    public static PlatformFlowLifecycleException Precondition(string message, Exception? innerException = null)
-        => new(PlatformFlowLifecycleFailureKind.Precondition, message, innerException);
+    public static PlatformFlowLifecycleException Precondition(
+        string message,
+        Exception? innerException = null,
+        PlatformFlowLifecycleFailureDetails? details = null)
+        => new(PlatformFlowLifecycleFailureKind.Precondition, message, innerException, details);
+
+    public static PlatformFlowLifecycleException Capability(
+        string message,
+        Exception? innerException = null,
+        PlatformFlowLifecycleFailureDetails? details = null)
+        => new(PlatformFlowLifecycleFailureKind.Capability, message, innerException, details);
 }
 
 internal sealed class PlatformBuildResult
@@ -105,7 +147,7 @@ internal sealed record PlatformAgentIdentity(string? InstanceId, int ProcessId)
     {
         var processId = status?.App?.ProcessId;
         return processId is > 0
-            ? new PlatformAgentIdentity(status.Agent?.InstanceId, processId.Value)
+            ? new PlatformAgentIdentity(status!.Agent?.InstanceId, processId.Value)
             : null;
     }
 }
@@ -186,7 +228,7 @@ internal static class PlatformAgentReadiness
                 else if (expectation.ExpectedProcessId is { } expectedProcessId &&
                          identity.ProcessId != expectedProcessId)
                 {
-                    lastReason = $"Expected Android process {expectedProcessId}, observed {identity.ProcessId}.";
+                    lastReason = $"Expected process {expectedProcessId}, observed {identity.ProcessId}.";
                 }
                 else if (expectation.PreviousAgent is { } previous &&
                          string.Equals(identity.StableId, previous.StableId, StringComparison.Ordinal))

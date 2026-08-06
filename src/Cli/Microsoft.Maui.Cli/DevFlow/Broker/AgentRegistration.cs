@@ -101,6 +101,13 @@ public record BrokerState
     /// </summary>
     [JsonPropertyName("embedToken")]
     public string? EmbedToken { get; init; }
+
+    /// <summary>
+    /// Separate local-process bearer for a native host that has already performed a human approval
+    /// ceremony. It must never be placed in an Inspector URL, DOM, webview message, or browser API.
+    /// </summary>
+    [JsonPropertyName("hostApprovalToken")]
+    public string? HostApprovalToken { get; init; }
 }
 
 internal record RegistrationMessage

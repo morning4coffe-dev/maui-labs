@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "xaml-advisory-missing-automation-id",
+  "kind": "no-repair",
+  "disposition": "diagnostic-only",
+  "fixture": {
+    "xaml": "<ContentPage><Button Text=\"Save\" /></ContentPage>",
+    "scope": "static-direct"
+  },
+  "expect": {
+    "diagnosticIds": ["DFXAML001"],
+    "repairEligible": false,
+    "ineligibilityCodes": ["source-proposal-required"]
+  }
+}

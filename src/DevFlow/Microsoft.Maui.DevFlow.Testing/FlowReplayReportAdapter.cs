@@ -55,8 +55,22 @@ public static class FlowReplayReportAdapter
                 result.Failed++;
         }
 
-        if (!result.Ok && result.Failed == 0)
+        if (!result.Ok && result.Results.Count == 0)
+        {
+            result.Results.Add(new FlowStepResult
+            {
+                Seq = TryParseStepSequence(report.DivergenceStepId) ?? 0,
+                Action = "run",
+                Label = "Prepare run",
+                Ok = false,
+                FailureKind = ToLegacyFailureKind(report.Failure?.Class ?? report.Failure?.Code),
+                Error = report.Failure?.Message ??
+                    report.Outcome?.Summary ??
+                    "The flow run failed before the first step.",
+            });
+            result.Total = Math.Max(result.Total, 1);
             result.Failed = 1;
+        }
         return result;
     }
 
@@ -78,7 +92,8 @@ public static class FlowReplayReportAdapter
         MauiFlowFailureClasses.Transport or
         MauiFlowFailureClasses.AgentDisconnected or
         MauiFlowFailureClasses.Infrastructure => FlowFailureKinds.Drive,
-        _ => null,
+        null or "" => null,
+        _ => FlowFailureKinds.Drive,
     };
 
     private static int? TryParseStepSequence(string? stepId)

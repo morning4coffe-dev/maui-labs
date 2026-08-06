@@ -207,9 +207,15 @@ public class ProtocolSpecTests
             "maui-flow-v2.json",
             "maui-test-plan-v1.json",
             "maui-flow-run-report-v1.json",
+            "maui-preview-qualification-v1.json",
             "broker-workflow-run-v1.json",
+            "maui-artifact-trust-v1.json",
+            "broker-artifact-trust-v1.json",
             "maui-flow-repair-proposal-v1.json",
             "maui-flow-repair-outcome-v1.json",
+            "maui-xaml-source-proposal-v1.json",
+            "maui-csharp-source-proposal-v1.json",
+            "maui-test-agent-protocol-v1.json",
         };
 
         foreach (var schemaName in schemaNames)

@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "id": "baseline-plan-criterion-gap",
+  "kind": "baseline",
+  "disposition": "diagnostic-only",
+  "fixture": { "acceptanceCriterion": "order-saved", "linkedStep": "1", "hardAssertion": false },
+  "expect": { "diagnosticIds": ["DFSH010"], "candidateKinds": [] }
+}

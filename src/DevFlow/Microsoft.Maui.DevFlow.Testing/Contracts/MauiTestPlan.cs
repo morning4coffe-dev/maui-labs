@@ -13,6 +13,7 @@ public sealed class MauiTestPlan
     [JsonPropertyName("planId")] public string? PlanId { get; init; }
     [JsonPropertyName("revision")] public int? Revision { get; init; }
     [JsonPropertyName("flow")] public MauiFlowReference? Flow { get; init; }
+    [JsonPropertyName("title")] public string? Title { get; init; }
     [JsonPropertyName("goal")] public string? Goal { get; init; }
     [JsonPropertyName("scenarios")] public List<MauiTestScenario> Scenarios { get; init; } = [];
     [JsonPropertyName("assumptions")] public List<string> Assumptions { get; init; } = [];
@@ -20,6 +21,7 @@ public sealed class MauiTestPlan
     [JsonPropertyName("preconditions")] public List<MauiTestPrecondition> Preconditions { get; init; } = [];
     [JsonPropertyName("reset")] public MauiTestResetRequirement? Reset { get; init; }
     [JsonPropertyName("acceptanceCriteria")] public List<MauiAcceptanceCriterion> AcceptanceCriteria { get; init; } = [];
+    [JsonPropertyName("requiredPlatforms")] public List<string> RequiredPlatforms { get; init; } = [];
     [JsonPropertyName("requirements")] public MauiFlowRequirements? Requirements { get; init; }
     [JsonPropertyName("explorationBudget")] public MauiExplorationBudget? ExplorationBudget { get; init; }
     [JsonPropertyName("prohibitedActionClasses")] public List<string> ProhibitedActionClasses { get; init; } = [];
@@ -27,6 +29,7 @@ public sealed class MauiTestPlan
     [JsonPropertyName("reviews")] public List<MauiPlanReview> Reviews { get; init; } = [];
     [JsonPropertyName("approvals")] public List<MauiPlanApproval> Approvals { get; init; } = [];
     [JsonPropertyName("sideEffectPolicy")] public string? SideEffectPolicy { get; init; }
+    [JsonPropertyName("repairPolicy")] public MauiFlowRepairPolicy? RepairPolicy { get; init; }
     [JsonPropertyName("businessOracles")] public List<MauiBusinessOracleRequirement> BusinessOracles { get; init; } = [];
     [JsonPropertyName("independentBusinessOracles")] public List<MauiIndependentBusinessOracleDeclaration> IndependentBusinessOracles { get; init; } = [];
     [JsonPropertyName("compensator")] public MauiFlowCompensatorReference? Compensator { get; set; }
@@ -36,6 +39,20 @@ public sealed class MauiTestPlan
     /// <summary>Parses the wire value without changing the additive string JSON contract.</summary>
     [JsonIgnore]
     public MauiFlowSideEffectPolicy ParsedSideEffectPolicy => MauiFlowSideEffectPolicies.Parse(SideEffectPolicy);
+}
+
+/// <summary>
+/// Explicit human-authored selector-repair gates. The policy can narrow the fixed safe defaults
+/// but cannot enable non-executable, ambiguous, virtualized, stale-source, or divergent forms.
+/// </summary>
+public sealed class MauiFlowRepairPolicy
+{
+    [JsonPropertyName("allowedCandidateKinds")] public List<string> AllowedCandidateKinds { get; init; } = [];
+    [JsonPropertyName("allowedRiskFlags")] public List<string> AllowedRiskFlags { get; init; } = [];
+    [JsonPropertyName("maxCandidates")] public int? MaxCandidates { get; init; }
+    [JsonPropertyName("minimumScore")] public double? MinimumScore { get; init; }
+    [JsonPropertyName("minimumScoreGap")] public double? MinimumScoreGap { get; init; }
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
 /// <summary>Identifies a flow without asserting that a legacy content-addressed flow has a stable ID.</summary>

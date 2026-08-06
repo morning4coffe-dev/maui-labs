@@ -131,6 +131,23 @@
           ],
           "format": "date-time"
         },
+        "totalSteps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total canonical flow steps retained for progress presentation."
+        },
+        "completedSteps": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Completed retained step attempts. A runner without live step callbacks reports zero until its terminal report is available."
+        },
+        "currentStepId": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "description": "Latest completed step identifier when retained; null never means that an in-flight mutation did not complete."
+        },
         "firstDivergence": {
           "type": [
             "integer",
@@ -226,6 +243,10 @@
         },
         "context": {
           "$ref": "#/$defs/RunContext"
+        },
+        "reproductionExpectation": {
+          "$ref": "#/$defs/ReproductionExpectation",
+          "description": "Optional host-supplied current-workspace fingerprints recorded with a new local run for later imported-artifact reproduction matching. This field never authorizes a repair or source proposal."
         }
       },
       "oneOf": [
@@ -311,6 +332,39 @@
         }
       },
       "additionalProperties": false
+    },
+    "ReproductionExpectation": {
+      "type": "object",
+      "required": [
+        "flowDigest",
+        "appBuildFingerprint",
+        "appSourceFingerprint",
+        "packageDigest",
+        "platform",
+        "deviceProfile"
+      ],
+      "properties": {
+        "flowDigest": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "appBuildFingerprint": {
+          "type": "string"
+        },
+        "appSourceFingerprint": {
+          "type": "string"
+        },
+        "packageDigest": {
+          "type": "string"
+        },
+        "platform": {
+          "type": "string"
+        },
+        "deviceProfile": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
     },
     "AccessRequest": {
       "type": "object",

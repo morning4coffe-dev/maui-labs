@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "id": "xaml-advisory-duplicate-automation-id",
+  "kind": "no-repair",
+  "disposition": "diagnostic-only",
+  "fixture": {
+    "xaml": "<ContentPage><Button AutomationId=\"SaveButton\" /><Button AutomationId=\"SaveButton\" /></ContentPage>",
+    "scope": "project"
+  },
+  "expect": {
+    "diagnosticIds": ["DFXAML002"],
+    "repairEligible": false,
+    "ineligibilityCodes": ["automation-id-duplicate-project"]
+  }
+}

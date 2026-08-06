@@ -79,6 +79,116 @@ public class WorkflowRunCoordinatorTests
     }
 
     [Fact]
+    public async Task Start_WithInspectorHandoff_TransfersTransactionBeforeExecutionIsScheduled()
+    {
+        var leases = new RecordingLeaseRegistry();
+        var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var coordinator = new WorkflowRunCoordinator(
+            leases,
+            async (_, cancellationToken) =>
+            {
+                await releaseExecution.Task.WaitAsync(cancellationToken);
+                return PassingReport();
+            });
+
+        var started = coordinator.Start(
+            Request("handoff", "handoff-key"),
+            Target(),
+            static () => true,
+            leaseHandoff: new WorkflowRunLeaseHandoff("inspector-lease", "web", "Browser Inspector"));
+
+        Assert.True(started.Ok);
+        Assert.Equal("transfer", Assert.Single(leases.Actions));
+
+        releaseExecution.SetResult();
+        await WaitForTerminalAsync(coordinator, started);
+        Assert.DoesNotContain("claim", leases.Actions);
+        Assert.DoesNotContain("begin", leases.Actions);
+    }
+
+    [Fact]
+    public void Preflight_ValidatesAdmissionAndPlanBindingWithoutAcquiringLeaseOrStartingRun()
+    {
+        var leases = new RecordingLeaseRegistry();
+        var executed = false;
+        var coordinator = new WorkflowRunCoordinator(
+            leases,
+            (_, _) =>
+            {
+                executed = true;
+                return Task.FromResult(PassingReport());
+            });
+
+        var admitted = coordinator.Preflight(Request("preflight", "preflight-key"), Target(), static () => true);
+
+        Assert.True(admitted.Ok);
+        Assert.NotNull(admitted.Admission);
+        Assert.Empty(leases.Actions);
+        Assert.False(executed);
+
+        var stale = Request("stale-plan", "stale-plan-key");
+        stale.Plan = new MauiTestPlan
+        {
+            Flow = new MauiFlowReference { Digest = new string('0', 64) },
+        };
+        var rejected = coordinator.Preflight(stale, Target(), static () => true);
+
+        Assert.False(rejected.Ok);
+        Assert.Equal(409, rejected.StatusCode);
+        Assert.Contains("stale flow digest", rejected.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(leases.Actions);
+        Assert.False(executed);
+    }
+
+    [Fact]
+    public async Task Run_ProgressCallback_UpdatesCurrentStepAndBoundedCountsBeforeTerminalReport()
+    {
+        var progressRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var coordinator = new WorkflowRunCoordinator(
+            new RecordingLeaseRegistry(),
+            async (execution, cancellationToken) =>
+            {
+                execution.Options.Progress?.Invoke(new MauiFlowRunProgress
+                {
+                    RunId = execution.RunId,
+                    StepId = "1",
+                    Sequence = 1,
+                    CompletedSteps = 0,
+                    TotalSteps = execution.Flow.Steps.Count,
+                    Phase = "step-started",
+                });
+                progressRaised.TrySetResult();
+                await release.Task.WaitAsync(cancellationToken);
+                execution.Options.Progress?.Invoke(new MauiFlowRunProgress
+                {
+                    RunId = execution.RunId,
+                    StepId = "1",
+                    Sequence = 1,
+                    CompletedSteps = 1,
+                    TotalSteps = execution.Flow.Steps.Count,
+                    Phase = "step-completed",
+                });
+                return PassingReport(execution.Flow);
+            });
+
+        var started = coordinator.Start(Request("progress", "progress-key"), Target(), static () => true);
+        await progressRaised.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        var active = coordinator.GetStatus(started.Run!.RunId, started.CapabilityToken).Run;
+
+        Assert.NotNull(active);
+        Assert.Equal(1, active!.TotalSteps);
+        Assert.Equal(0, active.CompletedSteps);
+        Assert.Equal("1", active.CurrentStepId);
+        Assert.Contains(active.Events, item => item.Kind == "step-started");
+
+        release.TrySetResult();
+        var terminal = await WaitForTerminalAsync(coordinator, started);
+        Assert.Equal(1, terminal.CompletedSteps);
+        Assert.Equal("1", terminal.CurrentStepId);
+    }
+
+    [Fact]
     public void Start_SideEffectAdmissionDeniedBeforeLeaseOrRunnerInvocation()
     {
         var leases = new RecordingLeaseRegistry();
@@ -493,6 +603,85 @@ public class WorkflowRunCoordinatorTests
         }
     }
 
+    [Fact]
+    public async Task LocalReproductionFacts_AreDerivedFromTerminalBrokerRunAndHostFingerprints()
+    {
+        var request = Request("reproduction", "reproduction-key");
+        var flowDigest = MauiFlowRunReportSerializer.ComputeFlowDigest(request.Flow!);
+        request.ReproductionExpectation = new MauiLocalReproductionExpectation
+        {
+            FlowDigest = flowDigest,
+            AppBuildFingerprint = "build-current",
+            AppSourceFingerprint = "source-current",
+            PackageDigest = "package-current",
+            Platform = "test",
+            DeviceProfile = "test-device",
+        };
+        var coordinator = new WorkflowRunCoordinator(
+            new RecordingLeaseRegistry(),
+            static (execution, _) => Task.FromResult(new FlowReplayReport
+            {
+                Ok = false,
+                Name = execution.Flow.Name,
+                Total = 1,
+                Failed = 1,
+                DivergencePoint = 1,
+                StructuredReport = new MauiFlowRunReport
+                {
+                    FlowDigest = MauiFlowRunReportSerializer.ComputeFlowDigest(execution.Flow),
+                    Target = new MauiFlowRunTarget
+                    {
+                        AppBuildFingerprint = "build-current",
+                    },
+                    Failure = new MauiFlowFailure
+                    {
+                        Code = MauiFlowFailureClasses.LocatorNotFound,
+                        Class = MauiFlowFailureClasses.LocatorNotFound,
+                        StepId = "1",
+                    },
+                    Steps =
+                    [
+                        new MauiFlowStepAttempt
+                        {
+                            StepId = "1",
+                            ExpectedCheckpoint = new MauiFlowCheckpoint
+                            {
+                                AppBuildFingerprint = "build-current",
+                                Route = "/todos",
+                            },
+                            ObservedCheckpoint = new MauiFlowCheckpoint
+                            {
+                                AppBuildFingerprint = "build-current",
+                                Route = "/todos",
+                            },
+                        },
+                    ],
+                },
+            }));
+
+        var start = coordinator.Start(
+            request,
+            Target(),
+            static () => true,
+            new WorkflowRunExecutionOptions
+            {
+                ReproductionExpectation = request.ReproductionExpectation,
+            });
+        await WaitForTerminalAsync(coordinator, start);
+
+        var local = coordinator.GetLocalReproductionFacts(start.Run!.RunId);
+
+        Assert.True(local.Ok, local.Error);
+        Assert.Equal(start.Run.RunId, local.Facts!.LocalRunId);
+        Assert.True(local.Facts.IsNewLocalRun);
+        Assert.Equal(flowDigest, local.Facts.FlowDigest);
+        Assert.Equal("source-current", local.Facts.AppSourceFingerprint);
+        Assert.Equal("package-current", local.Facts.PackageDigest);
+        Assert.Equal("test-device", local.Facts.DeviceProfile);
+        Assert.Equal(MauiFlowFailureClasses.LocatorNotFound, local.Facts.Failure!.Code);
+        Assert.Equal("/todos", local.Facts.Failure.ObservedCheckpoint!.Route);
+    }
+
     private static WorkflowRunStartRequest Request(
         string name,
         string idempotencyKey,
@@ -600,6 +789,29 @@ public class WorkflowRunCoordinatorTests
                 ExpiresInMs: 10_000)
             {
                 AuthorityEpoch = 1
+            };
+        }
+
+        public MutationLeaseSnapshot TransferAndBegin(
+            string agentId,
+            string sourceLeaseId,
+            string targetLeaseId,
+            string transactionId,
+            string? holderKind,
+            string? label)
+        {
+            _actions.Enqueue("transfer");
+            return new MutationLeaseSnapshot(
+                Allowed: true,
+                YouHold: true,
+                HeldByOther: false,
+                LeaseId: targetLeaseId,
+                TransactionId: transactionId,
+                HolderKind: holderKind,
+                Label: label,
+                ExpiresInMs: 10_000)
+            {
+                AuthorityEpoch = 2
             };
         }
     }

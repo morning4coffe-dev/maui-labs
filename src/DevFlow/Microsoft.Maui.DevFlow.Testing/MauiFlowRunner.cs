@@ -7,8 +7,8 @@ namespace Microsoft.Maui.DevFlow.Testing;
 /// <summary>Options for the single canonical flow execution implementation.</summary>
 public sealed class MauiFlowRunnerOptions
 {
-    public int PollTries { get; set; } = 4;
-    public int PollGapMs { get; set; } = 300;
+    public int PollTries { get; set; } = 10;
+    public int PollGapMs { get; set; } = 250;
     public bool ContinueOnFailure { get; set; }
     /// <summary>Preserves the legacy replayer cancellation contract when true.</summary>
     public bool ThrowOnCancellation { get; set; }
@@ -25,9 +25,31 @@ public sealed class MauiFlowRunnerOptions
     public MauiFlowRunContext? RunContext { get; set; }
     public MauiFlowCheckpoint? ExpectedCheckpoint { get; set; }
     public MauiFlowRunReportLimits ReportLimits { get; set; } = new();
+    /// <summary>
+    /// Value-free deterministic candidate capture settings. Candidates are recorded for diagnosis
+    /// only and never change the active selector or replay fallback behavior.
+    /// </summary>
+    public MauiSelectorCandidateGenerationOptions SelectorCandidateOptions { get; set; } = new();
     /// <summary>Optional root for atomic <c>&lt;runId&gt;/flow-run.json</c> output.</summary>
     public string? ArtifactRoot { get; set; }
     public TimeProvider Clock { get; set; } = TimeProvider.System;
+    /// <summary>
+    /// Optional bounded progress observer. It receives step identity and counts only; it never
+    /// receives typed values, driver payloads, or evidence content.
+    /// </summary>
+    public Action<MauiFlowRunProgress>? Progress { get; set; }
+}
+
+/// <summary>Value-free progress emitted around one canonical flow step.</summary>
+public sealed class MauiFlowRunProgress
+{
+    public string? RunId { get; init; }
+    public string? StepId { get; init; }
+    public int? Sequence { get; init; }
+    public int CompletedSteps { get; init; }
+    public int TotalSteps { get; init; }
+    /// <summary><c>step-started</c> or <c>step-completed</c>.</summary>
+    public string Phase { get; init; } = "";
 }
 
 /// <summary>The canonical structured result plus the compatibility report used by existing hosts.</summary>
@@ -137,6 +159,7 @@ public sealed class MauiFlowRunner
             BusinessOracles = _options.RunContext?.BusinessOracles.ToList() ?? [],
             ReplayEligibility = replayEligibility,
             StartedAt = startedAt,
+            SelectorHealth = new MauiFlowSelectorHealthSummary(),
         };
         var legacy = new FlowReplayReport
         {
@@ -260,6 +283,12 @@ public sealed class MauiFlowRunner
                 activeStopwatch = stopwatch;
                 activeActionability = actionability;
                 var actionabilitySequence = 0;
+                ReportProgress(
+                    runId,
+                    replayStep,
+                    report.Steps.Count,
+                    flow.Steps?.Count ?? 0,
+                    "step-started");
                 var engine = new FlowActionabilityEngine(
                     _driver,
                     _options.PollTries,
@@ -363,6 +392,14 @@ public sealed class MauiFlowRunner
                     legacyStep,
                     observedCheckpoint,
                     classification);
+                await AttachSelectorEvidenceAsync(
+                    structuredStep,
+                    drive.Target,
+                    drive.SelectorObservation,
+                    report.Target,
+                    observedCheckpoint,
+                    report,
+                    cancellationToken).ConfigureAwait(false);
                 report.Steps.Add(structuredStep);
                 legacy.Results.Add(legacyStep);
                 activeStep = null;
@@ -381,6 +418,12 @@ public sealed class MauiFlowRunner
                     legacyStep.Ok ? "step-passed" : "step-failed",
                     legacyStep.Ok ? "Step completed." : "Step diverged.",
                     StepId(replayStep));
+                ReportProgress(
+                    runId,
+                    replayStep,
+                    report.Steps.Count,
+                    flow.Steps?.Count ?? 0,
+                    "step-completed");
 
                 if (!legacyStep.Ok)
                 {
@@ -405,6 +448,7 @@ public sealed class MauiFlowRunner
                         break;
                     }
                 }
+
             }
 
             legacy.Ok = legacy.Failed == 0;
@@ -493,6 +537,31 @@ public sealed class MauiFlowRunner
                 MauiFlowRunOutcomes.InfrastructureError,
                 "Flow runner infrastructure error.",
                 CancellationToken.None).ConfigureAwait(false);
+        }
+    }
+
+    private void ReportProgress(
+        string runId,
+        FlowStep step,
+        int completedSteps,
+        int totalSteps,
+        string phase)
+    {
+        try
+        {
+            _options.Progress?.Invoke(new MauiFlowRunProgress
+            {
+                RunId = runId,
+                StepId = StepId(step),
+                Sequence = step.Seq,
+                CompletedSteps = Math.Max(0, completedSteps),
+                TotalSteps = Math.Max(0, totalSteps),
+                Phase = phase,
+            });
+        }
+        catch
+        {
+            // A UI/status observer must never affect canonical replay semantics.
         }
     }
 
@@ -686,9 +755,10 @@ public sealed class MauiFlowRunner
                         cancellationToken: cancellationToken).ConfigureAwait(false);
                     if (!target.Ok)
                         return DriveResult.FromTarget("tap", target);
+                    var observation = await CaptureSelectorObservationAtResolutionAsync(target, cancellationToken).ConfigureAwait(false);
                     return await _driver.TapAsync(target.Element!.Id).ConfigureAwait(false)
-                        ? DriveResult.Success(target)
-                        : DriveResult.Failure(FlowFailureKinds.Drive, "tap reported failure", target);
+                        ? DriveResult.Success(target, observation)
+                        : DriveResult.Failure(FlowFailureKinds.Drive, "tap reported failure", target, observation: observation);
                 }
                 case FlowActions.Fill:
                 {
@@ -698,12 +768,13 @@ public sealed class MauiFlowRunner
                         cancellationToken: cancellationToken).ConfigureAwait(false);
                     if (!target.Ok)
                         return DriveResult.FromTarget("fill", target);
+                    var observation = await CaptureSelectorObservationAtResolutionAsync(target, cancellationToken).ConfigureAwait(false);
                     var value = ResolveStepValue(step, args?.Text ?? step.Value, out var secretError);
                     if (secretError is not null)
-                        return DriveResult.Failure(FlowFailureKinds.SecretRequired, secretError, target);
+                        return DriveResult.Failure(FlowFailureKinds.SecretRequired, secretError, target, observation: observation);
                     return await _driver.FillAsync(target.Element!.Id, value ?? string.Empty).ConfigureAwait(false)
-                        ? DriveResult.Success(target)
-                        : DriveResult.Failure(FlowFailureKinds.Drive, "fill reported failure", target);
+                        ? DriveResult.Success(target, observation)
+                        : DriveResult.Failure(FlowFailureKinds.Drive, "fill reported failure", target, observation: observation);
                 }
                 case FlowActions.SetProperty:
                 {
@@ -712,23 +783,26 @@ public sealed class MauiFlowRunner
                         cancellationToken: cancellationToken).ConfigureAwait(false);
                     if (!target.Ok)
                         return DriveResult.FromTarget("setProperty", target);
+                    var observation = await CaptureSelectorObservationAtResolutionAsync(target, cancellationToken).ConfigureAwait(false);
                     if (IsUnsafeValueSource(args?.ValueSource))
                         return DriveResult.Failure(
                             FlowFailureKinds.UnsafeValue,
                             "setProperty value came from an unsafe source and cannot be replayed.",
-                            target);
+                            target,
+                            observation: observation);
                     var name = string.IsNullOrEmpty(args?.Name) ? "Text" : args!.Name!;
                     var value = ResolveStepValue(step, args?.Value ?? step.Value, out var secretError);
                     if (secretError is not null)
-                        return DriveResult.Failure(FlowFailureKinds.SecretRequired, secretError, target);
+                        return DriveResult.Failure(FlowFailureKinds.SecretRequired, secretError, target, observation: observation);
                     return await _driver.SetPropertyAsync(target.Element!.Id, name, value ?? string.Empty).ConfigureAwait(false)
-                        ? DriveResult.Success(target)
-                        : DriveResult.Failure(FlowFailureKinds.Drive, "setProperty reported failure", target);
+                        ? DriveResult.Success(target, observation)
+                        : DriveResult.Failure(FlowFailureKinds.Drive, "setProperty reported failure", target, observation: observation);
                 }
                 case FlowActions.Scroll:
                 {
                     string? id = null;
                     FlowTargetResolution? target = null;
+                    MauiSelectorObservation? observation = null;
                     var selector = FlowValidator.EffectiveSelector(step);
                     if (selector is not null && !selector.IsEmpty)
                     {
@@ -739,6 +813,7 @@ public sealed class MauiFlowRunner
                         if (!target.Ok)
                             return DriveResult.FromTarget("scroll", target);
                         id = target.Element!.Id;
+                        observation = await CaptureSelectorObservationAtResolutionAsync(target, cancellationToken).ConfigureAwait(false);
                     }
                     var ok = await _driver.ScrollAsync(
                         id,
@@ -748,8 +823,8 @@ public sealed class MauiFlowRunner
                         args?.ItemIndex,
                         args?.Position).ConfigureAwait(false);
                     return ok
-                        ? DriveResult.Success(target)
-                        : DriveResult.Failure(FlowFailureKinds.Drive, "scroll reported failure", target);
+                        ? DriveResult.Success(target, observation)
+                        : DriveResult.Failure(FlowFailureKinds.Drive, "scroll reported failure", target, observation: observation);
                 }
                 case FlowActions.Navigate:
                 {
@@ -795,6 +870,32 @@ public sealed class MauiFlowRunner
         catch (Exception ex)
         {
             return DriveResult.Failure(FlowFailureKinds.Drive, $"drive failed: {ex.Message}");
+        }
+    }
+
+    private async Task<MauiSelectorObservation?> CaptureSelectorObservationAtResolutionAsync(
+        FlowTargetResolution resolution,
+        CancellationToken cancellationToken)
+    {
+        if (resolution.Element is null)
+            return null;
+        try
+        {
+            var tree = await _driver.GetTreeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            return MauiSelectorObservationFactory.Create(
+                resolution.Element,
+                tree,
+                context: null,
+                truncated: tree.Count == 0);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            // Selector evidence is optional and must not alter canonical action dispatch.
+            return null;
         }
     }
 
@@ -959,6 +1060,119 @@ public sealed class MauiFlowRunner
         return stepAttempt;
     }
 
+    private async Task AttachSelectorEvidenceAsync(
+        MauiFlowStepAttempt step,
+        FlowTargetResolution? resolution,
+        MauiSelectorObservation? capturedObservation,
+        MauiFlowRunTarget? target,
+        MauiFlowCheckpoint? checkpoint,
+        MauiFlowRunReport report,
+        CancellationToken cancellationToken)
+    {
+        if (resolution?.Element is null)
+        {
+            if (resolution is not null && resolution.MatchCount > 1)
+            {
+                step.SelectorCandidateOmissions.Add(new MauiSelectorEvidenceOmission
+                {
+                    Kind = "selector-candidates",
+                    Reason = "No candidate fingerprint was captured because normal replay rejected an ambiguous selector.",
+                    Count = resolution.MatchCount,
+                });
+                IncrementSelectorHealthSummary(report, step);
+            }
+            return;
+        }
+
+        try
+        {
+            var context = new MauiSelectorObservationContext
+            {
+                AppId = target?.AppId,
+                AppBuild = target?.AppBuildFingerprint,
+                Platform = target?.Platform,
+                Route = checkpoint?.Route,
+                Window = checkpoint?.Window,
+                Modal = checkpoint?.Modal,
+                Locale = target?.Locale ?? checkpoint?.Locale,
+                Theme = target?.Theme ?? checkpoint?.Theme,
+                Orientation = target?.Orientation ?? checkpoint?.Orientation,
+                DisplayProfile = target?.DisplayProfile ?? checkpoint?.DisplayProfile,
+                CapabilityVersion = "flow-run-selector-evidence-v1",
+                ObservedAt = _options.Clock.GetUtcNow(),
+            };
+            var observation = capturedObservation;
+            if (observation is null)
+            {
+                var tree = await _driver.GetTreeAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+                observation = MauiSelectorObservationFactory.Create(
+                    resolution.Element,
+                    tree,
+                    context,
+                    truncated: tree.Count == 0);
+            }
+            else
+            {
+                observation.Context ??= context;
+                observation.Context.AppId ??= context.AppId;
+                observation.Context.AppBuild ??= context.AppBuild;
+                observation.Context.Platform ??= context.Platform;
+                observation.Context.Route ??= context.Route;
+                observation.Context.Window ??= context.Window;
+                observation.Context.Modal ??= context.Modal;
+                observation.Context.Locale ??= context.Locale;
+                observation.Context.Theme ??= context.Theme;
+                observation.Context.Orientation ??= context.Orientation;
+                observation.Context.DisplayProfile ??= context.DisplayProfile;
+                observation.Context.CapabilityVersion ??= context.CapabilityVersion;
+                observation.Context.ObservedAt ??= context.ObservedAt;
+            }
+            if (observation.Truncated == true)
+            {
+                step.Fingerprint = MauiElementFingerprintBuilder.Build(observation);
+                step.SelectorCandidateOmissions.Add(new MauiSelectorEvidenceOmission
+                {
+                    Kind = "live-tree",
+                    Reason = "The driver did not provide a tree, so selector uniqueness was not assumed and no candidate was generated.",
+                });
+            }
+            else
+            {
+                var generated = MauiSelectorCandidateGenerator.Generate(
+                    observation,
+                    _options.SelectorCandidateOptions);
+                step.Fingerprint = generated.Fingerprint;
+                step.SelectorCandidates = generated.Candidates;
+                step.SelectorCandidateOmissions = generated.Omissions;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            step.SelectorCandidateOmissions.Add(new MauiSelectorEvidenceOmission
+            {
+                Kind = "selector-candidates",
+                Reason = "Selector evidence could not be captured; normal replay behavior was unchanged.",
+            });
+        }
+        finally
+        {
+            IncrementSelectorHealthSummary(report, step);
+        }
+    }
+
+    private static void IncrementSelectorHealthSummary(MauiFlowRunReport report, MauiFlowStepAttempt step)
+    {
+        var summary = report.SelectorHealth ??= new MauiFlowSelectorHealthSummary();
+        if (step.Fingerprint is not null)
+            summary.CapturedSteps++;
+        summary.CandidateCount += step.SelectorCandidates.Count;
+        summary.OmissionCount += step.SelectorCandidateOmissions.Count;
+    }
+
     private static MauiFlowAssertionResult CreateStructuredAssertion(FlowAssertResult result)
     {
         var sensitive = FlowSecretReference.LooksSensitive(result.Name);
@@ -995,6 +1209,10 @@ public sealed class MauiFlowRunner
             target.AppId ??= MauiFlowReportRedactor.SafeIdentifier(status.App?.PackageId ?? status.App?.Name);
             target.AppBuildFingerprint ??= BuildFingerprint(status);
             target.AgentInstanceId ??= MauiFlowReportRedactor.SafeIdentifier(status.Agent?.InstanceId);
+            target.Locale ??= MauiFlowReportRedactor.SafeIdentifier(status.Locale);
+            target.Theme ??= MauiFlowReportRedactor.SafeIdentifier(status.Theme);
+            target.Orientation ??= MauiFlowReportRedactor.SafeIdentifier(status.Orientation);
+            target.DisplayProfile ??= MauiFlowReportRedactor.SafeIdentifier(status.DisplayProfile);
         }
         catch (OperationCanceledException)
         {
@@ -1019,6 +1237,12 @@ public sealed class MauiFlowRunner
                 AppBuildFingerprint = BuildFingerprint(status),
                 AgentInstanceId = MauiFlowReportRedactor.SafeIdentifier(status.Agent?.InstanceId),
                 Route = MauiFlowReportRedactor.SafeRoute(status.Route),
+                Window = MauiFlowReportRedactor.SafeIdentifier(status.Window),
+                Modal = MauiFlowReportRedactor.SafeIdentifier(status.Modal),
+                Locale = MauiFlowReportRedactor.SafeIdentifier(status.Locale),
+                Theme = MauiFlowReportRedactor.SafeIdentifier(status.Theme),
+                Orientation = MauiFlowReportRedactor.SafeIdentifier(status.Orientation),
+                DisplayProfile = MauiFlowReportRedactor.SafeIdentifier(status.DisplayProfile),
             };
         }
         catch (OperationCanceledException)
@@ -1191,12 +1415,18 @@ public sealed class MauiFlowRunner
             AppId = MauiFlowReportRedactor.SafeIdentifier(flow.App),
         };
 
-    private static string? BuildFingerprint(AgentStatus status)
+    internal static string? BuildFingerprint(AgentStatus status)
     {
-        var version = MauiFlowReportRedactor.SafeIdentifier(status.App?.Version);
-        var build = MauiFlowReportRedactor.SafeIdentifier(status.App?.Build);
+        var version = NormalizeFingerprintPart(MauiFlowReportRedactor.SafeIdentifier(status.App?.Version));
+        var build = NormalizeFingerprintPart(MauiFlowReportRedactor.SafeIdentifier(status.App?.Build));
         return version is null && build is null ? null : $"{version ?? "unknown"}:{build ?? "unknown"}";
     }
+
+    private static string? NormalizeFingerprintPart(string? value)
+        => string.IsNullOrWhiteSpace(value) ||
+           string.Equals(value, "unknown", StringComparison.OrdinalIgnoreCase)
+            ? null
+            : value;
 
     private static string? BuildDisplayProfile(AgentStatus status)
     {
@@ -1219,17 +1449,21 @@ public sealed class MauiFlowRunner
         string? Kind = null,
         string? Error = null,
         FlowTargetResolution? Target = null,
-        WorkflowCommandReceipt? Receipt = null)
+        WorkflowCommandReceipt? Receipt = null,
+        MauiSelectorObservation? SelectorObservation = null)
     {
-        public static DriveResult Success(FlowTargetResolution? target = null)
-            => new(true, Target: target);
+        public static DriveResult Success(
+            FlowTargetResolution? target = null,
+            MauiSelectorObservation? observation = null)
+            => new(true, Target: target, SelectorObservation: observation);
 
         public static DriveResult Failure(
             string kind,
             string error,
             FlowTargetResolution? target = null,
-            WorkflowCommandReceipt? receipt = null)
-            => new(false, kind, error, target, receipt);
+            WorkflowCommandReceipt? receipt = null,
+            MauiSelectorObservation? observation = null)
+            => new(false, kind, error, target, receipt, observation);
 
         public static DriveResult FromTarget(string action, FlowTargetResolution target)
             => Failure(

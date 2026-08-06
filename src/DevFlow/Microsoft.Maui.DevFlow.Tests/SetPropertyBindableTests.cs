@@ -11,11 +11,23 @@ using Microsoft.Maui.DevFlow.Agent.Core.Properties;
 using Microsoft.Maui.DevFlow.Driver;
 using Microsoft.Maui.Dispatching;
 using CorePropertyMutationResponse = Microsoft.Maui.DevFlow.Agent.Core.Properties.PropertyMutationResponse;
+using CoreElementInfo = Microsoft.Maui.DevFlow.Agent.Core.ElementInfo;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
 public class SetPropertyBindableTests
 {
+    [Fact]
+    public void SelectorObservationIndex_DuplicateStableIds_AreExcludedFromTopology()
+    {
+        var first = new CoreElementInfo { Id = "shared", Type = "Button" };
+        var duplicate = new CoreElementInfo { Id = "shared", Type = "ContentView" };
+
+        var known = DevFlowAgentService.IndexSelectorObservationElements([first, duplicate]);
+
+        Assert.Empty(known);
+    }
+
     [Fact]
     public async Task SetPropertyAsync_UpdatesButtonText_ThroughAgentEndpoint()
     {

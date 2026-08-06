@@ -19,6 +19,27 @@ The DevFlow unit tests parse `openapi.yaml` with OpenAPI tooling and validate YA
 
 The public `Microsoft.Maui.DevFlow.Testing` package uses these provider-neutral contracts:
 
+### Testing contract index
+
+Every JSON document below has a stable `$id`; the `v1` name is not a promise that a newly required
+semantic can be introduced without a new version or explicit capability negotiation. Status is
+intentionally about the contract, not device qualification.
+
+| Contract | Canonical document and stable ID | Status |
+|---|---|---|
+| Broker workflow operations | [broker-workflow-runs-v1.yaml](broker-workflow-runs-v1.yaml) (OpenAPI 3.1, `info.version: 1.0.0`) | Preview local-broker contract; explicit target and capability token required |
+| Broker workflow run | [broker-workflow-run-v1.json](schemas/broker-workflow-run-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/broker-workflow-run-v1.json` | Preview contract |
+| Test plan | [maui-test-plan-v1.json](schemas/maui-test-plan-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-test-plan-v1.json` | Preview contract; plan data never grants lifecycle authority |
+| Flow run report | [maui-flow-run-report-v1.json](schemas/maui-flow-run-report-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-run-report-v1.json` | Preview contract; bounded/redacted diagnostics |
+| Artifact trust | [maui-artifact-trust-v1.json](schemas/maui-artifact-trust-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-artifact-trust-v1.json` | Preview contract; imports remain diagnostic-only until local reproduction |
+| Broker artifact trust | [broker-artifact-trust-v1.json](schemas/broker-artifact-trust-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/broker-artifact-trust-v1.json` | Preview contract; bounded, capability-gated broker projection |
+| Selector repair proposal | [maui-flow-repair-proposal-v1.json](schemas/maui-flow-repair-proposal-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-repair-proposal-v1.json` | Preview contract; proposal only, never auto-apply |
+| Selector repair outcome | [maui-flow-repair-outcome-v1.json](schemas/maui-flow-repair-outcome-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-repair-outcome-v1.json` | Preview contract; human approval/verification lifecycle |
+| XAML source proposal | [maui-xaml-source-proposal-v1.json](schemas/maui-xaml-source-proposal-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-xaml-source-proposal-v1.json` | Preview contract; explicit local-host apply only |
+| C# source proposal | [maui-csharp-source-proposal-v1.json](schemas/maui-csharp-source-proposal-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-csharp-source-proposal-v1.json` | Preview contract; IDE-mediated apply only |
+| Restricted test-agent | [maui-test-agent-protocol-v1.json](schemas/maui-test-agent-protocol-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-test-agent-protocol-v1.json` | Preview contract; human-issued grants and no generic automation authority |
+| Android preview qualification | [maui-preview-qualification-v1.json](schemas/maui-preview-qualification-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-preview-qualification-v1.json` | Preview accounting only; may report `not-qualified` and is not a device/runtime pass |
+
 - [Executable MAUI flow v2](schemas/maui-flow-v2.json) — the authoritative payload in a
   Markdown `json maui-test` block.
 - [Test plan v1](schemas/maui-test-plan-v1.json) — non-executable goals, safety constraints,
@@ -30,13 +51,39 @@ The public `Microsoft.Maui.DevFlow.Testing` package uses these provider-neutral 
   outcome, ordered actionability/command/assertion step evidence, typed failure, and artifact
   facts. Failure evidence links back through additive `manifest.flowRun` metadata in `.mauitrace`
   v1; it never adds a ZIP entry or changes the evidence allow-list.
+- [Preview qualification report v1](schemas/maui-preview-qualification-v1.json) — redacted
+  Android engineering-preview gate evidence: corpus/package/tool/policy fingerprints, declared
+  device/build/seed profiles, static/generated/device-backed sample separation, first-attempt
+  stability, conservative confidence intervals, calibration, privacy/security results, reviews,
+  feature flags, thresholds, exclusions, artifacts, and `pass`/`fail`/`not-qualified` reasons.
+  It is accounting only: it does not replay, repair, apply source, invoke a model, or make a PR
+  check required.
+- [Artifact trust v1](schemas/maui-artifact-trust-v1.json) — provider-neutral imported-artifact
+  identity namespace, integrity-only facts, provenance policy/verification outcomes, safe
+  projection, and local-reproduction binding. It defines `untrusted`, `attested`, and
+  `locally-reproduced`; only the final state may pass a future proposal policy gate.
 - [Broker workflow run v1](schemas/broker-workflow-run-v1.json) — broker lifecycle, explicit
   agent-instance targeting, idempotency, and per-run capability-token contracts.
+- [Broker artifact trust v1](schemas/broker-artifact-trust-v1.json) — bounded import,
+  capability-gated status/safe-projection/local-reproduction routes with no raw-content endpoint.
 - [Workflow command ledger](schemas/workflow-command-ledger.json) — agent-instance-bound begin/end
   control, contiguous command envelopes, bounded duplicate receipts, and unknown-completion fencing.
 - [Repair proposal v1](schemas/maui-flow-repair-proposal-v1.json) and
   [repair outcome v1](schemas/maui-flow-repair-outcome-v1.json) — reviewable selector-repair
   evidence and immutable outcomes.
+- [XAML source proposal v1](schemas/maui-xaml-source-proposal-v1.json) — a distinct,
+  local-host-only proposal for one static literal `AutomationId` addition/replacement. Source
+  approval and source grants never approve a flow repair; flow selector follow-up remains a
+  separate reviewed proposal.
+- [C# source proposal v1](schemas/maui-csharp-source-proposal-v1.json) — a distinct,
+  Roslyn-proven proposal for one direct object-initializer or literal-assignment `AutomationId`
+  change. It is advisory only: the broker never writes C# source; a native IDE host applies and
+  acknowledges the exact forward or rollback patch hashes.
+- [Restricted test-agent protocol v1](schemas/maui-test-agent-protocol-v1.json) — provider-neutral
+  request envelope, exact target/process identity, revision/run correlation, provenance,
+  read-capability and opaque human-issued mutation-grant binding, typed errors, and bounded audit
+  fields. It is used only by `maui devflow mcp --profile test-agent`; it does not add provider,
+  source, device-lifecycle, repair-apply, or generic automation authority.
 
 Schema 2 is the current executable flow contract. Schema 1 remains readable by the package and
 can be preview-normalized to schema 2 without writing a file or inventing fingerprints, source
@@ -46,6 +93,26 @@ documents are data contracts only: a plan never authorizes reset or device lifec
 
 Required capabilities and semantics are declared by a plan rather than changing flow schema 2.
 Hosts must reject an unsupported required semantic before any mutation is attempted.
+
+### Restricted test-agent authorization
+
+The restricted MCP profile requires an explicit `agentId` and `agentInstanceId` for every
+effectful request. Mutation grants are opaque, short-lived, and single-use (or atomically bounded
+for approved exploration) and bind actor/provider/channel, app build and seed state, plan/flow
+revision/digest, action/selector/route/side-effect/value/count limits, expiration, nonce, and
+policy version. UI text, logs, network content, Markdown, screenshots, and imported artifacts are
+untrusted data; none may widen a grant or policy. The audit contract retains only bounded IDs and
+digests. See [test-agent.md](../test-agent.md).
+
+### Imported artifacts
+
+Foreign reports and `.mauitrace` v1 bundles are untrusted data. Their embedded IDs and provenance
+are inert metadata; internal hashes provide integrity only. The pure Testing evaluator performs no
+remote attestation lookup. A trusted host may supply independently verified facts matching its
+configured repository/workflow/commit/digest policy to reach `attested`, but that state grants no
+execution, replay, repair, or source authority. A separate, newly executed local run must match
+the current flow/app/target/failure facts to reach `locally-reproduced`. Broker imports are
+capability-token gated, bounded, memory-only safe projections; raw content has no broad endpoint.
 
 ### Side-effect admission
 

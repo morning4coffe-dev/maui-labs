@@ -101,6 +101,9 @@
         "$ref": "#/$defs/ArtifactReference"
       }
     },
+    "selectorHealth": {
+      "$ref": "#/$defs/SelectorHealthSummary"
+    },
     "reportDigest": {
       "type": "string"
     },
@@ -145,6 +148,12 @@
           "type": "string"
         },
         "appBuildFingerprint": {
+          "type": "string"
+        },
+        "appSourceFingerprint": {
+          "type": "string"
+        },
+        "packageDigest": {
           "type": "string"
         },
         "agentId": {
@@ -610,6 +619,21 @@
         "failureClass": {
           "$ref": "#/$defs/FailureClass"
         },
+        "fingerprint": {
+          "$ref": "#/$defs/ElementFingerprint"
+        },
+        "selectorCandidates": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/SelectorCandidate"
+          }
+        },
+        "selectorCandidateOmissions": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Omission"
+          }
+        },
         "artifacts": {
           "type": "array",
           "items": {
@@ -961,6 +985,59 @@
           "type": "integer",
           "minimum": 0
         }
+      },
+      "additionalProperties": true
+    },
+    "SelectorHealthSummary": {
+      "type": "object",
+      "properties": {
+        "ruleVersion": { "type": "string" },
+        "rankerRuleVersion": { "type": "string" },
+        "calibrationState": { "const": "uncalibrated" },
+        "capturedSteps": { "type": "integer", "minimum": 0 },
+        "candidateCount": { "type": "integer", "minimum": 0 },
+        "omissionCount": { "type": "integer", "minimum": 0 }
+      },
+      "additionalProperties": true
+    },
+    "ElementFingerprint": {
+      "type": "object",
+      "properties": {
+        "schema": { "const": 1 },
+        "fingerprintId": { "type": "string" },
+        "context": { "type": "object" },
+        "managed": { "type": "object" },
+        "native": { "type": "object" },
+        "source": { "type": "object" },
+        "topology": { "type": "object" },
+        "collection": { "type": "object" },
+        "normalizedBounds": { "type": "object" },
+        "observedAt": { "$ref": "#/$defs/Timestamp" },
+        "capabilityVersion": { "type": "string" },
+        "evidenceRefs": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "SelectorCandidate": {
+      "type": "object",
+      "properties": {
+        "schema": { "const": 1 },
+        "candidateId": { "type": "string" },
+        "rank": { "type": "integer", "minimum": 1 },
+        "priority": { "type": "integer", "minimum": 1 },
+        "selectorDescriptor": { "type": "object" },
+        "scopeDescriptor": { "type": "object" },
+        "origin": { "type": "string" },
+        "rationaleCodes": { "type": "array", "items": { "type": "string" } },
+        "riskFlags": { "type": "array", "items": { "type": "string" } },
+        "scores": { "type": "object" },
+        "validation": { "type": "object" },
+        "calibration": {
+          "type": "object",
+          "properties": { "state": { "const": "uncalibrated" } },
+          "additionalProperties": true
+        },
+        "evidenceRefs": { "type": "array", "items": { "type": "string" } }
       },
       "additionalProperties": true
     }

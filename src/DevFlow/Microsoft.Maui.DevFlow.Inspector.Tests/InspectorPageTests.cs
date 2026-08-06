@@ -476,6 +476,27 @@ public class InspectorPageTests : IAsyncLifetime
     }
 
     [LiveInspectorFact]
+    public async Task TestWorkbenchGoal_PreservesFocusAndExpandersDuringBackgroundRefresh()
+    {
+        await _page.GotoAsync(BaseUrl);
+        await _page.Locator("#df-toggle-workbench").ClickAsync();
+
+        var goal = _page.Locator("#df-goal-input");
+        await goal.FillAsync("Keep authoring controls stable during broker refresh.");
+        await goal.FocusAsync();
+        await _page.WaitForTimeoutAsync(3_500);
+        Assert.True(await goal.EvaluateAsync<bool>("element => element === document.activeElement"));
+
+        var guide = _page.Locator("#df-workbench-panel-plan .df-agent-guide");
+        var summary = guide.Locator("summary");
+        await summary.ClickAsync();
+        await summary.FocusAsync();
+        await _page.WaitForTimeoutAsync(3_500);
+        Assert.True(await guide.EvaluateAsync<bool>("details => details.open"));
+        Assert.True(await summary.EvaluateAsync<bool>("element => element === document.activeElement"));
+    }
+
+    [LiveInspectorFact]
     public async Task TestWorkbenchProgressiveDisclosure_ShowsOnlyCurrentActions()
     {
         await _page.GotoAsync(BaseUrl);

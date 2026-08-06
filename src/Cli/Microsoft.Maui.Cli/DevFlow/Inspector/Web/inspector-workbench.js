@@ -578,17 +578,7 @@ export function createInspectorWorkbench(options = {}) {
     };
   }
 
-  function renderPanel() {
-    if (['repair', 'source'].includes(state.selectedTab) && !toolAvailability(state.selectedTab).enabled) {
-      state = normalizeWorkbenchState(state, { selectedTab: 'trace', selectedStage: 'results' });
-    }
-    const active = doc.activeElement;
-    const retainedTraceStep = state.selectedTab === 'trace' && active instanceof HTMLElement
-      ? active.dataset.traceStep
-      : null;
-    const renderer = PANEL_RENDERERS[state.selectedTab];
-    const body = panelBodies.get(state.selectedTab);
-    if (body && renderer) body.replaceChildren(renderer(makeHelpers()));
+  function renderChrome() {
     const journey = journeyStatus();
     for (const tab of WORKBENCH_TABS) {
       const selected = tab === state.selectedTab;
@@ -609,6 +599,20 @@ export function createInspectorWorkbench(options = {}) {
       if (panel) panel.hidden = !selected;
     }
     renderJourney(journey);
+  }
+
+  function renderPanel() {
+    if (['repair', 'source'].includes(state.selectedTab) && !toolAvailability(state.selectedTab).enabled) {
+      state = normalizeWorkbenchState(state, { selectedTab: 'trace', selectedStage: 'results' });
+    }
+    const active = doc.activeElement;
+    const retainedTraceStep = state.selectedTab === 'trace' && active instanceof HTMLElement
+      ? active.dataset.traceStep
+      : null;
+    const renderer = PANEL_RENDERERS[state.selectedTab];
+    const body = panelBodies.get(state.selectedTab);
+    if (body && renderer) body.replaceChildren(renderer(makeHelpers()));
+    renderChrome();
     if (retainedTraceStep) {
       const retained = body?.querySelectorAll?.('[data-trace-step]');
       const target = [...(retained || [])].find((element) => element.dataset.traceStep === retainedTraceStep);
@@ -902,9 +906,12 @@ export function createInspectorWorkbench(options = {}) {
     toggle,
     isOpen: () => opened,
     state: () => ({ ...state, startupHints: { ...state.startupHints }, draft: { ...state.draft } }),
-    updateState(patch) {
+    updateState(patch, options = {}) {
       state = normalizeWorkbenchState(state, patch);
-      renderPanel();
+      const activeToolBecameUnavailable =
+        ['repair', 'source'].includes(state.selectedTab) && !toolAvailability(state.selectedTab).enabled;
+      if (options.preservePanel === true && !activeToolBecameUnavailable) renderChrome();
+      else renderPanel();
     },
     destroy() {
       if (pendingGoalFocus !== null) win.clearTimeout(pendingGoalFocus);

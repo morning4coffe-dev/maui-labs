@@ -119,6 +119,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   let lastMarkdownSource = null;
   let replaying = false;
   let authoringLoadGeneration = 0;
+  let lastWorkbenchCanDrive = null;
   const pendingRecordingWork = new Set();
   // An imported trace is a captured diagnostic artifact, not an execution authority. This guard
   // sits below the UI so pointer, keyboard, property, and data mutations fail closed too.
@@ -1810,6 +1811,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     // (record / replay / assert / return-to-start-route) 409 or fail otherwise, so disable them
     // rather than let a click error out. Record stays clickable WHILE recording so you can stop.
     const canDrive = isWriter && connected && !capturedTraceMode;
+    const workbenchCanDrive = canDrive && !replaying;
     const workbenchAuthoring = recordingId
       ? 'recording'
       : authoringDraft.saving
@@ -1821,8 +1823,13 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
             : lastMarkdown
               ? 'saved'
               : 'none';
-    if (testWorkbench)
-      testWorkbench.updateState({ authoring: workbenchAuthoring });
+    const driveAuthorityChanged = lastWorkbenchCanDrive !== workbenchCanDrive;
+    lastWorkbenchCanDrive = workbenchCanDrive;
+    if (testWorkbench) {
+      const authoringChanged = testWorkbench.state().authoring !== workbenchAuthoring;
+      if (authoringChanged || driveAuthorityChanged)
+        testWorkbench.updateState({ authoring: workbenchAuthoring });
+    }
     updateRecordingUi();
     if (cancelRecordingBtn) cancelRecordingBtn.disabled = !recordingId || recordingStopping || replaying || !canDrive;
     propertyGrid.updateWriterState();
@@ -3453,7 +3460,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   }
 
   function notifyAuthoring(rerender = true) {
-    if (!rerender || !testWorkbench) return;
+    if (!testWorkbench) return;
     const authoringState = recordingId
       ? 'recording'
       : authoringDraft.saving
@@ -3465,15 +3472,18 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
             : authoringDraft.plan || authoringDraft.flow
               ? 'saved'
               : 'none';
-    testWorkbench.updateState({
-      authoring: authoringState,
-      draft: {
-        dirty: !!(authoringDraft.planDirty || authoringDraft.flowDirty),
-        saving: !!authoringDraft.saving,
-        stale: !!authoringDraft.stale,
-        readiness: authoringReadiness(),
+    testWorkbench.updateState(
+      {
+        authoring: authoringState,
+        draft: {
+          dirty: !!(authoringDraft.planDirty || authoringDraft.flowDirty),
+          saving: !!authoringDraft.saving,
+          stale: !!authoringDraft.stale,
+          readiness: authoringReadiness(),
+        },
       },
-    });
+      { preservePanel: !rerender }
+    );
   }
 
   function applyAuthoringResponse(response, committed) {

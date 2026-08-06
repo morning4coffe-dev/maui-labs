@@ -454,6 +454,10 @@ test("authoring panels retain explicit recording, validation, diff, and commit c
   assert.match(devflow, /const retainedPlan = source === 'recording'/);
   assert.match(devflow, /startAppendingRecording/);
   assert.match(devflow, /appendRecordingBase/);
+  assert.match(devflow, /lastWorkbenchCanDrive/);
+  assert.match(devflow, /authoringChanged \|\| driveAuthorityChanged/);
+  assert.match(devflow, /preservePanel: !rerender/);
+  assert.match(read("inspector-workbench.js"), /options\.preservePanel === true/);
   assert.match(devflow, /merged\.steps =/);
   assert.match(devflow, /bindingStale/);
   assert.match(devflow, /older flow digest/);

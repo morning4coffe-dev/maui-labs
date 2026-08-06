@@ -198,6 +198,17 @@ export function createInspectorWorkbench(options = {}) {
   const closeButton = root.querySelector('#df-workbench-close');
   const getLayout = typeof options.getLayout === 'function' ? options.getLayout : () => 'wide';
   const setInspectorStatus = typeof options.setStatus === 'function' ? options.setStatus : () => {};
+  const copyText = typeof options.copyText === 'function'
+    ? options.copyText
+    : async (text) => {
+      if (typeof win.navigator?.clipboard?.writeText !== 'function') return false;
+      try {
+        await win.navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        return false;
+      }
+    };
   const bridge = options.hostBridge || null;
   const authoring = options.authoring || null;
   const run = options.run || null;
@@ -338,7 +349,7 @@ export function createInspectorWorkbench(options = {}) {
       case 'requests':
         return {
           enabled: tabs.find((button) => button.dataset.workbenchTab === tab)?.dataset.available === 'true',
-          reason: 'No agent requests are available.',
+          reason: 'Agent requests appear here after your agent prepares a test or asks to run it.',
         };
       case 'repair':
         if (traceState.mode === 'imported') {
@@ -467,6 +478,60 @@ export function createInspectorWorkbench(options = {}) {
         button.addEventListener('click', onClick);
         parent.append(button);
         return button;
+      },
+      agentGuide(parent, config = {}) {
+        const guide = doc.createElement('details');
+        guide.className = 'df-agent-guide df-tool-details';
+        guide.open = config.open === true;
+        const summary = doc.createElement('summary');
+        summary.textContent = config.title || 'Work with your agent';
+        guide.append(summary);
+        if (config.description) {
+          const description = doc.createElement('p');
+          description.className = 'df-workbench-intro';
+          description.textContent = config.description;
+          guide.append(description);
+        }
+        if (Array.isArray(config.steps) && config.steps.length > 0) {
+          const steps = doc.createElement('ol');
+          steps.className = 'df-workbench-list df-agent-guide-steps';
+          for (const value of config.steps) {
+            const item = doc.createElement('li');
+            item.textContent = String(value);
+            steps.append(item);
+          }
+          guide.append(steps);
+        }
+        if (config.prompt) {
+          const actions = doc.createElement('div');
+          actions.className = 'df-authoring-actions';
+          const copy = doc.createElement('button');
+          copy.type = 'button';
+          copy.className = 'df-workbench-action df-agent-guide-copy';
+          copy.textContent = config.buttonLabel || 'Copy prompt for your agent';
+          copy.addEventListener('click', async () => {
+            const value = typeof config.prompt === 'function' ? config.prompt() : config.prompt;
+            const prompt = String(value || '').trim().slice(0, 8192);
+            if (!prompt) {
+              setStatus('No agent prompt is available yet.');
+              return;
+            }
+            copy.disabled = true;
+            const copied = await copyText(prompt);
+            copy.textContent = copied ? 'Prompt copied' : 'Copy failed';
+            setStatus(copied
+              ? 'Copied instructions. Paste them into your coding agent chat.'
+              : 'Could not copy the agent prompt.');
+            win.setTimeout(() => {
+              copy.disabled = false;
+              copy.textContent = config.buttonLabel || 'Copy prompt for your agent';
+            }, 1600);
+          });
+          actions.append(copy);
+          guide.append(actions);
+        }
+        parent.append(guide);
+        return guide;
       },
       placeholder(message) {
         setStatus(message);

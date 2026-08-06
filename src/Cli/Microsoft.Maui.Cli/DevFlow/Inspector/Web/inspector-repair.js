@@ -12,7 +12,7 @@ export function renderRepairPanel(helpers) {
     reasons.some((reason) => String(reason?.code || '').includes('locator-ambiguous'));
 
   if (!hasFailedRun && !eligibility && !proposal)
-    helpers.intro(root, 'Repair becomes available after a local test fails because one selector is missing.');
+    helpers.intro(root, 'Repair becomes available after a local test cannot find one control.');
   helpers.safety(root);
 
   if (state.error) {
@@ -26,10 +26,10 @@ export function renderRepairPanel(helpers) {
     const empty = document.createElement('section');
     empty.className = 'df-authoring-section df-tool-empty-state';
     const heading = document.createElement('h4');
-    heading.textContent = 'No failed local test to repair';
+    heading.textContent = 'Nothing to repair yet';
     const message = document.createElement('p');
     message.className = 'df-workbench-intro';
-    message.textContent = 'Run a saved test first. If it fails because one selector is missing, return here.';
+    message.textContent = 'Run a saved test first. If it cannot find a control, return here or ask your agent to diagnose the failure.';
     empty.append(heading, message);
     helpers.action(empty, 'Open Results', () => helpers.selectStage?.('results'));
     root.append(empty);
@@ -41,6 +41,21 @@ export function renderRepairPanel(helpers) {
     );
     classify.classList.add('df-authoring-primary');
     classify.disabled = state.classifying || !repair;
+    helpers.agentGuide?.(root, {
+      title: 'Diagnose with your agent',
+      description: 'Your agent can inspect the bounded failure details and prepare a safe suggestion. It cannot apply the change.',
+      steps: [
+        'Ask the agent to classify the latest failed test.',
+        'If a safe control replacement exists, the agent prepares an inert suggestion.',
+        'You review, validate, and apply any change here.',
+      ],
+      prompt: [
+        'Use only the restricted DevFlow test-agent tools.',
+        'Inspect the latest failed local DevFlow test and explain the failure in plain language.',
+        'If a selector-only repair is safely eligible, create an inert proposal for human review.',
+        'Do not approve, apply, roll back, or edit source.',
+      ].join(' '),
+    });
   } else if (eligibility?.eligible !== true && !proposal) {
     const unavailable = document.createElement('section');
     unavailable.className = 'df-authoring-section df-tool-empty-state';
@@ -59,14 +74,14 @@ export function renderRepairPanel(helpers) {
     const ready = document.createElement('section');
     ready.className = 'df-authoring-section df-tool-ready-state';
     const heading = document.createElement('h4');
-    heading.textContent = 'A selector-only repair may be possible';
+    heading.textContent = 'A safe test update may be possible';
     const message = document.createElement('p');
     message.className = 'df-workbench-intro';
-    message.textContent = 'Create an inert proposal to review. Nothing is applied automatically.';
+    message.textContent = 'Create a suggested control update to review. Nothing changes automatically.';
     ready.append(heading, message);
     const propose = helpers.action(
       ready,
-      state.proposing ? 'Creating proposal…' : 'Create repair proposal',
+      state.proposing ? 'Creating suggestion…' : 'Create suggested update',
       () => repair?.propose?.()
     );
     propose.classList.add('df-authoring-primary');
@@ -79,18 +94,18 @@ export function renderRepairPanel(helpers) {
     const proposalCard = document.createElement('section');
     proposalCard.className = 'df-authoring-section df-tool-ready-state';
     const heading = document.createElement('h4');
-    heading.textContent = `Repair proposal · ${String(lifecycle || 'proposed').replace(/-/g, ' ')}`;
+    heading.textContent = `Suggested test update · ${String(lifecycle || 'proposed').replace(/-/g, ' ')}`;
     proposalCard.append(heading);
     const next = document.createElement('p');
     next.className = 'df-workbench-intro';
     next.textContent = lifecycle === 'proposed'
-      ? 'Preview the selector-only change.'
+      ? 'Review exactly which control this step would use.'
       : lifecycle === 'previewed' && !(proposal.validationRunIds?.length)
-        ? 'Validate the proposed selector against a reset test run.'
+        ? 'Try the suggested control in a reset test run without saving it.'
         : lifecycle === 'previewed'
-          ? 'Validation completed. Approve the reviewed change when ready.'
+          ? 'The suggestion worked in validation. Approve the reviewed update when ready.'
           : lifecycle === 'approved'
-            ? 'Apply the approved selector change.'
+            ? 'Apply the approved test update.'
             : lifecycle === 'applied'
               ? 'The change is applied; verification is still required.'
               : 'Review the current repair state.';
@@ -100,27 +115,27 @@ export function renderRepairPanel(helpers) {
     if (agentOriginated) {
       const notice = document.createElement('p');
       notice.className = 'df-workbench-safety';
-      notice.textContent = 'This agent proposal still requires human validation and approval.';
+      notice.textContent = 'Your agent prepared this suggestion. You may review or validate it, but agent-originated suggestions are never applied directly.';
       proposalCard.append(notice);
     }
 
     if (lifecycle === 'proposed') {
-      const preview = helpers.action(proposalCard, 'Preview repair', () => repair?.preview?.());
+      const preview = helpers.action(proposalCard, 'Review suggested update', () => repair?.preview?.());
       preview.classList.add('df-authoring-primary');
     } else if (lifecycle === 'previewed' && !(proposal.validationRunIds?.length)) {
-      const validate = helpers.action(proposalCard, 'Run safe validation', () => repair?.validate?.());
+      const validate = helpers.action(proposalCard, 'Try this update', () => repair?.validate?.());
       validate.classList.add('df-authoring-primary');
       validate.disabled = !repair || !canMutate;
     } else if (lifecycle === 'previewed' && proposal.validationRunIds?.length && !agentOriginated) {
-      const approval = helpers.action(proposalCard, 'Approve repair', () => repair?.requestApproval?.());
+      const approval = helpers.action(proposalCard, 'Approve update', () => repair?.requestApproval?.());
       approval.classList.add('df-authoring-primary');
       approval.disabled = !repair || !canMutate;
     } else if (lifecycle === 'approved' && !agentOriginated) {
-      const apply = helpers.action(proposalCard, 'Apply approved repair', () => repair?.apply?.());
+      const apply = helpers.action(proposalCard, 'Apply update', () => repair?.apply?.());
       apply.classList.add('df-authoring-primary');
       apply.disabled = !repair || !state.proposal?.grant || !canMutate;
     } else if (['applying', 'applied'].includes(lifecycle)) {
-      const refresh = helpers.action(proposalCard, 'Refresh repair status', () => repair?.refresh?.());
+      const refresh = helpers.action(proposalCard, 'Refresh update status', () => repair?.refresh?.());
       refresh.classList.add('df-authoring-primary');
     }
     if (lifecycle === 'previewed') {
@@ -131,7 +146,7 @@ export function renderRepairPanel(helpers) {
     const proposalDetails = document.createElement('details');
     proposalDetails.className = 'df-tool-details';
     const detailSummary = document.createElement('summary');
-    detailSummary.textContent = 'Repair details';
+    detailSummary.textContent = 'Technical repair details';
     proposalDetails.append(detailSummary);
     if (proposal.diff?.markdown) {
       const label = document.createElement('h4');

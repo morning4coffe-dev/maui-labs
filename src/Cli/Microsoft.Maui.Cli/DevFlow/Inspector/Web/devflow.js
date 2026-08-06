@@ -643,7 +643,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     lastScrollY = e.clientY;
 
     if (scrollFlushTimer) clearTimeout(scrollFlushTimer);
-    scrollFlushTimer = setTimeout(() => void flushPendingScroll(), 100);
+    scrollFlushTimer = setTimeout(() => {
+      const work = flushPendingScroll();
+      if (recordingId) trackRecordingWork(work);
+    }, 100);
   }, { passive: false });
 
   // ── Pointer Drag → Gesture ──
@@ -1818,7 +1821,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
             : lastMarkdown
               ? 'saved'
               : 'none';
-    if (testWorkbench && testWorkbench.state().authoring !== workbenchAuthoring)
+    if (testWorkbench)
       testWorkbench.updateState({ authoring: workbenchAuthoring });
     updateRecordingUi();
     if (cancelRecordingBtn) cancelRecordingBtn.disabled = !recordingId || recordingStopping || replaying || !canDrive;
@@ -6246,6 +6249,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     study: studyController,
     getLayout: () => hostLayout,
     setStatus,
+    copyText,
     onOpen: () => {
       studyController.workbenchOpened();
       setMoreOpen(false);
@@ -6262,6 +6266,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     inspectorApi,
     openPanel: () => testWorkbench?.open?.('requests', false),
     setStatus,
+    copyText,
     onTransition: (kind, data) => studyController?.agentApprovalTransition?.(kind, data),
   });
   agentRequestController.start();

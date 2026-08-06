@@ -11,6 +11,33 @@ function strings(values) {
     .map((value) => value.trim()))];
 }
 
+function readableAction(value) {
+  return {
+    'author-commit': 'save the test',
+    run: 'run the test',
+    cancel: 'cancel the run',
+    assert: 'check an expected result',
+    tap: 'tap a control',
+    fill: 'enter text',
+    scroll: 'scroll',
+    navigate: 'navigate',
+    back: 'go back',
+  }[value] || readable(value);
+}
+
+export function agentRequestStarterPrompt(appName = null, platform = null) {
+  const target = [appName, platform].filter(Boolean).join(' on ');
+  return [
+    'Use only the restricted DevFlow test-agent tools.',
+    target
+      ? `Discover and explicitly target ${target}.`
+      : 'Discover and explicitly target the connected app.',
+    'Help me define the Goal if needed, then prepare the complete test draft with steps and expected results.',
+    'Request one commit review, then wait. Do not run until I approve a separate run request.',
+    'Do not apply repairs or source changes automatically.',
+  ].join(' ');
+}
+
 export function normalizeAgentRequestScope(scope = {}) {
   return {
     allowedActions: strings(scope.allowedActions),
@@ -41,8 +68,9 @@ export function isNarrowedAgentRequestScope(requested, approved) {
 
 export function agentRequestSummary(request) {
   const scope = normalizeAgentRequestScope(request?.requestedScope);
-  const actionText = scope.allowedActions.length === 1
-    ? scope.allowedActions[0]
+  const actions = scope.allowedActions.map(readableAction);
+  const actionText = actions.length === 1
+    ? actions[0]
     : `${scope.allowedActions.length} action types`;
   const selectorText = scope.allowedSelectors.length === 0
     ? 'no element selectors'
@@ -62,21 +90,21 @@ function readable(value) {
 
 function requestTitle(kind) {
   return {
-    commit: 'Review test draft',
-    run: 'Run this test once',
-    'draft-change': 'Update test draft',
-    assertion: 'Add expected results',
-    exploration: 'Explore the app',
+    commit: 'Your agent prepared a test',
+    run: 'Your agent would like to run this test once',
+    'draft-change': 'Your agent suggests a test update',
+    assertion: 'Your agent suggests expected results',
+    exploration: 'Your agent would like to inspect test controls',
   }[kind] || `Review ${readable(kind)}`;
 }
 
 function approvalLabel(kind) {
   return {
-    commit: 'Approve draft',
-    run: 'Approve run',
-    'draft-change': 'Approve update',
-    assertion: 'Approve checks',
-    exploration: 'Approve exploration',
+    commit: 'Save test',
+    run: 'Allow one run',
+    'draft-change': 'Allow update',
+    assertion: 'Add expected results',
+    exploration: 'Allow exploration',
   }[kind] || 'Approve request';
 }
 
@@ -153,6 +181,17 @@ export function createAgentRequestController(options = {}) {
   const tabBadge = options.tabBadge || doc.getElementById('df-agent-requests-badge');
   const openPanel = typeof options.openPanel === 'function' ? options.openPanel : () => {};
   const setStatus = typeof options.setStatus === 'function' ? options.setStatus : () => {};
+  const copyText = typeof options.copyText === 'function'
+    ? options.copyText
+    : async (text) => {
+      if (typeof win.navigator?.clipboard?.writeText !== 'function') return false;
+      try {
+        await win.navigator.clipboard.writeText(text);
+        return true;
+      } catch {
+        return false;
+      }
+    };
   const onTransition = typeof options.onTransition === 'function' ? options.onTransition : () => {};
   if (!api || !panel || !body) {
     return Object.freeze({
@@ -203,7 +242,7 @@ export function createAgentRequestController(options = {}) {
         : 'Agent requests';
       tab.setAttribute('aria-label', label);
       tab.title = !available
-        ? 'No agent requests are available.'
+        ? 'Agent requests appear here after your agent prepares a test or asks to run it.'
         : pending > 0
         ? `${pending} agent request${pending === 1 ? '' : 's'} waiting for review`
         : 'Review requests from test agents';
@@ -227,7 +266,7 @@ export function createAgentRequestController(options = {}) {
       else expandedRequests.delete(request.approvalRequestId);
     });
     const summary = doc.createElement('summary');
-    summary.textContent = pending ? 'Review permissions and decide' : 'Reviewed permissions';
+    summary.textContent = pending ? 'Review what your agent can do' : 'Reviewed permissions';
     details.append(summary);
     appendText(
       doc,
@@ -245,7 +284,7 @@ export function createAgentRequestController(options = {}) {
       checked ? draft.allowedActions.add(value) : draft.allowedActions.delete(value);
       render();
     });
-    scopeGroup(doc, grid, 'Selectors', requested.allowedSelectors, draft.allowedSelectors, !pending, (value, checked) => {
+    scopeGroup(doc, grid, 'Controls', requested.allowedSelectors, draft.allowedSelectors, !pending, (value, checked) => {
       checked ? draft.allowedSelectors.add(value) : draft.allowedSelectors.delete(value);
       render();
     });
@@ -253,7 +292,7 @@ export function createAgentRequestController(options = {}) {
       checked ? draft.allowedRoutes.add(value) : draft.allowedRoutes.delete(value);
       render();
     });
-    scopeGroup(doc, grid, 'Side effects', requested.allowedSideEffectClasses, draft.allowedSideEffectClasses, !pending, (value, checked) => {
+    scopeGroup(doc, grid, 'App changes', requested.allowedSideEffectClasses, draft.allowedSideEffectClasses, !pending, (value, checked) => {
       checked ? draft.allowedSideEffectClasses.add(value) : draft.allowedSideEffectClasses.delete(value);
       render();
     });
@@ -323,7 +362,7 @@ export function createAgentRequestController(options = {}) {
         render();
       });
       const confirmationText = doc.createElement('span');
-      confirmationText.textContent = `I reviewed this request for ${appName || 'this app'}${platform ? ` on ${platform}` : ''}.`;
+      confirmationText.textContent = `I reviewed what my agent wants to do in ${appName || 'this app'}${platform ? ` on ${platform}` : ''}.`;
       confirmation.append(checkbox, confirmationText);
       review.append(confirmation);
 
@@ -349,11 +388,11 @@ export function createAgentRequestController(options = {}) {
       review.append(actions);
     } else {
       const message = {
-        approved: 'Approved. The agent receives the opaque grant through status; do not paste anything into chat.',
-        consumed: 'Used. The approved grant has been consumed and cannot be replayed.',
-        rejected: 'Rejected. No grant was issued.',
-        expired: 'Expired. The agent must submit a fresh request.',
-        stale: 'Stale. The app instance or draft revision changed; the agent must submit a fresh request.',
+        approved: 'Approved. Your agent can continue; you do not need to copy anything into chat.',
+        consumed: 'Completed. This approval was used and cannot be used again.',
+        rejected: 'Rejected. Your agent cannot continue with this request.',
+        expired: 'Expired. Ask your agent to submit a fresh request.',
+        stale: 'The app or test changed. Ask your agent to submit a fresh request.',
       }[request.state] || 'This request is no longer pending.';
       appendText(doc, card, 'p', message, 'df-agent-request-result');
       const reviewed = doc.createElement('details');
@@ -372,13 +411,48 @@ export function createAgentRequestController(options = {}) {
     const pending = requests.filter((request) => request.state === 'pending');
     const recent = requests.filter((request) => request.state !== 'pending').slice(0, 6);
     if (requests.length === 0) {
-      appendText(doc, body, 'p', 'No requests are waiting for your review.', 'df-agent-request-empty');
+      const empty = doc.createElement('section');
+      empty.className = 'df-authoring-section df-tool-empty-state df-agent-request-empty-state';
+      appendText(doc, empty, 'h4', 'Work with your agent');
+      appendText(
+        doc,
+        empty,
+        'p',
+        `Ask your coding agent to prepare or improve a DevFlow test${appName ? ` for ${appName}` : ''}. Its save and run requests will appear here for review.`,
+        'df-workbench-intro'
+      );
+      const steps = doc.createElement('ol');
+      steps.className = 'df-workbench-list';
+      for (const text of [
+        'Your agent prepares the draft and expected results.',
+        'You review the test before saving it.',
+        'You separately decide whether to run it once.',
+      ]) appendText(doc, steps, 'li', text);
+      empty.append(steps);
+      const copy = doc.createElement('button');
+      copy.type = 'button';
+      copy.className = 'df-workbench-action';
+      copy.textContent = 'Copy prompt for your agent';
+      copy.addEventListener('click', async () => {
+        const copied = await copyText(agentRequestStarterPrompt(appName, platform));
+        setStatus(copied
+          ? 'Copied instructions. Paste them into your coding agent chat.'
+          : 'Could not copy the agent prompt.');
+      });
+      empty.append(copy);
+      body.append(empty);
       syncChrome();
       return;
     }
 
     if (pending.length > 0) {
-      appendText(doc, body, 'p', `${pending.length} request${pending.length === 1 ? '' : 's'} waiting. Nothing changes until you decide.`, 'df-agent-request-intro');
+      appendText(
+        doc,
+        body,
+        'p',
+        `Your agent is waiting for ${pending.length === 1 ? 'a decision' : `${pending.length} decisions`}. Review what it wants to do. Nothing changes until you approve.`,
+        'df-agent-request-intro'
+      );
       pending.forEach((request, index) => body.append(renderRequest(request, index === 0)));
     }
     if (recent.length > 0) {

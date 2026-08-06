@@ -473,6 +473,21 @@ margin-bottom: 10px; }
 }
 .df-tool-empty-state { border-color: var(--df-border); }
 .df-tool-ready-state { border-color: var(--df-border); }
+.df-onboarding-callout,
+.df-agent-guide {
+  border-color: color-mix(in srgb, var(--df-accent) 42%, var(--df-border));
+  background: color-mix(in srgb, var(--df-accent) 6%, var(--df-surface));
+}
+.df-agent-guide > summary {
+  color: var(--df-fg);
+}
+.df-agent-guide > .df-workbench-list,
+.df-agent-guide > .df-authoring-actions {
+  margin-inline: 10px;
+}
+.df-agent-guide-steps {
+  margin-block: 0 10px;
+}
 .df-tool-details {
   padding-bottom: 8px;
 }

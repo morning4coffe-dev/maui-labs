@@ -76,6 +76,12 @@ screenshot, properties/source, Data dock, and Evidence controls remain unchanged
 5. DevFlow opens **Results** for every terminal outcome. Use the pass/fail banner and next actions
    to check and run again, improve the test, inspect a failed step, or review an eligible repair.
 
+The Goal page also includes a collapsed **Create this test with your agent** guide. It copies a
+ready-to-paste prompt that asks the restricted agent to prepare the complete draft and return only
+the save decision to **Requests**. Saving and running remain separate human decisions. Failed
+Results and Improve expose equivalent contextual prompts for diagnosis and read-only quality
+review; agent repair suggestions are never applied directly.
+
 Each workflow tab uses progressive disclosure. **Steps** shows only Goal recovery, active recording,
 or the captured-step summary that is currently relevant. **Review** withholds save/run actions until
 steps and an expected result exist. **Run** sends unsaved work back to Review and exposes one
@@ -233,9 +239,12 @@ proposal.
 ### Repair (human-approved selector repair)
 
 The initial **Repair** view shows only the current safe action: **Open Results** when no failed local
-test exists, **Check latest failure** when one can be classified, or **Create repair proposal** when
-eligibility passes. A proposal then advances one reviewed action at a time: preview, validation,
-approval, and apply. Classification evidence, selector proof, and policy rules remain collapsed.
+test exists, **Check latest failure** when one can be classified, or **Create suggested update**
+when eligibility passes. A suggestion then advances one reviewed action at a time: **Review
+suggested update**, **Try this update**, **Approve update**, and **Apply update**. Classification
+evidence, selector proof, and policy rules remain collapsed. **Diagnose with your agent** copies a
+bounded prompt for failure explanation or an inert suggestion; agent-originated suggestions are
+never applied directly.
 
 The **Repair** tab explains eligibility rather than guessing. It accepts only a primary
 pre-dispatch `locator-not-found` with a complete matching current checkpoint and trusted local

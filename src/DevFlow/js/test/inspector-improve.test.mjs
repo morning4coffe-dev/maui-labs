@@ -90,7 +90,7 @@ test("Improve renderer exposes evidence, links, filters, and no apply action", (
 
   for (const text of [
     "No test to scan", "Scan test", "Scan again", "Include the current live visual tree",
-    "Filter findings", "Coverage details", "Open Steps", "Open Trace", "Source anchor", "Evidence:",
+    "Filter findings", "Coverage details", "Improve this test with your agent", "Open Steps", "Open Trace", "Source anchor", "Evidence:",
   ]) {
     assert.match(source, new RegExp(text));
   }

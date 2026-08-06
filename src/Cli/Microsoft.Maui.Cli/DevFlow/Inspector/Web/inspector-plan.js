@@ -14,6 +14,22 @@ function splitCsv(value) {
   return String(value || '').split(',').map((item) => item.trim()).filter(Boolean);
 }
 
+export function agentPreparationPrompt(goal = '') {
+  const boundedGoal = String(goal || '')
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .trim()
+    .slice(0, 1000);
+  return [
+    'Use only the restricted DevFlow test-agent tools.',
+    boundedGoal
+      ? `Prepare a complete test for the connected app with this Goal: ${boundedGoal}`
+      : 'Help me define the Goal, then prepare a complete test for the connected app.',
+    'Include the steps and expected results in the initial draft.',
+    'Request one commit review, then wait. Do not run until I approve a separate run request.',
+    'Do not apply repairs or source changes automatically.',
+  ].join(' ');
+}
+
 function el(tag, props = {}, children = []) {
   const node = document.createElement(tag);
   for (const [name, value] of Object.entries(props)) {
@@ -380,6 +396,8 @@ export function renderPlanPanel(helpers) {
 
   const draft = authoring.state();
   let plan = clone(draft.plan || defaultPlan(draft));
+  const goalComplete = !!String(plan.goal || '').trim();
+  const firstTest = !goalComplete && !draft.flow && !draft.markdown && draft.savedBundle !== true;
   const artifactMissing = list(draft.errors).some((value) =>
     /workflow test no longer exists|workflow artifact no longer exists|flow-not-found/i.test(String(value)));
 
@@ -409,8 +427,20 @@ export function renderPlanPanel(helpers) {
     action(recovery, 'Download current draft', () => authoring.downloadTestDraft?.());
   }
 
-  helpers.intro(root, 'Describe the outcome this test must prove. This is the only required field before adding steps.');
-  const goalComplete = !!String(plan.goal || '').trim();
+  if (firstTest) {
+    const welcome = section(
+      root,
+      'Create your first test',
+      'Describe what should work, then demonstrate it in the app. DevFlow turns your actions into a test you can review and run again.'
+    );
+    welcome.classList.add('df-onboarding-callout');
+    welcome.append(el('p', {
+      className: 'df-workbench-note',
+      text: 'You can create it here or ask your coding agent to prepare the draft. Nothing is saved or run until you review it.',
+    }));
+  } else {
+    helpers.intro(root, 'Describe the outcome this test must prove. This is the only required field before adding steps.');
+  }
   root.classList.toggle('df-goal-incomplete', !goalComplete);
   const goalStart = el('section', { className: 'df-goal-start' });
   if (draft.savedTestPickerOpen) {
@@ -515,6 +545,16 @@ export function renderPlanPanel(helpers) {
   });
   openSaved.classList.add('df-workbench-action-secondary');
   goalStart.append(quickActions);
+  helpers.agentGuide?.(goalStart, {
+    title: 'Create this test with your agent',
+    description: 'Prefer to start in agent chat? Your agent can prepare the complete draft, then bring only the save and run decisions back here.',
+    steps: [
+      'Paste the prompt into your coding agent chat.',
+      'Review the prepared test when its request appears in Agent requests.',
+      'Approve saving and running separately.',
+    ],
+    prompt: () => agentPreparationPrompt(plan.goal),
+  });
   if (!draft.savedTestPickerOpen) root.append(goalStart);
 
   findings(root, 'Check test issues', draft.errors, 'error');

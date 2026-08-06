@@ -368,7 +368,11 @@ export function renderImprovePanel(helpers) {
   if (!state.hasFlow && !ambiguity) {
     const empty = create('section', 'df-authoring-section df-tool-empty-state');
     empty.append(create('h4', null, 'No test to scan'));
-    empty.append(create('p', 'df-workbench-intro', 'Record or open a test first, then return here.'));
+    empty.append(create(
+      'p',
+      'df-workbench-intro',
+      'Record or open a test first. You can then check it here or ask your agent to review its quality.'
+    ));
     empty.append(button('Go to Steps', () => helpers.selectStage?.('record')));
     root.append(empty);
     return root;
@@ -378,7 +382,14 @@ export function renderImprovePanel(helpers) {
   if (state.error) root.append(create('p', 'df-workbench-safety', safe(state.error)));
 
   const controls = create('section', 'df-authoring-section df-tool-ready-state');
-  controls.append(create('h4', null, analysis ? 'Scan summary' : 'Scan this test'));
+  controls.append(create('h4', null, analysis ? 'Scan summary' : 'Check this test'));
+  controls.append(create(
+    'p',
+    'df-workbench-intro',
+    analysis
+      ? 'Review the findings below. Nothing in the test changes until you edit or approve it.'
+      : 'Look for fragile controls, missing expected results, and incomplete route or platform coverage.'
+  ));
   const actionRow = create('div', 'df-authoring-actions');
   const scan = button(
     state.scanning ? 'Scanning…' : analysis ? (stale ? 'Update scan' : 'Scan again') : 'Scan test',
@@ -398,6 +409,21 @@ export function renderImprovePanel(helpers) {
         : 'The scan is read-only and does not create a repair.'
   ));
   root.append(controls);
+  helpers.agentGuide?.(root, {
+    title: 'Improve this test with your agent',
+    description: 'Your agent can run the same read-only quality check and explain the findings in plain language.',
+    steps: [
+      'The agent scans the loaded test without changing it.',
+      'It summarizes fragile controls and missing expected results.',
+      'You decide which suggestions to edit or review.',
+    ],
+    prompt: [
+      'Use only the restricted DevFlow test-agent tools.',
+      'Review the currently loaded DevFlow test for fragile controls, missing expected results, and incomplete route or platform coverage.',
+      'Summarize the most important findings in plain language and suggest the next safe action.',
+      'Do not apply repairs or source changes.',
+    ].join(' '),
+  });
 
   const scanOptions = create('details', 'df-tool-details');
   scanOptions.append(create('summary', null, 'Scan options'));

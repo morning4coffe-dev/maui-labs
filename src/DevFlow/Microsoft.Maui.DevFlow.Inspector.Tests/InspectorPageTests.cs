@@ -352,7 +352,8 @@ public class InspectorPageTests : IAsyncLifetime
         var review = request.Locator(".df-agent-request-details");
         await Expect(review).ToBeVisibleAsync();
         Assert.True(await review.EvaluateAsync<bool>("details => details.open"));
-        await Expect(request.GetByRole(AriaRole.Button, new() { Name = "Approve run", Exact = true })).ToBeVisibleAsync();
+        await Expect(request).ToContainTextAsync("Your agent would like to run this test once");
+        await Expect(request.GetByRole(AriaRole.Button, new() { Name = "Allow one run", Exact = true })).ToBeVisibleAsync();
         await Expect(request.GetByRole(AriaRole.Button, new() { Name = "Reject", Exact = true })).ToBeVisibleAsync();
     }
 
@@ -371,7 +372,7 @@ public class InspectorPageTests : IAsyncLifetime
 
         foreach (var (selector, title) in new[]
         {
-            ("#df-workbench-tab-requests", "No agent requests are available."),
+            ("#df-workbench-tab-requests", "Agent requests appear here after your agent prepares a test or asks to run it."),
             ("#df-workbench-tab-repair", "Open a failed local result to unlock Repair."),
             ("#df-workbench-tab-improve", "Record or open a test to unlock Improve."),
             ("#df-workbench-tab-source", "Select a source-mapped control to unlock Source."),
@@ -461,6 +462,14 @@ public class InspectorPageTests : IAsyncLifetime
             "does not support save test bundles",
             await _page.Locator("#df-workbench-panel-plan").TextContentAsync(),
             StringComparison.OrdinalIgnoreCase);
+        await Expect(_page.Locator("#df-workbench-panel-plan")).ToContainTextAsync("Create your first test");
+        var agentGuide = _page.Locator("#df-workbench-panel-plan .df-agent-guide");
+        await Expect(agentGuide).ToContainTextAsync("Create this test with your agent");
+        Assert.False(await agentGuide.EvaluateAsync<bool>("details => details.open"));
+        await agentGuide.Locator("summary").ClickAsync();
+        await Expect(agentGuide.GetByRole(
+            AriaRole.Button,
+            new() { Name = "Copy prompt for your agent", Exact = true })).ToBeVisibleAsync();
 
         await Expect(_page.Locator("#df-workbench-stage-record")).ToBeDisabledAsync();
         await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Record steps", Exact = true })).ToBeDisabledAsync();
@@ -1413,7 +1422,7 @@ public class InspectorPageTests : IAsyncLifetime
     [LiveInspectorFact]
     public async Task InspectorExposesAccessibleDocumentStructure()
     {
-        await _page.SetViewportSizeAsync(900, 820);
+        await _page.SetViewportSizeAsync(420, 820);
         await _page.GotoAsync(BaseUrl);
 
         await Expect(_page.Locator("html")).ToHaveAttributeAsync("lang", "en");
@@ -1449,7 +1458,7 @@ public class InspectorPageTests : IAsyncLifetime
     [LiveInspectorFact]
     public async Task TransientInspectorChromeRestoresKeyboardFocus()
     {
-        await _page.SetViewportSizeAsync(900, 820);
+        await _page.SetViewportSizeAsync(420, 820);
         await _page.GotoAsync(BaseUrl);
         var more = _page.Locator("#df-more");
         await Expect(more).ToBeVisibleAsync();
@@ -2109,8 +2118,11 @@ public class InspectorPageTests : IAsyncLifetime
         await _page.Locator("#df-workbench-tab-improve").ClickAsync();
         var improve = _page.Locator("#df-workbench-panel-improve");
         await Expect(improve.GetByRole(AriaRole.Button, new() { Name = "Scan test", Exact = true })).ToBeVisibleAsync();
+        var improveAgentGuide = improve.Locator(".df-agent-guide");
+        await Expect(improveAgentGuide).ToContainTextAsync("Improve this test with your agent");
+        Assert.False(await improveAgentGuide.EvaluateAsync<bool>("details => details.open"));
         var scanOptions = improve.Locator(".df-tool-details");
-        await Expect(scanOptions).ToHaveCountAsync(0);
+        await Expect(scanOptions).ToHaveCountAsync(1);
         await _page.Locator("#df-workbench-stage-run").ClickAsync();
         var runPanel = _page.Locator("#df-workbench-panel-run");
         await Expect(runPanel).ToBeVisibleAsync();
@@ -2541,8 +2553,11 @@ public class InspectorPageTests : IAsyncLifetime
     [LiveInspectorFact]
     public async Task TransientMenusRemainAvailableOverInspectorSurfaces()
     {
-        await _page.SetViewportSizeAsync(900, 820);
+        await _page.SetViewportSizeAsync(420, 820);
         await _page.GotoAsync(BaseUrl);
+        if (!await _page.Locator("#df-tree-pane").IsVisibleAsync())
+            await _page.Locator("#df-toggle-tree").ClickAsync();
+        await Expect(_page.Locator("#df-tree-pane")).ToBeVisibleAsync();
         await _page.Locator(".df-tree-node").Last.ClickAsync();
         await Expect(_page.Locator("#df-props-pane")).ToBeVisibleAsync();
 
@@ -3042,8 +3057,7 @@ public class InspectorPageTests : IAsyncLifetime
         Assert.False(string.IsNullOrEmpty(elementId));
         await frame.Locator($".df-tree-node[data-tree-id='{elementId}']").ClickAsync();
 
-        await frame.Locator("#df-more").ClickAsync();
-        await frame.Locator("#df-send-copilot").ClickAsync();
+        await ClickHostedToolbarActionAsync(frame, "#df-send-copilot");
         await frame.Locator("[data-copilot-context='selection']").ClickAsync();
         await Expect(frame.Locator("#df-status")).ToHaveTextAsync("Attached requested context.");
 
@@ -3053,13 +3067,11 @@ public class InspectorPageTests : IAsyncLifetime
         await frame.Locator("#df-saved-test-open").ClickAsync();
         await Expect(frame.Locator("#df-workbench-strip")).ToContainTextAsync("saved.md");
 
-        await frame.Locator("#df-more").ClickAsync();
-        await frame.Locator("#df-send-copilot").ClickAsync();
+        await ClickHostedToolbarActionAsync(frame, "#df-send-copilot");
         await frame.Locator("[data-copilot-context='workflow']").ClickAsync();
         await Expect(frame.Locator("#df-status")).ToHaveTextAsync("Attached requested context.");
 
-        await frame.Locator("#df-more").ClickAsync();
-        await frame.Locator("#df-send-copilot").ClickAsync();
+        await ClickHostedToolbarActionAsync(frame, "#df-send-copilot");
         await frame.Locator("[data-copilot-context='combined']").ClickAsync();
         await Expect(frame.Locator("#df-status")).ToHaveTextAsync("Attached requested context.");
 
@@ -3135,8 +3147,7 @@ public class InspectorPageTests : IAsyncLifetime
         var frame = _page.FrameLocator("#hosted");
         await Expect(frame.Locator(".devflow-element").First).ToBeAttachedAsync();
         await Expect(frame.Locator("body")).ToHaveAttributeAsync("data-host-kind", "test-host");
-        await frame.Locator("#df-more").ClickAsync();
-        await frame.Locator("#df-toggle-dock").ClickAsync();
+        await ClickHostedToolbarActionAsync(frame, "#df-toggle-dock");
         await frame.Locator("[data-tab='device']").ClickAsync();
         await Expect(frame.Locator("#df-attach-data")).ToBeEnabledAsync();
         await frame.Locator("#df-attach-data").ClickAsync();
@@ -3306,6 +3317,19 @@ public class InspectorPageTests : IAsyncLifetime
         if (!await action.IsVisibleAsync())
         {
             await _page.Locator("#df-more").ClickAsync();
+            await Expect(action).ToBeVisibleAsync();
+        }
+        await action.ClickAsync();
+    }
+
+    private async Task ClickHostedToolbarActionAsync(IFrameLocator frame, string selector)
+    {
+        var action = frame.Locator(selector);
+        if (!await action.IsVisibleAsync())
+        {
+            var more = frame.Locator("#df-more");
+            await Expect(more).ToBeVisibleAsync();
+            await more.ClickAsync();
             await Expect(action).ToBeVisibleAsync();
         }
         await action.ClickAsync();

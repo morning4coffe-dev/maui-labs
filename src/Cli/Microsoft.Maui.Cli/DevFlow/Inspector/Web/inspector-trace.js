@@ -335,6 +335,24 @@ function renderResultsSummary(root, helpers, state, controller, snapshot, report
     }
   }
   banner.append(actions);
+  if (failed) {
+    helpers.agentGuide?.(banner, {
+      title: 'Diagnose this failure with your agent',
+      description: 'Your agent can inspect the bounded result, explain what failed, and prepare a safe suggestion for you to review.',
+      steps: [
+        'The agent classifies the latest local failure.',
+        'It explains whether to fix the test, inspect the app, or retry later.',
+        'Any repair remains a suggestion until you validate and approve it.',
+      ],
+      prompt: [
+        'Use only the restricted DevFlow test-agent tools.',
+        'Inspect the latest failed local DevFlow test and explain the failure in plain language.',
+        'Recommend the next safe action.',
+        'If a selector-only repair is eligible, create an inert proposal for human review only.',
+        'Do not apply repairs or source changes.',
+      ].join(' '),
+    });
+  }
 }
 
 function renderLocalTrace(root, helpers, state, controller) {

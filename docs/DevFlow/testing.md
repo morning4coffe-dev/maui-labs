@@ -28,6 +28,19 @@ Open `maui devflow inspect`, select **Tests**, then follow **Goal**, **Steps**, 
 5. Choose **Check test**, inspect **Review changes**, then explicitly choose **Save test**.
    Save never runs a test.
 
+### Work with your coding agent
+
+From **Goal**, expand **Create this test with your agent** and copy the prepared prompt into your
+coding-agent chat. The agent prepares the complete draft and expected results, then its request
+appears under **Requests**. Review the test before choosing **Save test**; running it is always a
+second, separate **Allow one run** decision.
+
+After a failure, **Results** offers **Diagnose this failure with your agent**. The agent can explain
+the bounded failure and prepare an inert control-update suggestion, but it cannot apply the
+repair. **Repair** keeps review, validation, approval, and apply under human control. In
+**Improve**, the equivalent agent prompt asks for a read-only quality review of fragile controls,
+missing expected results, and incomplete coverage.
+
 The five workflow tabs reveal only the current usable action. Missing prerequisites link back to
 the tab that can satisfy them instead of showing disabled future controls. Recording/recovery,
 additional outcome checks, run/evidence details, compatibility replay, diagnostic import, and

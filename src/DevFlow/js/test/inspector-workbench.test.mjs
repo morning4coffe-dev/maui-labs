@@ -129,15 +129,16 @@ test("repair panel exposes human-only selector repair boundaries", () => {
   const repair = read("inspector-repair.js");
 
   for (const text of [
-    "No failed local test to repair", "Check latest failure", "Create repair proposal",
-    "Preview repair", "Run safe validation", "Approve repair", "Apply approved repair",
+    "Nothing to repair yet", "Check latest failure", "Create suggested update",
+    "Review suggested update", "Try this update", "Approve update", "Apply update",
+    "Diagnose with your agent",
     "How this stays safe",
   ]) {
     assert.match(repair, new RegExp(text));
   }
   assert.match(repair, /one selector only; actions, checks, values, order, and source stay unchanged/i);
   assert.match(repair, /only a current local missing-selector failure can qualify/i);
-  assert.match(repair, /This agent proposal still requires human validation and approval/);
+  assert.match(repair, /agent-originated suggestions are never applied directly/i);
 });
 
 test("source proposal panel keeps XAML/C# review and flow repair separate", () => {
@@ -175,6 +176,7 @@ test("workbench assets are embedded, routed, and responsive", () => {
   assert.match(css, /data-host-layout="narrow"/);
   assert.match(css, /data-host-layout="short"/);
   assert.match(css, /forced-colors: active/);
+  assert.match(css, /\.df-agent-guide/);
 });
 
 test("agent request inbox permits narrowing only and never treats chat as approval", async () => {
@@ -211,16 +213,22 @@ test("agent request inbox permits narrowing only and never treats chat as approv
   assert.match(approvals.agentRequestSummary({ requestedScope: requested }), /2 action types.*2 exact selectors.*up to 2 actions/);
   assert.equal(approvals.agentRequestGrantDurationSeconds({ kind: "commit" }), 600);
   assert.equal(approvals.agentRequestGrantDurationSeconds({ kind: "run" }), 300);
+  assert.match(
+    approvals.agentRequestStarterPrompt("MauiTodo", "WinUI"),
+    /restricted DevFlow test-agent tools.*MauiTodo on WinUI.*commit review.*separate run request/i
+  );
 
   const source = read("inspector-agent-requests.js");
   assert.match(source, /humanConfirmed: true/);
   assert.match(source, /\/api\/workbench\/agent-requests/);
-  assert.match(source, /do not paste anything into chat/i);
+  assert.match(source, /Your agent can continue; you do not need to copy anything into chat/i);
   assert.match(source, /scrollIntoView/);
   assert.match(source, /openPanel/);
   assert.match(source, /df-workbench-tab-requests/);
   assert.doesNotMatch(source, /Back to tests|df-agent-requests-open|setOpen\(|hasNewPending|seenPending/);
-  assert.match(source, /Approve run/);
+  assert.match(source, /Allow one run/);
+  assert.match(source, /Your agent prepared a test/);
+  assert.match(source, /Copy prompt for your agent/);
   assert.doesNotMatch(source, /approvalGrantId/);
 });
 
@@ -368,6 +376,10 @@ test("human plan draft includes required test-plan-v1 authoring fields", async (
   assert.equal(draft.flow.digest, "a".repeat(64));
   assert.equal(draft.provenance.actorKind, "human");
   assert.equal(draft.provenance.channel, "inspector");
+  assert.match(
+    plan.agentPreparationPrompt("Adding a todo updates the count"),
+    /restricted DevFlow test-agent tools.*Adding a todo updates the count.*commit review.*separate run request/i
+  );
 });
 
 test("typed assertion and selector authoring keep hard and observation semantics distinct", async () => {
@@ -409,6 +421,8 @@ test("authoring panels retain explicit recording, validation, diff, and commit c
   assert.match(plan, /Reload saved test/);
   assert.match(plan, /Download current draft/);
   assert.match(plan, /What should this test prove\? \(required\)/);
+  assert.match(plan, /Create your first test/);
+  assert.match(plan, /Create this test with your agent/);
   assert.match(plan, /required: true/);
   assert.match(plan, /ariaInvalid/);
   assert.match(plan, /ariaDescribedBy/);
@@ -529,6 +543,7 @@ test("results show persistent summaries and contextual next actions", () => {
   ]) {
     assert.match(trace, new RegExp(text));
   }
+  assert.match(trace, /Diagnose this failure with your agent/);
   assert.match(trace, /df-results-summary/);
   assert.match(trace, /df-results-banner/);
   for (const next of ["Go to Goal", "Go to Steps", "Go to Review", "Go to Run"]) {

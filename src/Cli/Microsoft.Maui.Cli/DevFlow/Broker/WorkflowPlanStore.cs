@@ -92,7 +92,7 @@ internal sealed class WorkflowPlanStore
         string? planJson,
         bool requireSidecar = false)
     {
-        if (!TryReadSnapshot(flowName, out var committed, out var readResult))
+        if (!TryReadCommitBaseline(flowName, out var committed, out var readResult))
             return readResult;
 
         if (!TryParseFlow(markdown, out var draftFlow, out var canonicalMarkdown, out var errors, out var warnings))
@@ -536,7 +536,7 @@ internal sealed class WorkflowPlanStore
         string? markdown,
         string? planJson)
     {
-        if (!TryReadSnapshot(flowName, out var committed, out var readResult))
+        if (!TryReadCommitBaseline(flowName, out var committed, out var readResult))
             return readResult;
 
         var validation = Validate(flowName, markdown, planJson, requireSidecar: false);
@@ -546,7 +546,7 @@ internal sealed class WorkflowPlanStore
         var flowDiff = DeterministicDiff(
             $"committed/{committed!.Name}",
             $"draft/{committed.Name}",
-            FlowMarkdown.Serialize(committed.Flow!),
+            committed.Flow is null ? string.Empty : FlowMarkdown.Serialize(committed.Flow),
             validation.Snapshot.Markdown!);
         var planDiff = string.IsNullOrWhiteSpace(planJson)
             ? string.Empty
@@ -1228,6 +1228,14 @@ internal sealed class WorkflowPlanStore
         }
         if (forms != 1)
             errors.Add($"{context}: exactly one active selector is required.");
+        var hasStableItemKey = !string.IsNullOrWhiteSpace(selector.StableItemKey);
+        var hasCollectionScope = !string.IsNullOrWhiteSpace(selector.CollectionScope);
+        if (hasStableItemKey != hasCollectionScope)
+            errors.Add($"{context}: stable item key and collection scope must be supplied together.");
+        if ((hasStableItemKey || hasCollectionScope) && string.IsNullOrWhiteSpace(selector.AutomationId))
+            errors.Add($"{context}: a scoped item selector also requires an AutomationId.");
+        if (hasStableItemKey && !FlowSelector.IsOpaqueStableItemKey(selector.StableItemKey))
+            errors.Add($"{context}: stable item key must be an opaque SHA-256 identity.");
         if (selector.MatchCount is not null && selector.MatchCount != 1)
             errors.Add($"{context}: selector must resolve exactly one element; it currently reports {selector.MatchCount} matches.");
         if (string.Equals(selector.Quality, "ambiguous", StringComparison.OrdinalIgnoreCase))

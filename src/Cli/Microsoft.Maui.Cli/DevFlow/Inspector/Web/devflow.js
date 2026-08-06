@@ -137,6 +137,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     planRevision: null,
     committedFlowDigest: null,
     committedPlanDigest: null,
+    committedPlanRevision: null,
     committedPlan: null,
     flowDirty: false,
     planDirty: false,
@@ -145,7 +146,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     bindingStale: false,
     errors: [],
     warnings: [],
+    issues: [],
     diff: null,
+    checkPassed: false,
+    diffReviewed: false,
+    attentionStepSequence: null,
     workspaceAvailable: null,
     rawDraft: false,
     recordingDraft: false,
@@ -1990,6 +1995,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       id: el.getAttribute('data-id') || null,
       type: el.getAttribute('data-type') || 'Element',
       automationId: el.getAttribute('data-automationId') || null,
+      stableItemKey: el.getAttribute('data-stableItemKey') || null,
+      collectionScope: el.getAttribute('data-collectionScope') || null,
       text: el.getAttribute('data-text') || null,
       hasSource: el.getAttribute('data-hasSource') === 'true',
     };
@@ -3497,6 +3504,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       ? response.errors.map(String)
       : response.error ? [String(response.error)] : [];
     authoringDraft.warnings = Array.isArray(response.warnings) ? response.warnings.map(String) : [];
+    authoringDraft.issues = Array.isArray(response.issues) ? response.issues : [];
+    authoringDraft.attentionStepSequence =
+      authoringDraft.issues.find((issue) => issue?.blocking === true && Number.isInteger(issue?.stepSequence))
+        ?.stepSequence ?? null;
     const bindingStale = authoringDraft.warnings.some((warning) =>
       /older flow digest|flow\.digest must match|plan.*flow.*digest/i.test(warning));
     authoringDraft.bindingStale = bindingStale;
@@ -3520,6 +3531,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     if (committed && response.ok === true) {
       authoringDraft.committedFlowDigest = authoringDraft.flowDigest;
       authoringDraft.committedPlanDigest = authoringDraft.planDigest;
+      authoringDraft.committedPlanRevision = authoringDraft.planRevision;
       authoringDraft.committedPlan = cloneAuthoring(authoringDraft.plan);
       authoringDraft.flowDirty = false;
       authoringDraft.planDirty = bindingStale;
@@ -3541,6 +3553,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     authoringDraft.diff = null;
     authoringDraft.errors = [];
     authoringDraft.warnings = [];
+    authoringDraft.issues = [];
+    authoringDraft.checkPassed = false;
+    authoringDraft.diffReviewed = false;
+    authoringDraft.attentionStepSequence = null;
     if (source !== 'recording') {
       authoringDraft.rawDraft = false;
       authoringDraft.recordingDraft = false;
@@ -3564,6 +3580,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       authoringDraft.planRevision = null;
       authoringDraft.committedPlan = null;
       authoringDraft.committedPlanDigest = null;
+      authoringDraft.committedPlanRevision = null;
       authoringDraft.planDirty = false;
     }
     if (source === 'project') {
@@ -3899,6 +3916,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
                   authoringDraft.planJson = bundle.planJson;
                   authoringDraft.planRevision = authoringDraft.plan.revision || null;
                   authoringDraft.committedPlan = cloneAuthoring(authoringDraft.plan);
+                  authoringDraft.committedPlanRevision = authoringDraft.planRevision;
                   authoringDraft.planDirty = false;
                 } catch {
                   authoringDraft.errors = ['The host returned an invalid plan sidecar.'];
@@ -3930,9 +3948,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           const response = await postAuthoring('/api/plans/save', {
             name,
             planJson: authoringDraft.planJson || JSON.stringify(authoringDraft.plan, null, 2),
-            expectedPlanRevision: authoringDraft.planRevision,
-            expectedPlanDigest: authoringDraft.committedPlanDigest || authoringDraft.planDigest,
-            expectedFlowDigest: authoringDraft.committedFlowDigest || authoringDraft.flowDigest,
+            expectedPlanRevision: authoringDraft.committedPlanRevision,
+            expectedPlanDigest: authoringDraft.committedPlanDigest,
+            expectedFlowDigest: authoringDraft.committedFlowDigest,
             confirmOverwrite: confirmOverwrite === true,
           });
           applyAuthoringResponse(response, response.ok === true && response.supported !== false);
@@ -3990,6 +4008,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
             planJson: authoringDraft.planJson,
           });
           applyAuthoringResponse(response, false);
+          authoringDraft.checkPassed = response.ok === true && authoringDraft.errors.length === 0;
+          authoringDraft.diffReviewed = false;
           setStatus(response.ok && !authoringDraft.errors.length
             ? 'Test check passed. No app action was started.'
             : response.error || 'Validation found issues.');
@@ -4009,6 +4029,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
             planJson: authoringDraft.planJson,
           });
           applyAuthoringResponse(response, false);
+          authoringDraft.diffReviewed = response.ok === true && authoringDraft.errors.length === 0;
           setStatus(response.ok ? 'Generated deterministic draft diff.' : response.error || 'Could not generate a diff.');
         } finally {
           authoringDraft.saving = false;
@@ -4032,13 +4053,17 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
             name,
             markdown: authoringDraft.markdown,
             planJson: authoringDraft.planJson || JSON.stringify(authoringDraft.plan, null, 2),
-            expectedPlanRevision: authoringDraft.planRevision,
-            expectedPlanDigest: authoringDraft.committedPlanDigest || authoringDraft.planDigest,
-            expectedFlowDigest: authoringDraft.committedFlowDigest || authoringDraft.flowDigest,
+            expectedPlanRevision: authoringDraft.committedPlanRevision,
+            expectedPlanDigest: authoringDraft.committedPlanDigest,
+            expectedFlowDigest: authoringDraft.committedFlowDigest,
             confirmOverwrite: confirmOverwrite === true,
           };
           const response = await postAuthoring('/api/flows/commit', payload);
           applyAuthoringResponse(response, response.ok === true && response.supported !== false);
+          if (!response.ok) {
+            authoringDraft.checkPassed = false;
+            authoringDraft.diffReviewed = false;
+          }
           if (response.ok) {
             lastMarkdown = authoringDraft.markdown;
             lastMarkdownName = name;
@@ -4047,6 +4072,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
             authoringDraft.recordingDraft = false;
             authoringDraft.recordingDraftStepCount = 0;
             authoringDraft.guidanceMessage = 'Test saved — ready to run.';
+            authoringDraft.checkPassed = true;
+            authoringDraft.diffReviewed = true;
+            authoringDraft.attentionStepSequence = null;
             if (response.supported !== false) studyController?.testSaved();
             setStatus('Test saved — ready to run.');
             return;
@@ -4066,6 +4094,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
               authoringDraft.committedPlan = cloneAuthoring(authoringDraft.plan);
               authoringDraft.committedFlowDigest = bundle.flowDigest;
               authoringDraft.committedPlanDigest = bundle.planDigest;
+              authoringDraft.committedPlanRevision = authoringDraft.planRevision;
               authoringDraft.errors = [];
               authoringDraft.warnings = [];
               authoringDraft.stale = false;
@@ -4093,17 +4122,35 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         const response = await postAuthoring('/api/flows/selector/verify', { selector });
         return response;
       },
+      clearAttention() {
+        authoringDraft.attentionStepSequence = null;
+      },
+      selectLiveElement(id) {
+        if (!id || !elById(id)) return false;
+        selectElement(id);
+        return true;
+      },
       async applyHumanSelectedSelector({ stepId, stepSequence, selector } = {}) {
         const automationId = typeof selector?.automationId === 'string' ? selector.automationId.trim() : '';
+        const stableItemKey = typeof selector?.stableItemKey === 'string' ? selector.stableItemKey.trim() : '';
+        const collectionScope = typeof selector?.collectionScope === 'string' ? selector.collectionScope.trim() : '';
         if (!automationId) {
           setStatus('Choose a non-empty AutomationId before updating the draft.');
           return { ok: false, error: 'A human-selected AutomationId is required.' };
+        }
+        if ((stableItemKey && !collectionScope) || (!stableItemKey && collectionScope)) {
+          setStatus('A repeated item needs both a stable item key and its collection scope.');
+          return { ok: false, error: 'stableItemKey and collectionScope must be supplied together.' };
         }
 
         // The bounded ambiguity card only proves that this ID was distinct among displayed
         // candidates. Always use the canonical endpoint to prove global uniqueness immediately
         // before changing the local draft.
-        const verification = await controller.verifySelector({ automationId });
+        const candidateSelector = {
+          automationId,
+          ...(stableItemKey && collectionScope ? { stableItemKey, collectionScope } : {}),
+        };
+        const verification = await controller.verifySelector(candidateSelector);
         if (!verification?.ok || verification.matchCount !== 1) {
           const error = verification?.error || 'The selected AutomationId no longer resolves exactly one live element.';
           setStatus(`${error} The draft was not changed.`);
@@ -4126,7 +4173,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           return { ok: false, error, verification };
         }
         const nextSelector = {
-          automationId,
+          ...candidateSelector,
           matchCount: 1,
           quality: verification.quality || 'durable',
         };
@@ -4145,6 +4192,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         authoringDraft.diff = null;
         authoringDraft.errors = [];
         authoringDraft.warnings = [];
+        authoringDraft.issues = [];
+        authoringDraft.checkPassed = false;
+        authoringDraft.diffReviewed = false;
+        authoringDraft.attentionStepSequence = null;
         authoringDraft.guidanceMessage =
           'Selector updated in the draft only. Save test, then rerun it; DevFlow did not commit or run anything.';
         notifyAuthoring();

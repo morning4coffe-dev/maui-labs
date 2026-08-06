@@ -2343,6 +2343,14 @@ public sealed class InspectorServer : IDisposable
             (selector.TypeIndex is not null ? 1 : 0);
         if (forms != 1)
             return JsonResponse(400, new { ok = false, error = "Exactly one active selector is required." });
+        var hasStableItemKey = !string.IsNullOrWhiteSpace(selector.StableItemKey);
+        var hasCollectionScope = !string.IsNullOrWhiteSpace(selector.CollectionScope);
+        if (hasStableItemKey != hasCollectionScope)
+            return JsonResponse(400, new { ok = false, error = "stableItemKey and collectionScope must be supplied together." });
+        if ((hasStableItemKey || hasCollectionScope) && string.IsNullOrWhiteSpace(selector.AutomationId))
+            return JsonResponse(400, new { ok = false, error = "A scoped item selector also requires an AutomationId." });
+        if (hasStableItemKey && !Testing.FlowSelector.IsOpaqueStableItemKey(selector.StableItemKey))
+            return JsonResponse(400, new { ok = false, error = "stableItemKey must be an opaque SHA-256 identity." });
 
         var resolution = await new Testing.FlowActionabilityEngine(
             new Testing.AgentClientMauiFlowDriver(_client),
@@ -2397,6 +2405,10 @@ public sealed class InspectorServer : IDisposable
                 {
                     type = resolution.Element.Type,
                     automationId = resolution.Element.AutomationId,
+                    stableItemKey = Testing.FlowSelector.IsOpaqueStableItemKey(resolution.Element.StableItemKey)
+                        ? resolution.Element.StableItemKey
+                        : null,
+                    collectionScope = resolution.Element.CollectionScope,
                     text = resolution.Element.Text,
                     hasSource = !string.IsNullOrWhiteSpace(resolution.Element.SourceFile),
                 },
@@ -2412,6 +2424,10 @@ public sealed class InspectorServer : IDisposable
             type = element.Type,
             role = element.Role,
             automationId = element.AutomationId,
+            stableItemKey = Testing.FlowSelector.IsOpaqueStableItemKey(element.StableItemKey)
+                ? element.StableItemKey
+                : null,
+            collectionScope = element.CollectionScope,
             isVisible = element.IsVisible,
             isEnabled = element.IsEnabled,
             bounds = CreateSelectorVerifyBounds(element.Bounds),
@@ -2517,6 +2533,7 @@ public sealed class InspectorServer : IDisposable
             items = result.Items,
             errors = result.Errors,
             warnings = result.Warnings,
+            issues = CreateAuthoringIssues(result.Errors, result.Warnings),
             diff = result.Diff,
             flow = snapshot is null ? null : new
             {
@@ -2533,6 +2550,52 @@ public sealed class InspectorServer : IDisposable
                 revision = snapshot.Plan?.Revision,
             },
         });
+    }
+
+    internal static object[] CreateAuthoringIssues(
+        IReadOnlyList<string> errors,
+        IReadOnlyList<string> warnings)
+        => errors.Select(message => CreateAuthoringIssue(message, "error", true))
+            .Concat(warnings.Select(message => CreateAuthoringIssue(message, "warning", false)))
+            .ToArray();
+
+    private static object CreateAuthoringIssue(string message, string severity, bool blocking)
+    {
+        var match = System.Text.RegularExpressions.Regex.Match(
+            message,
+            @"^step (?<step>\d+)(?: \((?<action>[^)]+)\))?: (?<detail>.+)$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase |
+            System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        var detail = match.Success ? match.Groups["detail"].Value : message;
+        var stepSequence = match.Success && int.TryParse(match.Groups["step"].Value, out var parsed)
+            ? parsed
+            : (int?)null;
+        var code = detail.Contains("ambiguous selector", StringComparison.OrdinalIgnoreCase)
+            ? "selector-ambiguous"
+            : detail.Contains("resolve exactly one", StringComparison.OrdinalIgnoreCase)
+                ? "selector-match-count"
+                : detail.Contains("fragile selector", StringComparison.OrdinalIgnoreCase) ||
+                  detail.Contains("selector is fragile", StringComparison.OrdinalIgnoreCase)
+                    ? "selector-fragile"
+                    : detail.Contains("expected result", StringComparison.OrdinalIgnoreCase) ||
+                      detail.Contains("outcome check", StringComparison.OrdinalIgnoreCase)
+                        ? "expected-result-missing"
+                        : "review-required";
+        var remediation = code is "selector-ambiguous" or "selector-match-count" or "selector-fragile"
+            ? "resolve-selector"
+            : code == "expected-result-missing"
+                ? "add-expected-result"
+                : "review";
+        return new
+        {
+            severity,
+            blocking,
+            code,
+            stepSequence,
+            action = match.Success ? match.Groups["action"].Value : null,
+            message,
+            remediation,
+        };
     }
 
     private static (int, string, byte[]) JsonResponse(int status, object value)

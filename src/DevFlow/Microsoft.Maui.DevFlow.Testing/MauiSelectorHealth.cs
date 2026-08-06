@@ -510,13 +510,18 @@ public static class MauiSelectorCandidateGenerator
         var collection = fingerprint.Collection;
         if (!string.IsNullOrWhiteSpace(collection?.ItemKey))
         {
-            if (string.IsNullOrWhiteSpace(collection.Scope))
+            if (string.IsNullOrWhiteSpace(fingerprint.Managed.AutomationId))
+            {
+                Omit(omissions, "stable-item-key", "A repeated child also needs an AutomationId.", null);
+            }
+            else if (string.IsNullOrWhiteSpace(collection.Scope))
             {
                 Omit(omissions, "stable-item-key", "An unscoped collection item key is not durable.", null);
             }
             else
             {
                 var count = CountResolvable(all, element =>
+                    string.Equals(element.AutomationId, fingerprint.Managed.AutomationId, StringComparison.Ordinal) &&
                     string.Equals(element.StableItemKey, collection.ItemKey, StringComparison.Ordinal) &&
                     string.Equals(element.CollectionScope, collection.Scope, StringComparison.Ordinal));
                 if (count == 1)
@@ -526,6 +531,7 @@ public static class MauiSelectorCandidateGenerator
                         selector: new MauiSelectorCandidateSelector
                         {
                             Kind = "stable-item-key",
+                            AutomationId = fingerprint.Managed.AutomationId,
                             StableItemKey = collection.ItemKey,
                             AncestorAutomationId = collection.Scope,
                         },
@@ -818,6 +824,17 @@ public static class MauiSelectorCandidateGenerator
     private static FlowSelector? ToFlowSelector(MauiSelectorCandidateSelector selector) => selector.Kind switch
     {
         "automation-id" => new FlowSelector { AutomationId = selector.AutomationId },
+        "stable-item-key" when !string.IsNullOrWhiteSpace(selector.AutomationId) &&
+                                    !string.IsNullOrWhiteSpace(selector.StableItemKey) &&
+                                    !string.IsNullOrWhiteSpace(selector.AncestorAutomationId)
+            => new FlowSelector
+            {
+                AutomationId = selector.AutomationId,
+                StableItemKey = selector.StableItemKey,
+                CollectionScope = selector.AncestorAutomationId,
+                MatchCount = 1,
+                Quality = "stable-item-key",
+            },
         "exact-text" => new FlowSelector { Text = selector.ExactText },
         _ => null,
     };

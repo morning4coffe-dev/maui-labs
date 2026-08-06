@@ -1875,19 +1875,7 @@ internal sealed class TestAgentSessionService
     }
 
     private static string? SelectorScopeKey(FlowSelector selector)
-    {
-        if (!string.IsNullOrWhiteSpace(selector.AutomationId))
-            return "automationId:" + selector.AutomationId;
-        if (selector.TypeIndex is { Type: { Length: > 0 } type, Index: >= 0 } index)
-            return $"typeIndex:{type}:{index.Index}";
-        if (selector.SelectorKind == "typeIndex" &&
-            !string.IsNullOrWhiteSpace(selector.Type) &&
-            selector.Index is >= 0)
-        {
-            return $"typeIndex:{selector.Type}:{selector.Index}";
-        }
-        return null;
-    }
+        => MauiTestAgentSelectorScopeKey.FromSelector(selector);
 
     private static int NextSequence(MauiFlow flow)
         => flow.Steps.Count == 0 ? 1 : flow.Steps.Max(step => step.Seq) + 1;

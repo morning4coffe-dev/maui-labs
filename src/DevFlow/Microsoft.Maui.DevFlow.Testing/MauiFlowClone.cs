@@ -262,6 +262,8 @@ internal static class MauiFlowClone
     private static FlowSelector? CloneSelector(FlowSelector? selector) => selector is null ? null : new FlowSelector
     {
         AutomationId = selector.AutomationId,
+        StableItemKey = selector.StableItemKey,
+        CollectionScope = selector.CollectionScope,
         Text = selector.Text,
         Id = selector.Id,
         Type = selector.Type,

@@ -429,6 +429,8 @@ public static class MauiFlowRepairProposalGenerator
 
     private static bool SelectorsMatch(FlowSelector first, FlowSelector second)
         => string.Equals(first.AutomationId, second.AutomationId, StringComparison.Ordinal) &&
+           string.Equals(first.StableItemKey, second.StableItemKey, StringComparison.Ordinal) &&
+           string.Equals(first.CollectionScope, second.CollectionScope, StringComparison.Ordinal) &&
            string.Equals(first.Text, second.Text, StringComparison.Ordinal) &&
            string.Equals(first.Id, second.Id, StringComparison.Ordinal) &&
            string.Equals(first.TypeIndex?.Type, second.TypeIndex?.Type, StringComparison.Ordinal) &&
@@ -795,16 +797,21 @@ public static class MauiFlowRepairPatchBuilder
         return forms == 1;
     }
 
-    private static string SelectorMaterial(FlowSelector? selector)
-        => selector is null
-            ? string.Empty
-            : string.Join(
-                "\u001f",
-                selector.AutomationId,
-                selector.Text,
-                selector.Id,
-                selector.TypeIndex?.Type,
-                selector.TypeIndex?.Index);
+    internal static string SelectorMaterial(FlowSelector? selector)
+    {
+        if (selector is null)
+            return string.Empty;
+        var legacy = string.Join(
+            "\u001f",
+            selector.AutomationId,
+            selector.Text,
+            selector.Id,
+            selector.TypeIndex?.Type,
+            selector.TypeIndex?.Index);
+        return selector.HasScopedStableItem
+            ? string.Join("\u001f", legacy, selector.StableItemKey, selector.CollectionScope)
+            : legacy;
+    }
 
     private static string Hash(string value)
         => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value ?? string.Empty))).ToLowerInvariant();
@@ -821,6 +828,8 @@ internal static class MauiFlowRepairClone
         return new FlowSelector
         {
             AutomationId = selector.AutomationId,
+            StableItemKey = selector.StableItemKey,
+            CollectionScope = selector.CollectionScope,
             Text = selector.Text,
             Id = selector.Id,
             Type = selector.Type,

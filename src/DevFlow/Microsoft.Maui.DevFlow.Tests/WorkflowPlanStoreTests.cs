@@ -187,6 +187,28 @@ public sealed class WorkflowPlanStoreTests : IDisposable
     }
 
     [Fact]
+    public void ValidateAndDiff_NewFlow_UseEmptyCommitBaseline()
+    {
+        Directory.CreateDirectory(_root);
+        var store = new WorkflowPlanStore(_root);
+        var flow = ValidFlow();
+        var flowName = "new-review.md";
+        var markdown = FlowMarkdown.Serialize(flow);
+        var plan = PlanJson(flowName, MauiFlowRunReportSerializer.ComputeFlowDigest(flow));
+
+        var validation = store.Validate(flowName, markdown, plan);
+        var diff = store.Diff(flowName, markdown, plan);
+
+        Assert.True(validation.Ok, validation.Error);
+        Assert.Empty(validation.Errors);
+        Assert.NotNull(validation.Snapshot);
+        Assert.True(diff.Ok, diff.Error);
+        Assert.Contains($"draft/{flowName}", diff.Diff);
+        Assert.Contains(flow.Name, diff.Diff);
+        Assert.False(File.Exists(Path.Combine(_root, "maui-tests", flowName)));
+    }
+
+    [Fact]
     public void Diff_SameDraft_ProducesStableOutput()
     {
         var store = CreateStore(out var flowName, out var original);

@@ -105,6 +105,22 @@ role/type under a stable ancestor, current source plus topology, and locale-boun
 Runtime IDs, coordinates, type/index alone, screenshot similarity, ambiguous matches, and
 unscoped virtualized rows are rejected.
 
+For repeated controls, keep the child `AutomationId` and bind an app-owned stable model ID on the
+item-template root:
+
+```csharp
+border.SetBinding(
+    Microsoft.Maui.DevFlow.Agent.Core.DevFlowTest.StableItemKeyProperty,
+    nameof(TodoItem.Id));
+```
+
+DevFlow propagates that identity to the realized child controls and records the executable
+composite `AutomationId + collectionScope + stableItemKey`. This avoids visible text and
+type/index ordering while still identifying one repeated item after reset or virtualization.
+The raw app item ID is SHA-256 pseudonymized inside the in-app agent before it reaches a flow,
+report, Inspector, or MCP response. The item ID must remain stable for the reset seed declared by
+the test.
+
 Candidate rank is a transparent deterministic rule score, not a probability. Calibration is
 always `uncalibrated` in this preview. The stable diagnostic IDs are `DFSH001` through `DFSH011`:
 duplicate/missing IDs, fragile selector forms, localization, template/virtualization, source

@@ -410,6 +410,10 @@ export function renderPlanPanel(helpers) {
       stale: false,
       errors: [],
       warnings: [],
+      issues: [],
+      checkPassed: false,
+      diffReviewed: false,
+      attentionStepSequence: null,
       guidanceMessage: null,
     }, rerender);
   };

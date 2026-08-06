@@ -391,6 +391,13 @@ test("typed assertion and selector authoring keep hard and observation semantics
     automationId: "save", matchCount: 1, quality: "durable",
   }), true);
   assert.equal(steps.isStrictAuthoringSelector({
+    automationId: "TodoCheckBox",
+    stableItemKey: "todo-42",
+    collectionScope: "TodoList",
+    matchCount: 1,
+    quality: "stable-item-key",
+  }), true);
+  assert.equal(steps.isStrictAuthoringSelector({
     id: "runtime-42", matchCount: 1, quality: "fragile",
   }), false);
   assert.equal(steps.isStrictAuthoringSelector({
@@ -410,6 +417,25 @@ test("typed assertion and selector authoring keep hard and observation semantics
   const removed = steps.removeFlowStep(flow, 1);
   assert.deepEqual(removed.steps.map((step) => step.stepId), ["a", "c"]);
   assert.deepEqual(removed.steps.map((step) => step.seq), [1, 2]);
+  assert.deepEqual(steps.usableSelectorFromMatch({
+    automationId: "TodoCheckBox",
+    stableItemKey: "todo-42",
+    collectionScope: "TodoList",
+  }, [], false), {
+    automationId: "TodoCheckBox",
+    stableItemKey: "todo-42",
+    collectionScope: "TodoList",
+  });
+  assert.equal(steps.usableSelectorFromMatch(
+    { automationId: "TodoCheckBox" },
+    [{ automationId: "TodoCheckBox" }, { automationId: "TodoCheckBox" }],
+    false
+  ), null);
+  const issues = steps.authoringIssues({
+    errors: ["step 1: selector must resolve exactly one element; it currently reports 9 matches."],
+  });
+  assert.equal(issues[0].stepSequence, 1);
+  assert.equal(issues[0].remediation, "resolve-selector");
 });
 
 test("authoring panels retain explicit recording, validation, diff, and commit controls", () => {
@@ -445,10 +471,15 @@ test("authoring panels retain explicit recording, validation, diff, and commit c
     "Record more steps", "Select a step", "Save step", "Move up", "Move down", "Remove step",
     "Step details \\(optional\\)",
     "Add expected result", "Download recording draft", "Check current app now", "exactly one element", "never prefilled",
+    "Resolve step", "Check matching controls", "Use this control", "stable item key",
   ]) {
     assert.match(steps, new RegExp(text));
   }
   assert.match(steps, /addResult\.open = !assertions\.some/);
+  assert.match(steps, /draft\.checkPassed !== true/);
+  assert.match(steps, /draft\.diffReviewed !== true/);
+  assert.match(steps, /function selectorCheckKey/);
+  assert.match(steps, /selectorChecks\.clear\(\)/);
   assert.doesNotMatch(steps, /Recording status|className: 'df-steps-more'/);
   assert.doesNotMatch(steps, /At least one hard outcome check|Typed assertion composer/);
   assert.match(devflow, /const retainedPlan = source === 'recording'/);

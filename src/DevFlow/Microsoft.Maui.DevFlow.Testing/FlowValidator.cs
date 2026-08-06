@@ -154,6 +154,14 @@ public static class FlowValidator
         if (hasTypeIndex) kinds++;
         if (kinds == 0)
             v.Errors.Add($"{where}: selector has no usable kind (automationId|text|typeIndex|id).");
+        var hasStableItemKey = !string.IsNullOrWhiteSpace(sel.StableItemKey);
+        var hasCollectionScope = !string.IsNullOrWhiteSpace(sel.CollectionScope);
+        if (hasStableItemKey != hasCollectionScope)
+            v.Errors.Add($"{where}: stableItemKey and collectionScope must be supplied together.");
+        if ((hasStableItemKey || hasCollectionScope) && string.IsNullOrWhiteSpace(sel.AutomationId))
+            v.Errors.Add($"{where}: a scoped item selector also requires an AutomationId.");
+        if (hasStableItemKey && !FlowSelector.IsOpaqueStableItemKey(sel.StableItemKey))
+            v.Errors.Add($"{where}: stableItemKey must be an opaque SHA-256 identity.");
         var idx = sel.TypeIndex?.Index ?? sel.Index;
         if (idx is < 0)
             v.Errors.Add($"{where}: typeIndex index must be >= 0.");

@@ -119,6 +119,14 @@
         "automationId": {
           "$ref": "#/$defs/NullableString"
         },
+        "stableItemKey": {
+          "$ref": "#/$defs/NullableString",
+          "description": "App-supplied stable item identity. Valid only with automationId and collectionScope."
+        },
+        "collectionScope": {
+          "$ref": "#/$defs/NullableString",
+          "description": "AutomationId of the collection that scopes stableItemKey."
+        },
         "text": {
           "$ref": "#/$defs/NullableString"
         },

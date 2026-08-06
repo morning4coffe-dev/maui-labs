@@ -843,6 +843,8 @@ public static class MauiFlowReportRedactor
         return new FlowSelector
         {
             AutomationId = SafeIdentifier(selector.AutomationId),
+            StableItemKey = SafeIdentifier(selector.StableItemKey),
+            CollectionScope = SafeIdentifier(selector.CollectionScope),
             Id = selector.Id is null ? null : "sha256:" + ShortDigest(selector.Id),
             TypeIndex = selector.TypeIndex is null ? null : new FlowTypeIndex
             {
@@ -869,8 +871,11 @@ public static class MauiFlowReportRedactor
         if (!string.IsNullOrEmpty(selector.AutomationId))
             return new MauiFlowSelectorRequest
             {
-                Kind = "automationId",
+                Kind = selector.HasScopedStableItem ? "scopedAutomationId" : "automationId",
                 Value = DescribeValue(SafeIdentifier(selector.AutomationId), allowPlain: true),
+                Scope = selector.HasScopedStableItem
+                    ? $"{SafeIdentifier(selector.CollectionScope)}/{SafeIdentifier(selector.StableItemKey)}"
+                    : null,
             };
         if (!string.IsNullOrEmpty(selector.Text))
             return new MauiFlowSelectorRequest

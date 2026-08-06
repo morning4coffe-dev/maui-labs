@@ -182,6 +182,11 @@ public class TestAgentSessionServiceTests
                 "allowedActions": ["fill", "assert"],
                 "allowedSelectors": [
                   { "automationId": "NewTodoEntry" },
+                  {
+                    "automationId": "TodoCheckBox",
+                    "stableItemKey": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                    "collectionScope": "Todo:List"
+                  },
                   { "typeIndex": { "type": "Label", "index": 12 } }
                 ],
                 "allowedSideEffectClasses": ["authoring"],
@@ -195,8 +200,26 @@ public class TestAgentSessionServiceTests
             MauiTestingJsonContext.Default.MauiTestAgentAuthorRequest);
 
         Assert.Equal(
-            ["automationId:NewTodoEntry", "typeIndex:Label:12"],
+            [
+                "automationId:NewTodoEntry",
+                MauiTestAgentSelectorScopeKey.ScopedItem(
+                    "Todo:List",
+                    "sha256:" + new string('a', 64),
+                    "TodoCheckBox"),
+                "typeIndex:Label:12",
+            ],
             request!.ApprovalScope!.AllowedSelectors);
+    }
+
+    [Fact]
+    public void SelectorScopeKey_ScopedFieldsWithDelimiters_DoNotCollide()
+    {
+        var first = MauiTestAgentSelectorScopeKey.ScopedItem("a:b", "c", "d");
+        var second = MauiTestAgentSelectorScopeKey.ScopedItem("a", "b:c", "d");
+
+        Assert.NotEqual(first, second);
+        Assert.Contains("%3A", first);
+        Assert.Contains("%3A", second);
     }
 
     [Fact]
@@ -1116,6 +1139,42 @@ public class TestAgentSessionServiceTests
                 item.Selector == "automationId:TodoCheckBox" &&
                 item.Quality == "ambiguous" &&
                 item.MatchCount == 2));
+    }
+
+    [Fact]
+    public void SelectorProjection_DuplicateScopedItemKeysRemainAmbiguous()
+    {
+        var digest = "sha256:" + new string('a', 64);
+        var projection = TestAgentImprovementsTool.BuildSelectorProjection(
+        [
+            new MauiSelectorObservationElement
+            {
+                Id = "check-1",
+                Type = "CheckBox",
+                AutomationId = "TodoCheckBox",
+                StableItemKey = digest,
+                CollectionScope = "TodoList",
+                IsVisible = true,
+                IsEnabled = true,
+            },
+            new MauiSelectorObservationElement
+            {
+                Id = "check-2",
+                Type = "CheckBox",
+                AutomationId = "TodoCheckBox",
+                StableItemKey = digest,
+                CollectionScope = "TodoList",
+                IsVisible = true,
+                IsEnabled = true,
+            },
+        ]);
+
+        Assert.All(projection, item =>
+        {
+            Assert.Equal(2, item.MatchCount);
+            Assert.Equal("ambiguous", item.Quality);
+            Assert.Equal(digest, item.StableItemKeyDigest);
+        });
     }
 
     private static Fixture BeginFixture(

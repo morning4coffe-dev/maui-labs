@@ -166,6 +166,10 @@ public static class HtmlRenderer
             attrs.Append($" data-framework=\"{Escape(element.Framework)}\"");
         if (!string.IsNullOrEmpty(element.AutomationId))
             attrs.Append($" data-automationId=\"{Escape(element.AutomationId)}\"");
+        if (Microsoft.Maui.DevFlow.Testing.FlowSelector.IsOpaqueStableItemKey(element.StableItemKey))
+            attrs.Append($" data-stableItemKey=\"{Escape(element.StableItemKey!)}\"");
+        if (!string.IsNullOrEmpty(element.CollectionScope))
+            attrs.Append($" data-collectionScope=\"{Escape(element.CollectionScope)}\"");
         if (!string.IsNullOrEmpty(element.Text))
             attrs.Append($" data-text=\"{Escape(element.Text)}\"");
         if (!string.IsNullOrEmpty(element.Value))

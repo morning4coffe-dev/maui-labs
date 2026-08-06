@@ -566,6 +566,7 @@ M:Microsoft.Maui.DevFlow.Testing.FlowSecretReference.BuildEnvironmentVariable(au
 M:Microsoft.Maui.DevFlow.Testing.FlowSecretReference.IsValidEnvironmentVariable(value:System.String):System.Boolean
 M:Microsoft.Maui.DevFlow.Testing.FlowSecretReference.LooksSensitive(values:System.String[]):System.Boolean
 M:Microsoft.Maui.DevFlow.Testing.FlowSelector.IsFragile(selector:Microsoft.Maui.DevFlow.Testing.FlowSelector):System.Boolean
+M:Microsoft.Maui.DevFlow.Testing.FlowSelector.IsOpaqueStableItemKey(value:System.String):System.Boolean
 M:Microsoft.Maui.DevFlow.Testing.FlowTargetResolution.Failure(kind:System.String,error:System.String,candidates:System.Collections.Generic.IReadOnlyList`1[Microsoft.Maui.DevFlow.Driver.ElementInfo]=null):Microsoft.Maui.DevFlow.Testing.FlowTargetResolution
 M:Microsoft.Maui.DevFlow.Testing.FlowTargetResolution.Success(element:Microsoft.Maui.DevFlow.Driver.ElementInfo,count:System.Int32,quality:System.String):Microsoft.Maui.DevFlow.Testing.FlowTargetResolution
 M:Microsoft.Maui.DevFlow.Testing.FlowTargetResolution.WithFailure(kind:System.String,error:System.String):Microsoft.Maui.DevFlow.Testing.FlowTargetResolution
@@ -693,6 +694,8 @@ M:Microsoft.Maui.DevFlow.Testing.MauiSelectorHealthAnalyzer.Analyze(input:Micros
 M:Microsoft.Maui.DevFlow.Testing.MauiSelectorObservationFactory.Create(target:Microsoft.Maui.DevFlow.Driver.ElementInfo,tree:System.Collections.Generic.IEnumerable`1[Microsoft.Maui.DevFlow.Driver.ElementInfo],context:Microsoft.Maui.DevFlow.Driver.MauiSelectorObservationContext=null,truncated:System.Nullable`1[System.Boolean]=null):Microsoft.Maui.DevFlow.Driver.MauiSelectorObservation
 M:Microsoft.Maui.DevFlow.Testing.MauiSourceProposalCommonEligibility.Analyze(input:Microsoft.Maui.DevFlow.Testing.MauiSourceProposalCommonEligibilityInput):System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiSourceProposalCommonEligibilityReason]
 M:Microsoft.Maui.DevFlow.Testing.MauiSourceProposalTrustPolicy.CanCreateProposal(artifact:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustRecord):Microsoft.Maui.DevFlow.Testing.MauiArtifactProposalDecision
+M:Microsoft.Maui.DevFlow.Testing.MauiTestAgentSelectorScopeKey.FromSelector(selector:Microsoft.Maui.DevFlow.Testing.FlowSelector):System.String
+M:Microsoft.Maui.DevFlow.Testing.MauiTestAgentSelectorScopeKey.ScopedItem(collectionScope:System.String,stableItemKey:System.String,automationId:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidator.Validate(plan:Microsoft.Maui.DevFlow.Testing.MauiTestPlan):Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidation
 M:Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidator.ValidateJson(json:System.String,plan:Microsoft.Maui.DevFlow.Testing.MauiTestPlan&):Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidation
 M:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.GetTypeInfo(type:System.Type):System.Text.Json.Serialization.Metadata.JsonTypeInfo
@@ -752,14 +755,17 @@ P:Microsoft.Maui.DevFlow.Testing.FlowReplayReport.StoppedEarly[]:System.Boolean{
 P:Microsoft.Maui.DevFlow.Testing.FlowReplayReport.StructuredReport[]:Microsoft.Maui.DevFlow.Testing.MauiFlowRunReport{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowReplayReport.Total[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.AutomationId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.FlowSelector.CollectionScope[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.FragilityReasons[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.FlowSelector.HasScopedStableItem[]:System.Boolean{get:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.Id[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.Index[]:System.Nullable`1[System.Int32]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.IsEmpty[]:System.Boolean{get:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.MatchCount[]:System.Nullable`1[System.Int32]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.Quality[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.SelectorKind[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.FlowSelector.StableItemKey[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.Text[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.TypeIndex[]:Microsoft.Maui.DevFlow.Testing.FlowTypeIndex{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowSelector.Type[]:System.String{get:public;set:public}
@@ -3319,6 +3325,7 @@ T:class static Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalStates
 T:class static Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCategories
 T:class static Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes
 T:class static Microsoft.Maui.DevFlow.Testing.MauiTestAgentProtocolVersions
+T:class static Microsoft.Maui.DevFlow.Testing.MauiTestAgentSelectorScopeKey
 T:class static Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidator
 T:class static Microsoft.Maui.DevFlow.Testing.MauiXamlAutomationIdGrammar
 T:class static Microsoft.Maui.DevFlow.Testing.MauiXamlSourceEligibilityAnalyzer

@@ -9,6 +9,8 @@ namespace DevFlow.Sample;
 /// </summary>
 public class TodoService
 {
+    private int _nextItemId = 1;
+
     public ObservableCollection<TodoItem> Items { get; } = new();
 
     /// <summary>
@@ -26,14 +28,20 @@ public class TodoService
     internal void ResetToIntegrationSeed()
     {
         Items.Clear();
-        Add("Buy groceries");
-        Add("Walk the dog");
-        Add("Finish Microsoft.Maui.DevFlow project");
+        _nextItemId = 1;
+        Add("Buy groceries", id: "todo-buy-groceries");
+        Add("Walk the dog", id: "todo-walk-dog");
+        Add("Finish Microsoft.Maui.DevFlow project", id: "todo-finish-devflow");
     }
 
-    public void Add(string title, string description = "")
+    public void Add(string title, string description = "", string? id = null)
     {
-        Items.Add(new TodoItem { Title = title, Description = description });
+        Items.Add(new TodoItem
+        {
+            Id = string.IsNullOrWhiteSpace(id) ? $"todo-{_nextItemId++:D4}" : id,
+            Title = title,
+            Description = description,
+        });
         NotifyChanged();
     }
 

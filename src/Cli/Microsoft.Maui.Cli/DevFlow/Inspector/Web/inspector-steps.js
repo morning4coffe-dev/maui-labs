@@ -7,9 +7,20 @@ function list(value) {
 }
 
 let selectedReviewStepKey = null;
+const selectorChecks = new Map();
 
 function stepKey(step, index) {
   return String(step?.stepId || step?.seq || index + 1);
+}
+
+function selectorCheckKey(flow, step, index) {
+  return JSON.stringify([
+    flow?.flowId || null,
+    flow?.revision || null,
+    flow?.name || null,
+    stepKey(step, index),
+    effectiveSelector(step) || null,
+  ]);
 }
 
 function resequence(flow) {
@@ -117,11 +128,13 @@ function selectorKind(selector) {
 
 export function isStrictAuthoringSelector(selector) {
   if (!selector || typeof selector !== 'object') return false;
+  const scopedItemValid = (!selector.stableItemKey && !selector.collectionScope) ||
+    (!!selector.stableItemKey && !!selector.collectionScope && !!selector.automationId);
   const forms = (selector.automationId ? 1 : 0) +
     (selector.text ? 1 : 0) +
     (selector.typeIndex || selector.selectorKind === 'typeIndex' ? 1 : 0) +
     (selector.id ? 1 : 0);
-  return forms === 1 && !!(selector.automationId || selector.text || selector.typeIndex) &&
+  return scopedItemValid && forms === 1 && !!(selector.automationId || selector.text || selector.typeIndex) &&
     selector.matchCount !== 0 && selector.matchCount !== undefined &&
     selector.matchCount !== null && selector.matchCount === 1 &&
     selector.quality !== 'ambiguous';
@@ -133,7 +146,11 @@ export function isObservationOnlyAssertion(kind) {
 
 function selectorLabel(selector) {
   if (!selector) return 'No selector';
-  if (selector.automationId) return `AutomationId: ${selector.automationId}`;
+  if (selector.automationId) {
+    return selector.stableItemKey && selector.collectionScope
+      ? `AutomationId: ${selector.automationId} · stable item in ${selector.collectionScope}`
+      : `AutomationId: ${selector.automationId}`;
+  }
   if (selector.text) return `Text: ${selector.text}`;
   const typeIndex = selector.typeIndex || selector;
   if (typeIndex.type) return `Type index: ${typeIndex.type}[${typeIndex.index ?? 0}]`;
@@ -147,10 +164,124 @@ function looksSensitive(...values) {
 
 function makeSelectorFromSelected(selected) {
   if (!selected) return null;
-  if (selected.automationId) return { automationId: selected.automationId };
+  if (selected.automationId) {
+    return {
+      automationId: selected.automationId,
+      ...(selected.stableItemKey && selected.collectionScope
+        ? {
+          stableItemKey: selected.stableItemKey,
+          collectionScope: selected.collectionScope,
+        }
+        : {}),
+    };
+  }
   // Never copy live text from a selected control into a draft assertion. A text fallback can
   // accidentally persist an Entry/Editor value, so the composer requires an AutomationId.
   return null;
+}
+
+export function authoringIssues(draft) {
+  if (list(draft?.issues).length) return list(draft.issues);
+  return [
+    ...list(draft?.errors).map((message) => ({ message, severity: 'error', blocking: true })),
+    ...list(draft?.warnings).map((message) => ({ message, severity: 'warning', blocking: false })),
+  ].map((issue) => {
+    const match = /^step (\d+)(?: \(([^)]+)\))?: (.+)$/i.exec(String(issue.message || ''));
+    const detail = match?.[3] || String(issue.message || '');
+    const code = /ambiguous selector/i.test(detail)
+      ? 'selector-ambiguous'
+      : /resolve exactly one/i.test(detail)
+        ? 'selector-match-count'
+        : /fragile selector|selector is fragile/i.test(detail)
+          ? 'selector-fragile'
+          : /expected result|outcome check/i.test(detail)
+            ? 'expected-result-missing'
+            : 'review-required';
+    return {
+      ...issue,
+      code,
+      stepSequence: match ? Number(match[1]) : null,
+      action: match?.[2] || null,
+      remediation: ['selector-ambiguous', 'selector-match-count', 'selector-fragile'].includes(code)
+        ? 'resolve-selector'
+        : code === 'expected-result-missing'
+          ? 'add-expected-result'
+          : 'review',
+    };
+  });
+}
+
+function stepIssues(draft, step, index) {
+  const sequence = Number(step?.seq) || index + 1;
+  return authoringIssues(draft).filter((issue) => Number(issue?.stepSequence) === sequence);
+}
+
+function selectorIssues(draft, step, index) {
+  return stepIssues(draft, step, index)
+    .filter((issue) => issue?.remediation === 'resolve-selector');
+}
+
+function renderReviewIssueSummary(root, flow, draft, authoring, helpers) {
+  const blocking = authoringIssues(draft).filter((issue) => issue?.blocking === true);
+  if (!blocking.length) return;
+  const first = blocking[0];
+  const sequence = Number(first.stepSequence);
+  const card = el('section', { className: 'df-review-blocker df-authoring-section' });
+  card.append(
+    el('h4', {
+      text: Number.isInteger(sequence)
+        ? `Step ${sequence} needs attention`
+        : 'This test needs attention',
+    }),
+    el('p', {
+      className: 'df-workbench-intro',
+      text: first.remediation === 'resolve-selector'
+        ? 'Choose a stable control for this step before checking or saving the test.'
+        : first.message || 'Review the blocking issue before continuing.',
+    }),
+  );
+  const actions = el('div', { className: 'df-authoring-actions' });
+  if (Number.isInteger(sequence)) {
+    actions.append(button(`Resolve step ${sequence}`, () => {
+      const index = list(flow.steps).findIndex((step, stepIndex) =>
+        (Number(step?.seq) || stepIndex + 1) === sequence);
+      if (index >= 0) {
+        selectedReviewStepKey = stepKey(flow.steps[index], index);
+        authoring.clearAttention?.();
+        helpers.rerender?.();
+      }
+    }, { primary: true }));
+  }
+  actions.append(button('Check again', () => authoring.validateFlow?.()));
+  card.append(actions);
+  helpers.agentGuide?.(card, {
+    title: 'Ask your agent to help resolve this',
+    description: 'Your agent can inspect the draft and current app, explain the blocker, and prepare an inert update request.',
+    prompt: [
+      'Use only the restricted DevFlow test-agent tools.',
+      `Inspect the current human-authored draft and resolve the blocker for ${Number.isInteger(sequence) ? `step ${sequence}` : 'the test'}.`,
+      first.message || '',
+      'Prefer a unique AutomationId or a scoped stable item key. Do not use runtime IDs, coordinates, or type/index ordering.',
+      'Request only the bounded draft-change approval needed for the proposed selector. Do not run or apply source changes.',
+    ].filter(Boolean).join(' '),
+  });
+  root.append(card);
+}
+
+export function usableSelectorFromMatch(match, matches, truncated) {
+  if (!match?.automationId) return null;
+  if (match.stableItemKey && match.collectionScope) {
+    return {
+      automationId: match.automationId,
+      stableItemKey: match.stableItemKey,
+      collectionScope: match.collectionScope,
+    };
+  }
+  if (truncated) return null;
+  const sameId = list(matches)
+    .filter((candidate) => candidate?.automationId === match.automationId)
+    .length;
+  return sameId === 1 ? { automationId: match.automationId } : null;
 }
 
 function details(parent, title, value) {
@@ -169,6 +300,7 @@ function findings(parent, values, type) {
 }
 
 function applyFlow(authoring, draft, flow, rerender = true) {
+  selectorChecks.clear();
   authoring.update?.({
     flow,
     markdown: replaceFlowPayload(draft.markdown, flow),
@@ -177,6 +309,10 @@ function applyFlow(authoring, draft, flow, rerender = true) {
     stale: false,
     errors: [],
     warnings: [],
+    issues: [],
+    checkPassed: false,
+    diffReviewed: false,
+    attentionStepSequence: null,
   }, rerender);
 }
 
@@ -202,18 +338,38 @@ function renderSelectorEditor(card, flow, stepIndex, draft, authoring) {
     () => {},
     { type: 'number', placeholder: '0' }
   );
+  const stableItemKey = input(current?.stableItemKey || '', () => {}, { placeholder: 'Stable model item ID' });
+  const collectionScope = input(current?.collectionScope || '', () => {}, { placeholder: 'Collection AutomationId' });
   const indexField = field('Index', index, 'Only used for Type + index.');
+  const stableItemField = field('Stable item key', stableItemKey, 'Optional. Use with collection scope for repeated items.');
+  const collectionScopeField = field('Collection scope', collectionScope, 'AutomationId of the containing collection.');
   const updateVisibility = () => {
     indexField.hidden = select.value !== 'typeIndex';
+    stableItemField.hidden = select.value !== 'automationId';
+    collectionScopeField.hidden = select.value !== 'automationId';
     value.placeholder = select.value === 'typeIndex' ? 'Button' :
       select.value === 'text' ? 'Exact visible text' : 'AutomationId';
   };
   select.addEventListener('change', updateVisibility);
   updateVisibility();
-  host.append(field('Selector type', select), field('Selector value', value), indexField);
+  host.append(
+    field('Selector type', select),
+    field('Selector value', value),
+    indexField,
+    stableItemField,
+    collectionScopeField
+  );
   host.append(button('Validate and apply selector', async () => {
     const candidate = select.value === 'automationId'
-      ? { automationId: value.value.trim() }
+      ? {
+        automationId: value.value.trim(),
+        ...(stableItemKey.value.trim() && collectionScope.value.trim()
+          ? {
+            stableItemKey: stableItemKey.value.trim(),
+            collectionScope: collectionScope.value.trim(),
+          }
+          : {}),
+      }
       : select.value === 'text'
         ? { text: value.value }
         : { typeIndex: { type: value.value.trim(), index: Math.max(0, Number(index.value) || 0) } };
@@ -239,6 +395,152 @@ function renderSelectorEditor(card, flow, stepIndex, draft, authoring) {
   card.append(host);
 }
 
+function renderSelectorResolution(parent, flow, stepIndex, draft, authoring, helpers, issues) {
+  const step = flow.steps[stepIndex];
+  const sequence = Number(step?.seq) || stepIndex + 1;
+  const key = selectorCheckKey(flow, step, stepIndex);
+  const check = selectorChecks.get(key);
+  const current = effectiveSelector(step);
+  const host = el('section', { className: 'df-selector-resolution df-authoring-section' });
+  host.append(
+    el('h5', { text: `Step ${sequence} needs a stable control` }),
+    el('p', {
+      className: 'df-workbench-intro',
+      text: issues.some((issue) => issue?.code === 'selector-ambiguous' || issue?.code === 'selector-match-count')
+        ? 'The recorded control matches more than one element. DevFlow will not guess which one you intended.'
+        : 'This control may move or change between runs. Choose a stable control before saving.',
+    }),
+    el('p', {
+      className: 'df-workbench-note',
+      text: `Recorded control: ${selectorLabel(current)}`,
+    }),
+  );
+
+  const actions = el('div', { className: 'df-authoring-actions' });
+  const checkButton = button(
+    check?.loading ? 'Checking controls…' : 'Check matching controls',
+    async () => {
+      selectorChecks.set(key, { loading: true });
+      helpers.rerender?.();
+      const result = await authoring.verifySelector?.(current);
+      selectorChecks.set(key, result || { ok: false, error: 'Selector verification is unavailable.' });
+      helpers.rerender?.();
+    },
+    { primary: true, disabled: check?.loading || !current }
+  );
+  actions.append(
+    checkButton,
+    button('Select intended control in app', () => {
+      helpers.inspectApp?.();
+      authoring.message?.('Select the intended control in the app, then return to Review and choose Use selected control.');
+    }),
+    button('Use selected control', async () => {
+      const selected = authoring.selectedElement?.();
+      const selector = makeSelectorFromSelected(selected);
+      if (!selector) {
+        authoring.message?.('Select a control with a stable AutomationId before updating this step.');
+        return;
+      }
+      const result = await authoring.applyHumanSelectedSelector?.({
+        stepId: step?.stepId,
+        stepSequence: sequence,
+        selector,
+      });
+      if (result?.ok) selectorChecks.delete(key);
+    })
+  );
+  host.append(actions);
+
+  if (check && !check.loading) {
+    const matches = list(check.matches || check.ambiguity?.matches);
+    const totalCount = Number(check.totalCount ?? check.ambiguity?.totalCount ?? check.matchCount) || matches.length;
+    const truncated = check.truncated === true || check.ambiguity?.truncated === true;
+    if (check.ok === true && check.matchCount === 1) {
+      host.append(el('p', {
+        className: 'df-workbench-note',
+        text: 'The recorded control currently resolves exactly once. Apply it again to refresh the saved selector facts.',
+      }));
+      host.append(button('Use verified control', async () => {
+        const result = await authoring.applyHumanSelectedSelector?.({
+          stepId: step?.stepId,
+          stepSequence: sequence,
+          selector: current,
+        });
+        if (result?.ok) selectorChecks.delete(key);
+      }, { primary: true }));
+    } else if (matches.length) {
+      host.append(el('p', {
+        className: 'df-workbench-safety',
+        text: `${totalCount} controls match. Choose only a control with a unique AutomationId or a stable repeated-item key.`,
+      }));
+      const cards = el('div', { className: 'df-selector-match-list' });
+      let usable = 0;
+      for (const match of matches) {
+        const selector = usableSelectorFromMatch(match, matches, truncated);
+        if (selector) usable++;
+        const card = el('article', { className: 'df-selector-match' });
+        card.append(
+          el('h6', { text: match.type || 'Control' }),
+          el('p', {
+            className: 'df-workbench-note',
+            text: match.automationId
+              ? `AutomationId: ${match.automationId}`
+              : 'No AutomationId',
+          }),
+        );
+        if (match.stableItemKey && match.collectionScope) {
+          card.append(el('p', {
+            className: 'df-authoring-field-hint',
+            text: `Stable repeated item in ${match.collectionScope}`,
+          }));
+        }
+        const cardActions = el('div', { className: 'df-authoring-actions' });
+        cardActions.append(button('Highlight in app', () => authoring.selectLiveElement?.(match.id)));
+        if (selector) {
+          cardActions.append(button('Use this control', async () => {
+            const result = await authoring.applyHumanSelectedSelector?.({
+              stepId: step?.stepId,
+              stepSequence: sequence,
+              selector,
+            });
+            if (result?.ok) selectorChecks.delete(key);
+          }, { primary: true }));
+        }
+        card.append(cardActions);
+        cards.append(card);
+      }
+      host.append(cards);
+      if (usable === 0) {
+        host.append(el('p', {
+          className: 'df-workbench-safety',
+          text: 'None of these repeated controls has enough stable identity to save safely. Add a stable item key to the app, rebuild it, and record this step again.',
+        }));
+        helpers.agentGuide?.(host, {
+          title: 'Ask your agent to make this control testable',
+          description: 'The app needs stable identity for each repeated item before this step can be replayed safely.',
+          steps: [
+            'Add a stable model ID for each collection item.',
+            'Bind DevFlowTest.StableItemKey on the item-template root.',
+            'Rebuild the app and record this step again.',
+          ],
+          prompt: [
+            'Improve the connected MAUI app testability for this repeated control.',
+            `Step ${sequence} uses duplicate AutomationId ${current?.automationId || '(missing)'}.`,
+            'Add a stable model item ID and bind Microsoft.Maui.DevFlow.Agent.Core.DevFlowTest.StableItemKey on the repeated item-template root.',
+            'Keep the child AutomationId, do not use visible text or type/index ordering, rebuild the app, and explain that the step must be recorded again.',
+          ].join(' '),
+        });
+      }
+    } else {
+      host.append(el('p', {
+        className: 'df-workbench-safety',
+        text: check.error || 'The recorded control could not be resolved in the current app.',
+      }));
+    }
+  }
+  parent.append(host);
+}
+
 function renderAssertionComposer(parent, flow, draft, authoring, options = {}) {
   const host = el('section', { className: 'df-authoring-section' });
   host.append(el('h4', { text: 'Add expected result' }));
@@ -250,7 +552,17 @@ function renderAssertionComposer(parent, flow, draft, authoring, options = {}) {
   const fixedStepIndex = Number.isInteger(options.stepIndex) ? options.stepIndex : null;
   const stepSelector = fixedStepIndex == null ? null : effectiveSelector(flow.steps[fixedStepIndex]);
   const selectedSelector = makeSelectorFromSelected(selected) ||
-    (stepSelector?.automationId ? { automationId: stepSelector.automationId } : null);
+    (stepSelector?.automationId
+      ? {
+        automationId: stepSelector.automationId,
+        ...(stepSelector.stableItemKey && stepSelector.collectionScope
+          ? {
+            stableItemKey: stepSelector.stableItemKey,
+            collectionScope: stepSelector.collectionScope,
+          }
+          : {}),
+      }
+      : null);
   const kind = el('select', { className: 'df-authoring-select' });
   for (const [value, text] of [
     ['exists', 'The step target exists'],
@@ -374,7 +686,15 @@ function renderReviewEditor(root, flow, draft, authoring, helpers) {
   root.classList.add('df-review-workspace');
   const steps = list(flow.steps);
   const requestedIndex = steps.findIndex((step, index) => stepKey(step, index) === selectedReviewStepKey);
-  const selectedIndex = requestedIndex >= 0 ? requestedIndex : steps.length ? 0 : -1;
+  const attentionSequence = Number(draft.attentionStepSequence);
+  const attentionIndex = Number.isInteger(attentionSequence)
+    ? steps.findIndex((step, index) => (Number(step?.seq) || index + 1) === attentionSequence)
+    : -1;
+  const selectedIndex = attentionIndex >= 0
+    ? attentionIndex
+    : requestedIndex >= 0
+      ? requestedIndex
+      : steps.length ? 0 : -1;
   if (selectedIndex >= 0 && selectedReviewStepKey == null)
     selectedReviewStepKey = stepKey(steps[selectedIndex], selectedIndex);
   const layout = el('div', { className: 'df-review-layout' });
@@ -388,8 +708,10 @@ function renderReviewEditor(root, flow, draft, authoring, helpers) {
     const step = steps[index];
     const key = stepKey(step, index);
     const selected = index === selectedIndex;
+    const issues = stepIssues(draft, step, index);
+    const blocking = issues.some((issue) => issue?.blocking === true);
     const row = el('button', {
-      className: `df-review-step-row${selected ? ' df-selected' : ''}`,
+      className: `df-review-step-row${selected ? ' df-selected' : ''}${blocking ? ' df-review-step-blocked' : ''}`,
       type: 'button',
       role: 'option',
       'aria-selected': String(selected),
@@ -399,11 +721,14 @@ function renderReviewEditor(root, flow, draft, authoring, helpers) {
       el('span', { className: 'df-review-step-title', text: step.label || step.action || 'Step' }),
       el('span', {
         className: 'df-review-step-summary',
-        text: `${step.action || 'action'} · ${list(step.asserts).filter((assertion) => assertion?.verify !== false).length} expected result${list(step.asserts).filter((assertion) => assertion?.verify !== false).length === 1 ? '' : 's'}`,
+        text: blocking
+          ? 'Needs attention'
+          : `${step.action || 'action'} · ${list(step.asserts).filter((assertion) => assertion?.verify !== false).length} expected result${list(step.asserts).filter((assertion) => assertion?.verify !== false).length === 1 ? '' : 's'}`,
       }),
     );
     row.addEventListener('click', () => {
       selectedReviewStepKey = key;
+      authoring.clearAttention?.();
       helpers.rerender?.();
     });
     rail.append(row);
@@ -452,6 +777,19 @@ function renderReviewEditor(root, flow, draft, authoring, helpers) {
   );
   detail.append(editActions);
 
+  const activeSelectorIssues = selectorIssues(draft, step, selectedIndex);
+  if (activeSelectorIssues.length) {
+    renderSelectorResolution(
+      detail,
+      flow,
+      selectedIndex,
+      draft,
+      authoring,
+      helpers,
+      activeSelectorIssues
+    );
+  }
+
   const results = el('section', { className: 'df-review-expected-results' });
   results.append(el('h5', { text: 'Expected results' }));
   const assertions = list(step.asserts);
@@ -478,11 +816,18 @@ function renderReviewEditor(root, flow, draft, authoring, helpers) {
       results.append(row);
     }
   }
-  const addResult = el('details', { className: 'df-expected-result-editor' });
-  addResult.append(el('summary', { text: 'Add expected result' }));
-  addResult.open = !assertions.some((assertion) => assertion?.verify !== false);
-  renderAssertionComposer(addResult, flow, draft, authoring, { stepIndex: selectedIndex });
-  results.append(addResult);
+  if (activeSelectorIssues.length) {
+    results.append(el('p', {
+      className: 'df-workbench-note',
+      text: 'Resolve the control for this step before adding an expected result.',
+    }));
+  } else {
+    const addResult = el('details', { className: 'df-expected-result-editor' });
+    addResult.append(el('summary', { text: 'Add expected result' }));
+    addResult.open = !assertions.some((assertion) => assertion?.verify !== false);
+    renderAssertionComposer(addResult, flow, draft, authoring, { stepIndex: selectedIndex });
+    results.append(addResult);
+  }
   detail.append(results);
 
   const stepDetails = el('details', { className: 'df-review-step-details' });
@@ -550,8 +895,15 @@ export function renderStepsPanel(helpers) {
     return root;
   }
 
-  findings(root, draft.errors, 'error');
-  findings(root, draft.warnings, 'warning');
+  if (!reviewing) {
+    findings(root, draft.errors, 'error');
+    findings(root, draft.warnings, 'warning');
+  } else {
+    const nonStepErrors = list(draft.errors).filter((value) => !/^step \d+/i.test(String(value)));
+    const nonStepWarnings = list(draft.warnings).filter((value) => !/^step \d+/i.test(String(value)));
+    findings(root, nonStepErrors, 'error');
+    findings(root, nonStepWarnings, 'warning');
+  }
   if (draft.saving) root.append(el('p', { className: 'df-workbench-note', text: 'Saving test…' }));
 
   if (!reviewing && !hasSteps) {
@@ -627,6 +979,7 @@ export function renderStepsPanel(helpers) {
     return root;
   }
 
+  renderReviewIssueSummary(root, flow, draft, authoring, helpers);
   helpers.intro(root, draft.bindingStale
     ? 'The recorded steps changed after this plan was saved. Review them, then save the updated test.'
     : readiness.savedBundle && readiness.hardOutcomeCheck
@@ -643,13 +996,21 @@ export function renderStepsPanel(helpers) {
   renderReviewEditor(root, flow, draft, authoring, helpers);
 
   const actions = el('div', { className: 'df-authoring-actions df-review-actions' });
+  const blockingIssues = authoringIssues(draft).filter((issue) => issue?.blocking === true);
   if (readiness.savedBundle && readiness.hardOutcomeCheck && !draft.flowDirty && !draft.planDirty) {
     actions.append(button('Continue to Run', () => helpers.selectStage?.('run'), { primary: true }));
-  } else if (readiness.hardOutcomeCheck) {
-    actions.append(button('Check test', () => authoring.validateFlow?.(), { disabled: !!draft.saving }));
-    if (draft.flowDirty || draft.planDirty || draft.diff) {
-      actions.append(button('Review changes', () => authoring.diffFlow?.(), { disabled: !!draft.saving }));
-    }
+  } else if (blockingIssues.length === 0 && readiness.hardOutcomeCheck) {
+    if (draft.checkPassed !== true) {
+      actions.append(button('Check test', () => authoring.validateFlow?.(), {
+        primary: true,
+        disabled: !!draft.saving,
+      }));
+    } else if (draft.diffReviewed !== true) {
+      actions.append(button('Review changes', () => authoring.diffFlow?.(), {
+        primary: true,
+        disabled: !!draft.saving,
+      }));
+    } else {
     actions.append(button(
       draft.stale ? 'Overwrite saved test' : draft.bindingStale ? 'Save updated test' : 'Save test',
       () => authoring.commitBundle?.(draft.stale === true), {
@@ -657,6 +1018,7 @@ export function renderStepsPanel(helpers) {
       disabled: !!draft.saving,
       title: 'Saves the flow and managed plan together. Saving never starts a run.',
     }));
+    }
   }
   if (actions.childElementCount) root.append(actions);
 

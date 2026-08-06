@@ -127,6 +127,28 @@ public sealed class FlowActionabilityEngine
         if (!string.IsNullOrEmpty(selector.AutomationId))
         {
             matches = await _driver.QueryAsync(automationId: selector.AutomationId);
+            if (!string.IsNullOrWhiteSpace(selector.StableItemKey) ||
+                !string.IsNullOrWhiteSpace(selector.CollectionScope))
+            {
+                if (!selector.HasScopedStableItem)
+                {
+                    return FlowTargetResolution.Failure(
+                        FlowFailureKinds.NotFound,
+                        "A scoped item selector requires AutomationId, stableItemKey, and collectionScope.");
+                }
+                if (!FlowSelector.IsOpaqueStableItemKey(selector.StableItemKey))
+                {
+                    return FlowTargetResolution.Failure(
+                        FlowFailureKinds.NotFound,
+                        "A stable item key must be an opaque SHA-256 identity.");
+                }
+                matches = matches
+                    .Where(element =>
+                        string.Equals(element.StableItemKey, selector.StableItemKey, StringComparison.Ordinal) &&
+                        string.Equals(element.CollectionScope, selector.CollectionScope, StringComparison.Ordinal))
+                    .ToArray();
+                return Exact(matches, "scoped item", "stable-item-key");
+            }
             return Exact(matches, "AutomationId");
         }
         if (!string.IsNullOrEmpty(selector.Text))
@@ -157,10 +179,13 @@ public sealed class FlowActionabilityEngine
         return FlowTargetResolution.Failure(FlowFailureKinds.NotFound, "No usable target selector was supplied.");
     }
 
-    private static FlowTargetResolution Exact(IReadOnlyList<ElementInfo> matches, string selectorKind)
+    private static FlowTargetResolution Exact(
+        IReadOnlyList<ElementInfo> matches,
+        string selectorKind,
+        string? quality = null)
     {
         if (matches.Count == 1)
-            return FlowTargetResolution.Success(matches[0], 1, selectorKind);
+            return FlowTargetResolution.Success(matches[0], 1, quality ?? selectorKind);
         if (matches.Count == 0)
             return FlowTargetResolution.Failure(FlowFailureKinds.NotFound, $"{selectorKind} selector found no elements.", matches);
         return FlowTargetResolution.Failure(

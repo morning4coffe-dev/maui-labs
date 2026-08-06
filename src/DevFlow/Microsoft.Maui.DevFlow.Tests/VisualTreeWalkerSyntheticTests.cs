@@ -1,5 +1,6 @@
 using Microsoft.Maui.Controls;
 using Microsoft.Maui.DevFlow.Agent.Core;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -71,6 +72,22 @@ public class VisualTreeWalkerSyntheticTests
         Assert.Same(overlay, ordered[0]);
         Assert.Same(button, ordered[1]);
         Assert.Same(layout, ordered[2]);
+    }
+
+    [Fact]
+    public void StableItemKey_AttachedProperty_IsIncludedInElementInfo()
+    {
+        var button = new Button { AutomationId = "RepeatedAction" };
+        DevFlowTest.SetStableItemKey(button, "item-42");
+        var page = new ContentPage { Content = button };
+        var app = new TestApplication([page]);
+
+        var elements = VisualTreeWalker.FlattenElementInfos(new VisualTreeWalker().WalkTree(app)).ToList();
+
+        Assert.Contains(elements, element =>
+            element.AutomationId == "RepeatedAction" &&
+            FlowSelector.IsOpaqueStableItemKey(element.StableItemKey) &&
+            element.StableItemKey != "item-42");
     }
 
     private sealed class TestApplication(IEnumerable<IVisualTreeElement> children)

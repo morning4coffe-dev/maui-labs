@@ -162,11 +162,12 @@ public sealed class FlowRecordingSpoolStoreTests : IDisposable
             sessionId: "session",
             stableAgentId: "stable");
         Assert.True(started.Ok, started.Error);
-        Assert.True(first.Observe("process-a", new FlowObservation
+        var observed = first.Observe("process-a", new FlowObservation
         {
             Action = FlowActions.Tap,
             AutomationId = "First"
-        }, started.RecordingId).Ok);
+        }, started.RecordingId);
+        Assert.True(observed.Ok, observed.Error);
         first.RemoveAgent("process-a");
 
         var restarted = new BrokerFlowCoordinator(

@@ -147,6 +147,7 @@ public sealed class FlowRecordTools
         position = Clean(position);
         text = string.IsNullOrWhiteSpace(text) ? null : text;
 
+        var scopedItem = GetScopedStableItem(selectorObservation, automationId);
         var target = BuildSelector(
             automationId,
             text,
@@ -155,7 +156,9 @@ public sealed class FlowRecordTools
             id,
             matchCount,
             quality,
-            fragilityReasons);
+            fragilityReasons,
+            scopedItem.stableItemKey,
+            scopedItem.collectionScope);
 
         var args = new Testing.FlowStepArgs();
         string? stepValue = null;
@@ -574,16 +577,24 @@ public sealed class FlowRecordTools
         string? id,
         int? matchCount = null,
         string? quality = null,
-        IReadOnlyList<string>? fragilityReasons = null)
+        IReadOnlyList<string>? fragilityReasons = null,
+        string? stableItemKey = null,
+        string? collectionScope = null)
     {
         if (!string.IsNullOrEmpty(automationId))
+        {
+            var scoped = Testing.FlowSelector.IsOpaqueStableItemKey(stableItemKey) &&
+                !string.IsNullOrWhiteSpace(collectionScope);
             return new Testing.FlowSelector
             {
                 AutomationId = automationId,
-                MatchCount = matchCount,
-                Quality = quality ?? (matchCount == 1 ? "durable" : null),
-                FragilityReasons = fragilityReasons?.ToList()
+                StableItemKey = scoped ? stableItemKey : null,
+                CollectionScope = scoped ? collectionScope : null,
+                MatchCount = scoped ? 1 : matchCount,
+                Quality = scoped ? "stable-item-key" : quality ?? (matchCount == 1 ? "durable" : null),
+                FragilityReasons = scoped ? null : fragilityReasons?.ToList()
             };
+        }
         if (!string.IsNullOrEmpty(text))
             return new Testing.FlowSelector
             {
@@ -610,6 +621,32 @@ public sealed class FlowRecordTools
             };
         return null;
     }
+
+    private static (string? stableItemKey, string? collectionScope) GetScopedStableItem(
+        MauiSelectorObservation? observation,
+        string? automationId)
+    {
+        var target = observation?.Target;
+        var elements = observation?.Elements;
+        if (target is null || elements is null || observation?.Truncated == true ||
+            string.IsNullOrWhiteSpace(automationId) ||
+            !IsOpaqueStableItemKey(target.StableItemKey) ||
+            string.IsNullOrWhiteSpace(target.CollectionScope))
+        {
+            return (null, null);
+        }
+
+        var matches = elements.Count(element =>
+            string.Equals(element.AutomationId, automationId, StringComparison.Ordinal) &&
+            string.Equals(element.StableItemKey, target.StableItemKey, StringComparison.Ordinal) &&
+            string.Equals(element.CollectionScope, target.CollectionScope, StringComparison.Ordinal));
+        return matches == 1
+            ? (target.StableItemKey, target.CollectionScope)
+            : (null, null);
+    }
+
+    private static bool IsOpaqueStableItemKey(string? value)
+        => Testing.FlowSelector.IsOpaqueStableItemKey(value);
 
     internal static bool IsFragileSelector(Testing.FlowSelector? selector)
         => Testing.FlowSelector.IsFragile(selector);
@@ -646,7 +683,17 @@ public sealed class FlowRecordTools
         var type = Clean(s.TypeIndex?.Type ?? s.Type);
         var idx = s.TypeIndex?.Index ?? s.Index;
         var text = string.IsNullOrWhiteSpace(s.Text) ? null : s.Text;
-        return BuildSelector(Clean(s.AutomationId), text, type, idx, Clean(s.Id));
+        return BuildSelector(
+            Clean(s.AutomationId),
+            text,
+            type,
+            idx,
+            Clean(s.Id),
+            s.MatchCount,
+            s.Quality,
+            s.FragilityReasons,
+            Clean(s.StableItemKey),
+            Clean(s.CollectionScope));
     }
 
     private static bool IsEmptyArgs(Testing.FlowStepArgs a) =>

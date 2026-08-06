@@ -88,7 +88,8 @@ incremental edits to an existing human demonstration or recorded draft.
 Request grants one stage at a time. Draft changes alter `flowDigest`, and commit advances the plan
 and flow revisions, so future-stage grants requested against an earlier snapshot become stale by
 design. Every request envelope also needs a positive bounded `deadlineMs`.
-Selector scope entries use canonical `automationId:<id>` or `typeIndex:<type>:<index>` keys. The
+Selector scope entries use canonical `automationId:<id>`,
+`scopedItem:<collection>:<itemKey>:<automationId>`, or `typeIndex:<type>:<index>` keys. The
 protocol also accepts equivalent typed selector objects and normalizes them to those keys.
 
 For a plan with `sideEffectPolicy: non-replayable`, an approved `run` grant is the explicit one-shot

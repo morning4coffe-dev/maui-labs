@@ -541,6 +541,284 @@ public class InspectorPageTests : IAsyncLifetime
     }
 
     [LiveInspectorFact]
+    public async Task TestWorkbenchReview_AmbiguousSelectorGuidesResolutionThenCheckDiffSave()
+    {
+        string? commitRequest = null;
+        const string firstStableKey = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+        const string secondStableKey = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+        const string markdown = """
+            # Repeated item
+
+            ```json maui-test
+            {
+              "schema": 2,
+              "name": "repeated-item",
+              "steps": [
+                {
+                  "seq": 1,
+                  "action": "tap",
+                  "target": {
+                    "automationId": "TodoCheckBox",
+                    "matchCount": 2,
+                    "quality": "ambiguous"
+                  }
+                },
+                {
+                  "seq": 2,
+                  "action": "fill",
+                  "target": {
+                    "automationId": "NewTodoEntry",
+                    "matchCount": 1,
+                    "quality": "durable"
+                  },
+                  "args": {
+                    "text": "new item"
+                  },
+                  "asserts": [
+                    {
+                      "kind": "exists",
+                      "selector": {
+                        "automationId": "NewTodoEntry",
+                        "matchCount": 1,
+                        "quality": "durable"
+                      },
+                      "verify": true
+                    }
+                  ]
+                }
+              ]
+            }
+            ```
+            """;
+
+        await _page.RouteAsync("**/api/control", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = """{"youAreWriter":true,"heldByOther":false}""",
+        }));
+        await _page.RouteAsync("**/api/flows/record/start", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = """{"ok":true,"recordingId":"review-resolution","name":"repeated-item"}""",
+        }));
+        await _page.RouteAsync("**/api/flows/record/status", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = """{"ok":true,"recording":true,"recordingId":"review-resolution","name":"repeated-item","steps":2}""",
+        }));
+        await _page.RouteAsync("**/api/flows/record/stop", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = JsonSerializer.Serialize(new { ok = true, name = "repeated-item", steps = 2, markdown }),
+        }));
+        await _page.RouteAsync("**/api/flows/validate", async route =>
+        {
+            var hasScopedItem = route.Request.PostData?.Contains(secondStableKey, StringComparison.Ordinal) == true;
+            await route.FulfillAsync(new()
+            {
+                Status = hasScopedItem ? 200 : 400,
+                ContentType = "application/json",
+                Body = hasScopedItem
+                    ? """{"ok":true,"errors":[],"warnings":[],"issues":[]}"""
+                    : """
+                        {
+                          "ok": false,
+                          "error": "Validation found issues.",
+                          "errors": [
+                            "step 1: selector must resolve exactly one element; it currently reports 2 matches.",
+                            "step 1: ambiguous selectors cannot be saved."
+                          ],
+                          "warnings": [],
+                          "issues": [
+                            {
+                              "severity": "error",
+                              "blocking": true,
+                              "code": "selector-match-count",
+                              "stepSequence": 1,
+                              "message": "step 1: selector must resolve exactly one element; it currently reports 2 matches.",
+                              "remediation": "resolve-selector"
+                            }
+                          ]
+                        }
+                        """
+            });
+        });
+        await _page.RouteAsync("**/api/flows/selector/verify", async route =>
+        {
+            var scoped = route.Request.PostData?.Contains(secondStableKey, StringComparison.Ordinal) == true;
+            await route.FulfillAsync(new()
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = scoped
+                    ? $$"""
+                        {
+                          "ok": true,
+                          "matchCount": 1,
+                          "quality": "stable-item-key",
+                          "element": {
+                            "id": "todo-2-checkbox",
+                            "type": "CheckBox",
+                            "automationId": "TodoCheckBox",
+                            "stableItemKey": "{{secondStableKey}}",
+                            "collectionScope": "TodoList"
+                          }
+                        }
+                        """
+                    : $$"""
+                        {
+                          "ok": false,
+                          "matchCount": 2,
+                          "totalCount": 2,
+                          "truncated": false,
+                          "error": "AutomationId selector is ambiguous.",
+                          "matches": [
+                            {
+                              "id": "todo-1-checkbox",
+                              "type": "CheckBox",
+                              "automationId": "TodoCheckBox",
+                              "stableItemKey": "{{firstStableKey}}",
+                              "collectionScope": "TodoList",
+                              "isVisible": true,
+                              "isEnabled": true
+                            },
+                            {
+                              "id": "todo-2-checkbox",
+                              "type": "CheckBox",
+                              "automationId": "TodoCheckBox",
+                              "stableItemKey": "{{secondStableKey}}",
+                              "collectionScope": "TodoList",
+                              "isVisible": true,
+                              "isEnabled": true
+                            }
+                          ]
+                        }
+                        """
+            });
+        });
+        await _page.RouteAsync("**/api/flows/diff", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = """{"ok":true,"errors":[],"warnings":[],"issues":[],"diff":"--- saved\n+++ draft\n+ scoped item selector"}""",
+        }));
+        await _page.RouteAsync("**/api/flows/commit", async route =>
+        {
+            commitRequest = route.Request.PostData;
+            using var request = JsonDocument.Parse(commitRequest!);
+            var planJson = request.RootElement.GetProperty("planJson").GetString()!;
+            using var plan = JsonDocument.Parse(planJson);
+            await route.FulfillAsync(new()
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = JsonSerializer.Serialize(new
+                {
+                    ok = true,
+                    supported = true,
+                    errors = Array.Empty<string>(),
+                    warnings = Array.Empty<string>(),
+                    issues = Array.Empty<object>(),
+                    flow = new
+                    {
+                        name = "repeated-item.md",
+                        markdown = request.RootElement.GetProperty("markdown").GetString(),
+                        document = (object?)null,
+                        digest = new string('a', 64),
+                    },
+                    plan = new
+                    {
+                        json = planJson,
+                        document = plan.RootElement.Clone(),
+                        digest = new string('b', 64),
+                        revision = 1,
+                    },
+                }),
+            });
+        });
+
+        await _page.GotoAsync(BaseUrl);
+        await StartManagedRecordingAsync("Tap one repeated todo, then add a new item.");
+        await _page.GetByRole(AriaRole.Button, new() { Name = "Stop recording", Exact = true }).ClickAsync();
+
+        var review = _page.Locator("#df-workbench-panel-review");
+        await Expect(review.GetByRole(AriaRole.Button, new() { Name = "Check test", Exact = true })).ToBeVisibleAsync();
+        await review.GetByRole(AriaRole.Button, new() { Name = "Check test", Exact = true }).ClickAsync();
+        await Expect(review).ToContainTextAsync("Step 1 needs attention");
+        await Expect(review.GetByRole(AriaRole.Button, new() { Name = "Resolve step 1", Exact = true })).ToBeVisibleAsync();
+        await Expect(review.GetByRole(AriaRole.Button, new() { Name = "Save test", Exact = true })).ToHaveCountAsync(0);
+
+        await review.GetByRole(AriaRole.Button, new() { Name = "Resolve step 1", Exact = true }).ClickAsync();
+        await Expect(review).ToContainTextAsync("Step 1 needs a stable control");
+        await review.GetByRole(AriaRole.Button, new() { Name = "Check matching controls", Exact = true }).ClickAsync();
+        await Expect(review).ToContainTextAsync("2 controls match");
+        var useButtons = review.GetByRole(AriaRole.Button, new() { Name = "Use this control", Exact = true });
+        await Expect(useButtons).ToHaveCountAsync(2);
+        await useButtons.Nth(1).ClickAsync();
+
+        await Expect(review.GetByRole(AriaRole.Button, new() { Name = "Check test", Exact = true })).ToBeVisibleAsync();
+        await review.GetByRole(AriaRole.Button, new() { Name = "Check test", Exact = true }).ClickAsync();
+        await Expect(review).Not.ToContainTextAsync("Saving test…", new() { Timeout = 15_000 });
+        var reviewChanges = review.GetByRole(AriaRole.Button, new() { Name = "Review changes", Exact = true });
+        Assert.True(
+            await reviewChanges.IsVisibleAsync(),
+            $"{await review.InnerTextAsync()}\nSTATUS: {await _page.Locator("#df-status").InnerTextAsync()}");
+        await review.GetByRole(AriaRole.Button, new() { Name = "Review changes", Exact = true }).ClickAsync();
+        await Expect(review).ToContainTextAsync("Changes to save");
+        var save = review.GetByRole(AriaRole.Button, new() { Name = "Save test", Exact = true });
+        await Expect(save).ToBeVisibleAsync();
+        await save.ClickAsync();
+        await Expect(review.GetByRole(AriaRole.Button, new() { Name = "Continue to Run", Exact = true })).ToBeVisibleAsync();
+        Assert.NotNull(commitRequest);
+        using var committed = JsonDocument.Parse(commitRequest);
+        Assert.Equal(JsonValueKind.Null, committed.RootElement.GetProperty("expectedPlanRevision").ValueKind);
+        Assert.Equal(JsonValueKind.Null, committed.RootElement.GetProperty("expectedPlanDigest").ValueKind);
+        Assert.Equal(JsonValueKind.Null, committed.RootElement.GetProperty("expectedFlowDigest").ValueKind);
+    }
+
+    [LiveInspectorFact]
+    public async Task TestWorkbenchRecording_RepeatedItemUsesScopedStableSelector()
+    {
+        await _page.GotoAsync(BaseUrl);
+        var takeControl = _page.Locator("#df-take-control");
+        if (await takeControl.IsVisibleAsync())
+        {
+            await takeControl.ClickAsync();
+            await _page.GetByRole(AriaRole.Dialog)
+                .GetByRole(AriaRole.Button, new() { Name = "Take control", Exact = true })
+                .ClickAsync();
+        }
+        await StartManagedRecordingAsync("Toggle the first seeded todo and verify the target remains identifiable.");
+
+        await _page.Locator("[data-automationId='TodoCheckBox']").First.ClickAsync(new() { Force = true });
+        await _page.GetByRole(AriaRole.Button, new() { Name = "Stop recording", Exact = true }).ClickAsync();
+
+        var review = _page.Locator("#df-workbench-panel-review");
+        await Expect(review).ToBeVisibleAsync();
+        await Expect(review).ToContainTextAsync("stable item in TodoList");
+        await Expect(review).Not.ToContainTextAsync("needs a stable control");
+
+        var expectedResult = review.Locator(".df-expected-result-editor");
+        if (!await expectedResult.EvaluateAsync<bool>("details => details.open"))
+            await expectedResult.Locator("summary").ClickAsync();
+        await expectedResult.Locator(".df-authoring-section")
+            .GetByRole(AriaRole.Button, new() { Name = "Add expected result", Exact = true })
+            .ClickAsync();
+
+        await Expect(review.GetByRole(AriaRole.Button, new() { Name = "Check test", Exact = true })).ToBeVisibleAsync();
+        await review.GetByRole(AriaRole.Button, new() { Name = "Check test", Exact = true }).ClickAsync();
+        await Expect(review).Not.ToContainTextAsync("Saving test…", new() { Timeout = 15_000 });
+        var reviewChanges = review.GetByRole(AriaRole.Button, new() { Name = "Review changes", Exact = true });
+        Assert.True(
+            await reviewChanges.IsVisibleAsync(),
+            $"{await review.InnerTextAsync()}\nSTATUS: {await _page.Locator("#df-status").InnerTextAsync()}");
+    }
+
+    [LiveInspectorFact]
     public async Task TestWorkbenchNarrowLayout_ScrollsTabsAndExplainsTracePickerFallback()
     {
         await _page.SetViewportSizeAsync(320, 700);

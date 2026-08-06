@@ -342,6 +342,53 @@ public class FlowRecordingTests : System.IDisposable
         Assert.Null(FlowRecordTools.BuildSelector(null, null, null, null, null));
     }
 
+    [Fact]
+    public void BuildSelector_ScopedStableItem_OverridesAmbiguousAutomationIdFacts()
+    {
+        var stableItemKey = "sha256:" + new string('a', 64);
+        var selector = FlowRecordTools.BuildSelector(
+            "TodoCheckBox",
+            null,
+            null,
+            null,
+            null,
+            matchCount: 9,
+            quality: "ambiguous",
+            fragilityReasons: ["duplicate AutomationId"],
+            stableItemKey: stableItemKey,
+            collectionScope: "TodoList")!;
+
+        Assert.Equal("TodoCheckBox", selector.AutomationId);
+        Assert.Equal(stableItemKey, selector.StableItemKey);
+        Assert.Equal("TodoList", selector.CollectionScope);
+        Assert.Equal(1, selector.MatchCount);
+        Assert.Equal("stable-item-key", selector.Quality);
+        Assert.False(FlowSelector.IsFragile(selector));
+    }
+
+    [Fact]
+    public void FlowSelector_NullScopedItemFields_DoNotChangeCanonicalJson()
+    {
+        var flow = new MauiFlow
+        {
+            Name = "compat",
+            Steps =
+            [
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Tap,
+                    Target = new FlowSelector { AutomationId = "SaveButton" },
+                },
+            ],
+        };
+
+        var markdown = FlowMarkdown.Serialize(flow);
+
+        Assert.DoesNotContain("stableItemKey", markdown, StringComparison.Ordinal);
+        Assert.DoesNotContain("collectionScope", markdown, StringComparison.Ordinal);
+    }
+
     // ── ResolveOutputPath (path hardening) ──
 
     [Fact]
@@ -601,12 +648,13 @@ public class FlowRecordingTests : System.IDisposable
             AutomationId = "CanvasEntry",
             Value = "from canvas"
         }).Ok);
-        Assert.True(coordinator.Observe("agent", new FlowObservation
+        var navigation = coordinator.Observe("agent", new FlowObservation
         {
             Action = "navigate",
             Value = "//mcp",
             Navigated = true
-        }).Ok);
+        });
+        Assert.True(navigation.Ok, navigation.Error);
 
         var stopped = coordinator.Stop("agent");
         Assert.True(stopped.Ok, stopped.Error);
@@ -742,7 +790,7 @@ public class FlowRecordingTests : System.IDisposable
     [Fact]
     public void BrokerCoordinator_PersistsSyntheticAssertObservation()
     {
-        var coordinator = new BrokerFlowCoordinator();
+        var coordinator = CreateIsolatedCoordinator();
         Assert.True(coordinator.Start("agent", "assertion", "App", "Windows", null).Ok);
         const string assertsJson =
             "[{\"kind\":\"propEquals\",\"selector\":{\"automationId\":\"TodoDescription\"},\"name\":\"Text\",\"expected\":\"Hello\",\"verify\":true}]";
@@ -777,7 +825,7 @@ public class FlowRecordingTests : System.IDisposable
         string? propertyName,
         string expectedPropertyName)
     {
-        var coordinator = new BrokerFlowCoordinator();
+        var coordinator = CreateIsolatedCoordinator();
         Assert.True(coordinator.Start("agent", "auto-assert", "App", "Windows", null).Ok);
 
         var observed = coordinator.Observe("agent", new FlowObservation
@@ -928,8 +976,9 @@ public class FlowRecordingTests : System.IDisposable
     [Fact]
     public void BrokerCoordinator_AllowsCurrentLeaseToContinueExistingRecording()
     {
-        var coordinator = new BrokerFlowCoordinator();
-        Assert.True(coordinator.Start("agent", "scenario", null, null, null).Ok);
+        var coordinator = CreateIsolatedCoordinator();
+        var started = coordinator.Start("agent", "scenario", null, null, null);
+        Assert.True(started.Ok, started.Error);
 
         var observed = coordinator.Observe("agent", new FlowObservation
         {
@@ -1041,7 +1090,7 @@ public class FlowRecordingTests : System.IDisposable
     [Fact]
     public void LeaseTakeover_PreservesRecording_ForNewOwner()
     {
-        var coordinator = new BrokerFlowCoordinator();
+        var coordinator = CreateIsolatedCoordinator();
         var leases = new MutationLeaseRegistry();
         Assert.True(leases.Control("agent", "claim", "owner", "web", "Browser", false).YouHold);
         Assert.True(coordinator.Start("agent", "first", null, null, null).Ok);
@@ -1055,10 +1104,11 @@ public class FlowRecordingTests : System.IDisposable
     [Fact]
     public void LeaseRelease_PreservesRecording_ForLaterHandoff()
     {
-        var coordinator = new BrokerFlowCoordinator();
+        var coordinator = CreateIsolatedCoordinator();
         var leases = new MutationLeaseRegistry();
         Assert.True(leases.Control("agent", "claim", "owner", "web", "Browser", false).YouHold);
-        Assert.True(coordinator.Start("agent", "scenario", null, null, null).Ok);
+        var started = coordinator.Start("agent", "scenario", null, null, null);
+        Assert.True(started.Ok, started.Error);
 
         leases.Control("agent", "release", "owner", "web", "Browser", false);
 
@@ -1069,9 +1119,9 @@ public class FlowRecordingTests : System.IDisposable
     [Fact]
     public void StaleRecordingId_CannotStopCancelOrAppendToReplacementRecording()
     {
-        var coordinator = new BrokerFlowCoordinator();
+        var coordinator = CreateIsolatedCoordinator();
         var first = coordinator.Start("agent", "first", null, null, null);
-        Assert.True(first.Ok);
+        Assert.True(first.Ok, first.Error);
         Assert.True(coordinator.Cancel("agent", first.RecordingId).Ok);
 
         var second = coordinator.Start("agent", "second", null, null, null);
@@ -1096,9 +1146,9 @@ public class FlowRecordingTests : System.IDisposable
     [Fact]
     public void CancelIfEmpty_DoesNotDeleteRecordingThatGainedAStep()
     {
-        var coordinator = new BrokerFlowCoordinator();
+        var coordinator = CreateIsolatedCoordinator();
         var started = coordinator.Start("agent", "scenario", null, null, null);
-        Assert.True(started.Ok);
+        Assert.True(started.Ok, started.Error);
         Assert.True(coordinator.Observe("agent", new FlowObservation
         {
             Action = FlowActions.Tap,

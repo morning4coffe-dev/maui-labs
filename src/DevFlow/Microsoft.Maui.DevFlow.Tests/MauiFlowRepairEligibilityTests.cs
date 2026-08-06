@@ -5,6 +5,16 @@ namespace Microsoft.Maui.DevFlow.Tests;
 public sealed class MauiFlowRepairEligibilityTests
 {
     [Fact]
+    public void SelectorMaterial_UnscopedSelector_PreservesLegacyDigestInput()
+    {
+        var selector = new FlowSelector { AutomationId = "SaveButton" };
+
+        var material = MauiFlowRepairPatchBuilder.SelectorMaterial(selector);
+
+        Assert.Equal(string.Join("\u001f", "SaveButton", null, null, null, null), material);
+    }
+
+    [Fact]
     public void Evaluate_PreDispatchUniqueLocalLocatorDrift_AllowsRepair()
     {
         var checkpoint = Checkpoint();

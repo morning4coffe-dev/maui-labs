@@ -316,6 +316,17 @@ public sealed class TestAgentImprovementsTool
             .Where(static element => !string.IsNullOrWhiteSpace(element.AutomationId))
             .GroupBy(static element => element.AutomationId!, StringComparer.Ordinal)
             .ToDictionary(static group => group.Key, static group => group.Count(), StringComparer.Ordinal);
+        var scopedCounts = elements
+            .Where(static element =>
+                !string.IsNullOrWhiteSpace(element.AutomationId) &&
+                IsOpaqueStableItemKey(element.StableItemKey) &&
+                !string.IsNullOrWhiteSpace(element.CollectionScope))
+            .Select(static element => MauiTestAgentSelectorScopeKey.ScopedItem(
+                element.CollectionScope!,
+                element.StableItemKey!,
+                element.AutomationId!))
+            .GroupBy(static key => key, StringComparer.Ordinal)
+            .ToDictionary(static group => group.Key, static group => group.Count(), StringComparer.Ordinal);
         var typeIndices = new Dictionary<string, int>(StringComparer.Ordinal);
         var result = new List<TestAgentSelectorIdentityProjection>(Math.Min(maximum, elements.Count));
 
@@ -328,7 +339,20 @@ public sealed class TestAgentImprovementsTool
             typeIndices[type] = typeIndex + 1;
 
             var automationId = string.IsNullOrWhiteSpace(element.AutomationId) ? null : element.AutomationId;
-            int? matchCount = automationId is null ? null : automationIdCounts[automationId];
+            var scoped = automationId is not null &&
+                IsOpaqueStableItemKey(element.StableItemKey) &&
+                !string.IsNullOrWhiteSpace(element.CollectionScope);
+            var scopedKey = scoped
+                ? MauiTestAgentSelectorScopeKey.ScopedItem(
+                    element.CollectionScope!,
+                    element.StableItemKey!,
+                    automationId!)
+                : null;
+            int? matchCount = automationId is null
+                ? null
+                : scoped
+                    ? scopedCounts[scopedKey!]
+                    : automationIdCounts[automationId];
             result.Add(new TestAgentSelectorIdentityProjection
             {
                 Type = type,
@@ -336,10 +360,12 @@ public sealed class TestAgentImprovementsTool
                 AutomationId = automationId,
                 NativeAutomationIdentity = element.NativeAutomationIdentity,
                 NativeAutomationIdentityKind = element.NativeAutomationIdentityKind,
-                Selector = automationId is not null
-                    ? $"automationId:{automationId}"
+                Selector = scoped
+                    ? scopedKey
+                    : automationId is not null
+                        ? $"automationId:{automationId}"
                     : $"typeIndex:{type}:{typeIndex}",
-                SelectorKind = automationId is not null ? "automationId" : "typeIndex",
+                SelectorKind = scoped ? "scopedItem" : automationId is not null ? "automationId" : "typeIndex",
                 MatchCount = matchCount ?? 1,
                 Quality = automationId is null
                     ? "fragile"
@@ -349,6 +375,7 @@ public sealed class TestAgentImprovementsTool
                 Enabled = element.IsEnabled,
                 Focused = element.IsFocused,
                 CollectionScope = element.CollectionScope,
+                StableItemKeyDigest = scoped ? element.StableItemKey : null,
                 Virtualized = element.IsVirtualized,
             });
             if (result.Count >= maximum)
@@ -357,6 +384,11 @@ public sealed class TestAgentImprovementsTool
 
         return result;
     }
+
+    private static bool IsOpaqueStableItemKey(string? value)
+        => value is { Length: 71 } &&
+           value.StartsWith("sha256:", StringComparison.Ordinal) &&
+           value[7..].All(Uri.IsHexDigit);
 }
 
 internal sealed class TestAgentSelectorIdentityProjection
@@ -373,5 +405,6 @@ internal sealed class TestAgentSelectorIdentityProjection
     public bool? Enabled { get; init; }
     public bool? Focused { get; init; }
     public string? CollectionScope { get; init; }
+    public string? StableItemKeyDigest { get; init; }
     public bool? Virtualized { get; init; }
 }

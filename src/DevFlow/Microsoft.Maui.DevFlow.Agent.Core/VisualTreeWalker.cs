@@ -1799,6 +1799,8 @@ public class VisualTreeWalker
         if (element is VisualElement ve)
         {
             info.AutomationId = ve.AutomationId;
+            info.StableItemKey = FindStableItemKey(ve);
+            info.CollectionScope = FindCollectionScope(ve);
             info.IsVisible = ve.IsVisible;
             info.IsEnabled = ve.IsEnabled;
             info.IsFocused = ve.IsFocused;
@@ -1946,6 +1948,43 @@ public class VisualTreeWalker
         }
 
         return info;
+    }
+
+    private static string? FindStableItemKey(Element? element)
+    {
+        for (var current = element; current is not null; current = current.Parent)
+        {
+            if (current is BindableObject bindable)
+            {
+                var key = DevFlowTest.GetStableItemKey(bindable)?.Trim();
+                if (string.IsNullOrWhiteSpace(key) &&
+                    bindable.BindingContext is IDevFlowStableItemKey provider)
+                {
+                    key = provider.DevFlowStableItemKey?.Trim();
+                }
+                if (!string.IsNullOrWhiteSpace(key))
+                {
+                    if (key.Length > 256)
+                        return null;
+                    var digest = System.Security.Cryptography.SHA256.HashData(
+                        System.Text.Encoding.UTF8.GetBytes(key));
+                    return "sha256:" + Convert.ToHexString(digest).ToLowerInvariant();
+                }
+            }
+            if (current is CollectionView or CarouselView || current.GetType().Name == "ListView")
+                break;
+        }
+        return null;
+    }
+
+    private static string? FindCollectionScope(Element? element)
+    {
+        for (var current = element?.Parent; current is not null; current = current.Parent)
+        {
+            if (current is CollectionView or CarouselView || current.GetType().Name == "ListView")
+                return (current as VisualElement)?.AutomationId;
+        }
+        return null;
     }
 
     protected virtual void PopulateNativeInfo(ElementInfo info, VisualElement ve)

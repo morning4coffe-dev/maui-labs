@@ -246,6 +246,13 @@ coordinates, type/index alone, screenshots, ambiguous matches, and unscoped virt
 rejected. Candidates are diagnostic evidence; exactly one committed flow selector still drives
 normal replay, and ambiguity still fails.
 
+A stable-item candidate becomes executable when it also carries the repeated child
+`AutomationId`. `FlowSelector` stores this as `automationId`, `collectionScope`, and
+`stableItemKey`; `FlowActionabilityEngine` first queries the repeated AutomationId and then filters
+to the one app-supplied item identity. Apps provide that identity with the Agent.Core
+`DevFlowTest.StableItemKey` attached property on the item-template root. Agent.Core bounds and
+SHA-256 pseudonymizes the raw key before any selector evidence leaves the app process.
+
 The displayed `deterministicRankScore` is a transparent rule score, **not a probability**.
 Components use rule version `selector-ranker-v1`: app-owned identifier (0.45), scope (0.20),
 managed/native agreement (0.12), source anchor (0.10), topology (0.08), and geometry (0.05),

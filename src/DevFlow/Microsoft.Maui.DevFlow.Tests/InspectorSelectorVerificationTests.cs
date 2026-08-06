@@ -13,8 +13,30 @@ namespace Microsoft.Maui.DevFlow.Tests;
 public sealed class InspectorSelectorVerificationTests
 {
     [Fact]
+    public void AuthoringIssues_MapSelectorFailuresToBlockingStepRemediation()
+    {
+        var issues = InspectorServer.CreateAuthoringIssues(
+        [
+            "step 1: selector must resolve exactly one element; it currently reports 9 matches.",
+        ],
+        [
+            "step 1: selector is fragile.",
+        ]);
+        using var json = JsonDocument.Parse(JsonSerializer.Serialize(issues));
+        var entries = json.RootElement.EnumerateArray().ToArray();
+
+        Assert.Equal("selector-match-count", entries[0].GetProperty("code").GetString());
+        Assert.Equal(1, entries[0].GetProperty("stepSequence").GetInt32());
+        Assert.True(entries[0].GetProperty("blocking").GetBoolean());
+        Assert.Equal("resolve-selector", entries[0].GetProperty("remediation").GetString());
+        Assert.Equal("warning", entries[1].GetProperty("severity").GetString());
+    }
+
+    [Fact]
     public async Task SelectorVerify_AmbiguousSelector_ReturnsBoundedValueFreeMatchSummaries()
     {
+        var stableKeys = Enumerable.Range(1, 25)
+            .ToDictionary(index => index, index => "sha256:" + index.ToString("x64"));
         const string sensitiveText = "CorrectHorseBatteryStaple";
         const string sensitiveValue = "private-control-value";
         const string sensitivePath = @"C:\private\CustomerSecrets.xaml";
@@ -25,6 +47,8 @@ public sealed class InspectorSelectorVerificationTests
                 Type = "Button",
                 Role = "button",
                 AutomationId = "shared",
+                StableItemKey = stableKeys[index],
+                CollectionScope = "Items",
                 Text = sensitiveText,
                 Value = sensitiveValue,
                 FrameworkProperties = new Dictionary<string, string?> { ["SecretProperty"] = sensitiveValue },
@@ -61,6 +85,8 @@ public sealed class InspectorSelectorVerificationTests
         Assert.Equal("Button", matches[0].GetProperty("type").GetString());
         Assert.Equal("button", matches[0].GetProperty("role").GetString());
         Assert.Equal("shared", matches[0].GetProperty("automationId").GetString());
+        Assert.Equal(stableKeys[1], matches[0].GetProperty("stableItemKey").GetString());
+        Assert.Equal("Items", matches[0].GetProperty("collectionScope").GetString());
         Assert.True(matches[0].GetProperty("isVisible").GetBoolean());
         Assert.True(matches[0].GetProperty("isEnabled").GetBoolean());
         Assert.Equal(1, matches[0].GetProperty("bounds").GetProperty("x").GetInt32());
@@ -75,9 +101,61 @@ public sealed class InspectorSelectorVerificationTests
             Assert.False(match.TryGetProperty("frameworkProperties", out _));
             Assert.False(match.TryGetProperty("sourceFile", out _));
         }
+
         Assert.DoesNotContain(sensitiveText, json, StringComparison.Ordinal);
         Assert.DoesNotContain(sensitiveValue, json, StringComparison.Ordinal);
         Assert.DoesNotContain(sensitivePath, json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task SelectorVerify_ScopedStableItem_ResolvesOneRepeatedControl()
+    {
+        var firstKey = "sha256:" + new string('1', 64);
+        var secondKey = "sha256:" + new string('2', 64);
+        var elements = new[]
+        {
+            new DriverElementInfo
+            {
+                Id = "first",
+                Type = "CheckBox",
+                AutomationId = "TodoCheckBox",
+                StableItemKey = firstKey,
+                CollectionScope = "TodoList",
+                IsVisible = true,
+                IsEnabled = true,
+            },
+            new DriverElementInfo
+            {
+                Id = "second",
+                Type = "CheckBox",
+                AutomationId = "TodoCheckBox",
+                StableItemKey = secondKey,
+                CollectionScope = "TodoList",
+                IsVisible = true,
+                IsEnabled = true,
+            },
+        };
+
+        await using var harness = await SelectorVerificationHarness.StartAsync(elements);
+        using var client = new HttpClient();
+        var token = await harness.ReadTokenAsync(client);
+        using var response = await PostSelectorAsync(
+            client,
+            harness.Url,
+            token,
+            "TodoCheckBox",
+            stableItemKey: secondKey,
+            collectionScope: "TodoList");
+
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var root = body.RootElement;
+        Assert.True(root.GetProperty("ok").GetBoolean());
+        Assert.Equal(1, root.GetProperty("matchCount").GetInt32());
+        Assert.Equal("stable-item-key", root.GetProperty("quality").GetString());
+        var element = root.GetProperty("element");
+        Assert.Equal(secondKey, element.GetProperty("stableItemKey").GetString());
+        Assert.Equal("TodoList", element.GetProperty("collectionScope").GetString());
     }
 
     [Fact]
@@ -89,6 +167,8 @@ public sealed class InspectorSelectorVerificationTests
             Type = "Button",
             Role = "button",
             AutomationId = "save",
+            StableItemKey = "customer@example.com",
+            CollectionScope = "Customers",
             Text = "Save changes",
             IsVisible = true,
             IsEnabled = true,
@@ -102,7 +182,8 @@ public sealed class InspectorSelectorVerificationTests
         using var response = await PostSelectorAsync(client, harness.Url, token, "save");
 
         Assert.Equal(HttpStatusCode.OK, response.StatusCode);
-        using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+        var json = await response.Content.ReadAsStringAsync();
+        using var body = JsonDocument.Parse(json);
         var root = body.RootElement;
         Assert.True(root.GetProperty("ok").GetBoolean());
         Assert.Equal(1, root.GetProperty("matchCount").GetInt32());
@@ -110,23 +191,35 @@ public sealed class InspectorSelectorVerificationTests
         var result = root.GetProperty("element");
         Assert.Equal("Button", result.GetProperty("type").GetString());
         Assert.Equal("save", result.GetProperty("automationId").GetString());
+        Assert.Equal(JsonValueKind.Null, result.GetProperty("stableItemKey").ValueKind);
         Assert.Equal("Save changes", result.GetProperty("text").GetString());
         Assert.True(result.GetProperty("hasSource").GetBoolean());
         Assert.False(root.TryGetProperty("ambiguity", out _));
+        Assert.DoesNotContain("customer@example.com", json, StringComparison.Ordinal);
     }
 
     private static async Task<HttpResponseMessage> PostSelectorAsync(
         HttpClient client,
         string inspectorUrl,
         string token,
-        string automationId)
+        string automationId,
+        string? stableItemKey = null,
+        string? collectionScope = null)
     {
         var request = new HttpRequestMessage(
             HttpMethod.Post,
             $"{inspectorUrl}/api/flows/selector/verify")
         {
             Content = new StringContent(
-                JsonSerializer.Serialize(new { selector = new { automationId } }),
+                JsonSerializer.Serialize(new
+                {
+                    selector = new
+                    {
+                        automationId,
+                        stableItemKey,
+                        collectionScope,
+                    },
+                }),
                 Encoding.UTF8,
                 "application/json"),
         };

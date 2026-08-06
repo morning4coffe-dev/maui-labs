@@ -52,7 +52,16 @@ internal sealed class MauiTestAgentSelectorScopeListConverter : JsonConverter<Li
             automationId.ValueKind == JsonValueKind.String &&
             !string.IsNullOrWhiteSpace(automationId.GetString()))
         {
-            return "automationId:" + automationId.GetString();
+            var stableItemKey = ReadOptionalString(selector, "stableItemKey");
+            var collectionScope = ReadOptionalString(selector, "collectionScope");
+            if ((stableItemKey is null) != (collectionScope is null))
+                throw new JsonException("Scoped item selectors require stableItemKey and collectionScope together.");
+            return stableItemKey is not null
+                ? MauiTestAgentSelectorScopeKey.ScopedItem(collectionScope!, stableItemKey, automationId.GetString()!)
+                : MauiTestAgentSelectorScopeKey.FromSelector(new FlowSelector
+                {
+                    AutomationId = automationId.GetString(),
+                })!;
         }
 
         if (selector.TryGetProperty("typeIndex", out var typeIndex) &&
@@ -74,6 +83,13 @@ internal sealed class MauiTestAgentSelectorScopeListConverter : JsonConverter<Li
             "allowedSelectors objects must contain automationId or a non-negative typeIndex.");
     }
 
+    private static string? ReadOptionalString(JsonElement value, string name)
+        => value.TryGetProperty(name, out var property) &&
+           property.ValueKind == JsonValueKind.String &&
+           !string.IsNullOrWhiteSpace(property.GetString())
+            ? property.GetString()
+            : null;
+
     private static bool TryReadTypeIndex(JsonElement selector, out string key)
     {
         key = string.Empty;
@@ -87,7 +103,10 @@ internal sealed class MauiTestAgentSelectorScopeListConverter : JsonConverter<Li
             return false;
         }
 
-        key = $"typeIndex:{type.GetString()}:{value}";
+        key = MauiTestAgentSelectorScopeKey.FromSelector(new FlowSelector
+        {
+            TypeIndex = new FlowTypeIndex { Type = type.GetString(), Index = value },
+        })!;
         return true;
     }
 }

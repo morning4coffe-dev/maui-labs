@@ -19,6 +19,12 @@ const evidence = readFileSync(resolve(
 const steps = readFileSync(resolve(
   here,
   '../../../Cli/Microsoft.Maui.Cli/DevFlow/Inspector/Web/inspector-steps.js'), 'utf8');
+const todoService = readFileSync(resolve(
+  here,
+  '../../../../samples/DevFlow.Sample/TodoService.cs'), 'utf8');
+const todoItem = readFileSync(resolve(
+  here,
+  '../../../../samples/DevFlow.Sample/TodoItem.cs'), 'utf8');
 
 test('Inspector composition script parses as an ES module', () => {
   const result = spawnSync(process.execPath, ['--check', sourcePath], { encoding: 'utf8' });
@@ -59,4 +65,11 @@ test('workflow assertions never read Text from password entries', () => {
   assert.match(steps, /looksSensitive/);
   assert.match(steps, /Expected value \(never prefilled\)/);
   assert.match(steps, /Never copy its[\s\S]*current value into an authored assertion/);
+});
+
+test('sample repeated items expose deterministic stable test identity', () => {
+  assert.match(todoService, /_nextItemId = 1/);
+  assert.match(todoService, /\$"todo-\{_nextItemId\+\+:D4\}"/);
+  assert.match(todoItem, /IDevFlowStableItemKey/);
+  assert.match(todoItem, /DevFlowStableItemKey => Id/);
 });

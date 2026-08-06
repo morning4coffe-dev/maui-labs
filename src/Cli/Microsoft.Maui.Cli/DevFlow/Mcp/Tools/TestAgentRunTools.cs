@@ -72,12 +72,17 @@ public sealed class TestAgentValidationTool
             if (!string.IsNullOrWhiteSpace(selector.AutomationId))
             {
                 var matches = await agent.QueryAsync(automationId: selector.AutomationId).ConfigureAwait(false);
+                var resolved = selector.HasScopedStableItem
+                    ? matches.Where(match =>
+                        string.Equals(match.StableItemKey, selector.StableItemKey, StringComparison.Ordinal) &&
+                        string.Equals(match.CollectionScope, selector.CollectionScope, StringComparison.Ordinal)).ToArray()
+                    : matches.ToArray();
                 findings.Add(new
                 {
                     sequence = step.Seq,
-                    selector = "automationId:" + selector.AutomationId,
-                    matchCount = matches.Count,
-                    types = matches.Select(match => match.Type).Where(type => !string.IsNullOrWhiteSpace(type)).Distinct().Take(8).ToArray(),
+                    selector = MauiTestAgentSelectorScopeKey.FromSelector(selector),
+                    matchCount = resolved.Length,
+                    types = resolved.Select(match => match.Type).Where(type => !string.IsNullOrWhiteSpace(type)).Distinct().Take(8).ToArray(),
                 });
             }
             else

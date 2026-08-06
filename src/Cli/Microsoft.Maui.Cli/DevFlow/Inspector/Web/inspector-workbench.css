@@ -560,6 +560,35 @@ margin-bottom: 10px; }
   background: var(--df-selected);
   color: var(--df-accent-fg);
 }
+.df-review-step-row.df-review-step-blocked {
+  border-color: color-mix(in srgb, var(--df-warn) 55%, var(--df-border));
+}
+.df-review-step-row.df-review-step-blocked .df-review-step-summary {
+  color: var(--df-warn);
+  font-weight: 700;
+}
+.df-review-blocker,
+.df-selector-resolution {
+  border-color: color-mix(in srgb, var(--df-warn) 55%, var(--df-border));
+  background: color-mix(in srgb, var(--df-warn) 7%, var(--df-surface));
+}
+.df-selector-match-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+.df-selector-match {
+  min-width: 0;
+  padding: 10px;
+  border: 1px solid var(--df-border-subtle);
+  border-radius: var(--df-radius);
+  background: var(--df-surface);
+}
+.df-selector-match h6 {
+  margin: 0 0 6px;
+  font-size: 12px;
+}
 .df-review-step-number {
   grid-row: 1 / span 2;
   display: grid;

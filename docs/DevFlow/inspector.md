@@ -112,11 +112,15 @@ run, import a trace, invoke a provider, apply a repair, or write app source.
   stale sidecar is never overwritten until the human selects the explicit confirmation action.
 - Review displays compact recorded-step rows and one selected-step editor. Moving or removing a
   step changes only the draft; **Record more steps** appends a new recording to the existing draft.
-  Selector edits must validate exactly one live match; raw runtime IDs cannot be promoted.
+  Selector edits must validate exactly one live match; raw runtime IDs cannot be promoted. A
+  blocking issue selects the affected step and replaces the save actions with **Resolve step**.
+  Review can query bounded live matches, highlight candidates, and apply only a unique
+  AutomationId or scoped stable-item selector.
 - **Add expected result** creates `exists`, `propEquals`, or `routeIs` verification, or an
   observation-only `pageChanged` note, for the selected step. It never pre-fills or persists
   secret-shaped values. Optional current-app checking uses the same strict runner semantics.
-- **Check test**, **Review changes**, and **Save test** are all explicit. Save test writes canonical
+- **Check test**, **Review changes**, and **Save test** appear sequentially. A new recording can be
+  checked and diffed against an empty baseline before its first save. Save test writes canonical
   Markdown and its sidecar as a rollback-protected local bundle, or reports no success. It never
   replays the resulting flow.
 

@@ -11,6 +11,14 @@ namespace Microsoft.Maui.DevFlow.Testing;
 public sealed class FlowSelector
 {
     [JsonPropertyName("automationId")] public string? AutomationId { get; set; }
+    /// <summary>Optional app-supplied item identity used with AutomationId inside a repeated collection.</summary>
+    [JsonPropertyName("stableItemKey")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? StableItemKey { get; set; }
+    /// <summary>AutomationId of the collection that scopes <see cref="StableItemKey"/>.</summary>
+    [JsonPropertyName("collectionScope")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? CollectionScope { get; set; }
     [JsonPropertyName("text")] public string? Text { get; set; }
     [JsonPropertyName("id")] public string? Id { get; set; }
     [JsonPropertyName("typeIndex")] public FlowTypeIndex? TypeIndex { get; set; }
@@ -31,6 +39,12 @@ public sealed class FlowSelector
         string.IsNullOrEmpty(AutomationId) && string.IsNullOrEmpty(Text) && string.IsNullOrEmpty(Id) &&
         TypeIndex is null && !(SelectorKind == "typeIndex" && !string.IsNullOrEmpty(Type) && Index is not null);
 
+    [JsonIgnore]
+    public bool HasScopedStableItem =>
+        !string.IsNullOrWhiteSpace(AutomationId) &&
+        !string.IsNullOrWhiteSpace(StableItemKey) &&
+        !string.IsNullOrWhiteSpace(CollectionScope);
+
     /// <summary>Returns whether this selector is less durable than a unique AutomationId.</summary>
     public static bool IsFragile(FlowSelector? selector)
         => selector is not null
@@ -39,6 +53,11 @@ public sealed class FlowSelector
                 || selector.MatchCount is > 1
                 || string.Equals(selector.Quality, "ambiguous", StringComparison.OrdinalIgnoreCase)
                 || selector.FragilityReasons is { Count: > 0 });
+
+    public static bool IsOpaqueStableItemKey(string? value)
+        => value is { Length: 71 } &&
+           value.StartsWith("sha256:", StringComparison.Ordinal) &&
+           value[7..].All(Uri.IsHexDigit);
 }
 
 public sealed class FlowTypeIndex

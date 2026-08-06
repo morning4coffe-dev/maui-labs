@@ -47,8 +47,9 @@ export function renderShell(inspectorUrl, appName, bridgeId) {
       const bridgeId = ${bridgeLiteral};
       const frameOrigin = ${frameOriginLiteral};
       // Capabilities the canvas contributes: save recordings, receive the human's selection (so the
-      // agent can answer about "the selected element"), and push that selection to Copilot as context.
-      const capabilities = bridgeId ? ['saveRecording', 'selection', 'copilot', 'copilotContext', 'attachData'] : [];
+      // agent can answer about "the selected element"), save bounded flow+plan bundles, and push that
+      // selection to Copilot as context.
+      const capabilities = bridgeId ? ['saveRecording', 'selection', 'copilot', 'copilotContext', 'attachData', 'saveTestBundle'] : [];
       // Relay a control action to the canvas server (which updates the agent-facing selection store).
       function postControl(payload, cb) {
         try {
@@ -234,6 +235,21 @@ export function renderShell(inspectorUrl, appName, bridgeId) {
         }
         if (d.type === 'devflow:attachData') {
           postControl({ action: 'attachData', snapshot: d.snapshot }, function (result) {
+            if (!frame.contentWindow || !d.requestId) return;
+            frame.contentWindow.postMessage({
+              type: 'devflow:hostResult',
+              v: 1,
+              bridgeId: bridgeId,
+              requestId: d.requestId,
+              ok: !!(result && result.ok),
+              message: result && result.status ? String(result.status) : null,
+              error: result && result.error ? String(result.error) : null,
+            }, frameOrigin);
+          });
+          return;
+        }
+        if (d.type === 'devflow:saveTestBundle') {
+          postControl({ action: 'saveTestBundle', bundle: d.bundle }, function (result) {
             if (!frame.contentWindow || !d.requestId) return;
             frame.contentWindow.postMessage({
               type: 'devflow:hostResult',

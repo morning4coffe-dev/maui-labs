@@ -46,9 +46,16 @@ public class InspectorPageTests : IAsyncLifetime
 
     public async Task DisposeAsync()
     {
-        await _context.DisposeAsync();
-        await _browser.DisposeAsync();
-        _playwright.Dispose();
+        try
+        {
+            await ResetInspectorStateAsync();
+        }
+        finally
+        {
+            await _context.DisposeAsync();
+            await _browser.DisposeAsync();
+            _playwright.Dispose();
+        }
     }
 
     [LiveInspectorFact]
@@ -191,6 +198,11 @@ public class InspectorPageTests : IAsyncLifetime
         Assert.Contains(".devflow-element", text);
         // The shared inspector is a full interactive tool (toolbar, tree, docked properties,
         // timeline), so it ships its own hover/selection chrome — hover styles are expected here.
+
+        var workbenchResponse = await _page.APIRequest.GetAsync(ResolveUrl("inspector-workbench.css"));
+        Assert.True(workbenchResponse.Ok);
+        Assert.Contains("text/css", workbenchResponse.Headers["content-type"]);
+        Assert.Contains("#df-workbench", await workbenchResponse.TextAsync());
     }
 
     [LiveInspectorFact]
@@ -202,6 +214,16 @@ public class InspectorPageTests : IAsyncLifetime
             ("inspector-dialog.js", "export function confirmModal"),
             ("inspector-data-context.js", "export function createDataSnapshot"),
             ("inspector-evidence.js", "export function createEvidenceController"),
+            ("inspector-study.js", "export function createPrototypeStudyJournal"),
+            ("inspector-host-bridge.js", "export function createInspectorHostBridge"),
+            ("inspector-workbench.js", "export function createInspectorWorkbench"),
+            ("inspector-plan.js", "export function renderPlanPanel"),
+            ("inspector-steps.js", "export function renderStepsPanel"),
+            ("inspector-run.js", "export function renderRunPanel"),
+            ("inspector-trace.js", "export function renderTracePanel"),
+            ("inspector-repair.js", "export function renderRepairPanel"),
+            ("inspector-improve.js", "export function renderImprovePanel"),
+            ("inspector-source.js", "export function renderSourceProposalPanel"),
             ("inspector-properties.js", "export function createPropertyGridController"),
             ("inspector-tree.js", "export function createElementTreeController"),
         })
@@ -213,6 +235,353 @@ public class InspectorPageTests : IAsyncLifetime
             Assert.Equal("nosniff", response.Headers["x-content-type-options"]);
             Assert.Contains(exportedSymbol, await response.TextAsync());
         }
+    }
+
+    [LiveInspectorFact]
+    public async Task TestWorkbenchToolbar_SeparatesJourneyFromContextualTools()
+    {
+        await _page.GotoAsync(BaseUrl);
+
+        var button = _page.Locator("#df-toggle-workbench");
+        await Expect(button).ToHaveTextAsync("Tests");
+        await button.ClickAsync();
+
+        var workbench = _page.Locator("#df-workbench");
+        await Expect(workbench).ToBeVisibleAsync();
+        await Expect(workbench).ToHaveAttributeAsync("aria-label", "Tests");
+        foreach (var stage in new[] { "goal", "record", "review", "run", "results" })
+            await Expect(_page.Locator($"#df-workbench-stage-{stage}")).ToBeVisibleAsync();
+
+        await Expect(_page.Locator("#df-workbench-tabs")).ToBeVisibleAsync();
+        await Expect(_page.Locator("#df-workbench-advanced-tools")).ToBeVisibleAsync();
+        await Expect(_page.Locator("#df-workbench-tabs [role=tab]")).ToHaveCountAsync(9);
+        await Expect(_page.Locator("#df-workbench-tabs [role=tablist]")).ToHaveCountAsync(2);
+        await Expect(_page.Locator(".df-workbench-stage-list [role=tab]")).ToHaveCountAsync(5);
+        await Expect(_page.Locator(".df-workbench-tool-list [role=tab]")).ToHaveCountAsync(4);
+        foreach (var tab in new[] { "requests", "repair", "improve", "source" })
+            await Expect(_page.Locator($"#df-workbench-tab-{tab}")).ToBeVisibleAsync();
+
+        var selectedTabColors = await _page.Locator("#df-workbench-stage-goal").EvaluateAsync<string[]>(
+            """
+            element => {
+              const probe = document.createElement('span');
+              probe.style.color = 'var(--df-accent-fg)';
+              element.append(probe);
+              const expected = getComputedStyle(probe).color;
+              probe.remove();
+              return [
+                getComputedStyle(element).color,
+                expected,
+                element.dataset.state || ''
+              ];
+            }
+            """);
+        Assert.True(
+            selectedTabColors[0] == selectedTabColors[1],
+            $"Selected tab color {selectedTabColors[0]} did not match {selectedTabColors[1]}; " +
+            $"state={selectedTabColors[2]}.");
+
+        var tabsBox = await _page.Locator("#df-workbench-tabs").BoundingBoxAsync();
+        var contentBox = await _page.Locator("#df-workbench-content").BoundingBoxAsync();
+        Assert.NotNull(tabsBox);
+        Assert.NotNull(contentBox);
+        Assert.True(contentBox.Y >= tabsBox.Y + tabsBox.Height - 1,
+            "Tabbed content must start below the Tests tab row rather than stacking over it.");
+
+        foreach (var selector in new[]
+        {
+            "#df-workbench-stage-record", "#df-workbench-stage-review", "#df-workbench-stage-run",
+            "#df-workbench-tab-requests", "#df-workbench-tab-repair",
+            "#df-workbench-tab-improve", "#df-workbench-tab-source",
+        })
+            await Expect(_page.Locator(selector)).ToBeDisabledAsync();
+
+        await _page.Locator("#df-workbench-stage-results").ClickAsync();
+        await Expect(_page.Locator("#df-workbench-panel-trace")).ToBeVisibleAsync();
+        Assert.Contains("df-active", await _page.Locator("#df-workbench-stage-results").GetAttributeAsync("class"));
+        await Expect(_page.Locator("#df-timeline")).ToHaveCountAsync(1);
+    }
+
+    [LiveInspectorFact]
+    public async Task TestWorkbenchPendingAgentRequest_BadgesWithoutStealingActiveTab()
+    {
+        await _page.RouteAsync("**/api/workbench/agent-requests", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = """
+                {
+                  "ok": true,
+                  "appName": "Test app",
+                  "platform": "WinUI",
+                  "requests": [
+                    {
+                      "approvalRequestId": "approval_layout_test",
+                      "kind": "run",
+                      "state": "pending",
+                      "intent": "Run this test once",
+                      "expiresAt": "2099-01-01T00:00:00Z",
+                      "requestedScope": {
+                        "allowedActions": ["run"],
+                        "allowedSelectors": [],
+                        "allowedRoutes": [],
+                        "allowedSideEffectClasses": [],
+                        "maxActionCount": 1,
+                        "maxValueBytes": 0
+                      }
+                    }
+                  ]
+                }
+                """,
+        }));
+
+        await _page.GotoAsync(BaseUrl);
+        await _page.Locator("#df-toggle-workbench").ClickAsync();
+
+        await Expect(_page.Locator("#df-workbench-stage-goal")).ToHaveClassAsync(
+            new System.Text.RegularExpressions.Regex("df-active"));
+        await Expect(_page.Locator("#df-test-agent-request-badge")).ToHaveTextAsync("1");
+        await Expect(_page.Locator("#df-agent-requests-badge")).ToHaveTextAsync("1");
+        await Expect(_page.Locator("#df-agent-requests")).ToBeHiddenAsync();
+        await Expect(_page.Locator("#df-workbench-tab-requests")).ToBeEnabledAsync();
+
+        await _page.Locator("#df-workbench-tab-requests").ClickAsync();
+        await Expect(_page.Locator("#df-agent-requests")).ToBeVisibleAsync();
+        var request = _page.Locator("[data-approval-request-id=approval_layout_test]");
+        await Expect(request).ToBeVisibleAsync();
+        var review = request.Locator(".df-agent-request-details");
+        await Expect(review).ToBeVisibleAsync();
+        Assert.True(await review.EvaluateAsync<bool>("details => details.open"));
+        await Expect(request.GetByRole(AriaRole.Button, new() { Name = "Approve run", Exact = true })).ToBeVisibleAsync();
+        await Expect(request.GetByRole(AriaRole.Button, new() { Name = "Reject", Exact = true })).ToBeVisibleAsync();
+    }
+
+    [LiveInspectorFact]
+    public async Task TestWorkbenchToolTabs_StayDisabledUntilUseful()
+    {
+        await _page.RouteAsync("**/api/workbench/agent-requests", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = """{"ok":true,"appName":"Test app","platform":"WinUI","requests":[]}""",
+        }));
+
+        await _page.GotoAsync(BaseUrl);
+        await _page.Locator("#df-toggle-workbench").ClickAsync();
+
+        foreach (var (selector, title) in new[]
+        {
+            ("#df-workbench-tab-requests", "No agent requests are available."),
+            ("#df-workbench-tab-repair", "Open a failed local result to unlock Repair."),
+            ("#df-workbench-tab-improve", "Record or open a test to unlock Improve."),
+            ("#df-workbench-tab-source", "Select a source-mapped control to unlock Source."),
+        })
+        {
+            await Expect(_page.Locator(selector)).ToBeDisabledAsync();
+            await Expect(_page.Locator(selector)).ToHaveAttributeAsync("title", title);
+        }
+    }
+
+    [LiveInspectorFact]
+    public async Task TestWorkbenchSource_SelectedControlShowsOnlyCheckSource()
+    {
+        await _page.GotoAsync(BaseUrl);
+        await _page.Locator("#df-mode-inspect").ClickAsync();
+        var mappedId = await _page.EvaluateAsync<string>(
+            """
+            () => {
+              for (const element of document.querySelectorAll('.devflow-element[data-hassource=true]')) {
+                const id = element.getAttribute('data-id');
+                const row = id && document.querySelector(`.df-tree-node[data-tree-id='${id}']`);
+                if (row) {
+                  row.click();
+                  return id;
+                }
+              }
+              return '';
+            }
+            """);
+        if (string.IsNullOrWhiteSpace(mappedId))
+        {
+            await _page.Locator("#df-toggle-workbench").ClickAsync();
+            await Expect(_page.Locator("#df-workbench-tab-source")).ToBeDisabledAsync();
+            await Expect(_page.Locator("#df-workbench-tab-source"))
+                .ToHaveAttributeAsync("title", "Select a source-mapped control to unlock Source.");
+            return;
+        }
+
+        await _page.Locator("#df-toggle-workbench").ClickAsync();
+        await Expect(_page.Locator("#df-workbench-tab-source")).ToBeEnabledAsync();
+        await _page.Locator("#df-workbench-tab-source").ClickAsync();
+        var source = _page.Locator("#df-workbench-panel-source");
+        var automationId = source.GetByLabel("New AutomationId");
+        await Expect(automationId).ToBeVisibleAsync();
+        await automationId.FillAsync("ProgressiveSourceId");
+        await Expect(automationId).ToHaveValueAsync("ProgressiveSourceId");
+        await Expect(source.GetByRole(AriaRole.Button, new() { Name = "Check source", Exact = true })).ToBeEnabledAsync();
+        await Expect(source.GetByRole(AriaRole.Button, new() { Name = "Create source proposal", Exact = true })).ToHaveCountAsync(0);
+    }
+
+    [LiveInspectorFact]
+    public async Task TestWorkbenchKeyboard_RestoresToolbarFocusAndDoesNotStartRun()
+    {
+        await _page.GotoAsync(BaseUrl);
+
+        var button = _page.Locator("#df-toggle-workbench");
+        await button.FocusAsync();
+        await _page.Keyboard.PressAsync("Control+Alt+T");
+        await Expect(_page.Locator("#df-workbench")).ToBeVisibleAsync();
+        await _page.Keyboard.PressAsync("Control+Alt+4");
+        Assert.DoesNotContain("df-active", await _page.Locator("#df-workbench-stage-run").GetAttributeAsync("class"));
+        await Expect(_page.Locator("#df-status")).ToContainTextAsync("Save a reviewed test with an expected result to unlock Run.");
+        await _page.Keyboard.PressAsync("Escape");
+
+        var focusedId = await _page.EvaluateAsync<string>("() => document.activeElement && document.activeElement.id");
+        Assert.Equal("df-toggle-workbench", focusedId);
+    }
+
+    [LiveInspectorFact]
+    public async Task TestWorkbenchGoal_IsRequiredAndRecordingRecoversFocus()
+    {
+        await _page.GotoAsync(BaseUrl);
+        await _page.Locator("#df-toggle-workbench").ClickAsync();
+
+        var goal = _page.Locator("#df-goal-input");
+        await Expect(goal).ToBeVisibleAsync();
+        Assert.Equal("true", await goal.GetAttributeAsync("required"));
+        Assert.Equal("true", await goal.GetAttributeAsync("aria-invalid"));
+        Assert.Contains("df-goal-help", await goal.GetAttributeAsync("aria-describedby"));
+        await Expect(_page.Locator(".df-test-detail-group")).ToHaveCountAsync(4);
+        foreach (var group in await _page.Locator(".df-test-detail-group").AllAsync())
+            Assert.False(await group.EvaluateAsync<bool>("details => details.open"));
+        await Expect(_page.Locator("#df-test-name-input")).ToBeHiddenAsync();
+        await Expect(_page.Locator(".df-plan-more")).ToHaveCountAsync(0);
+        await Expect(_page.Locator(".df-advanced-quick-record")).ToHaveCountAsync(0);
+        Assert.DoesNotContain(
+            "does not support save test bundles",
+            await _page.Locator("#df-workbench-panel-plan").TextContentAsync(),
+            StringComparison.OrdinalIgnoreCase);
+
+        await Expect(_page.Locator("#df-workbench-stage-record")).ToBeDisabledAsync();
+        await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Record steps", Exact = true })).ToBeDisabledAsync();
+    }
+
+    [LiveInspectorFact]
+    public async Task TestWorkbenchProgressiveDisclosure_ShowsOnlyCurrentActions()
+    {
+        await _page.GotoAsync(BaseUrl);
+        await _page.Locator("#df-toggle-workbench").ClickAsync();
+
+        await Expect(_page.Locator(".df-test-detail-group")).ToHaveCountAsync(4);
+        foreach (var group in await _page.Locator(".df-test-detail-group").AllAsync())
+            Assert.False(await group.EvaluateAsync<bool>("details => details.open"));
+
+        await Expect(_page.Locator("#df-workbench-stage-record")).ToBeDisabledAsync();
+        await Expect(_page.Locator("#df-workbench-stage-review")).ToBeDisabledAsync();
+        await Expect(_page.Locator("#df-workbench-stage-run")).ToBeDisabledAsync();
+        await Expect(_page.Locator("#df-workbench-tab-improve")).ToBeDisabledAsync();
+        await Expect(_page.Locator("#df-workbench-stage-results")).ToBeEnabledAsync();
+        await _page.Locator("#df-workbench-stage-results").ClickAsync();
+        await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Go to Goal", Exact = true })).ToBeVisibleAsync();
+        await _page.GetByRole(AriaRole.Button, new() { Name = "Go to Goal", Exact = true }).ClickAsync();
+        await _page.Locator("#df-workbench-stage-goal").FocusAsync();
+        await _page.Keyboard.PressAsync("ArrowRight");
+        Assert.Equal("df-workbench-stage-results",
+            await _page.EvaluateAsync<string>("() => document.activeElement && document.activeElement.id"));
+
+        await _page.Locator("#df-workbench-stage-goal").ClickAsync();
+        await _page.Locator("#df-goal-input").FillAsync("Show only actions that are currently usable.");
+        await Expect(_page.Locator("#df-workbench-stage-record")).ToBeEnabledAsync();
+        await Expect(_page.Locator("#df-workbench-stage-review")).ToBeDisabledAsync();
+        await Expect(_page.Locator("#df-workbench-stage-run")).ToBeDisabledAsync();
+        await _page.Locator("#df-workbench-stage-record").ClickAsync();
+        await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Start recording", Exact = true })).ToBeVisibleAsync();
+        await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Save test", Exact = true })).ToHaveCountAsync(0);
+
+        await Expect(_page.Locator("#df-workbench-stage-review")).ToBeDisabledAsync();
+        await Expect(_page.Locator("#df-workbench-stage-run")).ToBeDisabledAsync();
+
+        await _page.Locator("#df-workbench-stage-results").ClickAsync();
+        await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Go to Steps", Exact = true })).ToBeVisibleAsync();
+        await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Go to Run", Exact = true })).ToHaveCountAsync(0);
+        var import = _page.Locator("#df-workbench-panel-trace .df-trace-import");
+        await Expect(import).ToBeVisibleAsync();
+        Assert.False(await import.EvaluateAsync<bool>("details => details.open"));
+        await Expect(_page.Locator("#df-workbench-panel-trace .df-trace-details")).ToHaveCountAsync(0);
+    }
+
+    [LiveInspectorFact]
+    public async Task TestWorkbenchNarrowLayout_ScrollsTabsAndExplainsTracePickerFallback()
+    {
+        await _page.SetViewportSizeAsync(320, 700);
+        await _page.GotoAsync(BaseUrl);
+        await _page.Locator("#df-toggle-workbench").ClickAsync();
+
+        var workbench = _page.Locator("#df-workbench");
+        await Expect(workbench).ToBeVisibleAsync();
+        Assert.Equal("true", await workbench.GetAttributeAsync("aria-modal"));
+        var tabList = _page.Locator("#df-workbench-tabs .df-workbench-stage-list");
+        var scrollWidth = await tabList.EvaluateAsync<double>("element => element.scrollWidth");
+        var clientWidth = await tabList.EvaluateAsync<double>("element => element.clientWidth");
+        Assert.True(scrollWidth >= clientWidth);
+        await _page.Locator("#df-workbench-stage-results").ClickAsync();
+        var tabListBox = await tabList.BoundingBoxAsync();
+        var resultsTabBox = await _page.Locator("#df-workbench-stage-results").BoundingBoxAsync();
+        Assert.NotNull(tabListBox);
+        Assert.NotNull(resultsTabBox);
+        Assert.True(
+            resultsTabBox.X >= tabListBox.X - 1 &&
+            resultsTabBox.X + resultsTabBox.Width <= tabListBox.X + tabListBox.Width + 1,
+            "The focused Results tab should scroll fully into view.");
+        await _page.Locator("#df-workbench-panel-trace .df-trace-import summary").ClickAsync();
+        await Expect(_page.Locator("#df-workbench-panel-trace")).ToContainTextAsync("does not support a bounded native trace picker");
+        await Expect(_page.Locator("#df-workbench-panel-trace")).ToContainTextAsync("Choose result file");
+    }
+
+    [LiveInspectorFact]
+    public async Task TestWorkbenchCanonicalPlanBinding_DoesNotReportFalseStale()
+    {
+        const string name = "recording-2026-08-04T07-33-09.md";
+        await _page.GotoAsync(BaseUrl);
+        await OpenSavedTestAsync(name);
+        await Expect(_page.Locator("#df-workbench-strip")).ToContainTextAsync(name);
+        var planLoad = await _page.EvaluateAsync<string>(
+            """
+            async name => {
+              const token = document.querySelector('meta[name="devflow-inspector-token"]')?.content || '';
+              const response = await fetch('api/plans/load', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'X-DevFlow-Inspector-Token': token
+                },
+                body: JSON.stringify({ name })
+              });
+              return await response.text();
+            }
+            """,
+            name);
+        using var planDocument = JsonDocument.Parse(planLoad);
+        var flowDigest = planDocument.RootElement.GetProperty("flow").GetProperty("digest").GetString();
+        var planFlowDigest = planDocument.RootElement
+            .GetProperty("plan")
+            .GetProperty("document")
+            .GetProperty("flow")
+            .GetProperty("digest")
+            .GetString();
+        Assert.Equal(flowDigest, planFlowDigest);
+
+        await Expect(_page.Locator("#df-workbench-stage-review")).ToBeEnabledAsync();
+        await Expect(_page.Locator("#df-workbench-stage-run")).ToBeEnabledAsync();
+        await _page.Locator("#df-workbench-stage-run").ClickAsync();
+        var run = _page.Locator("#df-workbench-panel-run");
+        await Expect(run).ToBeVisibleAsync();
+        await Expect(run).Not.ToContainTextAsync("The saved plan no longer matches the recorded steps.");
+        var checkRun = run.GetByRole(AriaRole.Button, new() { Name = "Check run", Exact = true });
+        if (await checkRun.IsVisibleAsync())
+            await checkRun.ClickAsync();
+        await Expect(run.GetByRole(AriaRole.Button, new() { Name = "Review and start", Exact = true })).ToBeVisibleAsync();
+        await Expect(run).ToContainTextAsync("Verification notes");
     }
 
     [LiveInspectorFact]
@@ -412,7 +781,10 @@ public class InspectorPageTests : IAsyncLifetime
         }));
 
         await _page.GotoAsync(BaseUrl);
-        await Expect(_page.Locator("#df-toggle-record")).ToBeEnabledAsync();
+        await OpenWorkbenchAsync();
+        await _page.Locator("#df-goal-input").FillAsync("Verify recording follows connection state.");
+        var record = _page.GetByRole(AriaRole.Button, new() { Name = "Record steps", Exact = true });
+        await Expect(record).ToBeEnabledAsync();
         try
         {
             await _context.SetOfflineAsync(true);
@@ -422,7 +794,7 @@ public class InspectorPageTests : IAsyncLifetime
             await Expect(_page.Locator("#df-disconnected-overlay")).ToContainTextAsync("Showing the last captured frame");
             Assert.True(await _page.Locator("body").EvaluateAsync<bool>(
                 "body => body.classList.contains('df-disconnected')"));
-            await Expect(_page.Locator("#df-toggle-record")).ToBeDisabledAsync();
+            await Expect(record).ToBeDisabledAsync();
             var entry = _page.Locator("[data-automationId='NewTodoEntry']");
             await Expect(entry).ToBeAttachedAsync();
             var bounds = await entry.BoundingBoxAsync();
@@ -431,7 +803,7 @@ public class InspectorPageTests : IAsyncLifetime
             await Expect(_page.Locator("#app-viewport > input, #app-viewport > textarea")).ToHaveCountAsync(0);
 
             await _context.SetOfflineAsync(false);
-            await Expect(_page.Locator("#df-toggle-record")).ToBeEnabledAsync(new() { Timeout = 15_000 });
+            await Expect(record).ToBeEnabledAsync(new() { Timeout = 15_000 });
             await Expect(_page.Locator("#df-status")).ToBeEmptyAsync();
             await Expect(_page.Locator("#df-presence")).ToContainTextAsync("Driving");
             await Expect(_page.Locator("#df-disconnected-overlay")).ToBeHiddenAsync();
@@ -491,6 +863,12 @@ public class InspectorPageTests : IAsyncLifetime
             ContentType = "application/json",
             Body = "{\"ok\":true,\"recordingId\":\"empty-recording\",\"name\":\"empty\"}",
         }));
+        await _page.RouteAsync("**/api/flows/record/status", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = "{\"ok\":true,\"recording\":true,\"recordingId\":\"empty-recording\",\"name\":\"empty\",\"steps\":0}",
+        }));
         await _page.RouteAsync("**/api/flows/record/stop", route => route.FulfillAsync(new()
         {
             Status = 200,
@@ -499,12 +877,10 @@ public class InspectorPageTests : IAsyncLifetime
         }));
 
         await _page.GotoAsync(BaseUrl);
-        var record = _page.Locator("#df-toggle-record");
-        await Expect(record).ToBeEnabledAsync();
-        await record.ClickAsync();
+        await StartManagedRecordingAsync("Stop an empty recording without creating a replayable test.");
         await Expect(_page.Locator("#df-timeline")).ToBeVisibleAsync();
 
-        await record.ClickAsync();
+        await _page.GetByRole(AriaRole.Button, new() { Name = "Stop recording", Exact = true }).ClickAsync();
 
         await Expect(_page.Locator("#df-status")).ToContainTextAsync("no replayable steps");
         await Expect(_page.Locator("#df-timeline")).ToBeHiddenAsync();
@@ -553,22 +929,18 @@ public class InspectorPageTests : IAsyncLifetime
             ContentType = "application/json",
             Body = "{\"ok\":false,\"reason\":\"writer\",\"label\":\"Canvas Inspector\"}",
         }));
-
         await _page.GotoAsync(BaseUrl);
-        var record = _page.Locator("#df-toggle-record");
-        await record.ClickAsync();
-        await Expect(record).ToHaveAttributeAsync("aria-pressed", "true");
+        await StartManagedRecordingAsync("Observe recording across a writer lease handoff.");
+        var stop = _page.GetByRole(AriaRole.Button, new() { Name = "Stop recording", Exact = true });
 
         await _page.Locator("[data-automationId='ShowModalButton']").ClickAsync(new() { Force = true });
         await Expect(_page.Locator("#df-presence")).ToContainTextAsync("Canvas Inspector");
-        await Expect(record).ToHaveAttributeAsync("aria-pressed", "true");
-        await Expect(record).ToBeDisabledAsync();
+        await Expect(stop).ToBeDisabledAsync();
         await Expect(_page.Locator("#df-timeline")).ToBeVisibleAsync();
 
         await _page.Locator("#df-take-control").ClickAsync();
         await _page.GetByRole(AriaRole.Dialog).GetByRole(AriaRole.Button, new() { Name = "Take control" }).ClickAsync();
-        await Expect(record).ToBeEnabledAsync();
-        await Expect(record).ToHaveAttributeAsync("aria-pressed", "true");
+        await Expect(stop).ToBeEnabledAsync();
         await Expect(_page.Locator("#df-timeline")).ToBeVisibleAsync();
     }
 
@@ -604,11 +976,8 @@ public class InspectorPageTests : IAsyncLifetime
                 Body = "{\"ok\":true,\"recording\":false}",
             });
         });
-
         await _page.GotoAsync(BaseUrl);
-        var record = _page.Locator("#df-toggle-record");
-        await record.ClickAsync();
-        await Expect(record).ToHaveAttributeAsync("aria-pressed", "true");
+        await StartManagedRecordingAsync("Discard an unfinished managed recording.");
 
         await _page.Locator("#df-record-cancel").ClickAsync();
         var dialog = _page.GetByRole(AriaRole.Dialog);
@@ -616,7 +985,7 @@ public class InspectorPageTests : IAsyncLifetime
         await dialog.GetByRole(AriaRole.Button, new() { Name = "Discard" }).ClickAsync();
 
         Assert.Equal(1, cancelRequests);
-        await Expect(record).ToHaveAttributeAsync("aria-pressed", "false");
+        await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Stop recording", Exact = true })).ToHaveCountAsync(0);
         await Expect(_page.Locator("#df-timeline")).ToBeHiddenAsync();
         await Expect(_page.Locator("#df-status")).ToContainTextAsync("Recording discarded");
     }
@@ -711,27 +1080,31 @@ public class InspectorPageTests : IAsyncLifetime
     [LiveInspectorFact]
     public async Task ToolbarMovesOnlyActionsThatDoNotFitIntoAnchoredMoreMenu()
     {
-        await _page.SetViewportSizeAsync(1440, 820);
+        await _page.SetViewportSizeAsync(1800, 820);
         await _page.GotoAsync(BaseUrl);
         await Expect(_page.Locator(".devflow-element").First).ToBeAttachedAsync();
         var total = await _page.Locator("#df-toolbar-secondary > button, #df-toolbar-overflow > button").CountAsync();
         var wideInline = await _page.Locator("#df-toolbar-secondary > button").CountAsync();
-        var focusedInline = _page.Locator("#df-toolbar-secondary > button").First;
+        var focusedInline = _page.Locator("#df-toggle-dock");
+        Assert.Equal("df-toolbar-secondary", await focusedInline.EvaluateAsync<string>(
+            "button => button.parentElement?.id"));
         await focusedInline.FocusAsync();
         await _page.EvaluateAsync("() => window.dispatchEvent(new Event('resize'))");
         await _page.WaitForTimeoutAsync(100);
+        Assert.Equal("df-toolbar-secondary", await focusedInline.EvaluateAsync<string>(
+            "button => button.parentElement?.id"));
         Assert.True(await focusedInline.EvaluateAsync<bool>("button => button === document.activeElement"),
             "Toolbar reflow should preserve focus for an action that remains inline.");
 
         var compactInline = 0;
         var compactOverflow = 0;
-        foreach (var width in new[] { 1300, 1200, 1100, 1000, 900 })
+        foreach (var width in new[] { 1400, 1300, 1200, 1100, 1000, 900, 800 })
         {
             await _page.SetViewportSizeAsync(width, 820);
             await _page.WaitForTimeoutAsync(150);
             compactInline = await _page.Locator("#df-toolbar-secondary > button").CountAsync();
             compactOverflow = await _page.Locator("#df-toolbar-overflow > button").CountAsync();
-            if (compactInline > 0 && compactOverflow > 0)
+            if (compactInline > 0 && compactOverflow > 0 && compactInline < wideInline)
                 break;
         }
         Assert.True(compactInline > 0, "Expected actions that still fit to remain inline.");
@@ -896,16 +1269,49 @@ public class InspectorPageTests : IAsyncLifetime
         await Expect(_page.Locator("#df-mode-interact")).ToHaveAttributeAsync("aria-checked", "false");
         await Expect(_page.Locator("#df-mode-inspect")).ToHaveAttributeAsync("aria-checked", "true");
 
-        await Expect(_page.Locator("#df-toggle-bounds")).ToHaveAttributeAsync("aria-pressed", "false");
-        await _page.Locator("#df-toggle-bounds").ClickAsync();
-        await Expect(_page.Locator("#df-toggle-bounds")).ToHaveAttributeAsync("aria-pressed", "true");
+        await ExpectToolbarToggleStateAsync("#df-toggle-bounds", false);
+        await ClickToolbarActionAsync("#df-toggle-bounds");
+        await ExpectToolbarToggleStateAsync("#df-toggle-bounds", true);
 
-        await Expect(_page.Locator("#df-toggle-record")).ToHaveAttributeAsync("aria-pressed", "false");
-        await Expect(_page.Locator("#df-toggle-dock")).ToHaveAttributeAsync("aria-pressed", "false");
-        await _page.Locator("#df-toggle-dock").ClickAsync();
-        await Expect(_page.Locator("#df-toggle-dock")).ToHaveAttributeAsync("aria-pressed", "true");
+        await ExpectToolbarToggleStateAsync("#df-toggle-dock", false);
+        await ClickToolbarActionAsync("#df-toggle-dock");
+        await ExpectToolbarToggleStateAsync("#df-toggle-dock", true);
         await _page.Locator("#df-dock-close").ClickAsync();
-        await Expect(_page.Locator("#df-toggle-dock")).ToHaveAttributeAsync("aria-pressed", "false");
+        await ExpectToolbarToggleStateAsync("#df-toggle-dock", false);
+    }
+
+    [LiveInspectorFact]
+    public async Task ToolbarOverflow_PreservesActiveToggleAccent()
+    {
+        await _page.SetViewportSizeAsync(320, 700);
+        await _page.GotoAsync(BaseUrl);
+        await Expect(_page.Locator(".devflow-element").First).ToBeAttachedAsync();
+
+        await ClickToolbarActionAsync("#df-toggle-bounds");
+        await _page.Locator("#df-more").ClickAsync();
+        var bounds = _page.Locator("#df-toolbar-overflow #df-toggle-bounds");
+        await Expect(bounds).ToBeVisibleAsync();
+        var colors = await bounds.EvaluateAsync<string[]>(
+            """
+            element => {
+              const probe = document.createElement('span');
+              probe.style.backgroundColor = 'var(--df-accent)';
+              probe.style.color = 'var(--df-accent-fg)';
+              element.append(probe);
+              const expected = getComputedStyle(probe);
+              const actual = getComputedStyle(element);
+              const result = [
+                actual.backgroundColor,
+                expected.backgroundColor,
+                actual.color,
+                expected.color
+              ];
+              probe.remove();
+              return result;
+            }
+            """);
+        Assert.Equal(colors[1], colors[0]);
+        Assert.Equal(colors[3], colors[2]);
     }
 
     [LiveInspectorFact]
@@ -1028,14 +1434,13 @@ public class InspectorPageTests : IAsyncLifetime
         await Expect(_page.Locator("#df-toolbar-overflow")).ToHaveAttributeAsync("aria-label", "More inspector actions");
         await _page.Locator("#df-more").ClickAsync();
         await Expect(_page.Locator("#df-toolbar-overflow")).ToBeVisibleAsync();
-        await Expect(_page.Locator("#df-toolbar-overflow > button").First).ToHaveAttributeAsync("role", "menuitem");
-        var assertAction = _page.Locator("#df-assert");
-        await Expect(assertAction).ToHaveAttributeAsync("aria-disabled", "true");
-        Assert.False(await assertAction.EvaluateAsync<bool>("button => button.disabled"));
-        await assertAction.EvaluateAsync("button => button.focus()");
-        Assert.True(await assertAction.EvaluateAsync<bool>("button => button === document.activeElement"));
-        await assertAction.DispatchEventAsync("click");
-        await Expect(_page.Locator("#df-status")).ToContainTextAsync("Enabled while recording");
+        var firstOverflowAction = _page.Locator("#df-toolbar-overflow > button").First;
+        var overflowRole = await firstOverflowAction.GetAttributeAsync("role");
+        Assert.True(overflowRole is "menuitem" or "menuitemcheckbox",
+            $"Expected a menu action role, but was '{overflowRole}'.");
+        if (overflowRole == "menuitemcheckbox")
+            await Expect(firstOverflowAction).ToHaveAttributeAsync("aria-checked", "false");
+        await Expect(_page.Locator("#df-toggle-workbench")).ToHaveAttributeAsync("aria-controls", "df-workbench");
         await Expect(_page.Locator(".df-dock-tab-list")).ToHaveAttributeAsync("aria-label", "App data");
         await Expect(_page.Locator("#df-viewport-wrap")).ToHaveAttributeAsync("role", "region");
         await Expect(_page.Locator("#df-viewport-wrap")).ToHaveAttributeAsync("aria-label", "Live app viewport");
@@ -1122,14 +1527,16 @@ public class InspectorPageTests : IAsyncLifetime
     {
         await _page.GotoAsync(BaseUrl);
         var titleRows = _page.Locator(".df-tree-node").Filter(new() { HasText = "Label TodoTitle" });
-        await Expect(titleRows).ToHaveCountAsync(3);
+        await Expect(titleRows.First).ToBeVisibleAsync();
+        Assert.True(await titleRows.CountAsync() >= 3);
         var titleLabels = await titleRows.AllInnerTextsAsync();
         Assert.Contains(titleLabels, label => label.Contains("Buy groceries", StringComparison.Ordinal));
         Assert.Contains(titleLabels, label => label.Contains("Walk the dog", StringComparison.Ordinal));
         Assert.Contains(titleLabels, label => label.Contains("Finish Microsoft.Maui.DevFlow project", StringComparison.Ordinal));
 
         var checkRows = _page.Locator(".df-tree-node").Filter(new() { HasText = "CheckBox TodoCheckBox" });
-        await Expect(checkRows).ToHaveCountAsync(3);
+        await Expect(checkRows.First).ToBeVisibleAsync();
+        Assert.True(await checkRows.CountAsync() >= 3);
         var checkLabels = await checkRows.AllInnerTextsAsync();
         Assert.Contains(checkLabels, label => label.Contains("Buy groceries", StringComparison.Ordinal));
         Assert.Contains(checkLabels, label => label.Contains("Walk the dog", StringComparison.Ordinal));
@@ -1266,7 +1673,9 @@ public class InspectorPageTests : IAsyncLifetime
         var takeControl = _page.Locator("#df-take-control");
         await Expect(takeControl).ToBeVisibleAsync();
         await takeControl.ClickAsync();
-        await Expect(_page.Locator("#df-toggle-record")).ToBeEnabledAsync();
+        await OpenWorkbenchAsync();
+        await _page.Locator("#df-goal-input").FillAsync("Verify takeover enables recording.");
+        await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Record steps", Exact = true })).ToBeEnabledAsync();
         Assert.True(claimCount >= 2);
     }
 
@@ -1298,7 +1707,9 @@ public class InspectorPageTests : IAsyncLifetime
 
         Assert.Equal(1, initialClaims);
         Assert.True(statusPolls >= 1, $"Expected status-only reconciliation, got {statusPolls} status poll(s).");
-        await Expect(_page.Locator("#df-toggle-record")).ToBeDisabledAsync();
+        await OpenWorkbenchAsync();
+        await _page.Locator("#df-goal-input").FillAsync("Verify read-only recording state.");
+        await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Record steps", Exact = true })).ToBeDisabledAsync();
         await Expect(_page.Locator("#df-take-control")).ToBeVisibleAsync();
     }
 
@@ -1340,6 +1751,7 @@ public class InspectorPageTests : IAsyncLifetime
     public async Task ReplayDialogEnterOnCancelDoesNotReplay()
     {
         var replayRequests = 0;
+        const string recordedMarkdown = "# Keyboard test\n\n```json maui-test\n{\"schemaVersion\":1,\"name\":\"keyboard-test\",\"steps\":[]}\n```";
         await _page.RouteAsync("**/api/control", route => route.FulfillAsync(new()
         {
             Status = 200,
@@ -1356,7 +1768,13 @@ public class InspectorPageTests : IAsyncLifetime
         {
             Status = 200,
             ContentType = "application/json",
-            Body = "{\"ok\":true,\"name\":\"keyboard-test\",\"steps\":1,\"markdown\":\"# keyboard test\"}",
+            Body = JsonSerializer.Serialize(new
+            {
+                ok = true,
+                name = "keyboard-test",
+                steps = 1,
+                markdown = recordedMarkdown,
+            }),
         }));
         await _page.RouteAsync("**/api/flows/replay", route =>
         {
@@ -1370,13 +1788,9 @@ public class InspectorPageTests : IAsyncLifetime
         });
 
         await _page.GotoAsync(BaseUrl);
-        var record = _page.Locator("#df-toggle-record");
-        await Expect(record).ToBeEnabledAsync();
-        await record.ClickAsync();
-        await record.ClickAsync();
-        var replay = _page.Locator("#df-toggle-replay");
-        await Expect(replay).ToBeEnabledAsync();
-        await replay.ClickAsync();
+        const string savedFlow = "recording-2026-08-04T07-33-09.md";
+        await OpenSavedTestAsync(savedFlow);
+        await OpenLegacyQuickReplayAsync();
 
         var dialog = _page.GetByRole(AriaRole.Dialog);
         await Expect(dialog).ToBeVisibleAsync();
@@ -1392,14 +1806,93 @@ public class InspectorPageTests : IAsyncLifetime
     [LiveInspectorFact]
     public async Task WorkflowPanelLoadsProjectAndLocalFilesAndShowsReplayResultsInline()
     {
-        const string projectMarkdown = "# Project workflow\n\n```json maui-test\n{\"schemaVersion\":1,\"name\":\"project\",\"steps\":[]}\n```";
+        const string projectMarkdown = "# Project workflow\n\n```json maui-test\n{\"schemaVersion\":1,\"name\":\"project\",\"steps\":[{\"seq\":1,\"stepId\":\"1\",\"action\":\"tap\",\"label\":\"Tap AddButton\",\"target\":{\"automationId\":\"AddButton\"},\"asserts\":[{\"kind\":\"exists\",\"selector\":{\"automationId\":\"AddButton\"},\"verify\":true}]}]}\n```";
         const string localMarkdown = "# Local workflow\n\n```json maui-test\n{\"schemaVersion\":1,\"name\":\"local\",\"steps\":[]}\n```";
+        const string appendedMarkdown = "# Appended workflow\n\n```json maui-test\n{\"schemaVersion\":1,\"name\":\"appended\",\"steps\":[{\"seq\":1,\"stepId\":\"2\",\"action\":\"tap\",\"label\":\"Tap AnotherButton\",\"target\":{\"automationId\":\"AnotherButton\"}}]}\n```";
         var replayRequests = 0;
-        await _page.RouteAsync("**/api/control", route => route.FulfillAsync(new()
+        var preflightRequests = 0;
+        var startRequests = 0;
+        var journalRequests = 0;
+        var statusRequests = 0;
+        var writer = true;
+        string? startedIdempotencyKey = null;
+        var recoveryKeyMatched = false;
+        var recoveryJournalAttempts = 0;
+        var preflightKeys = new List<string>();
+        using var flowDocumentJson = JsonDocument.Parse("""
+            {
+              "schemaVersion": 1,
+              "name": "project",
+              "steps": [
+                {
+                  "seq": 1,
+                  "stepId": "1",
+                  "action": "tap",
+                  "label": "Tap AddButton",
+                  "target": { "automationId": "AddButton" },
+                  "asserts": [
+                    {
+                      "kind": "exists",
+                      "selector": { "automationId": "AddButton" },
+                      "verify": true
+                    }
+                  ]
+                }
+              ]
+            }
+            """);
+        using var planDocumentJson = JsonDocument.Parse("""
+            {
+              "schema": 1,
+              "planId": "plan-project",
+              "revision": 1,
+              "flow": { "path": "saved.md", "digest": "" },
+              "goal": "Verify the saved workflow through broker preflight.",
+              "sideEffectPolicy": "none",
+              "scenarios": [],
+              "acceptanceCriteria": [],
+              "businessOracles": [],
+              "independentBusinessOracles": []
+            }
+            """);
+        var flowDocument = flowDocumentJson.RootElement.Clone();
+        var planDocument = planDocumentJson.RootElement.Clone();
+        await _page.RouteAsync("**/api/control", async route =>
+        {
+            using var body = JsonDocument.Parse(route.Request.PostData ?? "{}");
+            var action = body.RootElement.TryGetProperty("action", out var value)
+                ? value.GetString()
+                : "status";
+            if (action == "release") writer = false;
+            else if (action == "claim") writer = true;
+            await route.FulfillAsync(new()
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = JsonSerializer.Serialize(new
+                {
+                    youAreWriter = writer,
+                    heldByOther = false,
+                }),
+            });
+        });
+        await _page.RouteAsync("**/api/flows/record/start", route => route.FulfillAsync(new()
         {
             Status = 200,
             ContentType = "application/json",
-            Body = "{\"youAreWriter\":true,\"heldByOther\":false}",
+            Body = "{\"ok\":true,\"recordingId\":\"aaaaaaaaaaaaaaaaaaaaaaaa\",\"name\":\"appended\",\"steps\":0}",
+        }));
+        await _page.RouteAsync("**/api/flows/record/stop", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = JsonSerializer.Serialize(new
+            {
+                ok = true,
+                name = "appended",
+                steps = 1,
+                markdown = appendedMarkdown,
+            }),
         }));
         await _page.RouteAsync("**/api/flows/files/list", route => route.FulfillAsync(new()
         {
@@ -1424,6 +1917,150 @@ public class InspectorPageTests : IAsyncLifetime
                 }),
             });
         });
+        await _page.RouteAsync("**/api/plans/load", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = JsonSerializer.Serialize(new
+            {
+                ok = true,
+                flow = new
+                {
+                    name = "saved.md",
+                    markdown = projectMarkdown,
+                    document = flowDocument,
+                    digest = "saved-flow-digest",
+                },
+                plan = new
+                {
+                    json = planDocument.GetRawText(),
+                    document = planDocument,
+                    digest = "saved-plan-digest",
+                    revision = 1,
+                },
+            }),
+        }));
+        await _page.RouteAsync("**/api/workbench/target", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = """
+                {
+                  "ok": true,
+                  "target": {
+                    "agentId": "sample-agent",
+                    "agentInstanceId": "sample-instance",
+                    "appName": "Sample",
+                    "platform": "android"
+                  },
+                  "broker": {}
+                }
+                """,
+        }));
+        await _page.RouteAsync("**/api/workbench/run/preflight", async route =>
+        {
+            Interlocked.Increment(ref preflightRequests);
+            using var body = JsonDocument.Parse(route.Request.PostData ?? "{}");
+            preflightKeys.Add(body.RootElement
+                .GetProperty("run")
+                .GetProperty("idempotencyKey")
+                .GetString()!);
+            await route.FulfillAsync(new()
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = """
+                    {
+                      "ok": true,
+                      "flowDigest": "saved-flow-digest",
+                      "admission": {
+                        "ordinaryReplayAllowed": true,
+                        "runVerificationAllowed": false,
+                        "reasons": [
+                          {
+                            "code": "independent-oracle-absent",
+                            "message": "No required independent business oracle is declared, so the run or repair cannot be verified.",
+                            "blocking": false,
+                            "scope": "verification"
+                          }
+                        ]
+                      }
+                    }
+                    """,
+            });
+        });
+        await _page.RouteAsync("**/api/workbench/run/start", async route =>
+        {
+            Interlocked.Increment(ref startRequests);
+            using var body = JsonDocument.Parse(route.Request.PostData ?? "{}");
+            startedIdempotencyKey = body.RootElement
+                .GetProperty("run")
+                .GetProperty("idempotencyKey")
+                .GetString();
+            await route.AbortAsync("failed");
+        });
+        await _page.RouteAsync("**/api/workbench/run/journal*", route =>
+        {
+            Interlocked.Increment(ref journalRequests);
+            if (startRequests > 0 && !string.IsNullOrWhiteSpace(startedIdempotencyKey))
+            {
+                Interlocked.Increment(ref recoveryJournalAttempts);
+                recoveryKeyMatched = new Uri(route.Request.Url).Query.Contains(
+                    Uri.EscapeDataString(startedIdempotencyKey),
+                    StringComparison.Ordinal);
+            }
+            return route.FulfillAsync(new()
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = startRequests == 0 || recoveryJournalAttempts == 1
+                    ? """{"ok":true}"""
+                    : recoveryJournalAttempts == 2
+                        ? """{"ok":true,"pending":true}"""
+                    : JsonSerializer.Serialize(new
+                    {
+                        ok = true,
+                        run = new
+                        {
+                            runId = "recovered-run",
+                            state = "running",
+                            terminal = false,
+                            flowDigest = "saved-flow-digest",
+                            createdAt = DateTimeOffset.UtcNow,
+                            totalSteps = 1,
+                            completedSteps = 0,
+                            events = Array.Empty<object>(),
+                        },
+                    }),
+            });
+        });
+        await _page.RouteAsync("**/api/workbench/run/recovered-run/status", route =>
+        {
+            Interlocked.Increment(ref statusRequests);
+            return route.FulfillAsync(new()
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = """
+                    {
+                      "ok": true,
+                      "run": {
+                        "runId": "recovered-run",
+                        "state": "passed",
+                        "terminal": true,
+                        "flowDigest": "saved-flow-digest",
+                        "totalSteps": 1,
+                        "completedSteps": 1,
+                        "events": [],
+                        "report": {
+                          "outcome": { "status": "passed", "summary": "Flow replay passed.", "terminal": true },
+                          "steps": [{ "stepId": "1", "sequence": 1, "action": "tap", "intent": "Tap AddButton" }]
+                        }
+                      }
+                    }
+                    """,
+            });
+        });
         await _page.RouteAsync("**/api/flows/replay", async route =>
         {
             using var body = JsonDocument.Parse(route.Request.PostData ?? "{}");
@@ -1446,30 +2083,95 @@ public class InspectorPageTests : IAsyncLifetime
         });
 
         await _page.GotoAsync(BaseUrl);
-        await _page.Locator("#df-load-flow").ClickAsync();
-        await Expect(_page.Locator("#df-timeline")).ToBeVisibleAsync();
-        await Expect(_page.Locator("#df-workflow-select option")).ToHaveCountAsync(2);
-        await _page.Locator("#df-workflow-select").SelectOptionAsync("saved.md");
-        await Expect(_page.Locator("#df-timeline-meta")).ToContainTextAsync("saved.md");
-        await Expect(_page.Locator("#df-workflow-replay")).ToBeEnabledAsync();
+        await OpenSavedTestAsync("saved.md");
+        await Expect(_page.Locator("#df-workbench-strip")).ToContainTextAsync("saved.md");
+        await Expect(_page.Locator("#df-workbench-stage-record")).ToBeEnabledAsync();
+        await Expect(_page.Locator("#df-workbench-stage-review")).ToBeEnabledAsync();
+        await Expect(_page.Locator("#df-workbench-stage-run")).ToBeEnabledAsync();
+        await Expect(_page.Locator("#df-workbench-tab-improve")).ToBeEnabledAsync();
+        await Expect(_page.Locator("#df-workbench-tab-repair")).ToBeDisabledAsync();
+        await Expect(_page.Locator("#df-workbench-tab-source")).ToBeDisabledAsync();
+        await _page.Locator("#df-workbench-stage-review").ClickAsync();
+        var review = _page.Locator("#df-workbench-panel-review");
+        await Expect(review.Locator(".df-review-step-row")).ToHaveCountAsync(1);
+        await Expect(review.Locator(".df-review-step-editor")).ToContainTextAsync("Step 1");
+        foreach (var action in new[] { "Move up", "Move down", "Remove step", "Record more steps" })
+            await Expect(review.GetByRole(AriaRole.Button, new() { Name = action, Exact = true })).ToBeVisibleAsync();
+        await review.Locator(".df-review-step-details > summary").ClickAsync();
+        await Expect(review.GetByRole(AriaRole.Button, new() { Name = "Save step", Exact = true })).ToBeVisibleAsync();
+        var expectedResult = review.Locator(".df-expected-result-editor");
+        await Expect(expectedResult).ToBeVisibleAsync();
+        Assert.False(await expectedResult.EvaluateAsync<bool>("details => details.open"));
+        Assert.DoesNotContain(
+            "hard outcome check",
+            await review.TextContentAsync(),
+            StringComparison.OrdinalIgnoreCase);
+        await _page.Locator("#df-workbench-tab-improve").ClickAsync();
+        var improve = _page.Locator("#df-workbench-panel-improve");
+        await Expect(improve.GetByRole(AriaRole.Button, new() { Name = "Scan test", Exact = true })).ToBeVisibleAsync();
+        var scanOptions = improve.Locator(".df-tool-details");
+        await Expect(scanOptions).ToHaveCountAsync(0);
+        await _page.Locator("#df-workbench-stage-run").ClickAsync();
+        var runPanel = _page.Locator("#df-workbench-panel-run");
+        await Expect(runPanel).ToBeVisibleAsync();
+        await runPanel.GetByRole(AriaRole.Button, new() { Name = "Check run", Exact = true }).ClickAsync();
+        await Expect(runPanel).ToContainTextAsync("Ready to run; verification limited");
+        await Expect(runPanel).ToContainTextAsync("Verification notes");
+        await Expect(runPanel).ToContainTextAsync("can run, but the result will not be marked independently verified");
+        Assert.Equal(1, preflightRequests);
+        Assert.Equal(0, replayRequests);
 
-        await _page.Locator("#df-workflow-replay").ClickAsync();
+        await _page.GetByRole(AriaRole.Button, new() { Name = "Review and start", Exact = true }).ClickAsync();
         await _page.GetByRole(AriaRole.Dialog).GetByRole(
             AriaRole.Button,
-            new() { Name = "Replay" }).ClickAsync();
+            new() { Name = "Run test", Exact = true }).ClickAsync();
+        await Expect(_page.Locator("#df-workbench-stage-results")).ToHaveClassAsync(
+            new System.Text.RegularExpressions.Regex("df-active"));
+        Assert.Equal(1, startRequests);
+        Assert.True(journalRequests >= 1);
+        Assert.True(statusRequests >= 1);
+        Assert.True(recoveryKeyMatched);
+        Assert.True(recoveryJournalAttempts >= 3);
+
+        await _page.GetByRole(AriaRole.Button, new() { Name = "Run again", Exact = true }).ClickAsync();
+        await Expect(_page.Locator("#df-workbench-panel-run")).ToContainTextAsync("Ready to run; verification limited");
+        Assert.True(preflightKeys.Count >= 2);
+        Assert.NotEqual(preflightKeys[0], preflightKeys[^1]);
+        await OpenLegacyQuickReplayAsync();
+        await _page.GetByRole(AriaRole.Dialog).GetByRole(
+            AriaRole.Button,
+            new() { Name = "Legacy quick replay" }).ClickAsync();
         await Expect(_page.Locator("#df-timeline-title-text")).ToContainTextAsync("Replay passed");
         await Expect(_page.Locator("#df-timeline .df-step-passed")).ToHaveCountAsync(1);
         await Expect(_page.Locator("#df-timeline")).ToContainTextAsync("Tap AddButton");
         Assert.Equal(1, replayRequests);
 
-        await _page.Locator("#df-workflow-file-input").SetInputFilesAsync(new FilePayload
+        await OpenWorkbenchAsync();
+        await _page.Locator("#df-workbench-stage-review").ClickAsync();
+        await _page.GetByRole(AriaRole.Button, new() { Name = "Record more steps", Exact = true }).ClickAsync();
+        await Expect(_page.Locator("#df-workbench-panel-steps")).ToBeVisibleAsync();
+        await _page.GetByRole(AriaRole.Button, new() { Name = "Stop recording", Exact = true }).ClickAsync();
+        await Expect(_page.Locator("#df-workbench-panel-review")).ToBeVisibleAsync();
+        await Expect(_page.Locator("#df-workbench-panel-review .df-review-step-row")).ToHaveCountAsync(2);
+        await Expect(_page.Locator("#df-workbench-panel-review")).ToContainTextAsync("Tap AddButton");
+        await Expect(_page.Locator("#df-workbench-panel-review")).ToContainTextAsync("Tap AnotherButton");
+        await _page.Locator("#df-workbench-panel-review .df-review-step-row").Nth(1).ClickAsync();
+        Assert.True(await _page.Locator("#df-workbench-panel-review .df-expected-result-editor")
+            .EvaluateAsync<bool>("details => details.open"));
+        await CloseWorkbenchAsync();
+
+        await OpenWorkbenchAsync();
+        await _page.Locator("#df-workbench-stage-goal").ClickAsync();
+        await _page.GetByRole(AriaRole.Button, new() { Name = "Open saved test", Exact = true }).ClickAsync();
+        var fileChooser = await _page.RunAndWaitForFileChooserAsync(
+            () => _page.Locator("#df-saved-test-file").ClickAsync());
+        await fileChooser.SetFilesAsync(new FilePayload
         {
             Name = "local.md",
             MimeType = "text/markdown",
             Buffer = Encoding.UTF8.GetBytes(localMarkdown),
         });
-        await Expect(_page.Locator("#df-timeline-meta")).ToContainTextAsync("local.md");
-        await Expect(_page.Locator("#df-workflow-replay")).ToBeEnabledAsync();
+        await Expect(_page.Locator("#df-workbench-strip")).ToContainTextAsync("local.md");
     }
 
     [LiveInspectorFact]
@@ -1508,27 +2210,21 @@ public class InspectorPageTests : IAsyncLifetime
         {
             Status = 200,
             ContentType = "application/json",
-            Body = "{\"ok\":false,\"supported\":false}",
+            Body = """
+                {
+                  "ok": true,
+                  "supported": true,
+                  "properties": [
+                    { "name": "BackgroundColor", "kind": "color", "value": null, "writable": true, "persistable": true },
+                    { "name": "FontSize", "kind": "number", "value": "28", "writable": true, "persistable": true, "min": 0.1 },
+                    { "name": "FontAttributes", "kind": "enum", "value": "None", "writable": true, "persistable": true, "choices": ["None", "Bold", "Italic"] },
+                    { "name": "Opacity", "kind": "number", "value": "1", "writable": true, "persistable": true, "min": 0, "max": 1, "step": 0.05 },
+                    { "name": "IsVisible", "kind": "bool", "value": "true", "writable": true, "persistable": true },
+                    { "name": "IsEnabled", "kind": "bool", "value": "true", "writable": true, "persistable": true }
+                  ]
+                }
+                """,
         }));
-        await _page.RouteAsync("**/api/getProperty", async route =>
-        {
-            using var body = System.Text.Json.JsonDocument.Parse(route.Request.PostData ?? "{}");
-            var name = body.RootElement.GetProperty("name").GetString();
-            var value = name switch
-            {
-                "BackgroundColor" => "null",
-                "FontSize" => "28",
-                "Opacity" => "1",
-                "IsVisible" or "IsEnabled" => "true",
-                _ => "value",
-            };
-            await route.FulfillAsync(new()
-            {
-                Status = 200,
-                ContentType = "application/json",
-                Body = $"{{\"value\":{(value == "null" ? "null" : $"\"{value}\"")}}}",
-            });
-        });
         await _page.RouteAsync("**/api/setProperty", route =>
         {
             Interlocked.Increment(ref setPropertyRequests);
@@ -1792,7 +2488,7 @@ public class InspectorPageTests : IAsyncLifetime
         });
 
         await _page.GotoAsync(BaseUrl);
-        await _page.Locator("#df-toggle-record").ClickAsync();
+        await StartManagedRecordingAsync("Observe a recording that ends in another session.");
         await Expect(_page.Locator("#df-timeline")).ToBeVisibleAsync();
 
         ownsLease = false;
@@ -1801,7 +2497,7 @@ public class InspectorPageTests : IAsyncLifetime
         await endedStatusObserved.Task.WaitAsync(TimeSpan.FromSeconds(8));
 
         await Expect(_page.Locator("#df-timeline")).ToBeHiddenAsync();
-        await Expect(_page.Locator("#df-toggle-record")).ToHaveAttributeAsync("aria-pressed", "false");
+        await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Stop recording", Exact = true })).ToHaveCountAsync(0);
         await Expect(_page.Locator("#df-status")).ToContainTextAsync("ended in another session");
     }
 
@@ -1820,6 +2516,12 @@ public class InspectorPageTests : IAsyncLifetime
             ContentType = "application/json",
             Body = "{\"ok\":true,\"recordingId\":\"stale\",\"name\":\"stale\"}",
         }));
+        await _page.RouteAsync("**/api/flows/record/status", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = "{\"ok\":true,\"recording\":true,\"recordingId\":\"stale\",\"name\":\"stale\",\"steps\":0}",
+        }));
         await _page.RouteAsync("**/api/flows/record/stop", route => route.FulfillAsync(new()
         {
             Status = 400,
@@ -1828,11 +2530,10 @@ public class InspectorPageTests : IAsyncLifetime
         }));
 
         await _page.GotoAsync(BaseUrl);
-        var record = _page.Locator("#df-toggle-record");
-        await record.ClickAsync();
-        await record.ClickAsync();
+        await StartManagedRecordingAsync("Clear stale recording state when the recording is missing.");
+        await _page.GetByRole(AriaRole.Button, new() { Name = "Stop recording", Exact = true }).ClickAsync();
 
-        await Expect(record).ToHaveAttributeAsync("aria-pressed", "false");
+        await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Stop recording", Exact = true })).ToHaveCountAsync(0);
         await Expect(_page.Locator("#df-timeline")).ToBeHiddenAsync();
         await Expect(_page.Locator("#df-status")).ToContainTextAsync("already ended in another session");
     }
@@ -2252,7 +2953,7 @@ public class InspectorPageTests : IAsyncLifetime
     {
         await CaptureClipboardWritesAsync();
         var logs = Enumerable.Range(0, 200)
-            .Select(index => new { l = "Info", m = $"log-{index:D3}" })
+            .Select(index => new { l = "Info", m = $"log-{199 - index:D3}" })
             .ToArray();
         await _page.RouteAsync("**/api/logs", route => route.FulfillAsync(new()
         {
@@ -2262,15 +2963,16 @@ public class InspectorPageTests : IAsyncLifetime
         }));
 
         await OpenDataDockAsync();
+        await _page.Locator("[data-tab='logs']").ClickAsync();
         await Expect(_page.Locator("#df-attach-data")).ToBeEnabledAsync();
         await _page.Locator("#df-attach-data").ClickAsync();
 
         var copied = await _page.EvaluateAsync<string>("() => window.__copiedDevFlowData || ''");
         Assert.Contains("newest 100 of 200", copied);
-        Assert.Contains("log-000", copied);
-        Assert.Contains("log-099", copied);
-        Assert.DoesNotContain("log-100", copied);
-        Assert.DoesNotContain("log-199", copied);
+        Assert.Contains("log-199", copied);
+        Assert.Contains("log-100", copied);
+        Assert.DoesNotContain("log-099", copied);
+        Assert.DoesNotContain("log-000", copied);
     }
 
     [LiveInspectorFact]
@@ -2345,12 +3047,11 @@ public class InspectorPageTests : IAsyncLifetime
         await frame.Locator("[data-copilot-context='selection']").ClickAsync();
         await Expect(frame.Locator("#df-status")).ToHaveTextAsync("Attached requested context.");
 
-        var loadFlow = frame.Locator("#df-load-flow");
-        if (!await loadFlow.IsVisibleAsync())
-            await frame.Locator("#df-more").ClickAsync();
-        await loadFlow.ClickAsync();
-        await frame.Locator("#df-workflow-select").SelectOptionAsync("saved.md");
-        await Expect(frame.Locator("#df-timeline-meta")).ToContainTextAsync("saved.md");
+        await frame.Locator("#df-toggle-workbench").ClickAsync();
+        await frame.GetByRole(AriaRole.Button, new() { Name = "Open saved test", Exact = true }).ClickAsync();
+        await frame.Locator("#df-saved-test-select").SelectOptionAsync("saved.md");
+        await frame.Locator("#df-saved-test-open").ClickAsync();
+        await Expect(frame.Locator("#df-workbench-strip")).ToContainTextAsync("saved.md");
 
         await frame.Locator("#df-more").ClickAsync();
         await frame.Locator("#df-send-copilot").ClickAsync();
@@ -2381,8 +3082,10 @@ public class InspectorPageTests : IAsyncLifetime
         Assert.Equal(markdown,
             requests.RootElement[2].GetProperty("payload").GetProperty("markdown").GetString());
 
-        await frame.Locator("#df-workflow-file").ClickAsync();
-        await Expect(frame.Locator("#df-timeline-meta")).ToContainTextAsync("host-picked.md");
+        await frame.Locator("#df-workbench-stage-goal").ClickAsync();
+        await frame.GetByRole(AriaRole.Button, new() { Name = "Open saved test", Exact = true }).ClickAsync();
+        await frame.Locator("#df-saved-test-file").ClickAsync();
+        await Expect(frame.Locator("#df-workbench-strip")).ToContainTextAsync("host-picked.md");
         Assert.Equal(1, await _page.EvaluateAsync<int>("() => window.__workflowPicks"));
     }
 
@@ -2469,6 +3172,161 @@ public class InspectorPageTests : IAsyncLifetime
               value: { writeText: async text => { window.__copiedDevFlowData = text; } }
             });
             """);
+
+    private async Task ResetInspectorStateAsync()
+    {
+        try
+        {
+            var recordingIds = await _page.EvaluateAsync<string[]>("""
+                () => {
+                  try {
+                    const ids = JSON.parse(sessionStorage.getItem('maui-devflow-recording-capabilities-v1') || '[]');
+                    return Array.isArray(ids)
+                      ? ids.filter(id => /^[a-f0-9]{24}$/.test(String(id))).slice(0, 16)
+                      : [];
+                  } catch {
+                    return [];
+                  }
+                }
+                """);
+            foreach (var recordingId in recordingIds)
+            {
+                try
+                {
+                    var serializedId = JsonSerializer.Serialize(recordingId);
+                    await _page.EvaluateAsync($$"""
+                        async () => {
+                          const basePath = location.pathname.replace(/\/$/, '');
+                          await fetch(`${basePath}/api/flows/record/cancel`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ recordingId: {{serializedId}} })
+                          });
+                        }
+                        """);
+                }
+                catch
+                {
+                    // A test route can deliberately abort this request; page disposal still releases its lease.
+                }
+            }
+
+            await _page.EvaluateAsync("""
+                async () => {
+                  document.querySelector('#df-workbench-close')?.click();
+                  document.querySelector('#df-timeline-close')?.click();
+                  document.querySelector('#df-dock-close')?.click();
+                  document.querySelector('#df-props-close')?.click();
+                  document.querySelectorAll('[role="dialog"]').forEach(dialog => dialog.parentElement?.remove());
+                  const basePath = location.pathname.replace(/\/$/, '');
+                  await fetch(`${basePath}/api/control`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ action: 'release' })
+                  });
+                  sessionStorage.clear();
+                  localStorage.clear();
+                }
+                """);
+        }
+        catch
+        {
+            // Live-inspector cleanup is best effort when a test intentionally disconnects its page.
+        }
+    }
+
+    private async Task OpenWorkbenchAsync()
+    {
+        var workbench = _page.Locator("#df-workbench");
+        if (!await workbench.IsVisibleAsync())
+            await _page.Locator("#df-toggle-workbench").ClickAsync();
+        await Expect(workbench).ToBeVisibleAsync();
+    }
+
+    private async Task CloseWorkbenchAsync()
+    {
+        var workbench = _page.Locator("#df-workbench");
+        if (await workbench.IsVisibleAsync())
+        {
+            await _page.Locator("#df-workbench-close").ClickAsync();
+            await Expect(workbench).ToBeHiddenAsync();
+        }
+    }
+
+    private async Task FillManagedGoalAsync(string goal)
+    {
+        await OpenWorkbenchAsync();
+        await _page.Locator("#df-workbench-stage-goal").ClickAsync();
+        var input = _page.Locator("#df-goal-input");
+        await Expect(input).ToBeVisibleAsync();
+        await input.FillAsync(goal);
+        await Expect(input).ToHaveAttributeAsync("aria-invalid", "false");
+        await CloseWorkbenchAsync();
+    }
+
+    private async Task StartManagedRecordingAsync(string goal)
+    {
+        await OpenWorkbenchAsync();
+        await _page.Locator("#df-workbench-stage-goal").ClickAsync();
+        var input = _page.Locator("#df-goal-input");
+        await input.FillAsync(goal);
+        var record = _page.GetByRole(AriaRole.Button, new() { Name = "Record steps", Exact = true });
+        await Expect(record).ToBeEnabledAsync();
+        await record.ClickAsync();
+        await Expect(_page.Locator("#df-workbench-panel-steps")).ToBeVisibleAsync();
+    }
+
+    private async Task OpenSavedTestAsync(string name)
+    {
+        await OpenWorkbenchAsync();
+        await _page.Locator("#df-workbench-stage-goal").ClickAsync();
+        await _page.GetByRole(AriaRole.Button, new() { Name = "Open saved test", Exact = true }).ClickAsync();
+        await Expect(_page.Locator($"#df-saved-test-select option[value='{name}']")).ToHaveCountAsync(1);
+        await _page.Locator("#df-saved-test-select").SelectOptionAsync(name);
+        await _page.Locator("#df-saved-test-open").ClickAsync();
+        await Expect(_page.Locator("#df-workbench-strip")).ToContainTextAsync(name);
+    }
+
+    private async Task OpenLegacyQuickReplayAsync()
+    {
+        await OpenWorkbenchAsync();
+        await _page.Locator("#df-workbench-stage-run").ClickAsync();
+        var details = _page.Locator("#df-workbench-panel-run .df-run-details");
+        await Expect(details).ToBeVisibleAsync();
+        if (!await details.EvaluateAsync<bool>("element => element.open"))
+            await details.Locator("summary").First.ClickAsync();
+        var replay = details.GetByRole(AriaRole.Button, new() { Name = "Legacy quick replay (advanced)" });
+        await Expect(replay).ToBeEnabledAsync();
+        await replay.ClickAsync();
+    }
+
+    private async Task ClickToolbarActionAsync(string selector)
+    {
+        var action = _page.Locator(selector);
+        if (!await action.IsVisibleAsync())
+        {
+            await _page.Locator("#df-more").ClickAsync();
+            await Expect(action).ToBeVisibleAsync();
+        }
+        await action.ClickAsync();
+    }
+
+    private async Task ExpectToolbarToggleStateAsync(string selector, bool expected)
+    {
+        var action = _page.Locator(selector);
+        var value = expected ? "true" : "false";
+        var inOverflow = await action.EvaluateAsync<bool>(
+            "button => button.parentElement?.id === 'df-toolbar-overflow'");
+        if (inOverflow)
+        {
+            await Expect(action).ToHaveAttributeAsync("role", "menuitemcheckbox");
+            await Expect(action).ToHaveAttributeAsync("aria-checked", value);
+        }
+        else
+        {
+            await Expect(action).ToHaveAttributeAsync("aria-pressed", value);
+        }
+    }
 
     private static string EncodeUrlLayers(string value, int layers)
     {

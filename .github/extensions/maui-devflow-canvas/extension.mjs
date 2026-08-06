@@ -10,10 +10,11 @@
 // in-app DevFlow Agent (http://127.0.0.1:<port>/api/v1/...) — the same two hops the
 // `maui devflow` CLI does internally, minus the per-call process spawn.
 
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync, lstatSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { Buffer } from "node:buffer";
 import { createHash, randomBytes } from "node:crypto";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { joinSession, createCanvas, CanvasError } from "@github/copilot-sdk/extension";
 import { LiveStore } from "./store.mjs";
 import { Recorder } from "./recorder.mjs";
@@ -40,6 +41,15 @@ function deviceOpts(input = {}) {
   return o;
 }
 
+function inspectorStartupHints(input = {}) {
+  const hints = {};
+  for (const key of ["test", "trace", "agentRequest"]) {
+    const value = typeof input?.[key] === "string" ? input[key].trim() : "";
+    if (value && value.length <= 2048) hints[key] = value;
+  }
+  return hints;
+}
+
 // instanceId -> { store, server, port, url, sse:Set<res> }
 const instances = new Map();
 
@@ -52,9 +62,20 @@ function ensure(instanceId, input = {}) {
   if (!st) {
     const store = new LiveStore(deviceOpts(input));
     const recorder = new Recorder();
-    st = { store, recorder, server: null, port: 0, url: null, sse: new Set(), bridgeId: randomToken() };
+    st = {
+      store,
+      recorder,
+      server: null,
+      port: 0,
+      url: null,
+      sse: new Set(),
+      bridgeId: randomToken(),
+      startupHints: inspectorStartupHints(input),
+    };
     store.subscribe((snapshot) => broadcast(st, snapshot));
     instances.set(instanceId, st);
+  } else {
+    st.startupHints = { ...(st.startupHints || {}), ...inspectorStartupHints(input) };
   }
   return st;
 }
@@ -280,6 +301,7 @@ async function applyControl(st, body, instanceId) {
   case "attachSelection": return pushSelectionContext(instanceId, store, body.element);
   case "attachCopilot": return pushInspectorContext(instanceId, store, body.context, body.payload);
   case "attachData":   return pushDataContext(instanceId, body.snapshot);
+  case "saveTestBundle": return persistTestBundle(st, body.bundle);
   // ── Workflow Test Recorder ──────────────────────────────────────────────
   case "record.start": {
     const r = await store.device.recordingStart({ name: body.name, preconditions: body.preconditions });
@@ -337,6 +359,13 @@ function brokerInspectorUrl(st) {
     // Broker state unreadable — fall back to the disconnected shell.
   }
   return null;
+}
+
+function withInspectorStartupHints(inspectorUrl, hints) {
+  const url = new URL(inspectorUrl);
+  for (const [key, value] of Object.entries(hints || {}))
+    url.searchParams.set(key, value);
+  return url.toString();
 }
 
 async function postInspectorJson(st, path, body, timeoutMs = 30000) {
@@ -441,6 +470,129 @@ function persistRecording(st, body) {
   return st.recorder.persist(st.store, body);
 }
 
+const TEST_BUNDLE_MAX_BYTES = 1024 * 1024;
+
+function safeBundleName(value) {
+  if (typeof value !== "string") return null;
+  const name = value.trim();
+  return name && name.length <= 255 && /\.md$/i.test(name) &&
+    basename(name) === name && !name.includes("/") && !name.includes("\\") ? name : null;
+}
+
+function isDigest(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value);
+}
+
+function canonicalBundleJson(value) {
+  if (Array.isArray(value)) return value.map(canonicalBundleJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalBundleJson(value[key])]));
+  }
+  return value;
+}
+
+function canonicalBundleDigest(value) {
+  return createHash("sha256").update(JSON.stringify(canonicalBundleJson(value)), "utf8").digest("hex");
+}
+
+function flowPayload(markdown) {
+  const match = /```json maui-test\s*\r?\n([\s\S]*?)\r?\n```/.exec(markdown);
+  if (!match) return null;
+  try { return JSON.parse(match[1]); } catch { return null; }
+}
+
+function noReparsePoint(path) {
+  try { return !lstatSync(path).isSymbolicLink(); } catch { return true; }
+}
+
+function canvasBundleRoot(st) {
+  const project = st.store?.device?.resolvedAgent?.()?.project;
+  if (!project || !existsSync(project) || !noReparsePoint(project)) return null;
+  let projectRoot;
+  try { projectRoot = statSync(project).isDirectory() ? project : dirname(project); } catch { return null; }
+  if (!noReparsePoint(projectRoot)) return null;
+  const root = resolve(projectRoot, "maui-tests");
+  const rel = relative(resolve(projectRoot), root);
+  if (rel === ".." || rel.startsWith(`..${sep}`)) return null;
+  try {
+    mkdirSync(root, { recursive: true });
+    return noReparsePoint(root) ? root : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistTestBundle(st, bundle) {
+  const name = safeBundleName(bundle?.name);
+  const markdown = typeof bundle?.markdown === "string" ? bundle.markdown : null;
+  const planJson = typeof bundle?.planJson === "string" ? bundle.planJson : null;
+  if (!name || !markdown || !planJson || !isDigest(bundle?.flowDigest) ||
+      (bundle?.planDigest != null && !isDigest(bundle.planDigest))) {
+    return { ok: false, error: "The test bundle must contain bounded flow and plan content bound to SHA-256 digests." };
+  }
+  if (Buffer.byteLength(markdown, "utf8") > TEST_BUNDLE_MAX_BYTES ||
+      Buffer.byteLength(planJson, "utf8") > TEST_BUNDLE_MAX_BYTES) {
+    return { ok: false, error: "Flow and plan files must each be 1 MB or smaller." };
+  }
+  let plan;
+  try { plan = JSON.parse(planJson); } catch { return { ok: false, error: "The plan sidecar is not valid JSON." }; }
+  if (!plan || plan.schema !== 1 || plan.flow?.path !== name || plan.flow?.digest !== bundle.flowDigest)
+    return { ok: false, error: "The plan sidecar is not bound to this canonical flow filename and digest." };
+  const payload = flowPayload(markdown);
+  if (!payload || canonicalBundleDigest(payload) !== bundle.flowDigest)
+    return { ok: false, error: "The flow digest does not match the authoritative maui-test payload." };
+  if (bundle.planDigest && canonicalBundleDigest(plan) !== bundle.planDigest)
+    return { ok: false, error: "The plan digest does not match the submitted plan sidecar." };
+
+  const root = canvasBundleRoot(st);
+  if (!root) return { ok: false, error: "A safe project maui-tests directory could not be resolved." };
+  const flow = join(root, name);
+  const sidecar = join(root, name.replace(/\.md$/i, "") + ".maui-plan.json");
+  if (!noReparsePoint(flow) || !noReparsePoint(sidecar))
+    return { ok: false, error: "Refusing to overwrite a symbolic-link test artifact." };
+
+  const token = randomBytes(12).toString("hex");
+  const items = [
+    { path: flow, temp: `${flow}.${token}.tmp`, backup: null, content: markdown, committed: false },
+    { path: sidecar, temp: `${sidecar}.${token}.tmp`, backup: null, content: planJson, committed: false },
+  ];
+  let preserveBackups = false;
+  try {
+    for (const item of items) writeFileSync(item.temp, item.content, { encoding: "utf8", flag: "wx" });
+    for (const item of items) {
+      if (!existsSync(item.path)) continue;
+      item.backup = `${item.path}.${token}.bak`;
+      renameSync(item.path, item.backup);
+    }
+    for (const item of items) {
+      renameSync(item.temp, item.path);
+      item.committed = true;
+    }
+    for (const item of items) if (item.backup) unlinkSync(item.backup);
+    return { ok: true, status: `Saved ${name} and ${basename(sidecar)}.`, name };
+  } catch {
+    let restored = true;
+    for (const item of [...items].reverse()) {
+      try {
+        if (item.committed && existsSync(item.path)) unlinkSync(item.path);
+        if (item.backup && existsSync(item.backup)) renameSync(item.backup, item.path);
+      } catch { restored = false; }
+    }
+    preserveBackups = !restored;
+    return {
+      ok: false,
+      error: restored
+        ? "The bundle was not saved; the prior flow and plan were restored."
+        : "The bundle write failed and the prior files could not be fully restored.",
+    };
+  } finally {
+    for (const item of items) {
+      try { if (existsSync(item.temp)) unlinkSync(item.temp); } catch {}
+      try { if (!preserveBackups && item.backup && existsSync(item.backup)) unlinkSync(item.backup); } catch {}
+    }
+  }
+}
+
 async function startServer(instanceId, input = {}) {
   const st = ensure(instanceId, input);
   const server = createServer(async (req, res) => {
@@ -467,7 +619,11 @@ async function startServer(instanceId, input = {}) {
         inspectorUrl = await resolveInspectorUrl(st);
       }
       res.end(inspectorUrl
-        ? renderShell(inspectorUrl, st.store.snapshot()?.info?.appName, st.bridgeId)
+        ? renderShell(
+          withInspectorStartupHints(inspectorUrl, st.startupHints),
+          st.store.snapshot()?.info?.appName,
+          st.bridgeId,
+        )
         : renderDisconnected(st.store.snapshot()?.info?.appName));
       return;
     }
@@ -610,6 +766,9 @@ const canvas = createCanvas({
       agentPort: { type: "number", description: "DevFlow agent port to target when multiple apps are running." },
       platform: { type: "string", description: "Optional platform hint, e.g. android or windows." },
       device: { type: "string", description: "Optional device/emulator identifier." },
+      test: { type: "string", description: "Optional saved test hint to open in the shared Test Workbench." },
+      trace: { type: "string", description: "Optional test-result hint to open in the shared Test Workbench." },
+      agentRequest: { type: "string", description: "Optional agent-request identifier to focus in the shared Test Workbench." },
     },
   },
 

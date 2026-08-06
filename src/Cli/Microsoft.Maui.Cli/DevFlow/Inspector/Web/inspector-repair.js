@@ -1,0 +1,197 @@
+export function renderRepairPanel(helpers) {
+  const root = helpers.root('Repair');
+  const repair = helpers.repair;
+  const state = repair?.state?.() || {};
+  const proposal = state.proposal?.proposal || state.proposal || null;
+  const eligibility = state.eligibility;
+  const hasFailedRun = !!state.current?.report?.failure;
+  const lifecycle = state.proposal?.state || proposal?.state || null;
+  const canMutate = state.canMutate === true;
+  const reasons = Array.isArray(eligibility?.reasons) ? eligibility.reasons : [];
+  const ambiguous = eligibility?.failureCode === 'locator-ambiguous' ||
+    reasons.some((reason) => String(reason?.code || '').includes('locator-ambiguous'));
+
+  if (!hasFailedRun && !eligibility && !proposal)
+    helpers.intro(root, 'Repair becomes available after a local test fails because one selector is missing.');
+  helpers.safety(root);
+
+  if (state.error) {
+    const error = document.createElement('p');
+    error.className = 'df-workbench-safety';
+    error.textContent = state.error;
+    root.append(error);
+  }
+
+  if (!hasFailedRun && !eligibility && !proposal) {
+    const empty = document.createElement('section');
+    empty.className = 'df-authoring-section df-tool-empty-state';
+    const heading = document.createElement('h4');
+    heading.textContent = 'No failed local test to repair';
+    const message = document.createElement('p');
+    message.className = 'df-workbench-intro';
+    message.textContent = 'Run a saved test first. If it fails because one selector is missing, return here.';
+    empty.append(heading, message);
+    helpers.action(empty, 'Open Results', () => helpers.selectStage?.('results'));
+    root.append(empty);
+  } else if (!eligibility && !proposal) {
+    const classify = helpers.action(
+      root,
+      state.classifying ? 'Checking failure…' : 'Check latest failure',
+      () => repair?.classify?.()
+    );
+    classify.classList.add('df-authoring-primary');
+    classify.disabled = state.classifying || !repair;
+  } else if (eligibility?.eligible !== true && !proposal) {
+    const unavailable = document.createElement('section');
+    unavailable.className = 'df-authoring-section df-tool-empty-state';
+    const heading = document.createElement('h4');
+    heading.textContent = ambiguous ? 'Choose the intended control yourself' : 'This failure cannot use selector repair';
+    const message = document.createElement('p');
+    message.className = 'df-workbench-intro';
+    message.textContent = ambiguous
+      ? 'The selector matched more than one control, so DevFlow will not guess.'
+      : reasons[0]?.message || 'The failure did not meet the safe selector-only repair rules.';
+    unavailable.append(heading, message);
+    helpers.action(unavailable, 'Open Results', () => helpers.selectStage?.('results'));
+    if (ambiguous) helpers.action(unavailable, 'Resolve in Improve', () => helpers.selectTab?.('improve'));
+    root.append(unavailable);
+  } else if (eligibility?.eligible === true && !proposal) {
+    const ready = document.createElement('section');
+    ready.className = 'df-authoring-section df-tool-ready-state';
+    const heading = document.createElement('h4');
+    heading.textContent = 'A selector-only repair may be possible';
+    const message = document.createElement('p');
+    message.className = 'df-workbench-intro';
+    message.textContent = 'Create an inert proposal to review. Nothing is applied automatically.';
+    ready.append(heading, message);
+    const propose = helpers.action(
+      ready,
+      state.proposing ? 'Creating proposal…' : 'Create repair proposal',
+      () => repair?.propose?.()
+    );
+    propose.classList.add('df-authoring-primary');
+    propose.disabled = state.proposing || !repair;
+    root.append(ready);
+  }
+
+  if (proposal) {
+    const candidate = proposal.candidate;
+    const proposalCard = document.createElement('section');
+    proposalCard.className = 'df-authoring-section df-tool-ready-state';
+    const heading = document.createElement('h4');
+    heading.textContent = `Repair proposal · ${String(lifecycle || 'proposed').replace(/-/g, ' ')}`;
+    proposalCard.append(heading);
+    const next = document.createElement('p');
+    next.className = 'df-workbench-intro';
+    next.textContent = lifecycle === 'proposed'
+      ? 'Preview the selector-only change.'
+      : lifecycle === 'previewed' && !(proposal.validationRunIds?.length)
+        ? 'Validate the proposed selector against a reset test run.'
+        : lifecycle === 'previewed'
+          ? 'Validation completed. Approve the reviewed change when ready.'
+          : lifecycle === 'approved'
+            ? 'Apply the approved selector change.'
+            : lifecycle === 'applied'
+              ? 'The change is applied; verification is still required.'
+              : 'Review the current repair state.';
+    proposalCard.append(next);
+
+    const agentOriginated = state.proposal?.agentOriginated === true;
+    if (agentOriginated) {
+      const notice = document.createElement('p');
+      notice.className = 'df-workbench-safety';
+      notice.textContent = 'This agent proposal still requires human validation and approval.';
+      proposalCard.append(notice);
+    }
+
+    if (lifecycle === 'proposed') {
+      const preview = helpers.action(proposalCard, 'Preview repair', () => repair?.preview?.());
+      preview.classList.add('df-authoring-primary');
+    } else if (lifecycle === 'previewed' && !(proposal.validationRunIds?.length)) {
+      const validate = helpers.action(proposalCard, 'Run safe validation', () => repair?.validate?.());
+      validate.classList.add('df-authoring-primary');
+      validate.disabled = !repair || !canMutate;
+    } else if (lifecycle === 'previewed' && proposal.validationRunIds?.length && !agentOriginated) {
+      const approval = helpers.action(proposalCard, 'Approve repair', () => repair?.requestApproval?.());
+      approval.classList.add('df-authoring-primary');
+      approval.disabled = !repair || !canMutate;
+    } else if (lifecycle === 'approved' && !agentOriginated) {
+      const apply = helpers.action(proposalCard, 'Apply approved repair', () => repair?.apply?.());
+      apply.classList.add('df-authoring-primary');
+      apply.disabled = !repair || !state.proposal?.grant || !canMutate;
+    } else if (['applying', 'applied'].includes(lifecycle)) {
+      const refresh = helpers.action(proposalCard, 'Refresh repair status', () => repair?.refresh?.());
+      refresh.classList.add('df-authoring-primary');
+    }
+    if (lifecycle === 'previewed') {
+      helpers.action(proposalCard, 'Reject', () => repair?.reject?.());
+    }
+    root.append(proposalCard);
+
+    const proposalDetails = document.createElement('details');
+    proposalDetails.className = 'df-tool-details';
+    const detailSummary = document.createElement('summary');
+    detailSummary.textContent = 'Repair details';
+    proposalDetails.append(detailSummary);
+    if (proposal.diff?.markdown) {
+      const label = document.createElement('h4');
+      label.textContent = 'Selector-only diff';
+      const pre = document.createElement('pre');
+      pre.className = 'df-workbench-diff';
+      pre.textContent = proposal.diff.markdown;
+      proposalDetails.append(label, pre);
+    }
+    if (candidate) {
+      const kind = candidate.selectorDescriptor?.kind || candidate.origin || 'unknown';
+      const score = candidate.score ?? candidate.scores?.deterministicRankScore ?? 'n/a';
+      const line = document.createElement('p');
+      line.className = 'df-workbench-note';
+      line.textContent = `Candidate ${candidate.candidateId || 'unknown'} · ${kind} · unique ${candidate.validation?.unique === true ? 'yes' : 'no'} · score ${score}.`;
+      proposalDetails.append(line);
+    }
+    const proof = proposal.unchangedAssertionsProof;
+    if (proof) {
+      helpers.list(proposalDetails, [
+        `Checks unchanged: ${proof.unchanged === true ? 'proved' : 'not proved'}`,
+        `Actions unchanged: ${proof.actionsUnchanged === true ? 'proved' : 'not proved'}`,
+        `Values unchanged: ${proof.valuesUnchanged === true ? 'proved' : 'not proved'}`,
+        `Order unchanged: ${proof.orderUnchanged === true ? 'proved' : 'not proved'}`,
+      ]);
+    }
+    root.append(proposalDetails);
+  }
+
+  if (eligibility) {
+    const eligibilityDetails = document.createElement('details');
+    eligibilityDetails.className = 'df-tool-details';
+    const summary = document.createElement('summary');
+    summary.textContent = 'Failure classification details';
+    eligibilityDetails.append(summary);
+    if (reasons.length) {
+      helpers.list(eligibilityDetails, reasons.map((reason) =>
+        `${reason.code || 'reason'}: ${reason.message || 'No explanation supplied.'}`));
+    }
+    if (state.checkpoint) {
+      const checkpoint = document.createElement('p');
+      checkpoint.className = 'df-workbench-note';
+      checkpoint.textContent = `Checkpoint: route ${state.checkpoint.route || 'missing'} · window ${state.checkpoint.window || 'missing'} · build ${state.checkpoint.appBuildFingerprint || 'missing'}.`;
+      eligibilityDetails.append(checkpoint);
+    }
+    root.append(eligibilityDetails);
+  }
+
+  const policy = document.createElement('details');
+  policy.className = 'df-tool-details';
+  const policySummary = document.createElement('summary');
+  policySummary.textContent = 'How this stays safe';
+  policy.append(policySummary);
+  helpers.list(policy, [
+    'Only a current local missing-selector failure can qualify.',
+    'Validation uses a temporary selector and does not commit a flow change.',
+    'Applying changes one selector only; actions, checks, values, order, and source stay unchanged.',
+    'Verification failure requires explicit rollback handling.',
+  ]);
+  helpers.capability(policy, 'openSourceDiff');
+  root.append(policy);
+  return root;
+}

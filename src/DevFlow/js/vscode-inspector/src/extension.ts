@@ -15,7 +15,10 @@ import type { AgentRegistration } from "@maui-devflow/client";
  */
 export function activate(context: vscode.ExtensionContext): void {
   context.subscriptions.push(
-    vscode.commands.registerCommand("mauiDevflow.openInspector", () => openInspector())
+    vscode.commands.registerCommand(
+      "mauiDevflow.openInspector",
+      (startupHints?: InspectorStartupHints) => openInspector(startupHints),
+    )
   );
   registerSelectionTool(context);
   registerDataSnapshotTool(context);
@@ -50,7 +53,36 @@ interface BridgeResult {
   error?: string;
   name?: string;
   markdown?: string;
+  planJson?: string;
   steps?: number;
+  value?: {
+    name?: string;
+    kind?: "flow-run" | "mauitrace";
+    bytesBase64?: string;
+    state?: string;
+    reason?: string;
+    applied?: boolean;
+    reverted?: boolean;
+    preContentDigest?: string;
+    appliedContentDigest?: string;
+    contentDigest?: string;
+    patchDigest?: string;
+    applyRunId?: string;
+    errorCode?: string;
+    error?: string;
+    sourceFile?: string;
+    sourceLine?: number;
+    sourceColumn?: number;
+    sourceHash?: string;
+    sourceConfidence?: string;
+  };
+}
+interface TestBundle {
+  name?: unknown;
+  markdown?: unknown;
+  planJson?: unknown;
+  flowDigest?: unknown;
+  planDigest?: unknown;
 }
 let currentSelection: SelectedElement | null = null;
 let currentDataSnapshot: DataSnapshot | null = null;
@@ -103,7 +135,13 @@ function registerDataSnapshotTool(context: vscode.ExtensionContext): void {
   }
 }
 
-async function openInspector(): Promise<void> {
+interface InspectorStartupHints {
+  test?: unknown;
+  trace?: unknown;
+  agentRequest?: unknown;
+}
+
+async function openInspector(startupHints?: InspectorStartupHints): Promise<void> {
   // The client is ESM; this extension is CommonJS — load it via a dynamic import.
   const { discoverBroker, readBrokerState } = await import("@maui-devflow/client");
 
@@ -119,8 +157,9 @@ async function openInspector(): Promise<void> {
     return;
   }
 
-  const agent = await pickAgent(discovery.agents);
-  if (!agent) return;
+  const selectedAgent = await pickAgent(discovery.agents);
+  if (!selectedAgent) return;
+  let agent: AgentRegistration = selectedAgent;
 
   // The embed token proves this is a trusted local shell so the Inspector relaxes its
   // anti-framing headers; it lives in the local broker.json. Only use it when that state file
@@ -131,8 +170,12 @@ async function openInspector(): Promise<void> {
   // The broker's HttpListener is bound to `localhost`, so the iframe host MUST be localhost
   // (a 127.0.0.1 Host header is rejected as "Invalid Hostname").
   const base = `http://localhost:${discovery.port}/inspector/${encodeURIComponent(agent.id)}/`;
-  const inspectorUrl = embedToken ? `${base}?embed=${encodeURIComponent(embedToken)}` : base;
-  const title = agent.appName ?? agent.id;
+  let inspectorUrl = withInspectorStartupHints(
+    embedToken ? `${base}?embed=${encodeURIComponent(embedToken)}` : base,
+    startupHints,
+  );
+  let title = agent.appName ?? agent.id;
+  let activeBrokerPort = discovery.port;
 
   const panel = vscode.window.createWebviewPanel(
     "mauiDevflowInspector",
@@ -151,11 +194,12 @@ async function openInspector(): Promise<void> {
   // Per-embed secrets: `nonce` gates the one inline relay script (strict CSP, no unsafe-inline);
   // `bridgeId` authenticates every postMessage on the host bridge. The bridgeId travels in the URL
   // *fragment*, so it never reaches the broker over HTTP — only the iframe's own script reads it.
-  const nonce = randomToken();
-  const bridgeId = randomToken();
+  let nonce = randomToken();
+  let bridgeId = randomToken();
 
   // Register the message handler BEFORE the webview HTML loads so no early bridge message is lost.
   panel.webview.onDidReceiveMessage(async (msg: BridgeMessage | undefined) => {
+    const requestBridgeId = bridgeId;
     let result: BridgeResult;
     try {
       result = await handleBridgeMessage(msg);
@@ -165,17 +209,134 @@ async function openInspector(): Promise<void> {
     if (typeof msg?.requestId === "string" &&
         (msg.type === "devflow:attachData" ||
          msg.type === "devflow:attachCopilot" ||
-         msg.type === "devflow:pickWorkflow")) {
+         msg.type === "devflow:pickWorkflow" ||
+         msg.type === "devflow:saveTestBundle" ||
+         msg.type === "devflow:loadTestBundle" ||
+         msg.type === "devflow:pickTrace" ||
+         msg.type === "devflow:openSourceDiff" ||
+         msg.type === "devflow:applySourceProposal" ||
+         msg.type === "devflow:applyCSharpSourceProposal" ||
+         msg.type === "devflow:getCSharpSourceSelection")) {
+      if (requestBridgeId !== bridgeId) return;
       await panel.webview.postMessage({
         type: "devflow:hostResult",
         v: 1,
-        bridgeId,
+        bridgeId: requestBridgeId,
         requestId: msg.requestId,
         ...result,
       });
     }
   });
   panel.webview.html = renderHost(inspectorUrl, title, nonce, bridgeId);
+
+  let disposed = false;
+  let refreshing = false;
+  let runtimeIdentity = agentRuntimeIdentity(agent);
+  let connectionSignature = inspectorConnectionSignature(
+    activeBrokerPort,
+    embedToken,
+    agent,
+  );
+  const restartWatcher = setInterval(async () => {
+    if (disposed || refreshing) return;
+    refreshing = true;
+    try {
+      const refreshed = await discoverBroker({ bootstrap: "never", brokerPort });
+      if (!refreshed || refreshed.agents.length === 0) return;
+      const nextAgent = refreshed.agents.find((candidate) => candidate.id === agent.id) ??
+        refreshed.agents.find((candidate) =>
+          candidate.project === agent.project &&
+          candidate.tfm === agent.tfm &&
+          candidate.platform === agent.platform &&
+          candidate.appName === agent.appName);
+      if (!nextAgent) return;
+
+      const refreshedState = readBrokerState();
+      const refreshedEmbedToken = refreshedState && refreshedState.port === refreshed.port
+        ? refreshedState.embedToken ?? undefined
+        : undefined;
+      const nextSignature = inspectorConnectionSignature(
+        refreshed.port,
+        refreshedEmbedToken,
+        nextAgent,
+      );
+      if (nextSignature === connectionSignature) return;
+
+      const nextRuntimeIdentity = agentRuntimeIdentity(nextAgent);
+      if (nextRuntimeIdentity !== runtimeIdentity) {
+        currentSelection = null;
+        currentDataSnapshot = null;
+      }
+
+      agent = nextAgent;
+      activeBrokerPort = refreshed.port;
+      runtimeIdentity = nextRuntimeIdentity;
+      connectionSignature = nextSignature;
+      title = nextAgent.appName ?? nextAgent.id;
+      const nextBase = `http://localhost:${refreshed.port}/inspector/${encodeURIComponent(nextAgent.id)}/`;
+      inspectorUrl = withInspectorStartupHints(
+        refreshedEmbedToken
+          ? `${nextBase}?embed=${encodeURIComponent(refreshedEmbedToken)}`
+          : nextBase,
+        startupHints,
+      );
+      nonce = randomToken();
+      bridgeId = randomToken();
+      panel.title = `MAUI DevFlow Inspector · ${title}`;
+      panel.webview.options = {
+        enableScripts: true,
+        portMapping: [{ webviewPort: refreshed.port, extensionHostPort: refreshed.port }],
+      };
+      panel.webview.html = renderHost(inspectorUrl, title, nonce, bridgeId);
+    } catch {
+      // Keep the last frame visible while the broker is restarting; the next interval retries discovery.
+    } finally {
+      refreshing = false;
+    }
+  }, 2500);
+  panel.onDidDispose(() => {
+    disposed = true;
+    clearInterval(restartWatcher);
+  });
+}
+
+function agentRuntimeIdentity(agent: AgentRegistration): string {
+  return [
+    agent.id,
+    agent.sessionId ?? "",
+    agent.processId ?? "",
+    agent.connectedAt ?? "",
+  ].join("|");
+}
+
+function withInspectorStartupHints(
+  inspectorUrl: string,
+  hints: InspectorStartupHints | undefined,
+): string {
+  const url = new URL(inspectorUrl);
+  for (const [key, value] of [
+    ["test", hints?.test],
+    ["trace", hints?.trace],
+    ["agentRequest", hints?.agentRequest],
+  ] as const) {
+    if (typeof value !== "string") continue;
+    const bounded = value.trim();
+    if (!bounded || bounded.length > 2048) continue;
+    url.searchParams.set(key, bounded);
+  }
+  return url.toString();
+}
+
+function inspectorConnectionSignature(
+  brokerPort: number,
+  embedToken: string | undefined,
+  agent: AgentRegistration,
+): string {
+  return [
+    brokerPort,
+    embedToken ?? "",
+    agentRuntimeIdentity(agent),
+  ].join("|");
 }
 
 // ── Host bridge handlers (the shared inspector calls these via postMessage → relay → extension) ──
@@ -189,10 +350,26 @@ interface BridgeMessage {
   sourceHash?: string;
   name?: string;
   markdown?: string;
+  bundle?: TestBundle;
   element?: SelectedElement | null;
   snapshot?: DataSnapshot;
   context?: "selection" | "workflow" | "combined";
+  proposalId?: string;
+  fileRelativePath?: string;
+  patchDigest?: string;
+  diff?: string;
+  baseContentDigest?: string;
+  patch?: SourcePatch;
+  rollback?: boolean;
   requestId?: string;
+}
+
+interface SourcePatch {
+  start?: unknown;
+  length?: unknown;
+  replacement?: unknown;
+  beforeDigest?: unknown;
+  afterDigest?: unknown;
 }
 
 interface CopilotPayload {
@@ -219,6 +396,20 @@ async function handleBridgeMessage(msg: BridgeMessage | undefined): Promise<Brid
     case "devflow:recordingComplete":
       await saveRecording(msg.name, msg.markdown);
       return { ok: true };
+    case "devflow:saveTestBundle":
+      return await saveTestBundle(msg.bundle);
+    case "devflow:loadTestBundle":
+      return await loadTestBundle();
+    case "devflow:pickTrace":
+      return await pickTraceArtifact();
+    case "devflow:openSourceDiff":
+      return await openSourceDiff(msg.diff, msg.fileRelativePath);
+    case "devflow:applySourceProposal":
+      return await confirmXamlSourceApply(msg.proposalId, msg.fileRelativePath, msg.patchDigest);
+    case "devflow:applyCSharpSourceProposal":
+      return await applyCSharpSourceProposal(msg);
+    case "devflow:getCSharpSourceSelection":
+      return await getCSharpSourceSelection();
     case "devflow:selectionChanged":
       currentSelection = msg.element ?? null;
       return { ok: true };
@@ -226,6 +417,277 @@ async function handleBridgeMessage(msg: BridgeMessage | undefined): Promise<Brid
       return await attachDataToCopilot(msg.snapshot);
     default:
       return { ok: false, error: "Unsupported DevFlow bridge message." };
+  }
+
+  async function openSourceDiff(diff: string | undefined, fileRelativePath: string | undefined): Promise<BridgeResult> {
+    if (typeof diff !== "string" || !diff || Buffer.byteLength(diff, "utf8") > 1024 * 1024)
+      return { ok: false, error: "The reviewed source diff is missing or exceeds 1 MB." };
+    try {
+      const document = await vscode.workspace.openTextDocument({
+        content: diff,
+        language: "diff",
+      });
+      await vscode.window.showTextDocument(document, { preview: true });
+      return { ok: true, message: `Opened reviewed source diff${fileRelativePath ? ` for ${fileRelativePath}` : ""}.` };
+    } catch {
+      return { ok: false, error: "VS Code could not open the reviewed XAML diff." };
+    }
+  }
+
+  async function confirmXamlSourceApply(
+    proposalId: string | undefined,
+    fileRelativePath: string | undefined,
+    patchDigest: string | undefined,
+  ): Promise<BridgeResult> {
+    if (typeof proposalId !== "string" || proposalId.length > 128 ||
+        typeof fileRelativePath !== "string" || fileRelativePath.length > 512 ||
+        typeof patchDigest !== "string" || !/^sha256:[0-9a-f]{64}$/i.test(patchDigest)) {
+      return { ok: false, error: "The reviewed XAML source proposal binding is invalid." };
+    }
+    const choice = await vscode.window.showWarningMessage(
+      `Apply the reviewed AutomationId-only XAML proposal to ${fileRelativePath}? VS Code will ask the local DevFlow host to perform its compare-and-swap write. Flow selectors are not changed.`,
+      { modal: true },
+      "Apply reviewed XAML change",
+    );
+    return choice === "Apply reviewed XAML change"
+      ? { ok: true, message: "VS Code confirmed the bounded local XAML apply." }
+      : { ok: false, error: "The local VS Code user did not confirm the XAML source apply." };
+  }
+
+  async function applyCSharpSourceProposal(message: BridgeMessage): Promise<BridgeResult> {
+    const proposalId = typeof message.proposalId === "string" ? message.proposalId : "";
+    const relativePath = typeof message.fileRelativePath === "string" ? message.fileRelativePath : "";
+    const patchDigest = typeof message.patchDigest === "string" ? message.patchDigest : "";
+    const baseContentDigest = typeof message.baseContentDigest === "string" ? message.baseContentDigest : "";
+    const patch = message.patch;
+    const rollback = message.rollback === true;
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(proposalId) ||
+        !isSafeCSharpRelativePath(relativePath) ||
+        !isSha256Digest(patchDigest) ||
+        !isSha256Digest(baseContentDigest) ||
+        !isValidSourcePatch(patch)) {
+      return { ok: false, error: "The reviewed C# source proposal binding is invalid." };
+    }
+
+    const target = resolveWorkspaceCSharpSource(relativePath);
+    if (!target) {
+      return {
+        ok: false,
+        error: "VS Code can apply reviewed C# source only to one project file inside the open workspace.",
+      };
+    }
+
+    try {
+      const document = await vscode.workspace.openTextDocument(target);
+      if (document.isDirty) {
+        return { ok: false, error: "Save or discard local C# edits before applying the reviewed proposal." };
+      }
+      const beforeBytes = await vscode.workspace.fs.readFile(target);
+      const preContentDigest = sha256Digest(beforeBytes);
+      if (preContentDigest !== baseContentDigest.toLowerCase()) {
+        return {
+          ok: false,
+          error: "The C# file changed after proposal preview. The IDE did not apply the stale patch.",
+          value: { applied: false, reverted: false, preContentDigest, patchDigest },
+        };
+      }
+
+      const start = patch!.start as number;
+      const length = patch!.length as number;
+      const replacement = patch!.replacement as string;
+      const content = document.getText();
+      if (start > content.length || length > content.length - start) {
+        return { ok: false, error: "The reviewed C# patch span is outside the current document." };
+      }
+      const updated = content.slice(0, start) + replacement + content.slice(start + length);
+      await openCSharpProposalDiff(document, updated, rollback);
+      const action = rollback ? "Apply reviewed C# rollback" : "Apply reviewed C# change";
+      const choice = await vscode.window.showWarningMessage(
+        rollback
+          ? `Apply the exact reviewed C# rollback to ${relativePath}?`
+          : `Apply the exact reviewed C# AutomationId patch to ${relativePath}?`,
+        { modal: true },
+        action,
+      );
+      if (choice !== action) {
+        return { ok: false, error: "The local VS Code user did not apply the reviewed C# patch." };
+      }
+
+      const range = new vscode.Range(document.positionAt(start), document.positionAt(start + length));
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(target, range, replacement);
+      if (!await vscode.workspace.applyEdit(edit) || !await document.save()) {
+        return { ok: false, error: "VS Code could not apply and save the exact reviewed C# patch." };
+      }
+
+      const afterBytes = await vscode.workspace.fs.readFile(target);
+      const afterContentDigest = sha256Digest(afterBytes);
+      const expectedAfterDigest = String(patch!.afterDigest).toLowerCase();
+      if (afterContentDigest !== expectedAfterDigest) {
+        return {
+          ok: false,
+          error: "The saved C# file bytes do not match the reviewed patch result; broker acknowledgment was withheld.",
+          value: {
+            applied: false,
+            reverted: false,
+            preContentDigest,
+            appliedContentDigest: afterContentDigest,
+            contentDigest: afterContentDigest,
+            patchDigest,
+            errorCode: "post-apply-hash-mismatch",
+          },
+        };
+      }
+
+      return {
+        ok: true,
+        message: rollback ? "VS Code applied the reviewed C# rollback." : "VS Code applied the reviewed C# patch.",
+        value: rollback
+          ? {
+            reverted: true,
+            preContentDigest,
+            contentDigest: afterContentDigest,
+            patchDigest,
+          }
+          : {
+            applied: true,
+            preContentDigest,
+            appliedContentDigest: afterContentDigest,
+            patchDigest,
+            applyRunId: `vscode-${Date.now().toString(36)}`,
+          },
+      };
+    } catch {
+      return { ok: false, error: "VS Code could not open or apply the reviewed C# source patch." };
+    }
+  }
+
+  async function getCSharpSourceSelection(): Promise<BridgeResult> {
+    const editor = vscode.window.activeTextEditor;
+    const document = editor?.document;
+    if (!editor || !document || document.languageId !== "csharp" ||
+        document.uri.scheme !== "file" || document.isUntitled) {
+      return {
+        ok: false,
+        error: "Open and save the exact C# declaration in VS Code before creating a source proposal.",
+      };
+    }
+    if (document.isDirty) {
+      return { ok: false, error: "Save the active C# document before creating a source proposal." };
+    }
+    const folders = vscode.workspace.workspaceFolders ?? [];
+    if (!folders.some((folder) => isInside(folder.uri.fsPath, document.uri.fsPath))) {
+      return { ok: false, error: "The active C# document is outside the open VS Code workspace." };
+    }
+    const selection = editor.selection.active;
+    return {
+      ok: true,
+      message: "Using the active VS Code C# declaration for Roslyn proposal analysis.",
+      value: {
+        sourceFile: document.uri.fsPath,
+        sourceLine: selection.line + 1,
+        sourceColumn: selection.character + 1,
+        sourceHash: createHash("sha256").update(document.getText(), "utf8").digest("hex").slice(0, 16),
+        sourceConfidence: "roslyn-proven",
+      },
+    };
+  }
+}
+
+function isSha256Digest(value: string): boolean {
+  return /^sha256:[0-9a-f]{64}$/i.test(value);
+}
+
+function sha256Digest(value: Uint8Array): string {
+  return "sha256:" + createHash("sha256").update(value).digest("hex");
+}
+
+function isValidSourcePatch(patch: SourcePatch | undefined): patch is Required<SourcePatch> {
+  return !!patch &&
+    Number.isInteger(patch.start) && (patch.start as number) >= 0 &&
+    Number.isInteger(patch.length) && (patch.length as number) >= 0 &&
+    typeof patch.replacement === "string" && Buffer.byteLength(patch.replacement, "utf8") <= 1024 &&
+    isSha256Digest(String(patch.beforeDigest)) &&
+    isSha256Digest(String(patch.afterDigest));
+}
+
+function isSafeCSharpRelativePath(value: string): boolean {
+  if (!value || value.length > 512 || !/\.cs$/i.test(value) || path.isAbsolute(value))
+    return false;
+  const normalized = value.replace(/\\/g, "/");
+  return !normalized.split("/").some((segment) => !segment || segment === "." || segment === "..") &&
+    !normalized.includes("\0");
+}
+
+function resolveWorkspaceCSharpSource(relativePath: string): vscode.Uri | null {
+  const normalized = relativePath.replace(/\\/g, "/");
+  const matches = (vscode.workspace.workspaceFolders ?? [])
+    .map((folder) => ({ folder, uri: vscode.Uri.joinPath(folder.uri, ...normalized.split("/")) }))
+    .filter(({ folder, uri }) => isInside(folder.uri.fsPath, uri.fsPath));
+  return matches.length === 1 ? matches[0].uri : null;
+}
+
+async function openCSharpProposalDiff(
+  document: vscode.TextDocument,
+  updated: string,
+  rollback: boolean,
+): Promise<void> {
+  const preview = await vscode.workspace.openTextDocument({ content: updated, language: "csharp" });
+  await vscode.commands.executeCommand(
+    "vscode.diff",
+    document.uri,
+    preview.uri,
+    rollback ? "Reviewed C# rollback" : "Reviewed C# AutomationId proposal",
+    { preview: true },
+  );
+}
+
+const FLOW_RUN_MAX_BYTES = 1024 * 1024;
+const EVIDENCE_MAX_BYTES = 64 * 1024 * 1024;
+
+async function pickTraceArtifact(): Promise<BridgeResult> {
+  const picked = await vscode.window.showOpenDialog({
+    canSelectMany: false,
+    canSelectFiles: true,
+    canSelectFolders: false,
+    filters: { "DevFlow trace": ["json", "mauitrace"] },
+    title: "Choose a bounded DevFlow flow-run report or evidence bundle",
+  });
+  const file = picked?.[0];
+  if (!file) return { ok: false, error: "Trace selection was cancelled." };
+
+  const name = path.basename(file.fsPath);
+  const lower = name.toLowerCase();
+  const kind = lower.endsWith(".mauitrace")
+    ? "mauitrace"
+    : lower.endsWith(".json")
+      ? "flow-run"
+      : null;
+  if (!kind) return { ok: false, error: "Choose a .json flow-run report or .mauitrace v1 bundle." };
+
+  try {
+    const stat = await vscode.workspace.fs.stat(file);
+    const maximum = kind === "flow-run" ? FLOW_RUN_MAX_BYTES : EVIDENCE_MAX_BYTES;
+    if (stat.size <= 0 || stat.size > maximum) {
+      return {
+        ok: false,
+        error: `${kind === "flow-run" ? "flow-run.json" : ".mauitrace"} must be 1 byte to ${Math.floor(maximum / (1024 * 1024))} MB.`,
+      };
+    }
+    const bytes = await vscode.workspace.fs.readFile(file);
+    if (bytes.byteLength !== stat.size || bytes.byteLength > maximum) {
+      return { ok: false, error: "The selected trace changed or exceeded its bounded import size." };
+    }
+    return {
+      ok: true,
+      value: {
+        name,
+        kind,
+        bytesBase64: Buffer.from(bytes).toString("base64"),
+      },
+    };
+  } catch {
+    return { ok: false, error: "Could not read the selected trace artifact." };
   }
 }
 
@@ -478,6 +940,198 @@ async function saveRecording(name: string | undefined, markdown: string | undefi
   }
 }
 
+const TEST_BUNDLE_MAX_BYTES = 1024 * 1024;
+
+function safeTestBundleName(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const name = value.trim();
+  if (!name || name.length > 255 || !/\.md$/i.test(name) ||
+      name.includes("/") || name.includes("\\") || path.basename(name) !== name)
+    return null;
+  return name;
+}
+
+function safeDigest(value: unknown): string | null {
+  return typeof value === "string" && /^[a-f0-9]{64}$/i.test(value) ? value.toLowerCase() : null;
+}
+
+function bundlePlanName(flowName: string): string {
+  return flowName.replace(/\.md$/i, "") + ".maui-plan.json";
+}
+
+function canonicalBundleJson(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(canonicalBundleJson);
+  if (value && typeof value === "object") {
+    return Object.fromEntries(Object.keys(value as Record<string, unknown>)
+      .sort()
+      .map((key) => [key, canonicalBundleJson((value as Record<string, unknown>)[key])]));
+  }
+  return value;
+}
+
+function canonicalBundleDigest(value: unknown): string {
+  return createHash("sha256").update(JSON.stringify(canonicalBundleJson(value)), "utf8").digest("hex");
+}
+
+function flowPayload(markdown: string): unknown | null {
+  const match = /```json maui-test\s*\r?\n([\s\S]*?)\r?\n```/.exec(markdown);
+  if (!match) return null;
+  try { return JSON.parse(match[1]); } catch { return null; }
+}
+
+async function testRoot(): Promise<vscode.Uri | null> {
+  const folder = vscode.workspace.workspaceFolders?.[0];
+  if (!folder) return null;
+  const root = vscode.Uri.joinPath(folder.uri, "maui-tests");
+  try {
+    await vscode.workspace.fs.createDirectory(root);
+    const stat = await vscode.workspace.fs.stat(root);
+    if ((stat.type & vscode.FileType.SymbolicLink) !== 0) return null;
+    return root;
+  } catch {
+    return null;
+  }
+}
+
+async function isSafeRegularFile(uri: vscode.Uri): Promise<boolean> {
+  try {
+    const stat = await vscode.workspace.fs.stat(uri);
+    return (stat.type & vscode.FileType.SymbolicLink) === 0;
+  } catch {
+    return true; // a non-existing destination is safe to create beneath the checked root
+  }
+}
+
+async function saveTestBundle(bundle: TestBundle | undefined): Promise<BridgeResult> {
+  const name = safeTestBundleName(bundle?.name);
+  const markdown = typeof bundle?.markdown === "string" ? bundle.markdown : null;
+  const planJson = typeof bundle?.planJson === "string" ? bundle.planJson : null;
+  const flowDigest = safeDigest(bundle?.flowDigest);
+  const planDigest = bundle?.planDigest == null ? null : safeDigest(bundle.planDigest);
+  if (!name || !markdown || !planJson || !flowDigest || (bundle?.planDigest != null && !planDigest))
+    return { ok: false, error: "The test bundle must contain a bounded flow, plan, and SHA-256 digests." };
+  if (Buffer.byteLength(markdown, "utf8") > TEST_BUNDLE_MAX_BYTES ||
+      Buffer.byteLength(planJson, "utf8") > TEST_BUNDLE_MAX_BYTES)
+    return { ok: false, error: "Flow and plan files must each be 1 MB or smaller." };
+
+  let plan: any;
+  try { plan = JSON.parse(planJson); } catch { return { ok: false, error: "The plan sidecar is not valid JSON." }; }
+  if (!plan || typeof plan !== "object" || plan.schema !== 1 ||
+      plan.flow?.path !== name || plan.flow?.digest !== flowDigest)
+    return { ok: false, error: "The plan sidecar is not bound to the requested flow filename and digest." };
+  const payload = flowPayload(markdown);
+  if (!payload || canonicalBundleDigest(payload) !== flowDigest)
+    return { ok: false, error: "The flow digest does not match the authoritative maui-test payload." };
+  if (planDigest && canonicalBundleDigest(plan) !== planDigest)
+    return { ok: false, error: "The plan digest does not match the submitted plan sidecar." };
+
+  const root = await testRoot();
+  if (!root) return { ok: false, error: "No safe workspace maui-tests directory is available." };
+  const flow = vscode.Uri.joinPath(root, name);
+  const sidecar = vscode.Uri.joinPath(root, bundlePlanName(name));
+  if (!await isSafeRegularFile(flow) || !await isSafeRegularFile(sidecar))
+    return { ok: false, error: "Refusing to overwrite a symbolic-link test artifact." };
+
+  const nonce = randomBytes(12).toString("hex");
+  const staged = [
+    {
+      target: flow,
+      temporary: flow.with({ path: flow.path + `.${nonce}.tmp` }),
+      backup: flow.with({ path: flow.path + `.${nonce}.bak` }),
+      content: Buffer.from(markdown, "utf8"),
+    },
+    {
+      target: sidecar,
+      temporary: sidecar.with({ path: sidecar.path + `.${nonce}.tmp` }),
+      backup: sidecar.with({ path: sidecar.path + `.${nonce}.bak` }),
+      content: Buffer.from(planJson, "utf8"),
+    },
+  ];
+  const previous = new Map<string, Uint8Array | null>();
+  let preserveBackups = false;
+  try {
+    for (const item of staged) {
+      let bytes: Uint8Array | null = null;
+      try { bytes = await vscode.workspace.fs.readFile(item.target); } catch {}
+      previous.set(item.target.fsPath, bytes);
+      if (bytes) await vscode.workspace.fs.writeFile(item.backup, bytes);
+      await vscode.workspace.fs.writeFile(item.temporary, item.content);
+    }
+    for (const item of staged)
+      await vscode.workspace.fs.rename(item.temporary, item.target, { overwrite: true });
+    const document = await vscode.workspace.openTextDocument(flow);
+    await vscode.window.showTextDocument(document, { preview: false });
+    return { ok: true, message: `Saved ${name} and ${bundlePlanName(name)} in maui-tests.` };
+  } catch {
+    let restored = true;
+    for (const item of [...staged].reverse()) {
+      try {
+        const prior = previous.get(item.target.fsPath);
+        if (prior) {
+          try { await vscode.workspace.fs.rename(item.backup, item.target, { overwrite: true }); }
+          catch { await vscode.workspace.fs.writeFile(item.target, prior); }
+        }
+        else {
+          try { await vscode.workspace.fs.delete(item.target, { recursive: false, useTrash: false }); } catch {}
+        }
+      } catch { restored = false; }
+    }
+    preserveBackups = !restored;
+    return {
+      ok: false,
+      error: restored
+        ? "The bundle was not saved; the previous flow and plan were restored."
+        : "The bundle write failed and the prior files could not be fully restored.",
+    };
+  } finally {
+    for (const item of staged) {
+      try { await vscode.workspace.fs.delete(item.temporary, { recursive: false, useTrash: false }); } catch {}
+      try {
+        if (!preserveBackups)
+          await vscode.workspace.fs.delete(item.backup, { recursive: false, useTrash: false });
+      } catch {}
+    }
+  }
+}
+
+async function loadTestBundle(): Promise<BridgeResult> {
+  const root = await testRoot();
+  if (!root) return { ok: false, error: "No safe workspace maui-tests directory is available." };
+  const picked = await vscode.window.showOpenDialog({
+    canSelectMany: false,
+    canSelectFiles: true,
+    canSelectFolders: false,
+    defaultUri: root,
+    filters: { "DevFlow workflow": ["md"] },
+    title: "Load a DevFlow test bundle",
+  });
+  const flow = picked?.[0];
+  if (!flow) return { ok: false, error: "Test bundle selection was cancelled." };
+  const name = safeTestBundleName(path.basename(flow.fsPath));
+  if (!name || path.dirname(flow.fsPath) !== root.fsPath || !isInside(root.fsPath, flow.fsPath))
+    return { ok: false, error: "Only top-level maui-tests Markdown files can be loaded." };
+  const sidecar = vscode.Uri.joinPath(root, bundlePlanName(name));
+  try {
+    if (!await isSafeRegularFile(flow) || !await isSafeRegularFile(sidecar))
+      return { ok: false, error: "Refusing to load a symbolic-link test artifact." };
+    const flowBytes = await vscode.workspace.fs.readFile(flow);
+    if (flowBytes.byteLength > TEST_BUNDLE_MAX_BYTES)
+      return { ok: false, error: "Workflow files larger than 1 MB cannot be loaded." };
+    let planJson: string | undefined;
+    try {
+      const planBytes = await vscode.workspace.fs.readFile(sidecar);
+      if (planBytes.byteLength > TEST_BUNDLE_MAX_BYTES)
+        return { ok: false, error: "Plan sidecars larger than 1 MB cannot be loaded." };
+      planJson = Buffer.from(planBytes).toString("utf8");
+    } catch {
+      // A Markdown flow remains useful without a plan; the shared UI makes that state explicit.
+    }
+    return { ok: true, name, markdown: Buffer.from(flowBytes).toString("utf8"), planJson };
+  } catch {
+    return { ok: false, error: "Could not load the selected test bundle." };
+  }
+}
+
 function isInside(root: string, target: string): boolean {
   const rel = path.relative(root, target);
   return rel.length > 0 && !rel.startsWith("..") && !path.isAbsolute(rel);
@@ -535,7 +1189,7 @@ function renderHost(inspectorUrl: string, title: string, nonce: string, bridgeId
       const frame = document.getElementById('frame');
       const bridgeId = ${bridgeLiteral};
       // Capabilities this host contributes to the shared inspector.
-      const capabilities = ['copilot', 'copilotContext', 'workflowFilePicker', 'attachData', 'openSource', 'saveRecording', 'selection'];
+      const capabilities = ['copilot', 'copilotContext', 'workflowFilePicker', 'attachData', 'openSource', 'saveRecording', 'selection', 'saveTestBundle', 'loadTestBundle', 'pickTrace', 'openSourceDiff', 'applySourceProposal', 'applyCSharpSourceProposal', 'getCSharpSourceSelection'];
       // Map the shared inspector's semantic theme tokens onto VS Code's theme colors so the panel
       // adopts the user's active color theme (light / dark / high-contrast). getComputedStyle resolves
       // each --vscode-* var to a concrete color; the inspector re-validates every value before use.
@@ -660,7 +1314,7 @@ function renderHost(inspectorUrl: string, title: string, nonce: string, bridgeId
         }
         if (!d || d.bridgeId !== bridgeId) return;                // nonce-authenticated
         if (d.type === 'devflow:ready') { announce(); return; }
-        if (d.type === 'devflow:sendToCopilot' || d.type === 'devflow:attachCopilot' || d.type === 'devflow:pickWorkflow' || d.type === 'devflow:attachData' || d.type === 'devflow:openSource' || d.type === 'devflow:recordingComplete' || d.type === 'devflow:selectionChanged') {
+        if (d.type === 'devflow:sendToCopilot' || d.type === 'devflow:attachCopilot' || d.type === 'devflow:pickWorkflow' || d.type === 'devflow:attachData' || d.type === 'devflow:openSource' || d.type === 'devflow:recordingComplete' || d.type === 'devflow:selectionChanged' || d.type === 'devflow:saveTestBundle' || d.type === 'devflow:loadTestBundle' || d.type === 'devflow:pickTrace' || d.type === 'devflow:openSourceDiff' || d.type === 'devflow:applySourceProposal' || d.type === 'devflow:applyCSharpSourceProposal' || d.type === 'devflow:getCSharpSourceSelection') {
           vscode.postMessage(d);                                  // relay to the extension host
         }
       });

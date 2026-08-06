@@ -5,8 +5,12 @@ import { confirmModal } from './inspector-dialog.js';
 import { createDataSnapshot, isSecretContextKey, supportsDataContextScope } from './inspector-data-context.js';
 import { formatLayoutReport, formatPerformanceSummary } from './inspector-diagnostics.js';
 import { createEvidenceController } from './inspector-evidence.js';
+import { createAgentRequestController } from './inspector-agent-requests.js';
+import { createInspectorHostBridge } from './inspector-host-bridge.js';
 import { createPropertyGridController } from './inspector-properties.js';
 import { createElementTreeController } from './inspector-tree.js';
+import { createInspectorWorkbench } from './inspector-workbench.js';
+import { createPrototypeStudyJournal } from './inspector-study.js';
 
 (function () {
   'use strict';
@@ -26,17 +30,22 @@ import { createElementTreeController } from './inspector-tree.js';
 
   // Determine base path for API calls (handles being served under /inspector/{id}/)
   const basePath = location.pathname.replace(/\/$/, '');
+  const prototypeStudyJournal = createPrototypeStudyJournal();
   // Per-inspector read token for data tabs, injected into the page by InspectorServer. Same-origin
   // only — a cross-origin page can't set this custom header without a preflight the broker refuses.
   const inspectorToken = (document.querySelector('meta[name="devflow-inspector-token"]') || {}).content || '';
   const inspectorApi = createInspectorApi(basePath, inspectorToken);
   const apiPost = inspectorApi.post;
+  const testWorkbenchHostBridge = createInspectorHostBridge(window);
+  let testWorkbench = null;
+  let agentRequestController = null;
   function metaContent(name) {
     const meta = document.querySelector(`meta[name="${name}"]`);
     return meta && typeof meta.content === 'string' && meta.content ? meta.content : null;
   }
   const inspectorAgent = Object.freeze({
     id: metaContent('devflow-agent-id'),
+    instanceId: metaContent('devflow-agent-instance-id'),
     appName: metaContent('devflow-app-name'),
     platform: metaContent('devflow-platform'),
     port: Number(metaContent('devflow-agent-port')) || null,
@@ -103,14 +112,49 @@ import { createElementTreeController } from './inspector-tree.js';
   let recStepCount = 0;
   let recName = null;
   let recordingStopping = false;
+  let appendRecordingBase = null;
   // Replay + checkpoint (return-to-start-route) state.
   let lastMarkdown = null;
   let lastMarkdownName = null;
   let lastMarkdownSource = null;
-  let checkpointRoute = null;
-  let checkpointLabel = null;
   let replaying = false;
-  let resumeCheckpoint = null;
+  let authoringLoadGeneration = 0;
+  const pendingRecordingWork = new Set();
+  // An imported trace is a captured diagnostic artifact, not an execution authority. This guard
+  // sits below the UI so pointer, keyboard, property, and data mutations fail closed too.
+  let capturedTraceMode = false;
+  // Human-authoring drafts stay in the shared Inspector composition root. The Plan and Steps
+  // modules only render/edit this state; canonical validation and persistence remain in C#.
+  const authoringDraft = {
+    flowName: null,
+    markdown: null,
+    flow: null,
+    flowDigest: null,
+    plan: null,
+    planJson: null,
+    planDigest: null,
+    planRevision: null,
+    committedFlowDigest: null,
+    committedPlanDigest: null,
+    committedPlan: null,
+    flowDirty: false,
+    planDirty: false,
+    saving: false,
+    stale: false,
+    bindingStale: false,
+    errors: [],
+    warnings: [],
+    diff: null,
+    workspaceAvailable: null,
+    rawDraft: false,
+    recordingDraft: false,
+    recordingDraftStepCount: 0,
+    guidanceMessage: null,
+    savedTestPickerOpen: false,
+    savedTestsLoading: false,
+    savedTests: [],
+    savedTestsError: null,
+  };
 
   // Convert browser (client) coordinates to app logical coordinates. The viewport may be fit-scaled
   // by a CSS transform (see applyScale), so getBoundingClientRect() returns the on-screen (scaled)
@@ -136,10 +180,7 @@ import { createElementTreeController } from './inspector-tree.js';
       const resp = await fetch(`${basePath}/api/state`);
       if (!resp.ok) { markConnected(false); return; }
       const state = await resp.json();
-      const reconnecting = !connected;
       markConnected(true);
-      if (reconnecting) refreshResumeCheckpoint();
-
       // Update screenshot without flash
       if (screenshot && state.screenshotUrl) {
         screenshot.src = state.screenshotUrl;
@@ -350,6 +391,14 @@ import { createElementTreeController } from './inspector-tree.js';
   }
 
   function ensureCanDrive() {
+    if (recordingStopping) {
+      setStatus('Recording is stopping. Wait for the captured actions to finish.');
+      return false;
+    }
+    if (capturedTraceMode) {
+      setStatus('Captured result mode is read-only. Open a separate local run check to drive a live app.');
+      return false;
+    }
     if (!connected) {
       setStatus(disconnectedStatus);
       return false;
@@ -435,14 +484,15 @@ import { createElementTreeController } from './inspector-tree.js';
     if (commit && ensureCanDrive()) {
       const elementId = editor.dataset.elementId;
       const text = editor.value;
-      fetch(`${basePath}/api/fill`, {
+      const fillWork = fetch(`${basePath}/api/fill`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ elementId, text }),
-      }).then((resp) => {
-        if (recordingId && resp && resp.ok) recordStepById('fill', elementId, { value: text });
+      }).then(async (resp) => {
+        if (recordingId && resp && resp.ok) await recordStepById('fill', elementId, { value: text });
         scheduleRefresh(300);
       }).catch(err => console.error('Fill failed:', err));
+      if (recordingId) trackRecordingWork(fillWork);
     }
     editor.remove();
   }
@@ -563,6 +613,27 @@ import { createElementTreeController } from './inspector-tree.js';
   let scrollFlushTimer = null;
   let lastScrollX = 0, lastScrollY = 0;
 
+  async function flushPendingScroll() {
+    if (!scrollAccumX && !scrollAccumY) return;
+    const { x, y } = toAppCoords(lastScrollX, lastScrollY);
+    const dx = scrollAccumX, dy = scrollAccumY;
+    scrollAccumX = 0;
+    scrollAccumY = 0;
+    scrollFlushTimer = null;
+
+    try {
+      const resp = await fetch(`${basePath}/api/scroll`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ x, y, deltaX: dx, deltaY: dy })
+      });
+      if (recordingId && resp.ok) await recordStep('scroll', null, { dx, dy });
+      scheduleRefresh(300);
+    } catch (err) {
+      console.error('Scroll failed:', err);
+    }
+  }
+
   viewport.addEventListener('wheel', (e) => {
     e.preventDefault();
     if (!ensureCanDrive()) return;
@@ -572,25 +643,7 @@ import { createElementTreeController } from './inspector-tree.js';
     lastScrollY = e.clientY;
 
     if (scrollFlushTimer) clearTimeout(scrollFlushTimer);
-    scrollFlushTimer = setTimeout(async () => {
-      const { x, y } = toAppCoords(lastScrollX, lastScrollY);
-      const dx = scrollAccumX, dy = scrollAccumY;
-      scrollAccumX = 0;
-      scrollAccumY = 0;
-      scrollFlushTimer = null;
-
-      try {
-        const resp = await fetch(`${basePath}/api/scroll`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ x, y, deltaX: dx, deltaY: dy })
-        });
-        if (recordingId && resp.ok) recordStep('scroll', null, { dx, dy });
-        scheduleRefresh(300);
-      } catch (err) {
-        console.error('Scroll failed:', err);
-      }
-    }, 100);
+    scrollFlushTimer = setTimeout(() => void flushPendingScroll(), 100);
   }, { passive: false });
 
   // ── Pointer Drag → Gesture ──
@@ -776,7 +829,7 @@ import { createElementTreeController } from './inspector-tree.js';
     labelElement: propsElLabel,
     closeButton: propsCloseBtn,
     api: inspectorApi,
-    getIsWriter: () => isWriter && connected,
+    getIsWriter: () => isWriter && connected && !capturedTraceMode,
     prepareOpen: () => {
       const active = document.activeElement;
       if (active instanceof HTMLElement && active !== document.body && !propsPaneEl.contains(active))
@@ -784,6 +837,7 @@ import { createElementTreeController } from './inspector-tree.js';
       if (!isTransientPaneLayout()) return;
       if (isTreeDrawerLayout()) setTreeVisible(false);
       closeDock();
+      testWorkbench?.close();
     },
     syncPaneChrome,
     setStatus,
@@ -821,12 +875,8 @@ import { createElementTreeController } from './inspector-tree.js';
   };
   const toolbarActions = tb.secondary ? [...tb.secondary.querySelectorAll(':scope > button')] : [];
   const toolbarPriorities = new Map([
-    ['df-goto-checkpoint', 10],
-    ['df-assert', 20],
     ['df-toggle-bounds', 30],
     ['df-open-source', 50],
-    ['df-toggle-replay', 60],
-    ['df-load-flow', 70],
     ['df-send-copilot', 80],
     ['df-evidence', 85],
     ['df-toggle-dock', 90],
@@ -834,6 +884,7 @@ import { createElementTreeController } from './inspector-tree.js';
   toolbarActions.forEach((button, index) => {
     button.dataset.toolbarOrder = String(index);
     button.dataset.toolbarPriority = String(toolbarPriorities.get(button.id) || 40);
+    if (button.hasAttribute('aria-pressed')) button.dataset.toolbarToggle = 'true';
   });
   let toolbarLayoutFrame = 0;
   const treePanel = document.getElementById('df-tree');
@@ -869,10 +920,11 @@ import { createElementTreeController } from './inspector-tree.js';
     return hostLayout === 'narrow' || hostLayout === 'short';
   }
 
-  function setTreeVisible(visible, restore = false) {
+  function setTreeVisible(visible, restore = false, preserveWorkbench = false) {
     if (visible && isTransientPaneLayout()) {
       setMoreOpen(false);
       if (document.body.classList.contains('df-dock-open')) closeDock();
+      if (!preserveWorkbench) testWorkbench?.close();
     }
     document.body.classList.toggle('df-tree-hidden', !visible);
     if (tb.tree) {
@@ -896,8 +948,28 @@ import { createElementTreeController } from './inspector-tree.js';
     const before = [...container.children].find(child =>
       Number(child.dataset.toolbarOrder) > order);
     container.insertBefore(button, before || null);
-    if (container === tb.overflow) button.setAttribute('role', 'menuitem');
-    else button.removeAttribute('role');
+    const isToggle = button.dataset.toolbarToggle === 'true';
+    const state = button.getAttribute('aria-pressed') ?? button.getAttribute('aria-checked') ?? 'false';
+    if (container === tb.overflow) {
+      button.setAttribute('role', isToggle ? 'menuitemcheckbox' : 'menuitem');
+      if (isToggle) {
+        button.setAttribute('aria-checked', state);
+        button.removeAttribute('aria-pressed');
+      }
+    } else {
+      button.removeAttribute('role');
+      if (isToggle) {
+        button.setAttribute('aria-pressed', state);
+        button.removeAttribute('aria-checked');
+      }
+    }
+  }
+
+  function setToolbarToggleState(button, on) {
+    if (!button) return;
+    const state = String(!!on);
+    if (tb.overflow?.contains(button)) button.setAttribute('aria-checked', state);
+    else button.setAttribute('aria-pressed', state);
   }
 
   function toolbarFits() {
@@ -987,7 +1059,7 @@ import { createElementTreeController } from './inspector-tree.js';
       document.body.dataset.hostLayout = next;
       document.documentElement.dataset.hostLayout = next;
       setMoreOpen(false);
-      setTreeVisible(next === 'wide' || next === 'compact');
+      setTreeVisible(next === 'wide' || next === 'compact', false, true);
       scheduleToolbarLayout();
     }
     syncPaneChrome();
@@ -1123,6 +1195,10 @@ import { createElementTreeController } from './inspector-tree.js';
   });
 
   function setMode(next) {
+    if (capturedTraceMode && next === 'interact') {
+      next = 'inspect';
+      setStatus('Captured trace mode is read-only. Inspect remains available.');
+    }
     setHover(null);
     mode = next;
     tb.interact.classList.toggle('df-active', next === 'interact');
@@ -1196,7 +1272,16 @@ import { createElementTreeController } from './inspector-tree.js';
   function selectElement(id) {
     viewport.querySelectorAll('.devflow-element.df-selected').forEach((el) => el.classList.remove('df-selected'));
     selectedId = id || null;
-    if (!id) { propertyGrid.close(); elementTree.updateSelection(); setStatus(''); updateHostButtons(); updateFlowButtons(); postSelectionToHost(null); return; }
+    if (!id) {
+      propertyGrid.close();
+      elementTree.updateSelection();
+      setStatus('');
+      updateHostButtons();
+      updateFlowButtons();
+      if (testWorkbench?.isOpen?.()) testWorkbench.updateState({});
+      postSelectionToHost(null);
+      return;
+    }
     const el = elById(id);
     if (el) el.classList.add('df-selected');
     elementTree.updateSelection();
@@ -1204,6 +1289,8 @@ import { createElementTreeController } from './inspector-tree.js';
     if (el) { propertyGrid.open(el); setStatus(elementLabel(el)); }
     updateHostButtons();
     updateFlowButtons();
+    if (testWorkbench?.isOpen?.())
+      testWorkbench.updateState({});
     postSelectionToHost(el);
   }
 
@@ -1221,9 +1308,6 @@ import { createElementTreeController } from './inspector-tree.js';
   // ── Workflow recording: capture interactions into the shared Flow format, then
   // download a replayable Markdown test. Reuses the broker's /api/flows/record/* endpoints, which
   // feed the same FlowRecorder/FlowMarkdown engine as the MCP maui_flow_record_* tools. ──
-  const recordBtn = document.getElementById('df-toggle-record');
-  const assertBtn = document.getElementById('df-assert');
-
   // ── Timeline: a live strip of recorded step chips (shown while recording; each chip reselects its element) ──
   const timelineEl = document.getElementById('df-timeline');
   const timelineStepsEl = document.getElementById('df-timeline-steps');
@@ -1231,11 +1315,7 @@ import { createElementTreeController } from './inspector-tree.js';
   const timelineTitleText = document.getElementById('df-timeline-title-text');
   const cancelRecordingBtn = document.getElementById('df-record-cancel');
   const timelineCloseBtn = document.getElementById('df-timeline-close');
-  const loadFlowBtn = document.getElementById('df-load-flow');
-  const workflowSelect = document.getElementById('df-workflow-select');
-  const workflowFileBtn = document.getElementById('df-workflow-file');
   const workflowFileInput = document.getElementById('df-workflow-file-input');
-  const workflowReplayBtn = document.getElementById('df-workflow-replay');
   const workflowPanelClasses = ['df-tl-recording', 'df-tl-done', 'df-tl-replay-ok', 'df-tl-replay-failed'];
   function showWorkflowPanel() {
     if (!timelineEl) return;
@@ -1306,18 +1386,8 @@ import { createElementTreeController } from './inspector-tree.js';
     showWorkflowPanel();
   }
 
-  function updateRecordButton() {
-    if (!recordBtn) return;
-    recordBtn.classList.toggle('df-recording', !!recordingId);
-    recordBtn.setAttribute('aria-pressed', String(!!recordingId));
-    // Update only the label span so the leading icon and the responsive icon-collapse survive
-    // (setting textContent here would wipe the .df-btn-label wrapper the toolbar relies on).
-    const lbl = recordBtn.querySelector('.df-btn-label');
-    const label = recordingStopping ? 'Stopping…' : (recordingId ? `Rec (${recStepCount})` : 'Record');
-    if (lbl) lbl.textContent = label;
-    else recordBtn.textContent = recordingId ? `\u25CF ${label}` : `\u25CF ${label}`;
+  function updateRecordingUi() {
     if (cancelRecordingBtn) cancelRecordingBtn.classList.toggle('df-hidden', !recordingId);
-    scheduleToolbarLayout();
   }
 
   // Highest-precedence DURABLE selector for the element (automationId > text > id). We never send a
@@ -1332,20 +1402,35 @@ import { createElementTreeController } from './inspector-tree.js';
     return id ? { id } : {};
   }
 
-  async function recordStep(action, el, extra) {
-    if (!recordingId) return;
-    const body = Object.assign({ recordingId, action }, selectorPayload(el), extra || {});
-    try {
-      const r = await fetch(`${basePath}/api/flows/record/step`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
-      });
-      const j = r.ok ? await r.json().catch(() => null) : null;
-      if (j && j.ok) { recStepCount = j.stepCount; updateRecordButton(); timelineAdd(j.stepCount, action, el, extra); }
-    } catch (err) { console.error('record step failed:', err); }
+  function trackRecordingWork(work) {
+    const promise = Promise.resolve(work);
+    pendingRecordingWork.add(promise);
+    promise.finally(() => pendingRecordingWork.delete(promise));
+    return promise;
+  }
+
+  function recordStep(action, el, extra) {
+    const activeRecordingId = recordingId;
+    if (!activeRecordingId) return Promise.resolve();
+    const body = Object.assign({ recordingId: activeRecordingId, action }, selectorPayload(el), extra || {});
+    return trackRecordingWork((async () => {
+      try {
+        const r = await fetch(`${basePath}/api/flows/record/step`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+        });
+        const j = r.ok ? await r.json().catch(() => null) : null;
+        if (j && j.ok) {
+          recStepCount = j.stepCount;
+          updateRecordingUi();
+          notifyAuthoring();
+          timelineAdd(j.stepCount, action, el, extra);
+        }
+      } catch (err) { console.error('record step failed:', err); }
+    })());
   }
 
   function recordStepById(action, elementId, extra) {
-    recordStep(action, elById(elementId), extra);
+    return recordStep(action, elById(elementId), extra);
   }
 
   const recordingCapabilityStorageKey = 'maui-devflow-recording-capabilities-v1';
@@ -1383,7 +1468,32 @@ import { createElementTreeController } from './inspector-tree.js';
     return await response.json().catch(() => null);
   }
 
-  async function startRecording() {
+  async function startRecording(options = {}) {
+    const quick = options.quick === true;
+    const append = options.append === true;
+    if (!isWriter || !connected || capturedTraceMode || replaying) {
+      setStatus(capturedTraceMode
+        ? 'Recording is unavailable while an imported result is open.'
+        : !connected
+          ? 'Recording requires a connected app.'
+          : 'Take control of the app before recording steps.');
+      return false;
+    }
+    if (!quick && !hasAuthoringGoal()) {
+      openGoalForRecovery('Add a Goal before recording actions.');
+      return false;
+    }
+    const appendBase = append
+      ? {
+        flow: cloneAuthoring(currentAuthoringFlow()),
+        markdown: authoringDraft.markdown,
+        flowName: authoringDraft.flowName,
+      }
+      : null;
+    if (append && (!appendBase.flow || !Array.isArray(appendBase.flow.steps))) {
+      setStatus('Open a recorded test before adding more steps.');
+      return false;
+    }
     const name = 'recording-' + new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
     try {
       const r = await fetch(`${basePath}/api/flows/record/start`, {
@@ -1392,15 +1502,32 @@ import { createElementTreeController } from './inspector-tree.js';
       const j = r.ok ? await r.json().catch(() => null) : null;
       if (j && j.ok) {
         recordingId = j.recordingId; recStepCount = Number(j.steps) || 0; recName = j.name;
+        appendRecordingBase = appendBase;
+        recordStudyEvent('recording-started', {
+          quick,
+          provenance: studyProvenance(),
+        });
+        authoringDraft.rawDraft = quick;
+        authoringDraft.recordingDraft = false;
+        authoringDraft.recordingDraftStepCount = 0;
+        authoringDraft.guidanceMessage = quick
+          ? 'Quick recording is active. This raw draft is not repair-authoritative.'
+          : null;
         rememberRecordingCapability(recordingId);
-        if (j.route) { checkpointRoute = j.route; checkpointLabel = 'recording start'; }
         updateFlowButtons();
         timelineStart();
-        setStatus('Recording — interact with the app; each action is captured.');
+        setStatus(quick
+          ? 'Quick recording — actions will be kept as a raw draft.'
+          : append
+            ? 'Recording more steps — interact with the app, then stop to append them.'
+            : 'Recording — interact with the app; each action is captured.');
+        notifyAuthoring();
+        return true;
       } else {
         setStatus('Could not start recording.');
       }
     } catch (err) { setStatus('Could not start recording.'); }
+    return false;
   }
 
   async function stopRecording(reason) {
@@ -1411,6 +1538,13 @@ import { createElementTreeController } from './inspector-tree.js';
     updateFlowButtons();
     setStatus(pre + 'Stopping recording…');
     try {
+      if (scrollFlushTimer) {
+        clearTimeout(scrollFlushTimer);
+        scrollFlushTimer = null;
+        await flushPendingScroll();
+      }
+      while (pendingRecordingWork.size > 0)
+        await Promise.allSettled([...pendingRecordingWork]);
       const r = await fetch(`${basePath}/api/flows/record/stop`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ recordingId: id }),
       });
@@ -1422,6 +1556,7 @@ import { createElementTreeController } from './inspector-tree.js';
           forgetRecordingCapability(id);
           recStepCount = 0;
           recName = null;
+          appendRecordingBase = null;
           dismissTimeline();
           setStatus(`${pre}Recording already ended in another session.`);
           updateHostButtons();
@@ -1431,25 +1566,46 @@ import { createElementTreeController } from './inspector-tree.js';
         return;
       }
 
+      recordStudyEvent('recording-stopped', {
+        stepCount: Number(j.steps) || 0,
+        provenance: studyProvenance(),
+      });
       recordingId = null;
       forgetRecordingCapability(id);
       if (j.markdown) {
-        lastMarkdown = j.markdown;
-        const fname = (j.name || recName || 'recording') + '.md';
+        let markdown = j.markdown;
+        let fname = (j.name || recName || 'recording') + '.md';
+        let totalSteps = Number(j.steps) || 0;
+        if (appendRecordingBase?.flow) {
+          const appended = parseAuthoringFlow(j.markdown);
+          const merged = cloneAuthoring(appendRecordingBase.flow);
+          merged.steps = [
+            ...(Array.isArray(merged.steps) ? merged.steps : []),
+            ...(Array.isArray(appended?.steps) ? appended.steps : []),
+          ].map((step, index) => ({ ...step, seq: index + 1 }));
+          markdown = replaceAuthoringFlow(appendRecordingBase.markdown, merged);
+          fname = appendRecordingBase.flowName || fname;
+          totalSteps = merged.steps.length;
+        }
+        lastMarkdown = markdown;
         lastMarkdownName = fname;
         lastMarkdownSource = 'recording';
-        timelineStop(j.steps);
-        // Host-side save when a host advertises it (VS Code / canvas know workspace conventions);
-        // otherwise download in the browser. Gated by the authenticated host bridge.
-        if (hostHas('saveRecording') && postToHost('devflow:recordingComplete', { name: j.name, steps: j.steps, markdown: j.markdown })) {
-          setStatus(`${pre}Recorded ${j.steps} step(s) — handed to the host to save. Replay is now available.`);
-        } else {
-          downloadText(fname, j.markdown);
-          setStatus(`${pre}Recorded ${j.steps} step(s) → ${fname}. Replay is now available.`);
-        }
+        syncAuthoringFlow(markdown, fname, 'recording');
+        if (!authoringDraft.plan) authoringDraft.rawDraft = true;
+        timelineStop(totalSteps);
+        authoringDraft.recordingDraft = true;
+        authoringDraft.recordingDraftStepCount = totalSteps;
+        authoringDraft.guidanceMessage = authoringDraft.rawDraft
+          ? 'Recording draft saved. Add a Goal before saving this raw draft as a managed test.'
+          : 'Recording draft saved. Review the steps and save the test when it is ready.';
+        testWorkbench?.openStage?.('review', true);
+        workbenchAnnouncement(`Recording draft saved — ${totalSteps} step(s).`);
+        setStatus(`${pre}Recording draft saved — ${totalSteps} step(s). Review and save it when ready.`);
+        appendRecordingBase = null;
       } else {
         dismissTimeline();
         setStatus(pre + 'Recording stopped: no replayable steps.');
+        appendRecordingBase = null;
       }
       updateHostButtons();   // a completed recording enables Send-to-Copilot even with no selection
     } catch (err) {
@@ -1472,17 +1628,17 @@ import { createElementTreeController } from './inspector-tree.js';
           status = candidateStatus;
           break;
         }
-        if (candidate === recordingId &&
-            candidateStatus &&
-            /unknown recordingid|no recording is active|active recording no longer exists/i.test(
-              candidateStatus.error || '')) {
-          currentCapabilityEnded = true;
+        if (candidate === recordingId && candidateStatus) {
+          currentCapabilityEnded = (candidateStatus.ok === true && candidateStatus.recording === false)
+            || /unknown recordingid|no recording is active|active recording no longer exists/i.test(
+              candidateStatus.error || '');
         }
       }
       if (!status && currentCapabilityEnded && recordingId) {
         forgetRecordingCapability(recordingId);
         recordingId = null;
         recordingStopping = false;
+        appendRecordingBase = null;
         dismissTimeline();
         setStatus('Recording ended in another session.');
         updateFlowButtons();
@@ -1527,10 +1683,16 @@ import { createElementTreeController } from './inspector-tree.js';
         return;
       }
 
+      recordStudyEvent('recording-stopped', {
+        discarded: true,
+        stepCount: recStepCount,
+        provenance: studyProvenance(),
+      });
       recordingId = null;
       forgetRecordingCapability(id);
       recStepCount = 0;
       recName = null;
+      appendRecordingBase = null;
       dismissTimeline();
       setStatus('Recording discarded.');
       updateHostButtons();
@@ -1542,22 +1704,32 @@ import { createElementTreeController } from './inspector-tree.js';
     }
   }
 
-  function downloadText(filename, text) {
+  function downloadText(filename, text, contentType = 'text/markdown') {
     try {
-      const blob = new Blob([text], { type: 'text/markdown' });
+      const blob = new Blob([text], { type: contentType });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url; a.download = filename;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-    } catch (err) { console.error('download failed:', err); }
+      return true;
+    } catch (err) {
+      console.error('download failed:', err);
+      return false;
+    }
   }
 
-  function setLoadedWorkflow(markdown, name, source, steps) {
+  function setLoadedWorkflow(markdown, name, source, steps, loadGeneration = null) {
     if (typeof markdown !== 'string' || !markdown.trim()) return false;
+    const generation = loadGeneration ?? ++authoringLoadGeneration;
+    if (generation !== authoringLoadGeneration) return false;
     lastMarkdown = markdown;
     lastMarkdownName = String(name || 'workflow.md');
     lastMarkdownSource = source || 'file';
+    authoringDraft.savedTestPickerOpen = false;
+    authoringDraft.savedTestsLoading = false;
+    authoringDraft.savedTestsError = null;
+    syncAuthoringFlow(markdown, lastMarkdownName, lastMarkdownSource, generation);
     if (timelineStepsEl) {
       timelineStepsEl.replaceChildren();
       timelineStepsEl.dataset.emptyMessage = `Ready to replay ${lastMarkdownName}.`;
@@ -1570,49 +1742,23 @@ import { createElementTreeController } from './inspector-tree.js';
       timelineMetaEl.textContent = [lastMarkdownName, count].filter(Boolean).join(' · ');
     }
     setWorkflowPanelState('df-tl-done');
-    showWorkflowPanel();
+    dismissTimeline();
     updateFlowButtons();
     updateHostButtons();
     return true;
   }
 
-  async function refreshProjectWorkflows() {
-    if (!workflowSelect) return;
-    workflowSelect.disabled = true;
-    workflowSelect.replaceChildren(new Option('Loading project tests…', ''));
-    const result = await apiPost('/api/flows/files/list', {});
-    workflowSelect.replaceChildren();
-    workflowSelect.append(new Option('Project tests…', ''));
-    if (!result || result.ok !== true) {
-      workflowSelect.append(new Option('Could not list project tests', ''));
-      workflowSelect.disabled = false;
-      return;
-    }
-    if (result.supported === false) {
-      workflowSelect.append(new Option('Project unavailable — choose a file', ''));
-      workflowSelect.disabled = false;
-      return;
-    }
-    for (const test of (result.tests || [])) {
-      if (!test || typeof test.name !== 'string') continue;
-      const option = new Option(test.name, test.name);
-      option.title = test.modifiedAt ? `Modified ${new Date(test.modifiedAt).toLocaleString()}` : test.name;
-      workflowSelect.append(option);
-    }
-    if (workflowSelect.options.length === 1)
-      workflowSelect.append(new Option('No tests in maui-tests', ''));
-    workflowSelect.disabled = false;
-  }
-
   async function loadProjectWorkflow(name) {
     if (!name) return;
+    const generation = ++authoringLoadGeneration;
     setStatus(`Loading ${name}…`);
     const result = await apiPost('/api/flows/files/load', { name });
+    if (generation !== authoringLoadGeneration) return;
     if (!result || result.ok !== true || typeof result.markdown !== 'string') {
       setStatus((result && result.error) || 'Could not load the selected project workflow.');
       return;
     }
-    setLoadedWorkflow(result.markdown, result.name || name, 'project', result.steps);
+    setLoadedWorkflow(result.markdown, result.name || name, 'project', result.steps, generation);
     setStatus(`Loaded ${result.name || name} from the project.`);
   }
 
@@ -1648,119 +1794,40 @@ import { createElementTreeController } from './inspector-tree.js';
     workflowFileInput?.click();
   }
 
-  async function openWorkflowPicker() {
-    showWorkflowPanel();
-    if (timelineTitleText) timelineTitleText.textContent = 'Workflow';
-    if (timelineStepsEl && !lastMarkdown) {
-      timelineStepsEl.replaceChildren();
-      timelineStepsEl.dataset.emptyMessage = 'Choose a project test or Markdown file to replay.';
-    }
-    await refreshProjectWorkflows();
-  }
-
-  if (recordBtn) {
-    recordBtn.addEventListener('click', () => { if (recordingId) stopRecording(); else startRecording(); });
-  }
   if (cancelRecordingBtn) cancelRecordingBtn.addEventListener('click', cancelRecording);
-  if (loadFlowBtn) loadFlowBtn.addEventListener('click', openWorkflowPicker);
-  if (workflowSelect) workflowSelect.addEventListener('change', () => loadProjectWorkflow(workflowSelect.value));
-  if (workflowFileBtn) workflowFileBtn.addEventListener('click', chooseWorkflowFile);
   if (workflowFileInput) workflowFileInput.addEventListener('change', async () => {
     const file = workflowFileInput.files && workflowFileInput.files[0];
     workflowFileInput.value = '';
     await loadWorkflowFile(file);
   });
 
-  // ── Replay the recorded test + return-to-start-route (checkpoint) ──
-  const replayBtn = document.getElementById('df-toggle-replay');
-  const checkpointBtn = document.getElementById('df-goto-checkpoint');
-  const resumeSaveBtn = document.getElementById('df-resume-save');
-  const resumeRestoreBtn = document.getElementById('df-resume-restore');
-  const resumeClearBtn = document.getElementById('df-resume-clear');
-  const resumeStatusEl = document.getElementById('df-resume-status');
-
-  function renderResumeCheckpoint(status) {
-    resumeCheckpoint = status && status.checkpoint ? status.checkpoint : null;
-    if (resumeStatusEl) {
-      if (!status || status.ok === false) resumeStatusEl.textContent = (status && status.warning) || 'Resume checkpoint unavailable.';
-      else if (!resumeCheckpoint) resumeStatusEl.textContent = status.connected === false ? 'App disconnected; no saved resume checkpoint.' : 'No saved resume checkpoint.';
-      else if (resumeCheckpoint.lastRestore && resumeCheckpoint.lastRestore.success === false) resumeStatusEl.textContent = `Resume restore failed: ${resumeCheckpoint.lastRestore.message || 'unknown failure'}`;
-      else if (resumeCheckpoint.lastRestore && resumeCheckpoint.lastRestore.success) resumeStatusEl.textContent = 'Route restored.';
-      else resumeStatusEl.textContent = status.connected === false ? 'Saved route; app disconnected.' : 'Saved route ready to resume.';
-    }
-    updateFlowButtons();
-  }
-
-  async function refreshResumeCheckpoint() {
-    try {
-      const response = await fetch(`${basePath}/api/checkpoint/status`, { headers: { 'X-DevFlow-Inspector-Token': inspectorToken } });
-      renderResumeCheckpoint(response.ok ? await response.json().catch(() => null) : { ok: false, warning: 'Resume checkpoint unavailable.' });
-    } catch { renderResumeCheckpoint({ ok: false, warning: 'Resume checkpoint unavailable.' }); }
-  }
-
-  async function resumeCheckpointAction(action) {
-    if (action === 'restore' && !resumeCheckpoint) return;
-    if (action === 'restore' && !(await confirmModal('Resume navigates the live app to the saved route. App data is not restored. Continue?', 'Resume'))) return;
-    try {
-      const result = await apiPost(`/api/checkpoint/${action}`, {});
-      renderResumeCheckpoint(result);
-      if (result && result.ok) {
-        setStatus(action === 'save' ? 'Current route saved for resume.' : action === 'clear' ? 'Saved resume route cleared.' : 'Route restore requested and verified.');
-        if (action === 'restore') scheduleRefresh(500);
-      } else setStatus((result && result.warning) || `Could not ${action} the resume checkpoint.`);
-    } catch { setStatus(`Could not ${action} the resume checkpoint.`); }
-  }
-
+  // ── Replay and run support ──
   function updateFlowButtons() {
     // canDrive: this session holds the writer lease AND a live app is connected. The drive-actions
     // (record / replay / assert / return-to-start-route) 409 or fail otherwise, so disable them
     // rather than let a click error out. Record stays clickable WHILE recording so you can stop.
-    const canDrive = isWriter && connected;
-    updateRecordButton();
-    if (recordBtn) recordBtn.disabled = recordingStopping || replaying || !canDrive;
+    const canDrive = isWriter && connected && !capturedTraceMode;
+    const workbenchAuthoring = recordingId
+      ? 'recording'
+      : authoringDraft.saving
+        ? 'validating'
+        : authoringDraft.stale
+          ? 'stale'
+          : authoringDraft.flowDirty || authoringDraft.planDirty
+            ? 'draft'
+            : lastMarkdown
+              ? 'saved'
+              : 'none';
+    if (testWorkbench && testWorkbench.state().authoring !== workbenchAuthoring)
+      testWorkbench.updateState({ authoring: workbenchAuthoring });
+    updateRecordingUi();
     if (cancelRecordingBtn) cancelRecordingBtn.disabled = !recordingId || recordingStopping || replaying || !canDrive;
-    setExplainedDisabled(assertBtn, !recordingId || !selectedId || replaying || !canDrive);
-    setExplainedDisabled(replayBtn, !lastMarkdown || !!recordingId || replaying || !canDrive);
-    setExplainedDisabled(checkpointBtn, !checkpointRoute || replaying || !canDrive);
-    if (resumeSaveBtn) resumeSaveBtn.disabled = !connected || replaying;
-    if (resumeRestoreBtn) resumeRestoreBtn.disabled = !connected || !resumeCheckpoint || replaying || !canDrive;
-    if (resumeClearBtn) resumeClearBtn.disabled = !resumeCheckpoint || replaying;
-    if (loadFlowBtn) loadFlowBtn.disabled = !!recordingId || replaying;
-    if (workflowSelect) workflowSelect.disabled = !!recordingId || replaying;
-    if (workflowFileBtn) workflowFileBtn.disabled = !!recordingId || replaying;
-    if (workflowReplayBtn) workflowReplayBtn.disabled = !lastMarkdown || !!recordingId || replaying || !canDrive;
     propertyGrid.updateWriterState();
     document.querySelectorAll('#df-dock .df-alert-actions button').forEach((button) => {
       button.disabled = !canDrive;
     });
+    if (tb?.interact) tb.interact.disabled = capturedTraceMode;
   }
-
-  // While recording, capture an assertion on the selected element so the .md test VALIDATES (not
-  // just reproduces): prefer "Text == <current value>" (propEquals), else "element exists". The
-  // assertion carries its own durable selector and rides on a validation-only "assert" step.
-  async function recordAssert() {
-    if (!recordingId || !selectedId) return;
-    const el = elById(selectedId);
-    const sel = selectorPayload(el);
-    if (!sel.automationId && !sel.text && !sel.id) { setStatus('Cannot assert: element has no durable selector (add an AutomationId).'); return; }
-    let assert;
-    const passwordResult = await apiPost('/api/getProperty', { elementId: selectedId, name: 'IsPassword' });
-    const isPassword = String(passwordResult?.value ?? '').toLowerCase() === 'true';
-    if (isPassword) {
-      assert = { kind: 'exists', selector: sel, verify: true };
-    } else {
-      const res = await apiPost('/api/getProperty', { elementId: selectedId, name: 'Text' });
-      const text = res && res.value;
-      if (text != null && String(text).length > 0) assert = { kind: 'propEquals', selector: sel, name: 'Text', expected: String(text), verify: true };
-      else assert = { kind: 'exists', selector: sel, verify: true };
-    }
-    await recordStep('assert', null, { assertsJson: JSON.stringify([assert]) });
-    setStatus(assert.kind === 'propEquals' ? `Asserted Text == "${assert.expected}"` : 'Asserted element is present');
-  }
-  if (assertBtn) assertBtn.addEventListener('click', recordAssert);
-  if (resumeSaveBtn) resumeSaveBtn.addEventListener('click', () => resumeCheckpointAction('save'));
-  if (resumeRestoreBtn) resumeRestoreBtn.addEventListener('click', () => resumeCheckpointAction('restore'));
-  if (resumeClearBtn) resumeClearBtn.addEventListener('click', () => resumeCheckpointAction('clear'));
 
   function setReplayUi(on) {
     replaying = on;
@@ -1771,37 +1838,25 @@ import { createElementTreeController } from './inspector-tree.js';
     else if (!on && !pollInterval) { pollInterval = setInterval(() => { if (!refreshTimer && !wsLive) refreshState(); }, 3000); }
   }
 
-  async function captureCheckpoint(label) {
+  async function captureCheckpoint() {
     try {
       const r = await fetch(`${basePath}/api/checkpoint`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
       });
       const j = r.ok ? await r.json().catch(() => null) : null;
-      if (j && j.ok && j.route) { checkpointRoute = j.route; checkpointLabel = label; updateFlowButtons(); }
+      if (j && j.ok && j.route) updateFlowButtons();
     } catch (err) { /* best-effort */ }
   }
 
-  async function gotoCheckpoint() {
-    if (!checkpointRoute || replaying) return;
-    try {
-      const r = await fetch(`${basePath}/api/navigate`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ route: checkpointRoute }),
-      });
-      setStatus(r.ok
-        ? `Returned to ${checkpointLabel || 'start'} (${checkpointRoute}). Navigation only — app data is not reset.`
-        : 'Could not navigate to the checkpoint route.');
-      scheduleRefresh(500);
-    } catch (err) { setStatus('Navigate failed.'); }
-  }
-
-  async function replay() {
+  async function legacyQuickReplay() {
     if (!lastMarkdown || recordingId || replaying) return;
     const workflowLabel = lastMarkdownName ? ` “${lastMarkdownName}”` : '';
-    if (!(await confirmModal(`Replay${workflowLabel} will drive the LIVE app and may change its data. Continue?`, 'Replay'))) return;
-    // Auto-capture a "before replay" checkpoint so you can return to where you were.
-    await captureCheckpoint('before replay');
+    if (!(await confirmModal(`Legacy quick replay${workflowLabel} will drive the LIVE app and may change its data. It skips the Test Workbench run check. Continue?`, 'Legacy quick replay'))) return;
+    // Capture a broker checkpoint before compatibility replay for external recovery tooling.
+    await captureCheckpoint();
     setReplayUi(true);
     setStatus('Replaying…');
+    const restoreWriter = isWriter;
     try {
       const r = await fetch(`${basePath}/api/flows/replay`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ markdown: lastMarkdown }),
@@ -1817,7 +1872,11 @@ import { createElementTreeController } from './inspector-tree.js';
           : `Replay failed (HTTP ${r.status}).`));
       }
     } catch (err) { setStatus('Replay failed.'); }
-    finally { setReplayUi(false); scheduleRefresh(400); }
+    finally {
+      if (restoreWriter && !capturedTraceMode) await control('claim');
+      setReplayUi(false);
+      scheduleRefresh(400);
+    }
   }
 
   function showReplayReport(rep) {
@@ -1874,12 +1933,7 @@ import { createElementTreeController } from './inspector-tree.js';
     setStatus(rep.ok ? `Replay passed ${rep.passed}/${rep.total}.` : `Replay: ${rep.failed} step(s) did not pass.`);
   }
 
-  if (replayBtn) replayBtn.addEventListener('click', replay);
-  if (workflowReplayBtn) workflowReplayBtn.addEventListener('click', replay);
-  if (checkpointBtn) checkpointBtn.addEventListener('click', gotoCheckpoint);
   updateFlowButtons();
-  refreshResumeCheckpoint();
-
   // ── Host bridge: send-to-Copilot + open-XAML-source over a nonce-authenticated
   // iframe->host channel. The host (VS Code webview / canvas shell) advertises capabilities; a plain
   // browser tab has no host and uses clipboard fallbacks. The bridge nonce arrives in the URL
@@ -2938,10 +2992,10 @@ import { createElementTreeController } from './inspector-tree.js';
 
     const controls = elh('div', { class: 'df-diag-controls' });
     const startBtn = elh('button', { type: 'button', text: view.active ? 'Recording…' : 'Start recording' });
-    startBtn.disabled = view.active || performanceBusy;
+    startBtn.disabled = view.active || performanceBusy || capturedTraceMode;
     startBtn.addEventListener('click', () => controlPerformance('start'));
     const stopBtn = elh('button', { type: 'button', text: 'Stop' });
-    stopBtn.disabled = !view.active || !performanceOwned || performanceBusy;
+    stopBtn.disabled = !view.active || !performanceOwned || performanceBusy || capturedTraceMode;
     stopBtn.addEventListener('click', () => controlPerformance('stop'));
     controls.append(startBtn, stopBtn);
     header.append(controls);
@@ -2994,7 +3048,10 @@ import { createElementTreeController } from './inspector-tree.js';
   }
 
   async function controlPerformance(action) {
-    if (performanceBusy) return;
+    if (performanceBusy || capturedTraceMode) {
+      if (capturedTraceMode) setStatus('Captured trace mode disables effectful performance controls.');
+      return;
+    }
     performanceBusy = true;
     setStatus(action === 'start' ? 'Starting performance triage…' : 'Stopping performance triage…');
     try {
@@ -3086,8 +3143,10 @@ import { createElementTreeController } from './inspector-tree.js';
       for (const alertButton of buttons) {
         const label = String(alertButton.label || 'Dismiss');
         const button = elh('button', { class: 'df-dock-btn', text: label, 'data-alert-action': 'dismiss' });
-        button.disabled = !isWriter || !connected;
-        button.title = button.disabled ? 'Take control before dismissing native alerts.' : `Dismiss with ${label}`;
+        button.disabled = !isWriter || !connected || capturedTraceMode;
+        button.title = button.disabled
+          ? (capturedTraceMode ? 'Captured trace mode cannot dismiss native alerts.' : 'Take control before dismissing native alerts.')
+          : `Dismiss with ${label}`;
         button.addEventListener('click', async () => {
           if (!ensureCanDrive()) return;
           button.disabled = true;
@@ -3207,6 +3266,7 @@ import { createElementTreeController } from './inspector-tree.js';
     if (active instanceof HTMLElement && active !== document.body && !dockEl.contains(active))
       dockReturnFocus = active;
     if (isTransientPaneLayout()) {
+      testWorkbench?.close();
       propertyGrid.close();
       if (isTreeDrawerLayout()) setTreeVisible(false);
     }
@@ -3219,7 +3279,7 @@ import { createElementTreeController } from './inspector-tree.js';
     }
     if (toggleDockBtn) {
       toggleDockBtn.classList.add('df-active');
-      toggleDockBtn.setAttribute('aria-pressed', 'true');
+      setToolbarToggleState(toggleDockBtn, true);
     }
     if (!dockLoaded) { dockLoaded = true; loadTab(dockActiveTab); }
     syncPaneChrome();
@@ -3229,7 +3289,7 @@ import { createElementTreeController } from './inspector-tree.js';
     document.body.classList.remove('df-dock-open', 'df-dock-collapsed');
     if (toggleDockBtn) {
       toggleDockBtn.classList.remove('df-active');
-      toggleDockBtn.setAttribute('aria-pressed', 'false');
+      setToolbarToggleState(toggleDockBtn, false);
     }
     syncPaneChrome();
     if (restore) restoreFocus(dockReturnFocus, tb.more || toggleDockBtn);
@@ -3241,6 +3301,2976 @@ import { createElementTreeController } from './inspector-tree.js';
       dockCollapseBtn.title = collapsed ? 'Expand data panel' : 'Collapse data panel';
     }
   }
+  function parseAuthoringFlow(markdown) {
+    if (typeof markdown !== 'string') return null;
+    const match = /```json maui-test\s*\r?\n([\s\S]*?)\r?\n```/.exec(markdown);
+    if (!match) return null;
+    try { return JSON.parse(match[1]); } catch { return null; }
+  }
+
+  function replaceAuthoringFlow(markdown, flow) {
+    const payload = JSON.stringify(flow, null, 2);
+    const expression = /(```json maui-test\s*\r?\n)[\s\S]*?(\r?\n```)/;
+    if (typeof markdown === 'string' && expression.test(markdown))
+      return markdown.replace(expression, `$1${payload}$2`);
+    return `# Scenario: ${flow?.name || 'scenario'}\n\n\`\`\`json maui-test\n${payload}\n\`\`\`\n`;
+  }
+
+  function activeAuthoringStepSelector(step) {
+    const selector = step?.args?.selector;
+    return selector && typeof selector === 'object' && Object.keys(selector).length
+      ? selector
+      : step?.target && typeof step.target === 'object'
+        ? step.target
+        : null;
+  }
+
+  function selectorKindForAmbiguity(selector) {
+    if (!selector || typeof selector !== 'object') return 'unknown';
+    if (typeof selector.automationId === 'string' && selector.automationId.trim()) return 'automationId';
+    if (typeof selector.text === 'string' && selector.text) return 'text';
+    if (selector.typeIndex || selector.selectorKind === 'typeIndex') return 'typeIndex';
+    if (typeof selector.id === 'string' && selector.id) return 'runtimeId';
+    return 'unknown';
+  }
+
+  function sequenceFromStepId(stepId) {
+    const value = String(stepId || '').trim();
+    const match = /^(?:step-)?(\d+)$/.exec(value);
+    return match ? Number(match[1]) : null;
+  }
+
+  function authoringStepIndexForFailure(flow, stepId, stepSequence) {
+    const steps = Array.isArray(flow?.steps) ? flow.steps : [];
+    const sequence = Number.isInteger(Number(stepSequence)) && Number(stepSequence) > 0
+      ? Number(stepSequence)
+      : sequenceFromStepId(stepId);
+    if (!sequence) return -1;
+    const matches = steps
+      .map((step, index) => ({ step, index }))
+      .filter((entry) => Number(entry.step?.seq) === sequence);
+    return matches.length === 1 ? matches[0].index : -1;
+  }
+
+  function safeAuthoringName(value) {
+    const name = String(value || '').trim();
+    if (/^[^\\/]{1,255}\.md$/i.test(name)) return name;
+    const fallback = (lastMarkdownName || 'scenario.md').replace(/[\\/]/g, '_');
+    return /\.md$/i.test(fallback) ? fallback : `${fallback}.md`;
+  }
+
+  function createAuthoringPlan() {
+    const flowName = safeAuthoringName(authoringDraft.flowName);
+    return {
+      schema: 1,
+      planId: `plan_${Math.random().toString(36).slice(2, 12)}`,
+      revision: 1,
+      flow: { path: flowName, digest: authoringDraft.flowDigest || '' },
+      title: flowName.replace(/\.md$/i, ''),
+      goal: '',
+      scenarios: [{ scenarioId: 'scenario-1', description: '', acceptanceCriterionIds: [], risks: [] }],
+      assumptions: [],
+      risks: [],
+      preconditions: [],
+      reset: { required: true, strategy: '', resetIdentity: '', seedFingerprint: '', backendStateFingerprint: '' },
+      acceptanceCriteria: [],
+      requirements: { requiredCapabilities: [], requiredSemantics: [] },
+      requiredPlatforms: [],
+      explorationBudget: { maxActions: 0, maxDurationSeconds: 0, allowedScopes: [] },
+      prohibitedActionClasses: [],
+      provenance: {
+        actorKind: 'human',
+        channel: 'inspector',
+        provider: '',
+        intent: 'human-authored',
+        recordedAt: new Date().toISOString(),
+      },
+      reviews: [],
+      approvals: [],
+      sideEffectPolicy: 'none',
+      businessOracles: [],
+      independentBusinessOracles: [],
+      checkpoint: {},
+    };
+  }
+
+  function ensureAuthoringPlan() {
+    if (!authoringDraft.plan) {
+      authoringDraft.plan = createAuthoringPlan();
+      authoringDraft.planJson = JSON.stringify(authoringDraft.plan, null, 2);
+      authoringDraft.planDirty = true;
+    }
+    return authoringDraft.plan;
+  }
+
+  function updateAuthoringPlanFlowReference(name, digest = '') {
+    if (!authoringDraft.plan) return;
+    authoringDraft.plan.flow = {
+      ...(authoringDraft.plan.flow || {}),
+      path: safeAuthoringName(name),
+      digest,
+    };
+    authoringDraft.planJson = JSON.stringify(authoringDraft.plan, null, 2);
+    authoringDraft.planDirty = true;
+  }
+
+  function hasAuthoringGoal() {
+    return !!String(authoringDraft.plan?.goal || '').trim();
+  }
+
+  function authoringReadiness() {
+    const flow = authoringDraft.flow || parseAuthoringFlow(authoringDraft.markdown);
+    const steps = Array.isArray(flow?.steps) ? flow.steps : [];
+    const hardOutcomeCheck = steps.some((step) => Array.isArray(step?.asserts) &&
+      step.asserts.some((assertion) => assertion?.verify !== false && assertion?.kind !== 'pageChanged'));
+    return {
+      goal: hasAuthoringGoal(),
+      recordedSteps: steps.length > 0,
+      hardOutcomeCheck,
+      savedBundle: !!authoringDraft.committedFlowDigest &&
+        !!authoringDraft.committedPlanDigest &&
+        !authoringDraft.flowDirty &&
+        !authoringDraft.planDirty &&
+        !authoringDraft.bindingStale,
+    };
+  }
+
+  function openGoalForRecovery(message) {
+    ensureAuthoringPlan();
+    updateAuthoringPlanFlowReference(authoringDraft.flowName || lastMarkdownName || 'scenario.md');
+    authoringDraft.guidanceMessage = message;
+    authoringDraft.errors = [];
+    notifyAuthoring();
+    testWorkbench?.focusGoal?.();
+    workbenchAnnouncement(message, true);
+  }
+
+  function cloneAuthoring(value) {
+    return value == null ? value : JSON.parse(JSON.stringify(value));
+  }
+
+  function notifyAuthoring(rerender = true) {
+    if (!rerender || !testWorkbench) return;
+    const authoringState = recordingId
+      ? 'recording'
+      : authoringDraft.saving
+        ? 'validating'
+        : authoringDraft.stale
+          ? 'stale'
+          : authoringDraft.planDirty || authoringDraft.flowDirty
+            ? 'draft'
+            : authoringDraft.plan || authoringDraft.flow
+              ? 'saved'
+              : 'none';
+    testWorkbench.updateState({
+      authoring: authoringState,
+      draft: {
+        dirty: !!(authoringDraft.planDirty || authoringDraft.flowDirty),
+        saving: !!authoringDraft.saving,
+        stale: !!authoringDraft.stale,
+        readiness: authoringReadiness(),
+      },
+    });
+  }
+
+  function applyAuthoringResponse(response, committed) {
+    if (!response) {
+      authoringDraft.errors = ['The local authoring service did not respond.'];
+      return;
+    }
+    authoringDraft.workspaceAvailable = response.supported === false ? false : true;
+    authoringDraft.stale = response.stale === true;
+    authoringDraft.errors = Array.isArray(response.errors)
+      ? response.errors.map(String)
+      : response.error ? [String(response.error)] : [];
+    authoringDraft.warnings = Array.isArray(response.warnings) ? response.warnings.map(String) : [];
+    const bindingStale = authoringDraft.warnings.some((warning) =>
+      /older flow digest|flow\.digest must match|plan.*flow.*digest/i.test(warning));
+    authoringDraft.bindingStale = bindingStale;
+    if (bindingStale) {
+      authoringDraft.guidanceMessage =
+        'The recorded steps changed after this plan was saved. Review and save the test to update their binding.';
+    }
+    authoringDraft.diff = typeof response.diff === 'string' ? response.diff : null;
+    if (response.flow) {
+      authoringDraft.flowName = response.flow.name || authoringDraft.flowName;
+      authoringDraft.markdown = response.flow.markdown || authoringDraft.markdown;
+      authoringDraft.flow = response.flow.document || parseAuthoringFlow(authoringDraft.markdown);
+      authoringDraft.flowDigest = response.flow.digest || authoringDraft.flowDigest;
+    }
+    if (response.plan) {
+      authoringDraft.planJson = response.plan.json || null;
+      authoringDraft.plan = response.plan.document || (response.plan.json ? JSON.parse(response.plan.json) : null);
+      authoringDraft.planDigest = response.plan.digest || null;
+      authoringDraft.planRevision = response.plan.revision || authoringDraft.plan?.revision || null;
+    }
+    if (committed && response.ok === true) {
+      authoringDraft.committedFlowDigest = authoringDraft.flowDigest;
+      authoringDraft.committedPlanDigest = authoringDraft.planDigest;
+      authoringDraft.committedPlan = cloneAuthoring(authoringDraft.plan);
+      authoringDraft.flowDirty = false;
+      authoringDraft.planDirty = bindingStale;
+      authoringDraft.stale = response.stale === true;
+    }
+  }
+
+  function syncAuthoringFlow(markdown, name, source, loadGeneration = authoringLoadGeneration) {
+    const flow = parseAuthoringFlow(markdown);
+    const retainedPlan = source === 'recording' ? cloneAuthoring(authoringDraft.plan) : null;
+    const retainedCommittedFlowDigest = source === 'recording' ? authoringDraft.committedFlowDigest : null;
+    authoringDraft.flowName = safeAuthoringName(name);
+    authoringDraft.markdown = markdown;
+    authoringDraft.flow = flow;
+    authoringDraft.flowDigest = null;
+    authoringDraft.committedFlowDigest = null;
+    authoringDraft.flowDirty = source === 'recording';
+    authoringDraft.bindingStale = false;
+    authoringDraft.diff = null;
+    authoringDraft.errors = [];
+    authoringDraft.warnings = [];
+    if (source !== 'recording') {
+      authoringDraft.rawDraft = false;
+      authoringDraft.recordingDraft = false;
+      authoringDraft.recordingDraftStepCount = 0;
+    }
+    if (retainedPlan) {
+      authoringDraft.plan = retainedPlan;
+      authoringDraft.plan.flow = {
+        ...(authoringDraft.plan.flow || {}),
+        path: authoringDraft.flowName,
+        digest: '',
+      };
+      authoringDraft.planJson = JSON.stringify(authoringDraft.plan, null, 2);
+      authoringDraft.planDigest = null;
+      authoringDraft.planDirty = true;
+      authoringDraft.committedFlowDigest = retainedCommittedFlowDigest;
+    } else if (source !== 'project') {
+      authoringDraft.plan = null;
+      authoringDraft.planJson = null;
+      authoringDraft.planDigest = null;
+      authoringDraft.planRevision = null;
+      authoringDraft.committedPlan = null;
+      authoringDraft.committedPlanDigest = null;
+      authoringDraft.planDirty = false;
+    }
+    if (source === 'project') {
+      const requestedName = authoringDraft.flowName;
+      postAuthoring('/api/plans/load', { name: requestedName }).then((response) => {
+        if (loadGeneration === authoringLoadGeneration &&
+            authoringDraft.flowName === requestedName &&
+            response && response.ok === true) {
+          applyAuthoringResponse(response, true);
+          notifyAuthoring();
+        }
+      });
+    }
+    notifyAuthoring();
+  }
+
+  async function postAuthoring(path, body) {
+    const response = await inspectorApi.postDetailed(path, body);
+    const payload = response.body && typeof response.body === 'object'
+      ? response.body
+      : { ok: false, error: response.error || `Request failed (${response.status || 0}).` };
+    if (!response.ok) payload.ok = false;
+    return payload;
+  }
+
+  function planSidecarName(name) {
+    return String(name || 'scenario.md').replace(/\.md$/i, '') + '.maui-plan.json';
+  }
+
+  function canonicalAuthoringJson(value) {
+    if (Array.isArray(value)) return value.map(canonicalAuthoringJson);
+    if (value && typeof value === 'object') {
+      return Object.fromEntries(Object.keys(value).sort().map((key) => [key, canonicalAuthoringJson(value[key])]));
+    }
+    return value;
+  }
+
+  async function authoringSha256(value) {
+    if (!window.crypto?.subtle || typeof TextEncoder === 'undefined') return null;
+    const bytes = new TextEncoder().encode(JSON.stringify(canonicalAuthoringJson(value)));
+    const digest = await window.crypto.subtle.digest('SHA-256', bytes);
+    return [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('');
+  }
+
+  async function hostBundle(name) {
+    const flow = authoringDraft.flow || parseAuthoringFlow(authoringDraft.markdown);
+    const flowDigest = await authoringSha256(flow);
+    if (!flowDigest || !authoringDraft.plan) return null;
+    const plan = cloneAuthoring(authoringDraft.plan);
+    plan.flow = Object.assign({}, plan.flow || {}, { path: name, digest: flowDigest });
+    const planDigest = await authoringSha256(plan);
+    authoringDraft.flowDigest = flowDigest;
+    authoringDraft.plan = plan;
+    authoringDraft.planJson = JSON.stringify(plan, null, 2);
+    authoringDraft.planDigest = planDigest;
+    return {
+      name,
+      markdown: authoringDraft.markdown,
+      planJson: authoringDraft.planJson,
+      flowDigest,
+      planDigest,
+    };
+  }
+
+  function recordStudyEvent(kind, details) {
+    return prototypeStudyJournal.record(kind, details);
+  }
+
+  function studyProvenance(value) {
+    const actor = value ?? authoringDraft.plan?.provenance?.actorKind;
+    return actor === 'agent' || actor === 'mixed' ? actor : 'human';
+  }
+
+  function studySelectorQuality(selector) {
+    if (!selector || typeof selector !== 'object') return 'unknown';
+    if (selector.quality === 'durable' || selector.quality === 'fragile') return selector.quality;
+    if (typeof selector.automationId === 'string' && selector.automationId.trim()) return 'durable';
+    return selector.id || selector.text || selector.type || selector.css ? 'fragile' : 'unknown';
+  }
+
+  function studyFlowFacts(flow) {
+    const steps = Array.isArray(flow?.steps) ? flow.steps : [];
+    let hardAssertionCount = 0;
+    let durableSelectorCount = 0;
+    let fragileSelectorCount = 0;
+    const countSelector = (selector) => {
+      const quality = studySelectorQuality(selector);
+      if (quality === 'durable') durableSelectorCount += 1;
+      if (quality === 'fragile') fragileSelectorCount += 1;
+    };
+    for (const step of steps) {
+      countSelector(step?.args?.selector || step?.selector);
+      for (const assertion of Array.isArray(step?.asserts) ? step.asserts : []) {
+        if (assertion?.verify !== false && assertion?.kind !== 'pageChanged') hardAssertionCount += 1;
+        countSelector(assertion?.selector);
+      }
+    }
+    return {
+      stepCount: steps.length,
+      hardAssertionCount,
+      durableSelectorCount,
+      fragileSelectorCount,
+    };
+  }
+
+  function studyRunDuration(snapshot) {
+    const startedAt = Date.parse(snapshot?.startedAt || snapshot?.createdAt || '');
+    const endedAt = Date.parse(snapshot?.endedAt || '');
+    if (!Number.isFinite(startedAt) || !Number.isFinite(endedAt) || endedAt < startedAt) return null;
+    return endedAt - startedAt;
+  }
+
+  function studyFailureClass(snapshot) {
+    return snapshot?.report?.failure?.class ||
+      snapshot?.report?.failure?.code ||
+      snapshot?.report?.failureClass ||
+      snapshot?.failureClass ||
+      null;
+  }
+
+  function createPrototypeStudyController() {
+    return Object.freeze({
+      summary: () => prototypeStudyJournal.summary(),
+      workbenchOpened() {
+        return recordStudyEvent('workbench-opened', { provenance: 'human' });
+      },
+      goalDefined(value) {
+        if (!String(value || '').trim()) return false;
+        return recordStudyEvent('goal-defined', { provenance: 'human' });
+      },
+      assertionAdded(assertion) {
+        return recordStudyEvent('assertion-added', {
+          hard: assertion?.verify !== false && assertion?.kind !== 'pageChanged',
+          selectorQuality: studySelectorQuality(assertion?.selector),
+          provenance: 'human',
+        });
+      },
+      testSaved() {
+        const flow = authoringDraft.flow || parseAuthoringFlow(authoringDraft.markdown);
+        return recordStudyEvent('test-saved', {
+          ...studyFlowFacts(flow),
+          provenance: studyProvenance(),
+        });
+      },
+      runStarted(snapshot) {
+        const flow = authoringDraft.flow || parseAuthoringFlow(authoringDraft.markdown);
+        return recordStudyEvent('run-started', {
+          runId: snapshot?.runId,
+          stepCount: snapshot?.totalSteps ?? studyFlowFacts(flow).stepCount,
+          provenance: 'human',
+        });
+      },
+      runTerminal(snapshot) {
+        return recordStudyEvent('run-terminal', {
+          runId: snapshot?.runId,
+          state: snapshot?.state,
+          durationMs: studyRunDuration(snapshot),
+          stepCount: snapshot?.totalSteps,
+          failureClass: studyFailureClass(snapshot),
+        });
+      },
+      resultsOpened(snapshot) {
+        if (!snapshot?.terminal || !snapshot?.runId) return false;
+        return recordStudyEvent('results-opened', {
+          runId: snapshot.runId,
+          state: snapshot.state,
+        });
+      },
+      improveScanned(findingCount) {
+        return recordStudyEvent('improve-scanned', { findingCount });
+      },
+      agentApprovalTransition(kind, data) {
+        const provenance = kind === 'agent-requested' || kind === 'agent-consumed'
+          ? 'agent'
+          : kind === 'agent-approved' || kind === 'agent-rejected'
+            ? 'human'
+            : 'mixed';
+        return recordStudyEvent(kind, {
+          approvalRequestId: data?.approvalRequestId,
+          durationMs: data?.durationMs,
+          provenance,
+        });
+      },
+      repairTransition(state, proposalId) {
+        const event = {
+          proposed: 'repair-proposed',
+          approved: 'repair-approved',
+          rejected: 'repair-rejected',
+          applied: 'repair-applied',
+          verified: 'repair-verified',
+          reverted: 'repair-rollback',
+          'rollback-required': 'repair-rollback',
+          'rollback-failed': 'repair-rollback',
+        }[state];
+        return event && proposalId
+          ? recordStudyEvent(event, { proposalId, provenance: state === 'proposed' ? studyProvenance() : 'human' })
+          : false;
+      },
+      downloadSessionEvidence() {
+        try {
+          const downloaded = downloadText(
+            'devflow-prototype-study-evidence.json',
+            JSON.stringify(prototypeStudyJournal.exportEvidence(), null, 2),
+            'application/json',
+          );
+          if (!downloaded) return false;
+          setStatus('Downloaded file-only local prototype-study evidence.');
+          return true;
+        } catch {
+          setStatus('Could not create local prototype-study evidence download.');
+          return false;
+        }
+      },
+      clearLocalSessionEvidence() {
+        const cleared = prototypeStudyJournal.clear();
+        setStatus(cleared
+          ? 'Local prototype-study evidence cleared.'
+          : 'Local prototype-study evidence could not be cleared.');
+        if (cleared) testWorkbench?.updateState({});
+        return cleared;
+      },
+    });
+  }
+
+  function createAuthoringController() {
+    const controller = {
+      state: () => ({
+        ...authoringDraft,
+        readiness: authoringReadiness(),
+        canDrive: isWriter && connected && !capturedTraceMode && !replaying,
+        recording: !!recordingId,
+        appendingRecording: !!recordingId && !!appendRecordingBase,
+        recordingId,
+        recordingSteps: recStepCount,
+        recordingStopping,
+      }),
+      update(patch, rerender = true) {
+        Object.assign(authoringDraft, patch || {});
+        if (authoringDraft.plan && !authoringDraft.planJson)
+          authoringDraft.planJson = JSON.stringify(authoringDraft.plan, null, 2);
+        notifyAuthoring(rerender);
+      },
+      noteGoalDefined(value) {
+        return studyController?.goalDefined(value) || false;
+      },
+      noteAssertionAdded(assertion) {
+        return studyController?.assertionAdded(assertion) || false;
+      },
+      message: setStatus,
+      selectedElement: () => {
+        const selected = selectedElement();
+        return selected ? elementInfo(selected) : null;
+      },
+      hasSelectedSource: () => {
+        const selected = selectedElement();
+        return !!(selected && selected.getAttribute('data-hasSource') === 'true');
+      },
+      openSelectedSource: () => openSource(),
+      async openSavedTest() {
+        authoringDraft.savedTestPickerOpen = true;
+        authoringDraft.savedTestsLoading = true;
+        authoringDraft.savedTestsError = null;
+        notifyAuthoring();
+        const result = await apiPost('/api/flows/files/list', {});
+        authoringDraft.savedTestsLoading = false;
+        authoringDraft.workspaceAvailable = result?.supported !== false;
+        if (!result || result.ok !== true) {
+          authoringDraft.savedTests = [];
+          authoringDraft.savedTestsError = result?.error || 'Could not list saved project tests.';
+        } else {
+          authoringDraft.savedTests = (result.tests || [])
+            .filter((test) => test && typeof test.name === 'string')
+            .map((test) => ({ name: test.name, modifiedAt: test.modifiedAt || null }));
+          authoringDraft.savedTestsError = null;
+        }
+        notifyAuthoring();
+      },
+      closeSavedTestPicker() {
+        authoringDraft.savedTestPickerOpen = false;
+        authoringDraft.savedTestsError = null;
+        notifyAuthoring();
+      },
+      async loadSavedTest(name) {
+        if (!name) return;
+        authoringDraft.savedTestsLoading = true;
+        notifyAuthoring();
+        try {
+          await loadProjectWorkflow(name);
+        } finally {
+          authoringDraft.savedTestsLoading = false;
+          notifyAuthoring();
+        }
+      },
+      chooseSavedTestFile: () => chooseWorkflowFile(),
+      async reloadSavedTest() {
+        const name = safeAuthoringName(authoringDraft.flowName || lastMarkdownName || 'scenario.md');
+        if (lastMarkdownSource === 'project' || authoringDraft.workspaceAvailable !== false) {
+          await loadProjectWorkflow(name);
+        } else {
+          await controller.loadPlan();
+        }
+        authoringDraft.stale = false;
+        authoringDraft.guidanceMessage = 'Reloaded the saved test. Review any local changes before continuing.';
+        notifyAuthoring();
+      },
+      async newPlan() {
+        const plan = createAuthoringPlan();
+        authoringDraft.flowName = safeAuthoringName(authoringDraft.flowName);
+        authoringDraft.plan = plan;
+        authoringDraft.planJson = JSON.stringify(plan, null, 2);
+        authoringDraft.planDirty = true;
+        authoringDraft.stale = false;
+        authoringDraft.bindingStale = false;
+        authoringDraft.errors = [];
+        authoringDraft.warnings = [];
+        notifyAuthoring();
+      },
+      async loadPlan() {
+        const name = safeAuthoringName(authoringDraft.flowName);
+        authoringDraft.saving = true;
+        notifyAuthoring();
+        try {
+          const response = await postAuthoring('/api/plans/load', { name });
+          applyAuthoringResponse(response, true);
+          if (response.supported === false) {
+            const hostResult = await testWorkbenchHostBridge.request('loadTestBundle', {});
+            const bundle = hostResult?.value;
+            if (hostResult?.ok && bundle?.markdown) {
+              syncAuthoringFlow(bundle.markdown, bundle.name || name, 'file');
+              if (bundle.planJson) {
+                try {
+                  authoringDraft.plan = JSON.parse(bundle.planJson);
+                  authoringDraft.planJson = bundle.planJson;
+                  authoringDraft.planRevision = authoringDraft.plan.revision || null;
+                  authoringDraft.committedPlan = cloneAuthoring(authoringDraft.plan);
+                  authoringDraft.planDirty = false;
+                } catch {
+                  authoringDraft.errors = ['The host returned an invalid plan sidecar.'];
+                }
+              }
+              setStatus(`Loaded ${bundle.name || name} through the host bridge.`);
+            } else {
+              setStatus(hostResult?.error || 'Workspace persistence is unavailable. Create a plan and download it, or use a host bridge.');
+            }
+          }
+          else if (response.ok)
+            setStatus(response.plan?.document ? `Loaded ${name} and its plan sidecar.` : `Loaded ${name}; no plan sidecar exists yet.`);
+          else
+            setStatus(response.error || 'Could not load the plan sidecar.');
+        } finally {
+          authoringDraft.saving = false;
+          notifyAuthoring();
+        }
+      },
+      async savePlan(confirmOverwrite) {
+        if (!authoringDraft.plan) {
+          setStatus('Create or load a plan before saving.');
+          return;
+        }
+        const name = safeAuthoringName(authoringDraft.flowName);
+        authoringDraft.saving = true;
+        notifyAuthoring();
+        try {
+          const response = await postAuthoring('/api/plans/save', {
+            name,
+            planJson: authoringDraft.planJson || JSON.stringify(authoringDraft.plan, null, 2),
+            expectedPlanRevision: authoringDraft.planRevision,
+            expectedPlanDigest: authoringDraft.committedPlanDigest || authoringDraft.planDigest,
+            expectedFlowDigest: authoringDraft.committedFlowDigest || authoringDraft.flowDigest,
+            confirmOverwrite: confirmOverwrite === true,
+          });
+          applyAuthoringResponse(response, response.ok === true && response.supported !== false);
+          if (response.supported === false || response.code === 'flow-not-found') {
+            controller.downloadPlan();
+            setStatus('A canonical workspace flow is unavailable, so the plan sidecar was downloaded instead.');
+          } else if (response.ok) {
+            setStatus(`Saved ${planSidecarName(name)}. No app action was started.`);
+          } else {
+            setStatus(response.error || 'Could not save the plan sidecar.');
+          }
+        } finally {
+          authoringDraft.saving = false;
+          notifyAuthoring();
+        }
+      },
+      discardPlan() {
+        authoringDraft.plan = cloneAuthoring(authoringDraft.committedPlan);
+        authoringDraft.planJson = authoringDraft.plan ? JSON.stringify(authoringDraft.plan, null, 2) : null;
+        authoringDraft.planDirty = false;
+        authoringDraft.stale = false;
+        authoringDraft.errors = [];
+        authoringDraft.warnings = [];
+        notifyAuthoring();
+        setStatus('Plan draft discarded.');
+      },
+      downloadPlan() {
+        if (!authoringDraft.plan) return;
+        const name = planSidecarName(safeAuthoringName(authoringDraft.flowName));
+        downloadText(name, authoringDraft.planJson || JSON.stringify(authoringDraft.plan, null, 2));
+        setStatus(`Downloaded ${name}.`);
+      },
+      downloadTestDraft() {
+        const name = safeAuthoringName(authoringDraft.flowName || lastMarkdownName || 'scenario.md');
+        if (authoringDraft.markdown) downloadText(name, authoringDraft.markdown);
+        if (authoringDraft.plan) {
+          downloadText(
+            planSidecarName(name),
+            authoringDraft.planJson || JSON.stringify(authoringDraft.plan, null, 2)
+          );
+        }
+        setStatus('Downloaded the current test draft.');
+      },
+      async validateFlow() {
+        if (!authoringDraft.markdown) {
+          setStatus('Load or record a flow before validating.');
+          return;
+        }
+        authoringDraft.saving = true;
+        notifyAuthoring();
+        try {
+          const response = await postAuthoring('/api/flows/validate', {
+            name: safeAuthoringName(authoringDraft.flowName),
+            markdown: authoringDraft.markdown,
+            planJson: authoringDraft.planJson,
+          });
+          applyAuthoringResponse(response, false);
+          setStatus(response.ok && !authoringDraft.errors.length
+            ? 'Test check passed. No app action was started.'
+            : response.error || 'Validation found issues.');
+        } finally {
+          authoringDraft.saving = false;
+          notifyAuthoring();
+        }
+      },
+      async diffFlow() {
+        if (!authoringDraft.markdown) return;
+        authoringDraft.saving = true;
+        notifyAuthoring();
+        try {
+          const response = await postAuthoring('/api/flows/diff', {
+            name: safeAuthoringName(authoringDraft.flowName),
+            markdown: authoringDraft.markdown,
+            planJson: authoringDraft.planJson,
+          });
+          applyAuthoringResponse(response, false);
+          setStatus(response.ok ? 'Generated deterministic draft diff.' : response.error || 'Could not generate a diff.');
+        } finally {
+          authoringDraft.saving = false;
+          notifyAuthoring();
+        }
+      },
+      async commitBundle(confirmOverwrite) {
+        if (!authoringDraft.markdown) {
+          setStatus('Record or load steps before saving a test.');
+          return;
+        }
+        if (!authoringDraft.plan || !hasAuthoringGoal()) {
+          openGoalForRecovery('A Goal is required to save this test. Your recorded draft is still here.');
+          return;
+        }
+        const name = safeAuthoringName(authoringDraft.flowName);
+        authoringDraft.saving = true;
+        notifyAuthoring();
+        try {
+          const payload = {
+            name,
+            markdown: authoringDraft.markdown,
+            planJson: authoringDraft.planJson || JSON.stringify(authoringDraft.plan, null, 2),
+            expectedPlanRevision: authoringDraft.planRevision,
+            expectedPlanDigest: authoringDraft.committedPlanDigest || authoringDraft.planDigest,
+            expectedFlowDigest: authoringDraft.committedFlowDigest || authoringDraft.flowDigest,
+            confirmOverwrite: confirmOverwrite === true,
+          };
+          const response = await postAuthoring('/api/flows/commit', payload);
+          applyAuthoringResponse(response, response.ok === true && response.supported !== false);
+          if (response.ok) {
+            lastMarkdown = authoringDraft.markdown;
+            lastMarkdownName = name;
+            lastMarkdownSource = 'project';
+            authoringDraft.rawDraft = false;
+            authoringDraft.recordingDraft = false;
+            authoringDraft.recordingDraftStepCount = 0;
+            authoringDraft.guidanceMessage = 'Test saved — ready to run.';
+            if (response.supported !== false) studyController?.testSaved();
+            setStatus('Test saved — ready to run.');
+            return;
+          }
+          if (response.supported === false) {
+            const bundle = await hostBundle(name);
+            if (!bundle) {
+              downloadText(name, authoringDraft.markdown);
+              downloadText(planSidecarName(name), payload.planJson);
+              setStatus('Could not bind a digest for host persistence; downloaded flow and plan instead.');
+              return;
+            }
+            const hostResult = await testWorkbenchHostBridge.request('saveTestBundle', { bundle });
+            if (hostResult?.ok) {
+              authoringDraft.flowDirty = false;
+              authoringDraft.planDirty = false;
+              authoringDraft.committedPlan = cloneAuthoring(authoringDraft.plan);
+              authoringDraft.committedFlowDigest = bundle.flowDigest;
+              authoringDraft.committedPlanDigest = bundle.planDigest;
+              authoringDraft.errors = [];
+              authoringDraft.warnings = [];
+              authoringDraft.stale = false;
+              authoringDraft.bindingStale = false;
+              authoringDraft.rawDraft = false;
+              authoringDraft.recordingDraft = false;
+              authoringDraft.recordingDraftStepCount = 0;
+              authoringDraft.guidanceMessage = 'Test saved — ready to run.';
+              studyController?.testSaved();
+              setStatus(hostResult.message || 'Test saved — ready to run.');
+            } else {
+              downloadText(name, authoringDraft.markdown);
+              downloadText(planSidecarName(name), payload.planJson);
+              setStatus((hostResult && hostResult.error) || 'Workspace persistence is unavailable; downloaded flow and plan instead.');
+            }
+          } else {
+            setStatus(response.error || 'Bundle commit failed; no partial success was reported.');
+          }
+        } finally {
+          authoringDraft.saving = false;
+          notifyAuthoring();
+        }
+      },
+      async verifySelector(selector) {
+        const response = await postAuthoring('/api/flows/selector/verify', { selector });
+        return response;
+      },
+      async applyHumanSelectedSelector({ stepId, stepSequence, selector } = {}) {
+        const automationId = typeof selector?.automationId === 'string' ? selector.automationId.trim() : '';
+        if (!automationId) {
+          setStatus('Choose a non-empty AutomationId before updating the draft.');
+          return { ok: false, error: 'A human-selected AutomationId is required.' };
+        }
+
+        // The bounded ambiguity card only proves that this ID was distinct among displayed
+        // candidates. Always use the canonical endpoint to prove global uniqueness immediately
+        // before changing the local draft.
+        const verification = await controller.verifySelector({ automationId });
+        if (!verification?.ok || verification.matchCount !== 1) {
+          const error = verification?.error || 'The selected AutomationId no longer resolves exactly one live element.';
+          setStatus(`${error} The draft was not changed.`);
+          return { ok: false, error, verification };
+        }
+
+        const flow = currentAuthoringFlow();
+        const stepIndex = authoringStepIndexForFailure(flow, stepId, stepSequence);
+        if (!flow || stepIndex < 0) {
+          const error = 'The failed flow step could not be mapped to one unique draft step. The draft was not changed.';
+          setStatus(error);
+          return { ok: false, error, verification };
+        }
+
+        const next = cloneAuthoring(flow);
+        const step = next.steps[stepIndex];
+        if (!activeAuthoringStepSelector(step)) {
+          const error = 'The mapped failed step has no active selector to replace. The draft was not changed.';
+          setStatus(error);
+          return { ok: false, error, verification };
+        }
+        const nextSelector = {
+          automationId,
+          matchCount: 1,
+          quality: verification.quality || 'durable',
+        };
+        if (step?.args?.selector) step.args.selector = nextSelector;
+        else step.target = nextSelector;
+        step.fragile = false;
+
+        // Only the active selector and its selector-derived fragility flag on the mapped failed
+        // step change. The cloned flow retains every action, assertion, expected value, and step
+        // position verbatim.
+        authoringDraft.flow = next;
+        authoringDraft.markdown = replaceAuthoringFlow(authoringDraft.markdown, next);
+        authoringDraft.flowDigest = null;
+        authoringDraft.flowDirty = true;
+        authoringDraft.stale = false;
+        authoringDraft.diff = null;
+        authoringDraft.errors = [];
+        authoringDraft.warnings = [];
+        authoringDraft.guidanceMessage =
+          'Selector updated in the draft only. Save test, then rerun it; DevFlow did not commit or run anything.';
+        notifyAuthoring();
+        setStatus(authoringDraft.guidanceMessage);
+        return { ok: true, verification, stepIndex, requireSaveAndRerun: true };
+      },
+      async verifyAssertion(assertion) {
+        return await postAuthoring('/api/flows/assert/verify', { assertion });
+      },
+      async startRecording() {
+        const started = await startRecording();
+        notifyAuthoring();
+        if (started) testWorkbench?.openStage?.('record', true);
+      },
+      async startAppendingRecording() {
+        const started = await startRecording({ append: true });
+        notifyAuthoring();
+        if (started) testWorkbench?.openStage?.('record', true);
+      },
+      async quickRecord() {
+        await startRecording({ quick: true });
+        notifyAuthoring();
+      },
+      async stopRecording() {
+        await stopRecording();
+        notifyAuthoring();
+      },
+      async cancelRecording() {
+        await cancelRecording();
+        notifyAuthoring();
+      },
+      async recordingStatus() {
+        await syncRecordingStatus();
+        notifyAuthoring();
+      },
+      downloadRecordingDraft() {
+        if (!authoringDraft.markdown) {
+          setStatus('There is no recording draft to download yet.');
+          return;
+        }
+        const name = safeAuthoringName(authoringDraft.flowName || lastMarkdownName || 'recording.md');
+        downloadText(name, authoringDraft.markdown);
+        setStatus(`Downloaded recording draft ${name}.`);
+      },
+      saveRecordingDraftFallback() {
+        if (!authoringDraft.markdown) {
+          setStatus('There is no recording draft to save yet.');
+          return;
+        }
+        const name = safeAuthoringName(authoringDraft.flowName || lastMarkdownName || 'recording.md');
+        if (hostHas('saveRecording') && postToHost('devflow:recordingComplete', {
+          name: name.replace(/\.md$/i, ''),
+          steps: authoringDraft.recordingDraftStepCount,
+          markdown: authoringDraft.markdown,
+        })) {
+          setStatus('Asked the host to save the raw recording draft.');
+          return;
+        }
+        controller.downloadRecordingDraft();
+      },
+    };
+    return Object.freeze(controller);
+  }
+
+  function workbenchAnnouncement(message, failure = false) {
+    const status = document.getElementById('df-workbench-status');
+    const alert = document.getElementById('df-workbench-alert');
+    if (status) status.textContent = message || '';
+    if (failure && alert) alert.textContent = message || '';
+    if (message) setStatus(message);
+  }
+
+  function workbenchUpdate(patch, tabs = ['run', 'trace']) {
+    if (!testWorkbench) return;
+    const selected = testWorkbench.state().selectedTab;
+    if (tabs.includes(selected)) testWorkbench.updateState(patch);
+  }
+
+  function workbenchRunStorageKey() {
+    const agent = inspectorAgent.id || 'default';
+    const instance = inspectorAgent.instanceId || 'unknown';
+    return `maui-devflow-workbench-run:${agent}:${instance}`;
+  }
+
+  function readWorkbenchRunStorage() {
+    try {
+      const raw = sessionStorage.getItem(workbenchRunStorageKey());
+      const parsed = raw ? JSON.parse(raw) : null;
+      return parsed && typeof parsed.runId === 'string' && typeof parsed.capabilityToken === 'string' ? parsed : null;
+    } catch {
+      return null;
+    }
+  }
+
+  function writeWorkbenchRunStorage(runId, capabilityToken) {
+    try {
+      if (!runId || !capabilityToken) return;
+      sessionStorage.setItem(workbenchRunStorageKey(), JSON.stringify({ runId, capabilityToken }));
+    } catch {
+      // Session restoration is best effort; the broker-side Inspector journal still covers host handoff.
+    }
+  }
+
+  function clearWorkbenchRunStorage() {
+    try { sessionStorage.removeItem(workbenchRunStorageKey()); } catch {}
+  }
+
+  function createOpaqueIdempotencyKey() {
+    if (window.crypto?.randomUUID) return `inspector-${crypto.randomUUID()}`;
+    return `inspector-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+
+  function currentAuthoringFlow() {
+    return authoringDraft.flow || parseAuthoringFlow(authoringDraft.markdown);
+  }
+
+  function currentRunPlanSignature() {
+    return JSON.stringify({
+      markdown: authoringDraft.markdown || '',
+      plan: authoringDraft.plan || null,
+      target: runController?.state?.().target?.agentInstanceId || inspectorAgent.instanceId || '',
+    });
+  }
+
+  function triggerBlobDownload(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.append(anchor);
+    anchor.click();
+    anchor.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  let runController = null;
+  let traceController = null;
+  let improveController = null;
+  let repairController = null;
+  let sourceProposalController = null;
+  let studyController = null;
+
+  function createRunController() {
+    const state = {
+      target: null,
+      brokerCapabilities: null,
+      preflight: null,
+      preflighting: false,
+      approved: false,
+      manualOneShot: false,
+      evidence: { includeScreenshot: false, includeWorkflow: false },
+      stalePlan: false,
+      idempotencyKey: null,
+      requestSignature: null,
+      preflightSignature: null,
+      starting: false,
+      cancelConfirm: false,
+      cancelPending: false,
+      run: null,
+      pollTimer: null,
+      pollAttempt: 0,
+      reproduction: null,
+      restoreWriterAfterRun: false,
+      runViewStartedAt: 0,
+      resultsTimer: null,
+    };
+
+    function flowAndPlan() {
+      const flow = currentAuthoringFlow();
+      return {
+        flow,
+        plan: authoringDraft.plan || null,
+        flowName: authoringDraft.flowName || flow?.name || lastMarkdownName || null,
+      };
+    }
+
+    function deriveProgress() {
+      const report = state.run?.report;
+      const flow = currentAuthoringFlow();
+      const reportSteps = Array.isArray(report?.steps) ? report.steps : [];
+      const flowSteps = Array.isArray(flow?.steps) ? flow.steps : [];
+      const latest = Array.isArray(state.run?.events) && state.run.events.length
+        ? state.run.events[state.run.events.length - 1]
+        : null;
+      const completed = Number.isFinite(Number(state.run?.completedSteps))
+        ? Math.max(0, Number(state.run.completedSteps))
+        : reportSteps.filter((step) => !step?.failureClass).length;
+      const currentId = state.run?.currentStepId || latest?.stepId ||
+        reportSteps[reportSteps.length - 1]?.stepId || null;
+      const failedId = report?.divergenceStepId || report?.failure?.stepId ||
+        reportSteps.find((step) => step?.failureClass)?.stepId || null;
+      const progressSteps = flowSteps.map((step, index) => {
+        const sequence = Number(step?.seq) || index + 1;
+        const matching = reportSteps.find((item) =>
+          item?.stepId === step?.stepId ||
+          Number(item?.sequence) === sequence);
+        const stateName = (failedId && (step?.stepId === failedId || matching?.stepId === failedId)) || matching?.failureClass
+          ? 'failed'
+          : matching || index < completed
+            ? 'done'
+            : currentId && (step?.stepId === currentId || matching?.stepId === currentId)
+              ? 'current'
+              : index === completed && state.run && !state.run.terminal
+                ? 'current'
+                : 'pending';
+        return {
+          sequence,
+          action: step?.label || step?.action || matching?.action || 'step',
+          stepId: step?.stepId || matching?.stepId || null,
+          state: stateName,
+        };
+      });
+      const currentStep = progressSteps.find((step) => step.state === 'current') ||
+        progressSteps.find((step) => step.state === 'failed') || null;
+      return {
+        currentStep: currentStep?.stepId || currentId || null,
+        currentAction: currentStep?.action || latest?.action || latest?.message || null,
+        completed,
+        total: state.run?.totalSteps ?? flowSteps.length,
+        progressSteps,
+        latestEvent: latest?.message || state.run?.message || null,
+      };
+    }
+
+    function notify(message, failure = false) {
+      const runState = state.run?.state || (state.preflighting ? 'preflight' : state.preflight ? 'preflight' : 'idle');
+      const traceState = traceController?.state?.().mode === 'imported'
+        ? 'provenance-warning'
+        : state.run?.report ? 'ready' : 'none';
+      workbenchUpdate({ run: runState, trace: traceState }, ['run', 'trace']);
+      if (message) workbenchAnnouncement(message, failure);
+    }
+
+    async function loadTarget() {
+      const response = await inspectorApi.getDetailed('/api/workbench/target');
+      if (!response.ok || !response.body?.ok) {
+        state.target = null;
+        state.brokerCapabilities = null;
+        return { ok: false, error: response.body?.error || response.error || 'Could not read the broker target.' };
+      }
+      state.target = response.body.target || null;
+      state.brokerCapabilities = response.body.broker || null;
+      return { ok: true };
+    }
+
+    async function buildRequest() {
+      const current = flowAndPlan();
+      if (!current.flow || !authoringDraft.markdown) {
+        return { error: 'Load or commit a semantic Markdown flow before running it.' };
+      }
+      const targetResult = await loadTarget();
+      if (!targetResult.ok) return targetResult;
+      const target = state.target || {};
+      if (!target.agentId || !target.agentInstanceId) {
+        return { error: 'The broker did not provide an exact live agent instance.' };
+      }
+
+      const digest = authoringDraft.flowDigest || await authoringSha256(current.flow);
+      if (digest && !authoringDraft.flowDigest) authoringDraft.flowDigest = digest;
+      const planDigest = authoringDraft.planDigest || (current.plan ? await authoringSha256(current.plan) : null);
+      if (planDigest && !authoringDraft.planDigest) authoringDraft.planDigest = planDigest;
+      state.stalePlan = !!(current.plan?.flow?.digest && digest &&
+        String(current.plan.flow.digest).toLowerCase() !== digest.toLowerCase());
+
+      const signature = currentRunPlanSignature();
+      if (!state.idempotencyKey || state.requestSignature !== signature) {
+        state.idempotencyKey = createOpaqueIdempotencyKey();
+        state.requestSignature = signature;
+      }
+
+      const request = {
+        agentId: target.agentId,
+        agentInstanceId: target.agentInstanceId,
+        idempotencyKey: state.idempotencyKey,
+        markdown: authoringDraft.markdown,
+        timeoutMs: 120000,
+        plan: current.plan || undefined,
+        context: {
+          manualOneShotAuthorization: state.manualOneShot === true,
+        },
+      };
+
+      // Browser/Canvas cannot safely calculate a source fingerprint. A reproduction run remains
+      // separate and explicit, but matching trust stays unavailable until a trusted host can supply
+      // all current flow/build/source/package/target facts.
+      if (state.reproduction?.expectation) request.reproductionExpectation = state.reproduction.expectation;
+      return { request, flow: current.flow, plan: current.plan };
+    }
+
+    function applySnapshot(snapshot, message) {
+      if (!snapshot || typeof snapshot !== 'object') return;
+      const previousStep = state.run?.currentStepId;
+      const previousCompleted = state.run?.completedSteps;
+      const previousEvent = Array.isArray(state.run?.events) && state.run.events.length
+        ? state.run.events[state.run.events.length - 1]?.eventId ||
+          state.run.events[state.run.events.length - 1]?.at ||
+          state.run.events.length
+        : null;
+      state.run = snapshot;
+      state.cancelPending = snapshot.cancellationRequested === true && snapshot.terminal !== true;
+      const progress = deriveProgress();
+      const currentEvent = Array.isArray(snapshot.events) && snapshot.events.length
+        ? snapshot.events[snapshot.events.length - 1]?.eventId ||
+          snapshot.events[snapshot.events.length - 1]?.at ||
+          snapshot.events.length
+        : null;
+      if (snapshot.report || snapshot.terminal) traceController?.setLiveRun?.(snapshot, state.reproduction);
+      if (!snapshot.terminal && (
+        previousStep !== snapshot.currentStepId ||
+        previousCompleted !== snapshot.completedSteps ||
+        previousEvent !== currentEvent)) {
+        // Reuse the normal coalesced Inspector refresh so screenshot and tree updates stay safe
+        // while the broker advances semantic steps.
+        scheduleRefresh(125);
+      }
+      if (snapshot.terminal) {
+        studyController?.runTerminal(snapshot);
+        if (state.pollTimer) {
+          clearTimeout(state.pollTimer);
+          state.pollTimer = null;
+        }
+        state.pollAttempt = 0;
+        state.cancelPending = false;
+        if (snapshot.state === 'passed') {
+          workbenchAnnouncement(message || 'Test passed. Results are ready.', false);
+        } else {
+          const terminalMessage = message || `Broker run finished: ${snapshot.state || 'unknown'}.`;
+          workbenchAnnouncement(terminalMessage, true);
+        }
+        const showResults = () => {
+          state.resultsTimer = null;
+          testWorkbench?.openStage?.('results', false);
+          setTimeout(() => traceController?.focusResults?.(), 0);
+        };
+        if (state.resultsTimer) clearTimeout(state.resultsTimer);
+        const visibleFor = state.runViewStartedAt ? Date.now() - state.runViewStartedAt : 900;
+        const remaining = Math.max(0, 900 - visibleFor);
+        if (remaining > 0) state.resultsTimer = setTimeout(showResults, remaining);
+        else showResults();
+        if (state.restoreWriterAfterRun) {
+          state.restoreWriterAfterRun = false;
+          setTimeout(() => {
+            if (!capturedTraceMode) control('claim');
+          }, 0);
+        }
+      }
+      workbenchUpdate({
+        run: snapshot.state || 'idle',
+        trace: snapshot.report ? 'ready' : 'none',
+        selectedTraceStep: traceController?.state?.().selectedStepId || null,
+      }, ['run', 'trace']);
+      return progress;
+    }
+
+    function schedulePoll() {
+      if (!state.run?.runId || state.run.terminal || state.pollTimer) return;
+      const delay = Math.min(5000, 400 * (2 ** Math.min(state.pollAttempt, 4)));
+      state.pollTimer = setTimeout(async () => {
+        state.pollTimer = null;
+        await refreshStatus();
+        if (!state.run?.terminal) schedulePoll();
+      }, delay);
+      state.pollAttempt += 1;
+    }
+
+    async function refreshStatus() {
+      if (!state.run?.runId) return;
+      const saved = readWorkbenchRunStorage();
+      const capabilityToken = saved?.runId === state.run.runId ? saved.capabilityToken : state.run.capabilityToken;
+      const response = await inspectorApi.postDetailed(
+        `/api/workbench/run/${encodeURIComponent(state.run.runId)}/status`,
+        { capabilityToken }
+      );
+      if (!response.ok || response.body?.ok !== true || !response.body?.run) {
+        const error = response.body?.error || response.error || 'Could not refresh broker run status.';
+        if (response.status === 403 || response.status === 404) {
+          clearWorkbenchRunStorage();
+          const journal = await inspectorApi.getDetailed('/api/workbench/run/journal');
+          if (journal.ok && journal.body?.run) {
+            applySnapshot(journal.body.run, 'Recovered broker run state from the Inspector journal.');
+          } else {
+            applySnapshot({
+              ...state.run,
+              state: 'orphaned',
+              terminal: true,
+              message: 'The saved run capability is no longer valid and no broker journal entry could be recovered.',
+            });
+          }
+          return;
+        }
+        notify(error, true);
+        return;
+      }
+      applySnapshot(response.body.run);
+      if (!response.body.run.terminal) schedulePoll();
+    }
+
+    return Object.freeze({
+      state() {
+        const current = flowAndPlan();
+        const progress = deriveProgress();
+        return {
+          ...state,
+          flow: current.flow,
+          plan: current.plan,
+          flowName: current.flowName,
+          flowDigest: authoringDraft.flowDigest,
+          planDigest: authoringDraft.planDigest,
+          readiness: authoringReadiness(),
+          agent: inspectorAgent,
+          importedMode: traceController?.state?.().mode === 'imported',
+          hasTrace: !!state.run?.report,
+          ...progress,
+        };
+      },
+      async openPreflight() {
+        if (traceController?.state?.().mode === 'imported') {
+          workbenchAnnouncement('Imported result mode is read-only. Use Reproduce locally to open a separate live run check.', true);
+          return;
+        }
+        if (!state.reproduction && !authoringReadiness().savedBundle) {
+          if (!hasAuthoringGoal()) openGoalForRecovery('Add a Goal and save the test before running it.');
+          else {
+            testWorkbench?.openStage?.('review', true);
+            workbenchAnnouncement('Save the test before running it. Your recorded draft is still here.', true);
+          }
+          return;
+        }
+        if (state.run?.terminal) {
+          state.run = null;
+          state.preflight = null;
+          state.preflightSignature = null;
+          state.approved = false;
+          state.manualOneShot = false;
+        }
+        await this.refreshPreflight();
+      },
+      async refreshPreflight() {
+        if (traceController?.state?.().mode === 'imported') return;
+        if (!state.reproduction && !authoringReadiness().savedBundle) {
+          if (!hasAuthoringGoal()) openGoalForRecovery('Add a Goal and save the test before running it.');
+          else {
+            testWorkbench?.openStage?.('review', true);
+            workbenchAnnouncement('Save the test before running it. Your recorded draft is still here.', true);
+          }
+          return;
+        }
+        state.preflighting = true;
+        notify('Checking whether the test is ready to run…');
+        try {
+          const built = await buildRequest();
+          if (!built.request) {
+            state.preflight = { ok: false, errors: [built.error || 'Could not build a run request.'] };
+            notify(built.error || 'Could not build a run request.', true);
+            return;
+          }
+          const response = await inspectorApi.postDetailed('/api/workbench/run/preflight', {
+            run: built.request,
+            evidence: state.evidence,
+          });
+          state.preflight = response.body || { ok: false, error: response.error || 'No run-check response.' };
+          state.preflightSignature = state.requestSignature;
+          if (!response.ok || state.preflight.ok !== true) {
+            notify(state.preflight.error || 'The test is not ready to run.', true);
+          } else {
+            authoringDraft.flowDigest = state.preflight.flowDigest || authoringDraft.flowDigest;
+            notify('The test is ready. Review the summary before starting.');
+          }
+        } finally {
+          state.preflighting = false;
+          workbenchUpdate({ run: 'preflight' }, ['run']);
+        }
+      },
+      setApproval(value) {
+        state.approved = value === true;
+        workbenchUpdate({ run: 'preflight' }, ['run']);
+      },
+      setManualOneShot(value) {
+        state.manualOneShot = value === true;
+        state.preflight = null;
+        state.preflightSignature = null;
+        workbenchUpdate({ run: 'preflight' }, ['run']);
+      },
+      setEvidenceConsent(patch) {
+        state.evidence = { ...state.evidence, ...(patch || {}) };
+        workbenchUpdate({ run: 'preflight' }, ['run']);
+      },
+      async reviewAndRun() {
+        if (traceController?.state?.().mode === 'imported') {
+          notify('Imported trace mode cannot start a run.', true);
+          return;
+        }
+        if (state.preflight?.ok !== true) {
+          notify('Choose Check run before reviewing and starting.', true);
+          return;
+        }
+        if (flowAndPlan().plan?.sideEffectPolicy === 'non-replayable' && state.manualOneShot !== true) {
+          notify('Authorize the one human run in Run details before continuing.', true);
+          return;
+        }
+        const confirmed = await confirmModal(
+          'Run this saved test against the live app? It may drive the app and change test data.',
+          'Run test'
+        );
+        if (!confirmed) {
+          notify('Run was not started.');
+          return;
+        }
+        state.approved = true;
+        await this.start();
+      },
+      async start() {
+        if (traceController?.state?.().mode === 'imported') {
+          notify('Imported trace mode cannot start a run.', true);
+          return;
+        }
+        if (state.approved !== true || state.preflight?.ok !== true) {
+          notify('Review the current run check and explicitly approve it before starting.', true);
+          return;
+        }
+        state.starting = true;
+        state.runViewStartedAt = Date.now();
+        testWorkbench?.openStage?.('run', false);
+        notify('Starting broker-owned workflow run…');
+        let handedOffWriter = false;
+        try {
+          const built = await buildRequest();
+          if (!built.request) {
+            notify(built.error || 'Could not build a run request.', true);
+            return;
+          }
+          if (state.preflightSignature !== state.requestSignature) {
+            state.preflight = null;
+            notify('The test or target changed after the run check. Check it again before starting.', true);
+            return;
+          }
+          handedOffWriter = isWriter;
+          state.restoreWriterAfterRun = handedOffWriter;
+          const startAttemptedAt = Date.now();
+          const response = await inspectorApi.postDetailed('/api/workbench/run/start', {
+            run: built.request,
+            evidence: state.evidence,
+          });
+          const result = response.body;
+          if (!response.ok || result?.ok !== true || !result.run || !result.capabilityToken) {
+            const ambiguous = response.status === 0 || response.status >= 500 || response.ok === true;
+            if (handedOffWriter && ambiguous) {
+              const journalPath = state.idempotencyKey
+                ? `/api/workbench/run/journal?idempotencyKey=${encodeURIComponent(state.idempotencyKey)}`
+                : '/api/workbench/run/journal';
+              let recovered = null;
+              let delay = 0;
+              let observedPending = false;
+              const registrationDeadline = Date.now() + 45000;
+              while (true) {
+                if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+                const journal = await inspectorApi.getDetailed(journalPath);
+                const candidate = journal.ok && journal.body?.ok === true ? journal.body.run : null;
+                const createdAt = Date.parse(candidate?.createdAt || '');
+                const sameFlow = !state.preflight?.flowDigest ||
+                  candidate?.flowDigest === state.preflight.flowDigest;
+                const recent = !Number.isFinite(createdAt) || createdAt >= startAttemptedAt - 5000;
+                if (candidate?.runId && sameFlow && recent) {
+                  recovered = candidate;
+                  break;
+                }
+                if (journal.ok && journal.body?.ok === true) {
+                  if (journal.body.pending === true) {
+                    observedPending = true;
+                  } else if (journal.body.pending === false &&
+                    (observedPending || Date.now() >= registrationDeadline)) {
+                    break;
+                  }
+                }
+                delay = Math.min(delay ? delay * 2 : 100, 2000);
+              }
+              if (recovered?.runId) {
+                setWriterUi(false, true, 'Broker workflow run', null);
+                state.run = recovered;
+                state.cancelConfirm = false;
+                state.cancelPending = false;
+                state.pollAttempt = 0;
+                applySnapshot(recovered, 'Recovered the broker run after the start response was interrupted.');
+                if (!recovered.terminal) schedulePoll();
+                return;
+              }
+            }
+            state.preflight = result || state.preflight;
+            notify(result?.error || response.error || 'Broker did not start the run.', true);
+            if (handedOffWriter && !capturedTraceMode) {
+              state.restoreWriterAfterRun = false;
+              await control('claim');
+            }
+            return;
+          }
+          if (result.existing !== true) studyController?.runStarted(result.run);
+          if (handedOffWriter)
+            setWriterUi(false, true, 'Broker workflow run', null);
+          state.run = { ...result.run, capabilityToken: result.capabilityToken };
+          writeWorkbenchRunStorage(result.run.runId, result.capabilityToken);
+          state.cancelConfirm = false;
+          state.cancelPending = false;
+          state.pollAttempt = 0;
+          applySnapshot(state.run, result.existing ? 'Restored the existing idempotent broker run.' : 'Broker run queued.');
+          schedulePoll();
+        } finally {
+          if (handedOffWriter && !state.run?.runId && state.restoreWriterAfterRun) {
+            state.restoreWriterAfterRun = false;
+            if (!capturedTraceMode) await control('claim');
+          }
+          if (!state.run?.runId) state.runViewStartedAt = 0;
+          state.starting = false;
+          workbenchUpdate({ run: state.run?.state || 'preflight' }, ['run']);
+        }
+      },
+      requestCancel() {
+        if (!state.run?.runId || state.run.terminal) {
+          notify('There is no active broker run to cancel.');
+          return;
+        }
+        state.cancelConfirm = true;
+        workbenchUpdate({ run: state.run.state }, ['run']);
+      },
+      dismissCancel() {
+        state.cancelConfirm = false;
+        workbenchUpdate({ run: state.run?.state || 'idle' }, ['run']);
+      },
+      async cancel() {
+        if (!state.run?.runId) return;
+        state.cancelPending = true;
+        state.cancelConfirm = false;
+        notify('Cancellation requested. An in-flight command may already complete.');
+        const saved = readWorkbenchRunStorage();
+        const token = saved?.runId === state.run.runId ? saved.capabilityToken : state.run.capabilityToken;
+        const response = await inspectorApi.postDetailed(
+          `/api/workbench/run/${encodeURIComponent(state.run.runId)}/cancel`,
+          { capabilityToken: token }
+        );
+        if (!response.ok || response.body?.ok !== true) {
+          state.cancelPending = false;
+          notify(response.body?.error || response.error || 'The broker could not accept cancellation.', true);
+          return;
+        }
+        if (response.body.run) applySnapshot(response.body.run);
+        if (!state.run?.terminal) schedulePoll();
+      },
+      async restore() {
+        const stored = readWorkbenchRunStorage();
+        if (stored) {
+          state.run = { runId: stored.runId, capabilityToken: stored.capabilityToken, state: 'queued', terminal: false };
+          state.restoreWriterAfterRun = true;
+          await refreshStatus();
+          return;
+        }
+        const response = await inspectorApi.getDetailed('/api/workbench/run/journal');
+        if (response.ok && response.body?.run) {
+          state.run = response.body.run;
+          state.restoreWriterAfterRun = response.body.run.terminal !== true;
+          applySnapshot(response.body.run, response.body.restored ? 'Restored active broker run from the Inspector journal.' : undefined);
+          if (!response.body.run.terminal) schedulePoll();
+        }
+      },
+      async openReproduction(imported) {
+        state.reproduction = imported
+          ? {
+            artifactId: imported.status?.identity?.id,
+            capabilityToken: imported.capabilityToken,
+            current: null,
+            expectation: null,
+            message: 'Current source fingerprint is not available to this browser. The separate run remains diagnostic-only until a trusted host supplies all matching facts.',
+          }
+          : null;
+        state.preflight = null;
+        state.preflightSignature = null;
+        state.approved = false;
+        state.manualOneShot = false;
+        await setCapturedTraceMode(false);
+        await this.refreshPreflight();
+        workbenchUpdate({ run: 'preflight', trace: 'provenance-warning' }, ['run', 'trace']);
+        workbenchAnnouncement('A separate local run check is open. It has not started a run.', false);
+      },
+      focusDivergence() {
+        traceController?.focusSelectedStep?.();
+      },
+      focusResults() {
+        traceController?.focusResults?.();
+      },
+      async runAgain() {
+        if (state.resultsTimer) {
+          clearTimeout(state.resultsTimer);
+          state.resultsTimer = null;
+        }
+        state.run = null;
+        state.runViewStartedAt = 0;
+        state.preflight = null;
+        state.preflightSignature = null;
+        state.idempotencyKey = null;
+        state.requestSignature = null;
+        state.approved = false;
+        state.manualOneShot = false;
+        testWorkbench?.openStage?.('run', false);
+        await this.refreshPreflight();
+        workbenchAnnouncement('Run check opened. The test has not started.', false);
+      },
+      async legacyQuickReplay() {
+        await legacyQuickReplay();
+      },
+      async bindReproduction() {
+        const imported = state.reproduction;
+        if (!imported?.artifactId || !imported?.capabilityToken || !state.run?.terminal) {
+          notify('A completed separate local run and imported artifact are required before matching.', true);
+          return;
+        }
+        if (!imported.expectation) {
+          notify(imported.message || 'Current source matching facts are unavailable in this host.', true);
+          return;
+        }
+        const response = await inspectorApi.postDetailed(
+          `/api/workbench/artifacts/${encodeURIComponent(imported.artifactId)}/bind-local-reproduction`,
+          {
+            capabilityToken: imported.capabilityToken,
+            localRunId: state.run.runId,
+            current: imported.expectation,
+          }
+        );
+        traceController?.setReproduction?.(response.body);
+        notify(response.ok && response.body?.ok
+          ? 'Local reproduction facts were bound to the imported diagnostic artifact.'
+          : response.body?.error || response.error || 'Local reproduction binding was not established.',
+          !(response.ok && response.body?.ok));
+      },
+    });
+  }
+
+  function createTraceController() {
+    const state = {
+      mode: 'none',
+      run: null,
+      report: null,
+      selectedStepId: null,
+      importing: false,
+      imported: null,
+      reproductionOpening: false,
+      reproduction: null,
+    };
+
+    function currentSteps() {
+      return Array.isArray(state.report?.steps) ? state.report.steps : [];
+    }
+
+    function firstDivergence(report) {
+      return report?.divergenceStepId || report?.failure?.stepId ||
+        currentSteps().find((step) => step?.failureClass)?.stepId || null;
+    }
+
+    function notify() {
+      const trace = state.mode === 'imported' ? 'provenance-warning' : state.report ? 'ready' : 'none';
+      workbenchUpdate({ trace, selectedTraceStep: state.selectedStepId }, ['trace', 'run']);
+    }
+
+    function fileKind(name) {
+      const normalized = String(name || '').toLowerCase();
+      if (normalized.endsWith('.mauitrace')) return 'mauitrace';
+      if (normalized.endsWith('.json')) return 'flow-run';
+      return null;
+    }
+
+    function browserPickTrace() {
+      return new Promise((resolve) => {
+        const input = document.createElement('input');
+        input.type = 'file';
+        input.accept = '.json,.mauitrace,application/json,application/vnd.maui.evidence+zip';
+        input.className = 'df-sr-only';
+        input.addEventListener('change', async () => {
+          const file = input.files?.[0] || null;
+          input.remove();
+          if (!file) {
+            resolve(null);
+            return;
+          }
+          try {
+            resolve({ name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) });
+          } catch {
+            resolve({ error: 'The selected artifact could not be read.' });
+          }
+        }, { once: true });
+        document.body.append(input);
+        input.click();
+      });
+    }
+
+    function decodeBase64(value) {
+      if (typeof value !== 'string' || value.length > 90 * 1024 * 1024) return null;
+      try {
+        const decoded = atob(value);
+        const bytes = new Uint8Array(decoded.length);
+        for (let index = 0; index < decoded.length; index++) bytes[index] = decoded.charCodeAt(index);
+        return bytes;
+      } catch {
+        return null;
+      }
+    }
+
+    async function importBytes(name, bytes) {
+      const kind = fileKind(name);
+      if (!kind) {
+        workbenchAnnouncement('Choose a .json flow-run report or a .mauitrace v1 bundle.', true);
+        return;
+      }
+      const maximum = kind === 'flow-run' ? 1024 * 1024 : 64 * 1024 * 1024;
+      if (!(bytes instanceof Uint8Array) || !bytes.byteLength || bytes.byteLength > maximum) {
+        workbenchAnnouncement(`The selected ${kind} artifact exceeds its supported bounded size.`, true);
+        return;
+      }
+      state.importing = true;
+      notify();
+      try {
+        const response = await inspectorApi.postBinary(
+          `/api/workbench/artifacts/import?kind=${encodeURIComponent(kind)}`,
+          bytes,
+          kind === 'flow-run' ? 'application/json' : 'application/vnd.maui.evidence+zip'
+        );
+        const result = response ? await response.json().catch(() => null) : null;
+        if (!response?.ok || !result?.ok || !result.status?.identity?.id || !result.capabilityToken) {
+          workbenchAnnouncement(result?.error || `The broker rejected the imported ${kind} artifact.`, true);
+          return;
+        }
+        const artifactId = result.status.identity.id;
+        const capabilityToken = result.capabilityToken;
+        const [statusResponse, projectionResponse] = await Promise.all([
+          inspectorApi.postDetailed(`/api/workbench/artifacts/${encodeURIComponent(artifactId)}/status`, { capabilityToken }),
+          inspectorApi.postDetailed(`/api/workbench/artifacts/${encodeURIComponent(artifactId)}/projection`, { capabilityToken }),
+        ]);
+        if (!statusResponse.ok || !projectionResponse.ok || !statusResponse.body?.status || !projectionResponse.body?.projection) {
+          workbenchAnnouncement('The imported artifact was retained, but its safe diagnostic projection is unavailable.', true);
+          return;
+        }
+        state.mode = 'imported';
+        state.imported = {
+          name: String(name || 'imported artifact').slice(0, 255),
+          capabilityToken,
+          status: statusResponse.body.status,
+          projection: projectionResponse.body.projection,
+        };
+        state.run = null;
+        state.report = null;
+        state.selectedStepId = null;
+        state.reproduction = null;
+        await setCapturedTraceMode(true);
+        notify();
+        workbenchAnnouncement('Imported trace opened in captured read-only mode. No app action was started.');
+      } finally {
+        state.importing = false;
+        notify();
+      }
+    }
+
+    return Object.freeze({
+      state: () => ({ ...state }),
+      async pickTrace() {
+        if (state.importing) return;
+        let picked = null;
+        if (testWorkbenchHostBridge.has('pickTrace')) {
+          const host = await testWorkbenchHostBridge.request('pickTrace', {}, 60000);
+          if (!host?.ok) {
+            workbenchAnnouncement(host?.error || 'The host did not provide a trace artifact.', true);
+            return;
+          }
+          const value = host.value || {};
+          const bytes = decodeBase64(value.bytesBase64);
+          picked = bytes ? { name: value.name, bytes } : { error: 'The host returned an invalid bounded trace artifact.' };
+        } else {
+          picked = await browserPickTrace();
+        }
+        if (!picked) return;
+        if (picked.error) {
+          workbenchAnnouncement(picked.error, true);
+          return;
+        }
+        await importBytes(picked.name, picked.bytes);
+      },
+      setLiveRun(snapshot, reproduction) {
+        state.mode = 'local';
+        state.run = snapshot;
+        state.report = snapshot?.report || null;
+        state.selectedStepId = firstDivergence(state.report);
+        if (reproduction) {
+          state.reproduction = {
+            ...state.reproduction,
+            candidateRunId: snapshot?.runId,
+            canBind: !!reproduction.expectation,
+            unavailableReason: reproduction.expectation ? null : reproduction.message,
+            source: reproduction,
+          };
+        }
+        notify();
+      },
+      selectStep(stepId) {
+        if (!stepId) return;
+        state.selectedStepId = stepId;
+        notify();
+      },
+      canMove(direction) {
+        const steps = currentSteps();
+        const index = steps.findIndex((step) => step?.stepId === state.selectedStepId);
+        return direction < 0 ? index > 0 : index >= 0 && index < steps.length - 1;
+      },
+      previousStep() {
+        const steps = currentSteps();
+        const index = steps.findIndex((step) => step?.stepId === state.selectedStepId);
+        if (index > 0) this.selectStep(steps[index - 1]?.stepId);
+      },
+      nextStep() {
+        const steps = currentSteps();
+        const index = steps.findIndex((step) => step?.stepId === state.selectedStepId);
+        if (index >= 0 && index < steps.length - 1) this.selectStep(steps[index + 1]?.stepId);
+      },
+      focusSelectedStep() {
+        const id = state.selectedStepId;
+        if (!id) return;
+        setTimeout(() => {
+          const button = [...document.querySelectorAll('[data-trace-step]')]
+            .find((candidate) => candidate.dataset.traceStep === id);
+          button?.focus({ preventScroll: true });
+        }, 0);
+      },
+      focusResults() {
+        const id = state.selectedStepId || firstDivergence(state.report);
+        setTimeout(() => {
+          if (id) {
+            const button = [...document.querySelectorAll('[data-trace-step]')]
+              .find((candidate) => candidate.dataset.traceStep === id);
+            if (button) {
+              button.focus({ preventScroll: true });
+              return;
+            }
+          }
+          document.getElementById('df-results-summary')?.focus({ preventScroll: true });
+        }, 0);
+      },
+      runAgain() {
+        return runController?.runAgain?.();
+      },
+      hasDownloadableEvidence() {
+        return !!state.run?.runId && Array.isArray(state.report?.artifacts) &&
+          state.report.artifacts.some((artifact) => artifact?.kind === 'mauitrace');
+      },
+      async downloadEvidence() {
+        const run = state.run;
+        if (!run?.runId) return;
+        const stored = readWorkbenchRunStorage();
+        const capabilityToken = stored?.runId === run.runId ? stored.capabilityToken : run.capabilityToken;
+        const response = await inspectorApi.postBlob(
+          `/api/workbench/run/${encodeURIComponent(run.runId)}/evidence`,
+          { capabilityToken }
+        );
+        if (!response?.ok) {
+          const error = response ? await response.json().catch(() => null) : null;
+          workbenchAnnouncement(error?.error || 'No linked .mauitrace evidence is available for this run.', true);
+          return;
+        }
+        triggerBlobDownload(await response.blob(), `devflow-${run.runId}.mauitrace`);
+        workbenchAnnouncement('Downloaded linked redacted .mauitrace v1 evidence.');
+      },
+      async reproduceLocally() {
+        if (!state.imported || state.reproductionOpening) return;
+        state.reproductionOpening = true;
+        // Keep the imported projection isolated, but leave captured mode before opening the
+        // separate live preflight. This action still does not start a run.
+        state.mode = 'reproduction';
+        notify();
+        try {
+          await runController?.openReproduction?.(state.imported);
+          testWorkbench?.openStage?.('run', true);
+        } finally {
+          state.reproductionOpening = false;
+          notify();
+        }
+      },
+      async showImported() {
+        if (!state.imported) return;
+        state.mode = 'imported';
+        await setCapturedTraceMode(true);
+        notify();
+      },
+      setReproduction(result) {
+        state.reproduction = result || null;
+        if (state.imported) state.imported.status = result?.status || state.imported.status;
+        notify();
+      },
+      verifyReproduction() {
+        runController?.bindReproduction?.();
+      },
+    });
+  }
+
+  function createRepairController() {
+    const state = {
+      classifying: false,
+      proposing: false,
+      eligibility: null,
+      classificationToken: null,
+      checkpoint: null,
+      proposal: null,
+      generation: null,
+      error: null,
+      history: [],
+    };
+
+    function current() {
+      const flow = currentAuthoringFlow();
+      const plan = authoringDraft.plan || null;
+      const trace = traceController?.state?.();
+      const report = trace?.report || trace?.run?.report || null;
+      const failedStep = Array.isArray(report?.steps)
+        ? report.steps.find((step) => step?.stepId === (report?.failure?.stepId || report?.divergenceStepId)) || null
+        : null;
+      return { flow, plan, report, failedStep };
+    }
+
+    function setRepairState(message, failure = false) {
+      const proposal = state.proposal?.proposal || state.proposal || null;
+      const repair = proposal?.state ||
+        (state.classifying ? 'classifying' : state.eligibility?.eligible ? 'proposed' : 'unavailable');
+      studyController?.repairTransition(repair, proposal?.proposalId);
+      workbenchUpdate({ repair }, ['repair']);
+      if (message) workbenchAnnouncement(message, failure);
+    }
+
+    function baseFlow(flow) {
+      const digest = authoringDraft.flowDigest || null;
+      return {
+        path: authoringDraft.flowName || `${flow?.name || 'scenario'}.md`,
+        flowId: flow?.flowId || null,
+        revision: Number.isInteger(flow?.revision) ? flow.revision : null,
+        digest,
+      };
+    }
+
+    function currentTrust(report) {
+      // A live Inspector run is current local evidence. Imported/attested traces remain
+      // diagnostic-only until the separate local reproduction has completed.
+      return traceController?.state?.().mode === 'local' && report ? 'current-local-run' : 'untrusted';
+    }
+
+    return Object.freeze({
+      state: () => ({
+        ...state,
+        history: [...state.history],
+        current: current(),
+        canMutate: isWriter && connected && !capturedTraceMode,
+      }),
+      async classify() {
+        const { flow, plan, report, failedStep } = current();
+        if (!flow || !report?.failure) {
+          state.error = 'Open a failed local flow run before classifying selector repair eligibility.';
+          setRepairState(state.error, true);
+          return;
+        }
+        state.classifying = true;
+        state.error = null;
+        state.classificationToken = null;
+        setRepairState('Classifying repair eligibility without changing the flow.');
+        try {
+          const response = await inspectorApi.postDetailed('/api/workbench/repair/classify', {
+            run: report,
+            plan,
+            replayEligibility: report.replayEligibility || null,
+            expectedCheckpoint: failedStep?.expectedCheckpoint || null,
+            currentCheckpoint: failedStep?.observedCheckpoint || null,
+            beforeDispatch: failedStep?.dispatch == null && report.failure?.phase === 'resolution',
+            isCurrentLocalRun: currentTrust(report) === 'current-local-run',
+            artifactTrust: currentTrust(report),
+            // A prior trusted unique resolution must be supplied by canonical run history. This
+            // browser intentionally does not invent it from the failed lookup.
+            priorActiveSelectorResolution: null,
+            targetFingerprint: failedStep?.fingerprint || null,
+            additionalFailureCodes: [report.outcome?.status, failedStep?.failureClass].filter(Boolean),
+          });
+          if (!response.ok || !response.body?.ok) {
+            state.error = response.body?.error || response.error || 'Repair eligibility classification failed.';
+            return;
+          }
+          state.eligibility = response.body.eligibility || null;
+          state.classificationToken = response.body.classificationToken || null;
+          state.checkpoint = response.body.currentCheckpoint || null;
+          state.error = null;
+          const allowed = state.eligibility?.eligible === true;
+          setRepairState(
+            allowed
+              ? 'Repair eligibility passed. Review deterministic candidates before requesting a proposal.'
+              : 'Repair is unavailable. Review every explicit ineligibility reason.',
+            !allowed);
+        } finally {
+          state.classifying = false;
+          setRepairState();
+        }
+      },
+      async propose() {
+        const { flow, report, failedStep } = current();
+        if (!state.eligibility?.eligible || !flow || !report || !failedStep) {
+          state.error = 'Eligibility, a failed local run, and a semantic flow are required before proposing a repair.';
+          setRepairState(state.error, true);
+          return;
+        }
+        state.proposing = true;
+        state.error = null;
+        try {
+          const candidates = Array.isArray(failedStep.selectorCandidates) ? failedStep.selectorCandidates : [];
+          const response = await inspectorApi.postDetailed('/api/workbench/repair/propose', {
+            classificationToken: state.classificationToken,
+            input: {
+              eligibility: state.eligibility,
+              plan: current().plan,
+              flow,
+              baseFlow: baseFlow(flow),
+              sourceRunId: report.runId,
+              sourceStepId: report.failure?.stepId || failedStep.stepId,
+              sourceFailureId: report.failure?.failureId || null,
+              sourceFailureCode: report.failure?.code || report.failure?.class,
+              priorFingerprint: null,
+              selectorHealthCandidates: candidates,
+              // The browser never claims a fresh live uniqueness/fingerprint proof. A capable
+              // lifecycle host supplies these facts; without them the deterministic core abstains.
+              currentResolutions: [],
+              trust: 'current-local-run',
+            },
+            agentOriginated: false,
+          });
+          state.generation = response.body?.generation || null;
+          const proposal = Array.isArray(response.body?.proposals) ? response.body.proposals[0] : null;
+          state.proposal = proposal || null;
+          if (!response.ok || !response.body?.ok || !proposal) {
+            state.error = response.body?.error ||
+              'No safe repair proposal was generated. Ambiguous, unproven, or unsafe candidates remain diagnostic-only.';
+            setRepairState(state.error, true);
+            return;
+          }
+          state.history = [...state.history, { state: proposal.state, at: new Date().toISOString() }];
+          setRepairState('A selector-only proposal is available for human preview. Nothing has been applied.');
+        } finally {
+          state.proposing = false;
+          setRepairState();
+        }
+      },
+      async preview() {
+        const id = state.proposal?.proposal?.proposalId || state.proposal?.proposalId;
+        if (!id) return;
+        const response = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/preview`, {});
+        if (!response.ok || !response.body?.ok) {
+          state.error = response.body?.error || response.error || 'Repair preview could not be loaded.';
+          setRepairState(state.error, true);
+          return;
+        }
+        state.proposal = response.body.proposal;
+        setRepairState('Selector-only diff preview loaded. Assertions, actions, values, and order are unchanged.');
+      },
+      async refresh() {
+        const id = state.proposal?.proposal?.proposalId || state.proposal?.proposalId;
+        if (!id) return;
+        const response = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/status`, {});
+        if (response.ok && response.body?.proposal) {
+          state.proposal = response.body.proposal;
+          setRepairState();
+        } else {
+          state.error = response.body?.error || response.error || 'Repair status could not be refreshed.';
+          setRepairState(state.error, true);
+        }
+      },
+      async reject() {
+        const id = state.proposal?.proposal?.proposalId || state.proposal?.proposalId;
+        if (!id) return;
+        const response = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/reject`, {
+          reviewer: 'workbench-user',
+          reasonCode: 'human-rejected',
+        });
+        if (response.ok && response.body?.proposal) {
+          state.proposal = response.body.proposal;
+          setRepairState('The proposal was rejected. The flow and source remain unchanged.');
+        } else {
+          state.error = response.body?.error || response.error || 'The proposal could not be rejected.';
+          setRepairState(state.error, true);
+        }
+      },
+      async requestApproval() {
+        // This records an explicit human review request only. It cannot apply; validation and the
+        // single-use approval grant are still required by the broker.
+        const id = state.proposal?.proposal?.proposalId || state.proposal?.proposalId;
+        if (!id) return;
+        const response = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/approve`, {
+          reviewer: 'workbench-user',
+          humanConfirmed: true,
+          policy: 'repair-policy-v1',
+        });
+        if (response.ok && response.body?.proposal) {
+          state.proposal = response.body.proposal;
+          state.proposal.grant = response.body.grant;
+          setRepairState('Human approval was recorded. Apply remains a separate explicit action.');
+        } else {
+          state.error = response.body?.error || response.error ||
+            'Approval requires a successful transient validation and a current base flow.';
+          setRepairState(state.error, true);
+        }
+      },
+      async validate() {
+        const id = state.proposal?.proposal?.proposalId || state.proposal?.proposalId;
+        if (!id) return;
+        const issued = await inspectorApi.postDetailed('/api/workbench/repair/grant', {
+          proposalId: id,
+          kind: 'validation',
+          reviewer: 'workbench-user',
+          humanConfirmed: true,
+          policy: 'repair-policy-v1',
+        });
+        if (!issued.ok || !issued.body?.grant || !issued.body?.proposal) {
+          state.error = issued.body?.error || issued.error || 'A human validation grant could not be issued.';
+          setRepairState(state.error, true);
+          return;
+        }
+        state.proposal = issued.body.proposal;
+        const result = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/validate`, {
+          validationGrant: issued.body.grant,
+          replaySafety: current().report?.replayEligibility || null,
+        });
+        if (result.ok && result.body?.proposal) {
+          state.proposal = result.body.proposal;
+          setRepairState('Transient validation completed without committing a flow change.', result.body.validation?.passed !== true);
+        } else {
+          state.error = result.body?.error || result.error ||
+            'Transient validation is unavailable until a lifecycle-capable host is connected.';
+          setRepairState(state.error, true);
+        }
+      },
+      async apply() {
+        const runState = runController?.state?.().run?.state || traceController?.state?.().run?.state;
+        if (['unknown-completion', 'orphaned'].includes(runState)) {
+          state.error = 'Repair is unavailable until the uncertain run completion is resolved.';
+          setRepairState(state.error, true);
+          return;
+        }
+        if (!isWriter || !connected || capturedTraceMode) {
+          state.error = capturedTraceMode
+            ? 'Repair cannot be applied from an imported result. Reproduce the failure locally first.'
+            : 'Take control of the connected app before applying a repair.';
+          setRepairState(state.error, true);
+          return;
+        }
+        const snapshot = state.proposal;
+        const id = snapshot?.proposal?.proposalId || snapshot?.proposalId;
+        if (!id || snapshot?.agentOriginated === true || snapshot?.state !== 'approved' || !snapshot?.grant) {
+          state.error = 'Apply is unavailable until a human-approved, non-agent-originated proposal has a current grant.';
+          setRepairState(state.error, true);
+          return;
+        }
+        const response = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/apply`, {
+          approvalGrant: snapshot.grant,
+          policy: 'repair-policy-v1',
+        });
+        if (response.ok && response.body?.proposal) {
+          state.proposal = response.body.proposal;
+          setRepairState('The selector-only flow revision was applied. Three clean verification replays are still required.');
+        } else {
+          state.error = response.body?.error || response.error || 'The approved repair could not be applied.';
+          setRepairState(state.error, true);
+        }
+      },
+    });
+  }
+
+  function createXamlSourceProposalController() {
+    const state = {
+      language: 'Xaml',
+      csharpSource: null,
+      analyzing: false,
+      proposing: false,
+      proposedAutomationId: '',
+      eligibility: null,
+      preview: null,
+      proposal: null,
+      error: null,
+    };
+
+    function selectedElement() {
+      const current = selectedId ? elById(selectedId) : null;
+      const info = elementInfo(current);
+      if (!info?.id) return null;
+      const integerAttribute = (name) => {
+        const value = Number(current.getAttribute(name));
+        return Number.isInteger(value) && value > 0 ? value : null;
+      };
+      return {
+        id: info.id,
+        type: info.type,
+        hasSource: info.hasSource,
+        sourceFile: current.getAttribute('data-sourceFile') || null,
+        sourceLine: integerAttribute('data-sourceLine'),
+        sourceColumn: integerAttribute('data-sourceColumn'),
+        sourceHash: current.getAttribute('data-sourceHash') || null,
+        sourceConfidence: current.getAttribute('data-sourceConfidence') || null,
+      };
+    }
+
+    function isCSharp() {
+      return state.language === 'CSharp';
+    }
+
+    function sourceRoute(path = '') {
+      return isCSharp()
+        ? `/api/workbench/source/csharp${path}`
+        : `/api/workbench/source${path}`;
+    }
+
+    function proposalRoute(id, action) {
+      return isCSharp()
+        ? `/api/workbench/source/csharp/${encodeURIComponent(id)}/${action}`
+        : `/api/workbench/source/${encodeURIComponent(id)}/${action}`;
+    }
+
+    function capability() {
+      const canApplySource = testWorkbenchHostBridge.has('applySourceProposal');
+      const canApplyCSharpSource = testWorkbenchHostBridge.has('applyCSharpSourceProposal');
+      const canProvideCSharpSource = testWorkbenchHostBridge.has('getCSharpSourceSelection');
+      return {
+        hostKind: testWorkbenchHostBridge.hostKind?.() || 'browser',
+        canOpenNativeDiff: testWorkbenchHostBridge.has('openSourceDiff'),
+        canDownloadPatch: true,
+        canApplySource,
+        canApplyCSharpSource,
+        canProvideCSharpSource,
+        isExplicitLocalHostAction: isCSharp() ? canApplyCSharpSource : canApplySource,
+      };
+    }
+
+    function proposalId() {
+      return state.proposal?.proposal?.proposalId || state.proposal?.proposalId || state.preview?.proposalId || null;
+    }
+
+    function setSourceState(message, failure = false) {
+      const proposal = state.proposal?.proposal || state.proposal || state.preview;
+      const source = proposal?.state ||
+        (state.analyzing ? 'analyzing' : state.eligibility?.eligible ? 'proposed' : 'unavailable');
+      workbenchUpdate({ source }, ['source']);
+      if (message) workbenchAnnouncement(message, failure);
+    }
+
+    function proposalPayload() {
+      const selected = selectedElement();
+      const payload = {
+        elementId: selected?.id || null,
+        proposedAutomationId: state.proposedAutomationId,
+        // Flow selector changes are intentionally not included. Source follow-up is advisory only.
+        affectedFlows: [],
+      };
+      if (isCSharp() && state.csharpSource) {
+        payload.sourceFile = state.csharpSource.sourceFile;
+        payload.sourceLine = state.csharpSource.sourceLine;
+        payload.sourceColumn = state.csharpSource.sourceColumn;
+        payload.sourceHash = state.csharpSource.sourceHash;
+        payload.sourceConfidence = state.csharpSource.sourceConfidence;
+      }
+      return payload;
+    }
+
+    async function resolveCSharpSource() {
+      const selected = selectedElement();
+      const mapped = selected?.sourceFile && /\.cs$/i.test(selected.sourceFile) &&
+        Number.isInteger(selected.sourceLine) && Number.isInteger(selected.sourceColumn) &&
+        typeof selected.sourceHash === 'string' && /^[0-9a-f]{16}$/i.test(selected.sourceHash);
+      if (mapped) {
+        state.csharpSource = {
+          sourceFile: selected.sourceFile,
+          sourceLine: selected.sourceLine,
+          sourceColumn: selected.sourceColumn,
+          sourceHash: selected.sourceHash,
+          sourceConfidence: selected.sourceConfidence || 'mapped',
+        };
+        return true;
+      }
+      if (!testWorkbenchHostBridge.has('getCSharpSourceSelection')) {
+        state.error = 'C# source analysis requires a mapped C# runtime declaration or the active C# selection from a native IDE host. Canvas does not provide that capability.';
+        return false;
+      }
+      const host = await testWorkbenchHostBridge.request('getCSharpSourceSelection', {}, 10000);
+      const location = host?.value;
+      if (!host?.ok || !location ||
+          typeof location.sourceFile !== 'string' ||
+          !/\.cs$/i.test(location.sourceFile) ||
+          !Number.isInteger(location.sourceLine) ||
+          !Number.isInteger(location.sourceColumn) ||
+          typeof location.sourceHash !== 'string' ||
+          !/^[0-9a-f]{16}$/i.test(location.sourceHash)) {
+        state.error = host?.error || 'The native IDE did not provide a valid active C# source selection.';
+        return false;
+      }
+      state.csharpSource = {
+        sourceFile: location.sourceFile,
+        sourceLine: location.sourceLine,
+        sourceColumn: location.sourceColumn,
+        sourceHash: location.sourceHash,
+        sourceConfidence: location.sourceConfidence === 'roslyn-proven' ? 'roslyn-proven' : 'mapped',
+      };
+      return true;
+    }
+
+    async function refresh() {
+      const id = proposalId();
+      if (!id) return false;
+      const response = await inspectorApi.postDetailed(proposalRoute(id, 'status'), {});
+      if (!response.ok || !response.body?.proposal) {
+        state.error = response.body?.error || response.error || 'Source proposal status could not be refreshed.';
+        setSourceState(state.error, true);
+        return false;
+      }
+      const grant = state.proposal?.grant;
+      state.proposal = response.body.proposal;
+      if (grant) state.proposal.grant = grant;
+      state.error = null;
+      setSourceState();
+      return true;
+    }
+
+    return Object.freeze({
+      state: () => ({
+        ...state,
+        selectedElement: selectedElement(),
+        hostCapability: capability(),
+        canMutate: isWriter && connected && !capturedTraceMode,
+      }),
+      setLanguage(value) {
+        const language = value === 'CSharp' ? 'CSharp' : 'Xaml';
+        if (state.language === language) return;
+        state.language = language;
+        state.eligibility = null;
+        state.preview = null;
+        state.proposal = null;
+        state.csharpSource = null;
+        state.error = null;
+        setSourceState(`${language === 'CSharp' ? 'C#' : 'XAML'} source proposal mode selected. No source has changed.`);
+      },
+      setProposedAutomationId(value) {
+        state.proposedAutomationId = String(value || '').slice(0, 128);
+        state.eligibility = null;
+        state.preview = null;
+        state.proposal = null;
+        state.error = null;
+      },
+      async analyze() {
+        if (!selectedElement()?.id || !state.proposedAutomationId.trim()) {
+          state.error = `Select a mapped ${isCSharp() ? 'C#' : 'XAML'} element and enter a static AutomationId before analyzing.`;
+          setSourceState(state.error, true);
+          return;
+        }
+        if (isCSharp() && !await resolveCSharpSource()) {
+          setSourceState(state.error, true);
+          return;
+        }
+        state.analyzing = true;
+        state.error = null;
+        setSourceState(`Analyzing ${isCSharp() ? 'Roslyn-proven C#' : 'XAML'} source eligibility without writing source.`);
+        try {
+          const response = await inspectorApi.postDetailed(sourceRoute('/analyze'), proposalPayload());
+          state.eligibility = response.body?.eligibility || null;
+          state.preview = response.body?.preview || null;
+          if (!response.ok || !response.body?.ok) {
+            state.error = response.body?.error || response.error || 'The selected declaration is not eligible for a source proposal.';
+            setSourceState(state.error, true);
+            return;
+          }
+          setSourceState(`${isCSharp() ? 'C#' : 'XAML'} eligibility passed. Review the exact diff before creating a proposal.`);
+        } finally {
+          state.analyzing = false;
+          setSourceState();
+        }
+      },
+      async propose() {
+        if (state.eligibility?.eligible !== true) {
+          state.error = `Analyze a currently eligible ${isCSharp() ? 'C#' : 'XAML'} declaration before creating a proposal.`;
+          setSourceState(state.error, true);
+          return;
+        }
+        state.proposing = true;
+        state.error = null;
+        setSourceState(`Creating a reviewed ${isCSharp() ? 'C#' : 'XAML'} source proposal. No source or flow is changed.`);
+        try {
+          const response = await inspectorApi.postDetailed(sourceRoute('/propose'), proposalPayload());
+          if (!response.ok || !response.body?.ok || !response.body?.proposal) {
+            state.error = response.body?.error || response.error || `The ${isCSharp() ? 'C#' : 'XAML'} source proposal could not be created.`;
+            setSourceState(state.error, true);
+            return;
+          }
+          state.proposal = response.body.proposal;
+          state.preview = state.proposal.proposal || null;
+          setSourceState('A reviewed source proposal is available. Source approval is distinct from flow repair approval.');
+        } finally {
+          state.proposing = false;
+          setSourceState();
+        }
+      },
+      async preview() {
+        const id = proposalId();
+        if (!id) return;
+        const response = await inspectorApi.postDetailed(proposalRoute(id, 'preview'), {});
+        if (!response.ok || !response.body?.proposal) {
+          state.error = response.body?.error || response.error || 'Source proposal preview could not be loaded.';
+          setSourceState(state.error, true);
+          return;
+        }
+        state.proposal = response.body.proposal;
+        setSourceState(`Exact ${isCSharp() ? 'C#' : 'XAML'} diff preview refreshed. No source or flow has changed.`);
+      },
+      async reject() {
+        const id = proposalId();
+        if (!id) return;
+        const response = await inspectorApi.postDetailed(proposalRoute(id, 'reject'), {
+          reviewer: 'workbench-user',
+          reasonCode: 'human-rejected',
+        });
+        if (response.ok && response.body?.proposal) {
+          state.proposal = response.body.proposal;
+          setSourceState(`Source proposal rejected. ${isCSharp() ? 'C#' : 'XAML'} and flows remain unchanged.`);
+        } else {
+          state.error = response.body?.error || response.error || 'The source proposal could not be rejected.';
+          setSourceState(state.error, true);
+        }
+      },
+      async openNativeDiff() {
+        const proposal = state.proposal?.proposal || state.proposal || state.preview;
+        if (!proposal?.diff) return;
+        const host = await testWorkbenchHostBridge.request('openSourceDiff', {
+          proposalId: proposal.proposalId,
+          fileRelativePath: proposal.operation?.fileRelativePath,
+          diff: proposal.diff,
+          patchDigest: proposal.patchDigest,
+          intent: `Open reviewed ${isCSharp() ? 'C#' : 'XAML'} AutomationId diff`,
+        });
+        setStatus(host?.ok
+          ? (host.message || `Opened the reviewed ${isCSharp() ? 'C#' : 'XAML'} diff in the local host.`)
+          : (host?.error || 'A native source diff host is unavailable. Download the patch instead.'));
+      },
+      downloadPatch() {
+        const proposal = state.proposal?.proposal || state.proposal || state.preview;
+        if (!proposal?.diff) return;
+        triggerBlobDownload(
+          new Blob([proposal.diff], { type: 'text/x-diff;charset=utf-8' }),
+          `${String(proposal.operation?.fileRelativePath || (isCSharp() ? 'csharp' : 'xaml')).replace(/[\\/]/g, '_')}.patch`);
+        setStatus(`Downloaded the reviewed ${isCSharp() ? 'C#' : 'XAML'} patch. Downloading never applies source.`);
+      },
+      async approve() {
+        const id = proposalId();
+        if (!id) return;
+        const response = await inspectorApi.postDetailed(proposalRoute(id, 'approve'), {
+          reviewer: 'workbench-user',
+          humanConfirmed: true,
+          hostCapability: capability(),
+        });
+        if (response.ok && response.body?.proposal && response.body?.grant) {
+          state.proposal = response.body.proposal;
+          state.proposal.grant = response.body.grant;
+          setSourceState('Human source approval was recorded. A separate explicit local host action is still required.');
+        } else {
+          state.error = response.body?.error || response.error || 'A source-specific human approval grant could not be issued.';
+          setSourceState(state.error, true);
+        }
+      },
+      async apply() {
+        const runState = runController?.state?.().run?.state || traceController?.state?.().run?.state;
+        if (['unknown-completion', 'orphaned'].includes(runState)) {
+          state.error = 'Source changes are unavailable until the uncertain run completion is resolved.';
+          setSourceState(state.error, true);
+          return;
+        }
+        if (!isWriter || !connected || capturedTraceMode) {
+          state.error = capturedTraceMode
+            ? 'Source changes cannot be applied from an imported result.'
+            : 'Take control of the connected app before applying a source change.';
+          setSourceState(state.error, true);
+          return;
+        }
+        const id = proposalId();
+        const grant = state.proposal?.grant;
+        const hostCapability = capability();
+        const canApply = isCSharp() ? hostCapability.canApplyCSharpSource : hostCapability.canApplySource;
+        if (!id || !grant || !canApply) {
+          state.error = 'Apply requires a current source-specific grant and an explicit capable local host.';
+          setSourceState(state.error, true);
+          return;
+        }
+        const proposal = state.proposal?.proposal || state.proposal;
+        if (isCSharp()) {
+          const waiting = await inspectorApi.postDetailed(proposalRoute(id, 'await-host-apply'), {
+            hostCapability,
+          });
+          if (!waiting.ok || !waiting.body?.proposal) {
+            state.error = waiting.body?.error || waiting.error || 'The C# proposal could not enter IDE handoff state.';
+            setSourceState(state.error, true);
+            return;
+          }
+          state.proposal = waiting.body.proposal;
+          state.proposal.grant = grant;
+          const begun = await inspectorApi.postDetailed(proposalRoute(id, 'begin-host-apply'), {
+            approvalGrant: grant,
+            humanConfirmed: true,
+            hostCapability,
+          });
+          if (!begun.ok || !begun.body?.proposal) {
+            state.error = begun.body?.error || begun.error || 'The C# proposal could not begin IDE-mediated apply.';
+            setSourceState(state.error, true);
+            return;
+          }
+          state.proposal = begun.body.proposal;
+          const activeProposal = state.proposal?.proposal || state.proposal;
+          const host = await testWorkbenchHostBridge.request('applyCSharpSourceProposal', {
+            proposalId: id,
+            fileRelativePath: activeProposal?.operation?.fileRelativePath,
+            sourceHash: activeProposal?.operation?.sourceHash,
+            baseContentDigest: activeProposal?.baseContentDigest,
+            patchDigest: activeProposal?.patchDigest,
+            patch: activeProposal?.patch,
+            diff: activeProposal?.diff,
+            rollback: false,
+          }, 30000);
+          const ack = host?.value && typeof host.value === 'object' ? host.value : {};
+          const response = await inspectorApi.postDetailed(proposalRoute(id, 'apply-ack'), {
+            applied: host?.ok === true && ack.applied !== false,
+            hostKind: hostCapability.hostKind,
+            preContentDigest: ack.preContentDigest,
+            appliedContentDigest: ack.appliedContentDigest,
+            patchDigest: ack.patchDigest || activeProposal?.patchDigest,
+            applyRunId: ack.applyRunId,
+            errorCode: ack.errorCode || (host?.ok ? null : 'ide-apply-declined'),
+            error: ack.error || host?.error,
+          });
+          if (response.ok && response.body?.proposal) {
+            state.proposal = response.body.proposal;
+            setSourceState('C# was applied by the native IDE host and acknowledged with exact hashes. Build, remap, uniqueness, replay, and oracle verification are now required.');
+          } else {
+            state.error = response.body?.error || response.error || 'The IDE C# source apply acknowledgment failed.';
+            setSourceState(state.error, true);
+          }
+          return;
+        }
+
+        const host = await testWorkbenchHostBridge.request('applySourceProposal', {
+          proposalId: id,
+          fileRelativePath: proposal?.operation?.fileRelativePath,
+          patchDigest: proposal?.patchDigest,
+          diff: proposal?.diff,
+        });
+        if (!host?.ok) {
+          state.error = host?.error || 'The local host did not confirm this source apply.';
+          setSourceState(state.error, true);
+          return;
+        }
+        const waiting = await inspectorApi.postDetailed(proposalRoute(id, 'await-host-apply'), {
+          hostCapability,
+        });
+        if (!waiting.ok || !waiting.body?.proposal) {
+          state.error = waiting.body?.error || waiting.error || 'The source proposal could not enter local host apply state.';
+          setSourceState(state.error, true);
+          return;
+        }
+        state.proposal = waiting.body.proposal;
+        state.proposal.grant = grant;
+        const response = await inspectorApi.postDetailed(proposalRoute(id, 'apply'), {
+          approvalGrant: grant,
+          humanConfirmed: true,
+          hostCapability,
+        });
+        if (response.ok && response.body?.proposal) {
+          state.proposal = response.body.proposal;
+          setSourceState('XAML was changed through the explicit local host action. Build, remap, uniqueness, replay, and oracle verification are now required.');
+        } else {
+          state.error = response.body?.error || response.error || 'The approved local XAML source apply failed.';
+          setSourceState(state.error, true);
+        }
+      },
+      async rollback() {
+        const runState = runController?.state?.().run?.state || traceController?.state?.().run?.state;
+        if (['unknown-completion', 'orphaned'].includes(runState)) {
+          state.error = 'Source rollback is unavailable until the uncertain run completion is resolved.';
+          setSourceState(state.error, true);
+          return;
+        }
+        if (!isWriter || !connected || capturedTraceMode) {
+          state.error = capturedTraceMode
+            ? 'Source rollback is unavailable while an imported result is open.'
+            : 'Take control of the connected app before rolling back a source change.';
+          setSourceState(state.error, true);
+          return;
+        }
+        const id = proposalId();
+        const hostCapability = capability();
+        const canApply = isCSharp() ? hostCapability.canApplyCSharpSource : hostCapability.canApplySource;
+        if (!id || !canApply) {
+          state.error = 'Rollback requires an explicit capable local host.';
+          setSourceState(state.error, true);
+          return;
+        }
+        const issued = await inspectorApi.postDetailed(sourceRoute('/grant'), {
+          proposalId: id,
+          kind: 'rollback',
+          reviewer: 'workbench-user',
+          humanConfirmed: true,
+          hostCapability,
+        });
+        if (!issued.ok || !issued.body?.grant) {
+          state.error = issued.body?.error || issued.error || 'A rollback grant could not be issued.';
+          setSourceState(state.error, true);
+          return;
+        }
+        if (isCSharp()) {
+          const begun = await inspectorApi.postDetailed(proposalRoute(id, 'begin-rollback'), {
+            rollbackGrant: issued.body.grant,
+            humanConfirmed: true,
+            hostCapability,
+          });
+          if (!begun.ok || !begun.body?.proposal) {
+            state.error = begun.body?.error || begun.error || 'The C# rollback could not begin IDE handoff.';
+            setSourceState(state.error, true);
+            return;
+          }
+          state.proposal = begun.body.proposal;
+          const activeProposal = state.proposal?.proposal || state.proposal;
+          const host = await testWorkbenchHostBridge.request('applyCSharpSourceProposal', {
+            proposalId: id,
+            fileRelativePath: activeProposal?.operation?.fileRelativePath,
+            sourceHash: activeProposal?.operation?.sourceHash,
+            baseContentDigest: activeProposal?.rollbackPatch?.beforeDigest,
+            patchDigest: activeProposal?.rollbackPatchDigest,
+            patch: activeProposal?.rollbackPatch,
+            diff: activeProposal?.diff,
+            rollback: true,
+          }, 30000);
+          const ack = host?.value && typeof host.value === 'object' ? host.value : {};
+          const response = await inspectorApi.postDetailed(proposalRoute(id, 'rollback-ack'), {
+            reverted: host?.ok === true && ack.reverted !== false,
+            hostKind: hostCapability.hostKind,
+            preContentDigest: ack.preContentDigest,
+            contentDigest: ack.contentDigest,
+            patchDigest: ack.patchDigest || activeProposal?.rollbackPatchDigest,
+            errorCode: ack.errorCode || (host?.ok ? null : 'ide-rollback-declined'),
+            error: ack.error || host?.error,
+          });
+          if (response.ok && response.body?.proposal) {
+            state.proposal = response.body.proposal;
+            setSourceState('The C# rollback patch was applied and acknowledged by the native IDE host. Flow selectors remain unchanged.');
+          } else {
+            state.error = response.body?.error || response.error || 'The IDE C# source rollback acknowledgment failed.';
+            setSourceState(state.error, true);
+          }
+          return;
+        }
+
+        const response = await inspectorApi.postDetailed(proposalRoute(id, 'rollback'), {
+          rollbackGrant: issued.body.grant,
+          humanConfirmed: true,
+          hostCapability,
+        });
+        if (response.ok && response.body?.proposal) {
+          state.proposal = response.body.proposal;
+          setSourceState('The original XAML source bytes were atomically restored. Flow selectors remain unchanged.');
+        } else {
+          state.error = response.body?.error || response.error || 'The source rollback failed.';
+          setSourceState(state.error, true);
+        }
+      },
+      refresh,
+    });
+  }
+
+  function createImproveController() {
+    const maxAmbiguityMatches = 20;
+    const state = {
+      scanning: false,
+      resolvingAmbiguity: false,
+      error: null,
+      analysis: null,
+      inputKey: null,
+      includeLiveTree: true,
+      liveTree: null,
+      ambiguity: null,
+      filters: {
+        severity: null,
+        category: null,
+        step: null,
+        platform: null,
+      },
+    };
+
+    function currentInput() {
+      const flow = authoringDraft.flow || parseAuthoringFlow(authoringDraft.markdown);
+      const plan = authoringDraft.plan || null;
+      const currentKey = JSON.stringify({ flow: flow || null, plan });
+      return { flow, plan, currentKey };
+    }
+
+    function notify() {
+      testWorkbench?.updateState({});
+    }
+
+    function safeAmbiguityString(value, maximum = 256) {
+      if (value == null) return null;
+      const result = String(value).replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, maximum);
+      return result || null;
+    }
+
+    function safeAmbiguityBounds(value) {
+      if (!value || typeof value !== 'object') return null;
+      const coordinate = (name) => {
+        const number = Number(value[name]);
+        return Number.isFinite(number) ? number : null;
+      };
+      const bounds = {
+        x: coordinate('x'),
+        y: coordinate('y'),
+        width: coordinate('width'),
+        height: coordinate('height'),
+      };
+      return Object.values(bounds).some((value) => value !== null) ? bounds : null;
+    }
+
+    function safeAmbiguityMatch(value) {
+      const match = value && typeof value === 'object' ? value : {};
+      const hasSource = match.hasSource === true;
+      const sourceLine = Number(match.sourceLine);
+      return {
+        id: safeAmbiguityString(match.id),
+        type: safeAmbiguityString(match.type, 128),
+        role: safeAmbiguityString(match.role, 128),
+        automationId: safeAmbiguityString(match.automationId),
+        isVisible: match.isVisible === true ? true : match.isVisible === false ? false : null,
+        isEnabled: match.isEnabled === true ? true : match.isEnabled === false ? false : null,
+        bounds: safeAmbiguityBounds(match.bounds),
+        windowBounds: safeAmbiguityBounds(match.windowBounds),
+        hasSource,
+        sourceLine: hasSource && Number.isInteger(sourceLine) && sourceLine > 0 ? sourceLine : null,
+      };
+    }
+
+    function safeAmbiguityContext(response, target) {
+      const ambiguity = response?.ambiguity || response;
+      if (!ambiguity || typeof ambiguity !== 'object') return null;
+      const received = Array.isArray(ambiguity.matches) ? ambiguity.matches : [];
+      const matches = received.slice(0, maxAmbiguityMatches).map(safeAmbiguityMatch);
+      const declared = Number(ambiguity.totalCount);
+      const totalCount = Number.isInteger(declared) && declared >= matches.length
+        ? declared
+        : matches.length;
+      return {
+        stepId: safeAmbiguityString(target.stepId, 128),
+        stepSequence: target.stepSequence,
+        selectorKind: selectorKindForAmbiguity(target.selector),
+        totalCount,
+        truncated: ambiguity.truncated === true || received.length > maxAmbiguityMatches || totalCount > matches.length,
+        matches,
+      };
+    }
+
+    function isAmbiguousFailure(report, step) {
+      return [
+        report?.failure?.class,
+        report?.failure?.code,
+        report?.failure?.legacyKind,
+        report?.failureKind,
+        step?.failureClass,
+        step?.failureKind,
+        step?.targetResolution?.status,
+      ].some((value) => {
+        const normalized = String(value || '').trim().toLowerCase();
+        return normalized === 'locator-ambiguous' || normalized === 'ambiguous';
+      });
+    }
+
+    function ambiguityTarget() {
+      const trace = traceController?.state?.();
+      const report = trace?.report || trace?.run?.report || null;
+      const terminal = trace?.run?.terminal === true ||
+        report?.outcome?.terminal === true ||
+        ['failed', 'cancelled', 'timed-out', 'lease-lost', 'infrastructure-error', 'unknown-completion', 'orphaned']
+          .includes(report?.outcome?.status || trace?.run?.state);
+      const stepId = report?.failure?.stepId || report?.divergenceStepId ||
+        (Array.isArray(report?.steps) ? report.steps.find((step) => step?.failureClass)?.stepId : null);
+      const step = Array.isArray(report?.steps)
+        ? report.steps.find((candidate) => candidate?.stepId === stepId) || null
+        : null;
+      const flow = currentInput().flow;
+      const stepSequence = Number.isInteger(Number(step?.sequence)) && Number(step.sequence) > 0
+        ? Number(step.sequence)
+        : sequenceFromStepId(stepId);
+      const stepIndex = authoringStepIndexForFailure(flow, stepId, stepSequence);
+      const draftStep = stepIndex >= 0 ? flow?.steps?.[stepIndex] : null;
+      const selector = activeAuthoringStepSelector(draftStep);
+      return { trace, report, terminal, stepId, step, flow, stepSequence, stepIndex, draftStep, selector };
+    }
+
+    function isUniqueReturnedAutomationId(context, match) {
+      const automationId = safeAmbiguityString(match?.automationId);
+      if (!automationId || context?.truncated === true) return false;
+      return context.matches.filter((candidate) => candidate.automationId === automationId).length === 1;
+    }
+
+    function hasUniqueReturnedAutomationId(context) {
+      return context?.matches?.some((match) => isUniqueReturnedAutomationId(context, match)) === true;
+    }
+
+    function matchFromContext(match) {
+      const context = state.ambiguity;
+      if (!context || !match) return null;
+      return context.matches.find((candidate) =>
+        candidate.id === safeAmbiguityString(match.id) &&
+        candidate.automationId === safeAmbiguityString(match.automationId)) || null;
+    }
+
+    async function analyze(preserveFilters = false) {
+      const current = currentInput();
+      if (!current.flow) {
+        state.error = 'Load or record a flow before running selector-health analysis.';
+        notify();
+        return;
+      }
+      state.scanning = true;
+      state.error = null;
+      notify();
+      try {
+        const trace = traceController?.state?.();
+        const report = trace?.report || trace?.run?.report || null;
+        const response = await inspectorApi.postDetailed('/api/workbench/improve/analyze', {
+          flow: current.flow,
+          plan: current.plan,
+          runHistory: report ? [report] : [],
+          includeLiveTree: state.includeLiveTree,
+        });
+        if (!response.ok || !response.body?.ok || !response.body?.analysis) {
+          state.error = response.body?.error || response.error ||
+            `Selector-health scan failed (${response.status || 0}).`;
+          return;
+        }
+        state.analysis = response.body.analysis;
+        state.liveTree = response.body.liveTree || null;
+        state.inputKey = current.currentKey;
+        studyController?.improveScanned(Array.isArray(state.analysis.findings) ? state.analysis.findings.length : 0);
+        if (!preserveFilters) {
+          state.filters = {
+            severity: null,
+            category: null,
+            step: null,
+            platform: null,
+          };
+        }
+        setStatus('Deterministic selector-health analysis completed. No selector or source was changed.');
+      } finally {
+        state.scanning = false;
+        notify();
+      }
+    }
+
+    return Object.freeze({
+      state() {
+        const current = currentInput();
+        return {
+          ...state,
+          filters: { ...state.filters },
+          ambiguity: state.ambiguity
+            ? { ...state.ambiguity, matches: state.ambiguity.matches.map((match) => ({ ...match })) }
+            : null,
+          hasFlow: !!current.flow,
+          currentKey: current.currentKey,
+          stale: !!state.analysis && state.inputKey !== current.currentKey,
+        };
+      },
+      setFilters(patch) {
+        Object.assign(state.filters, patch || {});
+        notify();
+      },
+      setLiveTree(value) {
+        state.includeLiveTree = value !== false;
+        if (state.analysis) state.inputKey = null;
+        notify();
+      },
+      async analyze() {
+        await analyze();
+      },
+      async resolveAmbiguity({ runAnalysis = true } = {}) {
+        const target = ambiguityTarget();
+        if (!target.terminal || !isAmbiguousFailure(target.report, target.step)) {
+          state.error = 'Resolve matches is available only for a terminal locator-ambiguous result.';
+          testWorkbench?.open?.('improve', true);
+          notify();
+          return { ok: false, error: state.error };
+        }
+        if (!target.selector || target.stepIndex < 0 || !target.stepSequence) {
+          state.error = 'The failed flow step or its active selector could not be mapped to one draft step. The draft was not changed.';
+          testWorkbench?.open?.('improve', true);
+          notify();
+          return { ok: false, error: state.error };
+        }
+
+        state.resolvingAmbiguity = true;
+        state.error = null;
+        notify();
+        try {
+          const response = await authoringController.verifySelector(target.selector);
+          const ambiguity = safeAmbiguityContext(response, target);
+          if (!ambiguity || response?.matchCount <= 1) {
+            state.error = response?.ok
+              ? 'The selector no longer reports multiple matches. DevFlow did not change the draft; inspect the current app state before deciding what to edit.'
+              : response?.error || 'The ambiguous selector could not be verified against the current app.';
+            testWorkbench?.open?.('improve', true);
+            return { ok: false, error: state.error };
+          }
+
+          state.ambiguity = ambiguity;
+          state.filters.step = String(target.stepSequence);
+          testWorkbench?.open?.('improve', true);
+          if (runAnalysis) await analyze(true);
+          workbenchAnnouncement(
+            'Opened safe ambiguity details. DevFlow did not choose a match, change the draft, save the test, or rerun it.'
+          );
+          return { ok: true, ambiguity };
+        } finally {
+          state.resolvingAmbiguity = false;
+          notify();
+        }
+      },
+      highlightMatch(match) {
+        const candidate = matchFromContext(match);
+        if (!candidate?.id || !elById(candidate.id)) {
+          state.error = 'That ephemeral match is no longer present in the current app frame. Refresh Resolve matches before selecting it.';
+          notify();
+          return false;
+        }
+        selectElement(candidate.id);
+        workbenchAnnouncement('Highlighted the selected match in the app. No selector or source was changed.');
+        return true;
+      },
+      async useAutomationId(match) {
+        const candidate = matchFromContext(match);
+        if (!candidate || !isUniqueReturnedAutomationId(state.ambiguity, candidate)) {
+          state.error = state.ambiguity?.truncated
+            ? 'The match list is truncated, so no returned AutomationId can be used as a safe candidate. Highlight the intended control and re-check it globally.'
+            : 'This AutomationId is duplicated or unavailable in the returned matches. DevFlow will not guess.';
+          notify();
+          return { ok: false, error: state.error };
+        }
+        const result = await authoringController.applyHumanSelectedSelector({
+          stepId: state.ambiguity.stepId,
+          stepSequence: state.ambiguity.stepSequence,
+          selector: { automationId: candidate.automationId },
+        });
+        if (!result?.ok) {
+          state.error = result?.error || 'The selected AutomationId could not be globally verified. The draft was not changed.';
+          notify();
+          return result || { ok: false, error: state.error };
+        }
+        state.ambiguity = null;
+        state.error = null;
+        workbenchAnnouncement(
+          'Only the failed step selector changed in the draft. Save test, then rerun it; DevFlow did not commit or run anything.'
+        );
+        notify();
+        return result;
+      },
+      improveTestability(match) {
+        const candidate = matchFromContext(match);
+        if (!candidate?.hasSource || hasUniqueReturnedAutomationId(state.ambiguity)) {
+          state.error = 'A reviewed source handoff is available only when no safely unique returned AutomationId exists for a mapped match.';
+          notify();
+          return false;
+        }
+        if (!candidate.id || !elById(candidate.id)) {
+          state.error = 'That mapped element is no longer present in the current app frame. Refresh Resolve matches before opening Source.';
+          notify();
+          return false;
+        }
+        selectElement(candidate.id);
+        testWorkbench?.open?.('source', true);
+        workbenchAnnouncement(
+          'Opened a reviewed source proposal for the selected mapped element. No source, selector, test, or run changed automatically.'
+        );
+        return true;
+      },
+      async openSource(source) {
+        const anchor = String(source || '').slice(0, 360);
+        const result = await testWorkbenchHostBridge.request('openSourceDiff', {
+          sourceAnchor: anchor,
+          intent: 'Open read-only selector-health source anchor',
+        });
+        setStatus(result?.ok
+          ? (result.message || `Opened source anchor ${anchor}.`)
+          : `${result?.error || 'Source bridge is unavailable.'} Source anchor: ${anchor}. Improve never writes source.`);
+      },
+    });
+  }
+
+  studyController = createPrototypeStudyController();
+  const authoringController = createAuthoringController();
+  runController = createRunController();
+  traceController = createTraceController();
+  repairController = createRepairController();
+  sourceProposalController = createXamlSourceProposalController();
+  improveController = createImproveController();
+  testWorkbench = createInspectorWorkbench({
+    root: document.getElementById('df-workbench'),
+    toggleButton: document.getElementById('df-toggle-workbench'),
+    hostBridge: testWorkbenchHostBridge,
+    authoring: authoringController,
+    run: runController,
+    trace: traceController,
+    repair: repairController,
+    source: sourceProposalController,
+    improve: improveController,
+    study: studyController,
+    getLayout: () => hostLayout,
+    setStatus,
+    onOpen: () => {
+      studyController.workbenchOpened();
+      setMoreOpen(false);
+      if (isTransientPaneLayout()) {
+        propertyGrid.close();
+        if (isTreeDrawerLayout()) setTreeVisible(false, false, true);
+        closeDock();
+      }
+      syncPaneChrome();
+    },
+    onClose: syncPaneChrome,
+  });
+  agentRequestController = createAgentRequestController({
+    inspectorApi,
+    openPanel: () => testWorkbench?.open?.('requests', false),
+    setStatus,
+    onTransition: (kind, data) => studyController?.agentApprovalTransition?.(kind, data),
+  });
+  agentRequestController.start();
+  const startupAgentRequest = testWorkbench.state().startupHints.agentRequest;
+  if (startupAgentRequest) {
+    agentRequestController.open(startupAgentRequest);
+  }
+  window.addEventListener('beforeunload', () => agentRequestController?.stop?.(), { once: true });
+  runController.restore();
   if (toggleDockBtn) toggleDockBtn.addEventListener('click', () => (dockEl.classList.contains('df-hidden') ? openDock() : closeDock()));
   if (dockCloseBtn) dockCloseBtn.addEventListener('click', () => closeDock(true));
   if (dockCollapseBtn) dockCollapseBtn.addEventListener('click', toggleDockCollapsed);
@@ -3300,6 +6330,13 @@ import { createElementTreeController } from './inspector-tree.js';
       scheduleIfChanged();
       return;
     }
+    if (capturedTraceMode) {
+      setPresence('i-lock', 'Captured trace · read-only');
+      presence.className = 'df-presence df-readonly';
+      presence.title = 'Imported trace mode never takes or uses a mutation lease.';
+      scheduleIfChanged();
+      return;
+    }
     if (isWriter) {
       setPresence('i-edit', 'Driving');
       presence.title = 'This Inspector can drive the app.';
@@ -3328,11 +6365,18 @@ import { createElementTreeController } from './inspector-tree.js';
     otherLeaseExpiresInMs = leaseHeldByOther && expiresInMs != null && Number.isFinite(Number(expiresInMs))
       ? Number(expiresInMs)
       : null;
+    const workbenchAuthority = capturedTraceMode
+      ? 'read-only'
+      : (isWriter ? 'writer' : (lostLease ? 'lease-lost' : 'read-only'));
+    if (testWorkbench && testWorkbench.state().authority !== workbenchAuthority)
+      testWorkbench.updateState({ authority: workbenchAuthority });
     renderWriterPresence();
     const t = document.getElementById('df-take-control');
     if (t) {
-      t.classList.toggle('df-hidden', writer);
-      t.title = heldByOther
+      t.classList.toggle('df-hidden', writer || capturedTraceMode);
+      t.title = capturedTraceMode
+        ? 'Captured trace mode does not allow lease takeover'
+        : heldByOther
         ? `${otherLeaseLabel || 'Another session'} is driving this app; take control`
         : 'No session is driving this app, click to take control';
     }
@@ -3345,6 +6389,10 @@ import { createElementTreeController } from './inspector-tree.js';
     propertyGrid.updateWriterState();
   }
   async function control(action, force) {
+    if (capturedTraceMode && action !== 'status' && action !== 'release') {
+      setStatus('Captured trace mode does not take or renew a mutation lease.');
+      return null;
+    }
     const j = await apiPost('/api/control', force ? { action, force: true } : { action });
     if (j) {
       const wasWriter = isWriter;
@@ -3354,6 +6402,28 @@ import { createElementTreeController } from './inspector-tree.js';
     }
     return j;
   }
+
+  async function setCapturedTraceMode(enabled) {
+    const next = enabled === true;
+    if (capturedTraceMode === next) return;
+    capturedTraceMode = next;
+    document.body.classList.toggle('df-captured-trace', next);
+    if (next) {
+      closeEditor(false);
+      setMode('inspect');
+      if (isWriter) await control('release');
+      else await control('status');
+      setStatus('Captured trace mode is read-only. No app interaction, mutation, lease takeover, or replay is available.');
+    } else {
+      await control('status');
+      setStatus('The live run check is separate from the imported result. Take control explicitly before any manual interaction.');
+    }
+    if (testWorkbench)
+      testWorkbench.updateState({ authority: next ? 'read-only' : (isWriter ? 'writer' : 'read-only') });
+    updateFlowButtons();
+    renderWriterPresence();
+  }
+
   const takeControlEl = document.getElementById('df-take-control');
   if (takeControlEl) takeControlEl.addEventListener('click', async () => {
     if (leaseHeldByOther) {
@@ -3391,7 +6461,7 @@ import { createElementTreeController } from './inspector-tree.js';
   tb.bounds.addEventListener('click', () => {
     const on = document.body.classList.toggle('df-show-all');
     tb.bounds.classList.toggle('df-active', on);
-    tb.bounds.setAttribute('aria-pressed', String(on));
+    setToolbarToggleState(tb.bounds, on);
   });
 
   // ── Fit-to-container scaling (responsive) ──────────────────────────────────

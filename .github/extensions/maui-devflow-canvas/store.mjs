@@ -188,6 +188,7 @@ function inactivePageIds(roots, window) {
   const drop = new Set();
   for (const p of pages) {
     if (p.id === active.id) continue;
+    if (isDescendantOf(active.id, p.id, parent) || isDescendantOf(p.id, active.id, parent)) continue;
     if (!confident && (scoreById.get(p.id) || 0) > activeScore) continue; // safety only when guessing
     drop.add(p.id);
     let cur = parent.get(p.id);
@@ -206,7 +207,7 @@ function inactivePageIds(roots, window) {
   return drop;
 }
 
-function renderedRoots(roots, window) {
+export function renderedRoots(roots, window) {
   const dropIds = inactivePageIds(roots, window);
   const walk = (el, ax, ay) => {
     if (!el) return [];

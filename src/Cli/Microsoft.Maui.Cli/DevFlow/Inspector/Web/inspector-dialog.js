@@ -1,4 +1,19 @@
 // Host-agnostic modal dialog used by browser, VS Code, and Canvas Inspector hosts.
+export function modalFocusables(root) {
+  return [...root.querySelectorAll([
+    'button:not([disabled])',
+    '[href]',
+    'input:not([disabled]):not([type="hidden"])',
+    'textarea:not([disabled])',
+    'select:not([disabled])',
+    '[contenteditable]:not([contenteditable="false"])',
+    '[tabindex]:not([tabindex="-1"])',
+  ].join(', '))]
+    .filter((element) => element instanceof HTMLElement &&
+      !element.closest('[hidden], [aria-hidden="true"]') &&
+      element.getClientRects().length > 0);
+}
+
 export function confirmModal(message, confirmLabel) {
   return new Promise((resolve) => {
     const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -10,6 +25,7 @@ export function confirmModal(message, confirmLabel) {
     const box = document.createElement('div');
     box.setAttribute('role', 'dialog');
     box.setAttribute('aria-modal', 'true');
+    box.tabIndex = -1;
     Object.assign(box.style, {
       background: 'var(--df-surface, #252526)', color: 'var(--df-fg, #d4d4d4)',
       border: '1px solid var(--df-border, #3c3c3c)', borderRadius: 'var(--df-radius, 5px)',
@@ -53,10 +69,19 @@ export function confirmModal(message, confirmLabel) {
         event.stopImmediatePropagation();
         finish(false);
       } else if (event.key === 'Tab') {
-        const edge = event.shiftKey ? cancel : confirm;
-        if (document.activeElement === edge) {
+        const focusables = modalFocusables(box);
+        if (!focusables.length) {
           event.preventDefault();
-          (event.shiftKey ? confirm : cancel).focus();
+          box.focus();
+          return;
+        }
+        const index = focusables.indexOf(document.activeElement);
+        if (event.shiftKey && (index <= 0 || !box.contains(document.activeElement))) {
+          event.preventDefault();
+          focusables[focusables.length - 1].focus();
+        } else if (!event.shiftKey && index === focusables.length - 1) {
+          event.preventDefault();
+          focusables[0].focus();
         }
       }
     };

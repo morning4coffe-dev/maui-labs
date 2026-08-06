@@ -12,3 +12,12 @@ test("Canvas production replay delegates to the shared CSharp Inspector engine",
   assert.match(source, /replaySharedFlow/);
   assert.match(source, /canonical C# FlowReplayer/);
 });
+
+test("Canvas forwards bounded Test Workbench startup hints to the shared Inspector", () => {
+  assert.match(source, /function inspectorStartupHints/);
+  assert.match(source, /\["test", "trace", "agentRequest"\]/);
+  assert.match(source, /withInspectorStartupHints\(inspectorUrl, st\.startupHints\)/);
+  assert.match(source, /test: \{ type: "string"/);
+  assert.match(source, /trace: \{ type: "string"/);
+  assert.match(source, /agentRequest: \{ type: "string"/);
+});

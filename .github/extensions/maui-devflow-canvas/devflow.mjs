@@ -14,22 +14,20 @@ function num(v, fallback = 0) {
 }
 
 function largestWindowBounds(roots) {
+  const rootCandidates = (roots || []).filter((root) => root?.type === "Window");
+  const candidates = rootCandidates.length ? rootCandidates : (roots || []);
   let largest = null;
   let largestArea = 0;
-  const visit = (nodes) => {
-    for (const node of nodes || []) {
-      const bounds = node?.windowBounds;
-      const width = num(bounds?.width);
-      const height = num(bounds?.height);
-      const area = width * height;
-      if (area > largestArea) {
-        largestArea = area;
-        largest = { x: num(bounds?.x), y: num(bounds?.y), width, height };
-      }
-      visit(node?.children);
+  for (const node of candidates) {
+    const bounds = node?.windowBounds || node?.bounds;
+    const width = num(bounds?.width);
+    const height = num(bounds?.height);
+    const area = width * height;
+    if (area > largestArea) {
+      largestArea = area;
+      largest = { x: num(bounds?.x), y: num(bounds?.y), width, height };
     }
-  };
-  visit(roots);
+  }
   return largest;
 }
 

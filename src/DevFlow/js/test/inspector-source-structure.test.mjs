@@ -16,6 +16,9 @@ const html = readFileSync(resolve(
 const evidence = readFileSync(resolve(
   here,
   '../../../Cli/Microsoft.Maui.Cli/DevFlow/Inspector/Web/inspector-evidence.js'), 'utf8');
+const steps = readFileSync(resolve(
+  here,
+  '../../../Cli/Microsoft.Maui.Cli/DevFlow/Inspector/Web/inspector-steps.js'), 'utf8');
 
 test('Inspector composition script parses as an ES module', () => {
   const result = spawnSync(process.execPath, ['--check', sourcePath], { encoding: 'utf8' });
@@ -53,12 +56,7 @@ test('Evidence dialog redirects tab focus back inside when focus escapes', () =>
 });
 
 test('workflow assertions never read Text from password entries', () => {
-  const passwordProbe = source.indexOf("name: 'IsPassword'");
-  const passwordGuard = source.indexOf('if (isPassword)', passwordProbe);
-  const textProbe = source.indexOf("name: 'Text'", passwordGuard);
-
-  assert.ok(passwordProbe >= 0);
-  assert.ok(passwordGuard > passwordProbe);
-  assert.ok(textProbe > passwordGuard);
-  assert.match(source.slice(passwordGuard, textProbe), /kind:\s*'exists'/);
+  assert.match(steps, /looksSensitive/);
+  assert.match(steps, /Expected value \(never prefilled\)/);
+  assert.match(steps, /Never copy its[\s\S]*current value into an authored assertion/);
 });

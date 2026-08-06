@@ -3,13 +3,14 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>DevFlow Inspector</title>
+  <title>DevFlow Test Workbench · DevFlow Inspector</title>
   <!-- Base tag ensures relative URLs resolve correctly even when the page is
        opened at /inspector/{id} without a trailing slash. Without this, the
        browser would resolve devflow.css as /inspector/devflow.css (treating
        {id} as a filename) instead of /inspector/{id}/devflow.css. -->
   <base href="./">
   <link rel="stylesheet" href="devflow.css">
+  <link rel="stylesheet" href="inspector-workbench.css">
 </head>
 <body>
   <!-- Inline SVG icon sprite (stroke = currentColor so every icon inherits the button's themed
@@ -41,6 +42,7 @@
     <symbol id="i-file" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></symbol>
     <symbol id="i-attach" viewBox="0 0 24 24"><path d="m21.4 11.6-8.9 8.9a6 6 0 0 1-8.5-8.5l9.2-9.2a4 4 0 0 1 5.7 5.7l-9.2 9.2a2 2 0 0 1-2.8-2.8l8.5-8.5"/></symbol>
     <symbol id="i-evidence" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8.3-7 10-4-1.7-7-5.5-7-10V6z"/><path d="m9 12 2 2 4-4"/></symbol>
+    <symbol id="i-tests" viewBox="0 0 24 24"><path d="M9 4h6"/><path d="M9 20h6"/><path d="M12 4v16"/><path d="m5 9 2 2 4-4"/><path d="m13 15 2 2 4-4"/></symbol>
     <!-- Element-type icons for the visual tree (mapped by type in devflow.js). -->
     <symbol id="i-window" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M2 8h20"/><path d="M6 6h.01"/></symbol>
     <symbol id="i-layout" viewBox="0 0 24 24"><rect width="7" height="7" x="3" y="3" rx="1"/><rect width="7" height="7" x="14" y="3" rx="1"/><rect width="7" height="7" x="14" y="14" rx="1"/><rect width="7" height="7" x="3" y="14" rx="1"/></symbol>
@@ -63,19 +65,11 @@
         <span id="df-mode-inspect-help" class="df-sr-only">Click selects an element without tapping the app.</span>
       </div>
       <span class="df-sep"></span>
+      <button id="df-toggle-workbench" class="df-tool-btn df-workbench-entry" type="button" title="Open Tests (Ctrl/Cmd+Alt+T)" aria-label="Open Tests" aria-controls="df-workbench" aria-expanded="false" aria-pressed="false" aria-keyshortcuts="Control+Alt+T Meta+Alt+T"><svg class="df-ic"><use href="#i-tests"/></svg><span class="df-btn-label">Tests</span><span id="df-test-agent-request-badge" class="df-agent-request-badge" hidden></span></button>
       <button id="df-toggle-tree" class="df-tool-btn df-active" title="Show/hide the element tree" aria-expanded="true" aria-controls="df-tree"><svg class="df-ic"><use href="#i-tree"/></svg><span class="df-btn-label">Tree</span></button>
       <button id="df-toggle-fit" class="df-tool-btn df-active" title="Fit the app view to the available space (toggle to see it at 1:1 actual size)" aria-pressed="true"><svg class="df-ic"><use href="#i-fit"/></svg><span class="df-btn-label">Fit</span></button>
-      <button id="df-toggle-record" class="df-tool-btn" title="Record your interactions into a replayable Markdown test. Enabled when you're driving the app — take control if another session is Read-only." aria-pressed="false"><svg class="df-ic df-ic-rec"><use href="#i-record"/></svg><span class="df-btn-label">Record</span></button>
       <div id="df-toolbar-secondary" class="df-toolbar-secondary" aria-label="More inspector actions">
         <button id="df-toggle-bounds" class="df-tool-btn" title="Outline every element" aria-pressed="false"><svg class="df-ic"><use href="#i-bounds"/></svg><span class="df-btn-label">Bounds</span></button>
-        <button id="df-assert" class="df-tool-btn" aria-disabled="true" title="Add an assertion on the selected element (its Text = current value, or that it exists) so the test validates, not just reproduces. Enabled while recording with an element selected."><svg class="df-ic"><use href="#i-assert"/></svg><span class="df-btn-label">Assert</span></button>
-        <button id="df-load-flow" class="df-tool-btn" title="Load a saved workflow test from the project or a Markdown file"><svg class="df-ic"><use href="#i-folder"/></svg><span class="df-btn-label">Load test</span></button>
-        <button id="df-toggle-replay" class="df-tool-btn" aria-disabled="true" title="Replay the recorded test against the live app (drives the app). Enabled after you record and stop a test."><svg class="df-ic"><use href="#i-replay"/></svg><span class="df-btn-label">Replay</span></button>
-        <button id="df-goto-checkpoint" class="df-tool-btn" aria-disabled="true" title="Return to the route captured when recording started (navigation only; data is not reset). Enabled after a recording captures a start route."><svg class="df-ic"><use href="#i-route"/></svg><span class="df-btn-label">Start route</span></button>
-        <span id="df-resume-status" class="df-sr-only" role="status" aria-live="polite"></span>
-        <button id="df-resume-save" class="df-tool-btn" title="Save the current Shell route as a local resume checkpoint"><svg class="df-ic"><use href="#i-route"/></svg><span class="df-btn-label">Save route</span></button>
-        <button id="df-resume-restore" class="df-tool-btn" disabled title="Restore the saved route after an explicit confirmation"><svg class="df-ic"><use href="#i-replay"/></svg><span class="df-btn-label">Resume</span></button>
-        <button id="df-resume-clear" class="df-tool-btn" disabled title="Clear the saved local route checkpoint"><svg class="df-ic"><use href="#i-close"/></svg><span class="df-btn-label">Clear route</span></button>
         <button id="df-open-source" class="df-tool-btn" aria-disabled="true" title="Open the selected element's XAML source in your editor. Enabled when the selected element is defined in XAML with source mapping available."><svg class="df-ic"><use href="#i-source"/></svg><span class="df-btn-label">Source</span></button>
         <button id="df-send-copilot" class="df-tool-btn" aria-disabled="true" aria-haspopup="menu" aria-expanded="false" aria-controls="df-copilot-menu" title="Choose specific Inspector context to add to Copilot"><svg class="df-ic"><use href="#i-copilot"/></svg><span class="df-btn-label">Copilot</span><svg class="df-ic-xs df-menu-chevron"><use href="#i-chevron"/></svg></button>
         <button id="df-evidence" class="df-tool-btn" title="Capture a shareable, redacted evidence bundle (.mauitrace). You review exactly what it contains before it downloads."><svg class="df-ic"><use href="#i-evidence"/></svg><span class="df-btn-label">Evidence</span></button>
@@ -121,17 +115,65 @@
     </div>
     <div id="df-timeline" class="df-hidden" aria-label="Workflow">
       <span class="df-tl-title"><svg class="df-ic"><use href="#i-route"/></svg><span id="df-timeline-title-text">Workflow</span></span>
-      <select id="df-workflow-select" class="df-field df-workflow-select" aria-label="Saved project workflow">
-        <option value="">Project tests…</option>
-      </select>
       <div id="df-timeline-steps" class="df-tl-steps"></div>
       <span id="df-timeline-meta" class="df-tl-meta"></span>
-      <button id="df-workflow-file" class="df-tool-btn" type="button" title="Choose a workflow Markdown file"><svg class="df-ic"><use href="#i-file"/></svg><span>Choose file</span></button>
       <input id="df-workflow-file-input" class="df-sr-only" type="file" accept=".md,text/markdown" tabindex="-1" aria-hidden="true">
-      <button id="df-workflow-replay" class="df-tool-btn" type="button" disabled><svg class="df-ic"><use href="#i-replay"/></svg><span>Replay</span></button>
       <button id="df-record-cancel" class="df-tool-btn df-tl-discard df-hidden" title="Discard the active recording without saving" aria-label="Discard active recording"><svg class="df-ic"><use href="#i-close"/></svg><span>Discard</span></button>
       <button id="df-timeline-close" class="df-icon-btn" title="Dismiss timeline"><svg class="df-ic"><use href="#i-close"/></svg></button>
     </div>
+    <section id="df-workbench" class="df-hidden" aria-label="Tests" aria-labelledby="df-workbench-title" aria-describedby="df-workbench-description" aria-hidden="true" tabindex="-1">
+      <div id="df-workbench-resize" role="separator" aria-label="Resize DevFlow Test Workbench" aria-orientation="horizontal" aria-valuemin="240" aria-valuemax="1000" aria-valuenow="240" tabindex="0"></div>
+      <header class="df-workbench-header">
+        <div class="df-workbench-heading">
+          <h2 id="df-workbench-title" class="df-workbench-title">Tests</h2>
+          <p class="df-workbench-subtitle">Create, run, and improve app journeys</p>
+        </div>
+        <span id="df-workbench-description" class="df-sr-only">Create, review, run, repair, and improve tests for the connected app. App-driving actions and agent requests require explicit review.</span>
+        <span class="df-workbench-header-spacer"></span>
+        <span id="df-workbench-strip" class="df-workbench-strip" role="status" aria-live="polite" aria-atomic="true"></span>
+        <button id="df-workbench-close" class="df-icon-btn df-workbench-close" type="button" title="Close Tests" aria-label="Close Tests"><svg class="df-ic"><use href="#i-close"/></svg></button>
+      </header>
+      <div id="df-workbench-tabs" class="df-workbench-tabs">
+        <nav class="df-workbench-journey" aria-label="Test workflow">
+          <span class="df-workbench-nav-label">Test flow</span>
+          <div class="df-panel-tab-list df-workbench-stage-list" role="tablist" aria-label="Test workflow">
+            <button id="df-workbench-stage-goal" class="df-panel-tab df-workbench-tab df-workbench-stage-tab df-active" type="button" role="tab" data-workbench-tab="plan" data-workbench-stage="goal" aria-keyshortcuts="Control+Alt+1 Meta+Alt+1" aria-selected="true" aria-controls="df-workbench-panel-plan" tabindex="0"><span class="df-stage-number">1</span><span class="df-stage-label">Goal</span><span class="df-stage-state" aria-hidden="true"></span></button>
+            <button id="df-workbench-stage-record" class="df-panel-tab df-workbench-tab df-workbench-stage-tab" type="button" role="tab" data-workbench-tab="steps" data-workbench-stage="record" aria-keyshortcuts="Control+Alt+2 Meta+Alt+2" aria-selected="false" aria-controls="df-workbench-panel-steps" aria-disabled="true" title="Add a Goal to unlock Steps." tabindex="-1" disabled><span class="df-stage-number">2</span><span class="df-stage-label">Steps</span><span class="df-stage-state" aria-hidden="true"></span></button>
+            <button id="df-workbench-stage-review" class="df-panel-tab df-workbench-tab df-workbench-stage-tab" type="button" role="tab" data-workbench-tab="review" data-workbench-stage="review" aria-keyshortcuts="Control+Alt+3 Meta+Alt+3" aria-selected="false" aria-controls="df-workbench-panel-review" aria-disabled="true" title="Record at least one step to unlock Review." tabindex="-1" disabled><span class="df-stage-number">3</span><span class="df-stage-label">Review</span><span class="df-stage-state" aria-hidden="true"></span></button>
+            <button id="df-workbench-stage-run" class="df-panel-tab df-workbench-tab df-workbench-stage-tab" type="button" role="tab" data-workbench-tab="run" data-workbench-stage="run" aria-keyshortcuts="Control+Alt+4 Meta+Alt+4" aria-selected="false" aria-controls="df-workbench-panel-run" aria-disabled="true" title="Save a reviewed test with an expected result to unlock Run." tabindex="-1" disabled><span class="df-stage-number">4</span><span class="df-stage-label">Run</span><span class="df-stage-state" aria-hidden="true"></span></button>
+            <button id="df-workbench-stage-results" class="df-panel-tab df-workbench-tab df-workbench-stage-tab" type="button" role="tab" data-workbench-tab="trace" data-workbench-stage="results" aria-keyshortcuts="Control+Alt+5 Meta+Alt+5" aria-selected="false" aria-controls="df-workbench-panel-trace" aria-disabled="true" title="Run a test or use Import result to unlock Results." tabindex="-1" disabled><span class="df-stage-number">5</span><span class="df-stage-label">Results</span><span class="df-stage-state" aria-hidden="true"></span></button>
+          </div>
+        </nav>
+        <div id="df-workbench-advanced-tools" class="df-workbench-tools">
+          <span class="df-workbench-nav-label">Tools</span>
+          <div class="df-panel-tab-list df-workbench-tool-list" role="tablist" aria-label="Test tools">
+            <button id="df-workbench-tab-requests" class="df-panel-tab df-workbench-tab df-workbench-tool-tab" type="button" role="tab" data-workbench-tab="requests" data-available="false" aria-label="Agent requests" aria-selected="false" aria-controls="df-agent-requests" aria-disabled="true" title="No agent requests are available." tabindex="-1" disabled><svg class="df-ic-xs"><use href="#i-copilot"/></svg><span>Requests</span><span id="df-agent-requests-badge" class="df-agent-request-badge" hidden></span></button>
+            <button id="df-workbench-tab-repair" class="df-panel-tab df-workbench-tab df-workbench-tool-tab" type="button" role="tab" data-workbench-tab="repair" aria-selected="false" aria-controls="df-workbench-panel-repair" aria-disabled="true" title="Open a failed local result to unlock Repair." tabindex="-1" disabled><svg class="df-ic-xs"><use href="#i-refresh"/></svg><span>Repair</span></button>
+            <button id="df-workbench-tab-improve" class="df-panel-tab df-workbench-tab df-workbench-tool-tab" type="button" role="tab" data-workbench-tab="improve" aria-selected="false" aria-controls="df-workbench-panel-improve" aria-disabled="true" title="Record or open a test to unlock Improve." tabindex="-1" disabled><svg class="df-ic-xs"><use href="#i-assert"/></svg><span>Improve</span></button>
+            <button id="df-workbench-tab-source" class="df-panel-tab df-workbench-tab df-workbench-tool-tab" type="button" role="tab" data-workbench-tab="source" aria-selected="false" aria-controls="df-workbench-panel-source" aria-disabled="true" title="Select a source-mapped control to unlock Source." tabindex="-1" disabled><svg class="df-ic-xs"><use href="#i-source"/></svg><span>Source</span></button>
+          </div>
+        </div>
+      </div>
+      <div id="df-workbench-content" class="df-workbench-content">
+        <section id="df-workbench-panel-plan" class="df-workbench-view df-workbench-panel" role="tabpanel" aria-labelledby="df-workbench-stage-goal" tabindex="0"><div class="df-workbench-panel-body"></div></section>
+        <section id="df-workbench-panel-steps" class="df-workbench-view df-workbench-panel" role="tabpanel" aria-labelledby="df-workbench-stage-record" tabindex="0" hidden><div class="df-workbench-panel-body"></div></section>
+        <section id="df-workbench-panel-review" class="df-workbench-view df-workbench-panel" role="tabpanel" aria-labelledby="df-workbench-stage-review" tabindex="0" hidden><div class="df-workbench-panel-body"></div></section>
+        <section id="df-workbench-panel-run" class="df-workbench-view df-workbench-panel" role="tabpanel" aria-labelledby="df-workbench-stage-run" tabindex="0" hidden><div class="df-workbench-panel-body"></div></section>
+        <section id="df-workbench-panel-trace" class="df-workbench-view df-workbench-panel" role="tabpanel" aria-labelledby="df-workbench-stage-results" tabindex="0" hidden><div class="df-workbench-panel-body"></div></section>
+        <section id="df-agent-requests" class="df-workbench-view df-agent-requests" role="tabpanel" aria-labelledby="df-workbench-tab-requests" tabindex="0" hidden>
+          <div class="df-agent-requests-heading">
+            <h3>Agent requests</h3>
+            <p>Approve or reject actions requested by a test agent.</p>
+          </div>
+          <div id="df-agent-requests-body"></div>
+        </section>
+        <section id="df-workbench-panel-repair" class="df-workbench-view df-workbench-panel" role="tabpanel" aria-labelledby="df-workbench-tab-repair" tabindex="0" hidden><div class="df-workbench-panel-body"></div></section>
+        <section id="df-workbench-panel-improve" class="df-workbench-view df-workbench-panel" role="tabpanel" aria-labelledby="df-workbench-tab-improve" tabindex="0" hidden><div class="df-workbench-panel-body"></div></section>
+        <section id="df-workbench-panel-source" class="df-workbench-view df-workbench-panel" role="tabpanel" aria-labelledby="df-workbench-tab-source" tabindex="0" hidden><div class="df-workbench-panel-body"></div></section>
+      </div>
+      <div id="df-workbench-status" class="df-workbench-status" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div id="df-workbench-alert" class="df-sr-only" role="alert" aria-live="assertive" aria-atomic="true"></div>
+    </section>
     <div id="df-copilot-menu" class="df-context-menu df-hidden" role="menu" aria-label="Add context to Copilot">
       <button type="button" class="df-context-menu-item" role="menuitem" data-copilot-context="selection"><svg class="df-ic"><use href="#i-inspect"/></svg><span><strong>Selected element</strong><small>Type, AutomationId, text, and element id</small></span></button>
       <button type="button" class="df-context-menu-item" role="menuitem" data-copilot-context="workflow"><svg class="df-ic"><use href="#i-route"/></svg><span><strong>Workflow</strong><small>The loaded or recorded replay steps</small></span></button>

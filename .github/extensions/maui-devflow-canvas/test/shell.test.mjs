@@ -24,3 +24,14 @@ test("Canvas shell uses an exact frame origin and a separate CSP nonce", () => {
 test("Disconnected shell rotates its script nonce", () => {
   assert.notEqual(nonceOf(renderDisconnected("App")), nonceOf(renderDisconnected("App")));
 });
+
+test("Canvas shell relays bounded test bundle saves without adding replay semantics", () => {
+  const html = renderShell("http://localhost:19223/inspector/app/?embed=token", "App", "bridge-secret");
+
+  assert.match(html, /'saveTestBundle'/);
+  assert.match(html, /action: 'saveTestBundle', bundle: d\.bundle/);
+  assert.match(html, /devflow:hostResult/);
+  assert.doesNotMatch(html, /devflow:loadTestBundle/);
+  assert.doesNotMatch(html, /const capabilities = \[[^\]]*'attachTestContext'/);
+  assert.doesNotMatch(html, /devflow:attachTestContext|devflow:requestTestProposal/);
+});

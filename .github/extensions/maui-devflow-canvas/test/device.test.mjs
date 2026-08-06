@@ -55,7 +55,7 @@ before(async () => {
       }));
     }
     if (req.method === "GET" && p === "/api/v1/ui/tree") {
-      return json([{ id: "root", type: "Page", fullType: "P", windowBounds: { x: 0, y: 0, width: 390, height: 844 }, children: [{ id: "btn", type: "Button", fullType: "B", automationId: "submit", text: "Go" }] }]);
+      return json([{ id: "root", type: "Page", fullType: "P", windowBounds: { x: 0, y: 0, width: 390, height: 844 }, children: [{ id: "btn", type: "Button", fullType: "B", automationId: "submit", text: "Go", windowBounds: { x: 0, y: 0, width: 1000, height: 2000 } }] }]);
     }
     if (p.includes("/properties/")) {
       if (req.method === "GET") return json({ value: "Go" });

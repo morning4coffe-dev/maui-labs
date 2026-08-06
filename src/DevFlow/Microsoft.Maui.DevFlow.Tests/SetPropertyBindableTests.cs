@@ -293,6 +293,42 @@ public class SetPropertyBindableTests
     }
 
     [Fact]
+    public async Task MutationObservation_SkipsNonInteractiveContainerTap()
+    {
+        var layout = new Grid { AutomationId = "layout" };
+        using var harness = await SetPropertyTestHarness.CreateAsync(layout);
+        var layoutId = await harness.GetElementIdAsync("layout");
+
+        var observation = await harness.Service.CreateMutationObservationAsync(new HttpRequest
+        {
+            Method = "POST",
+            Path = "/api/v1/ui/actions/tap",
+            Body = JsonSerializer.Serialize(new { elementId = layoutId })
+        });
+
+        Assert.Null(observation);
+    }
+
+    [Fact]
+    public async Task MutationObservation_RecordsContainerWithTapGesture()
+    {
+        var layout = new Grid { AutomationId = "tappable-layout" };
+        layout.GestureRecognizers.Add(new TapGestureRecognizer());
+        using var harness = await SetPropertyTestHarness.CreateAsync(layout);
+        var layoutId = await harness.GetElementIdAsync("tappable-layout");
+
+        var observation = await harness.Service.CreateMutationObservationAsync(new HttpRequest
+        {
+            Method = "POST",
+            Path = "/api/v1/ui/actions/tap",
+            Body = JsonSerializer.Serialize(new { elementId = layoutId })
+        });
+
+        Assert.NotNull(observation);
+        Assert.Equal("tappable-layout", observation.AutomationId);
+    }
+
+    [Fact]
     public async Task MutationObservation_NeverCarriesPasswordEntryText()
     {
         var entry = new Entry

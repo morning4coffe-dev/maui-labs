@@ -215,7 +215,8 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             Assert.Equal(instanceId, target.RootElement.GetProperty("target").GetProperty("agentInstanceId").GetString());
             Assert.Equal("build-1", target.RootElement.GetProperty("target").GetProperty("app").GetProperty("build").GetString());
 
-            var markdown = FlowMarkdown.Serialize(AssertOnlyFlow());
+            var flow = FailingTapFlow();
+            var markdown = FlowMarkdown.Serialize(flow);
             using var preflight = await PostJsonAsync(
                 http,
                 $"{inspectorBase}/api/workbench/run/preflight",
@@ -264,7 +265,7 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             Assert.False(journal.RootElement.GetProperty("run").TryGetProperty("capabilityToken", out _));
 
             JsonDocument? terminal = null;
-            for (var attempt = 0; attempt < 40; attempt++)
+            for (var attempt = 0; attempt < 240; attempt++)
             {
                 using var status = await PostJsonAsync(
                     http,
@@ -274,13 +275,73 @@ public sealed class InspectorWorkbenchBrokerRouteTests
                 terminal = JsonDocument.Parse(await status.Content.ReadAsStringAsync());
                 if (terminal.RootElement.GetProperty("run").GetProperty("terminal").GetBoolean())
                     break;
-                await Task.Delay(25);
+                await Task.Delay(50);
             }
             using (terminal)
             {
                 Assert.NotNull(terminal);
                 Assert.True(terminal!.RootElement.GetProperty("run").GetProperty("terminal").GetBoolean());
+                Assert.Equal("failed", terminal.RootElement.GetProperty("run").GetProperty("state").GetString());
             }
+
+            using var handoffResponse = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-handoff",
+                new
+                {
+                    runId,
+                    capabilityToken = runToken,
+                    flowName = "inspector-workbench.md",
+                    markdown,
+                    flow,
+                });
+            Assert.Equal(HttpStatusCode.OK, handoffResponse.StatusCode);
+            using var handoff = JsonDocument.Parse(await handoffResponse.Content.ReadAsStringAsync());
+            var context = handoff.RootElement.GetProperty("context");
+            var failureRequest = context.GetProperty("failureRequest");
+            Assert.Equal(runId, failureRequest.GetProperty("runId").GetString());
+            Assert.Equal(runToken, failureRequest.GetProperty("runCapabilityToken").GetString());
+            var failureEnvelope = failureRequest.GetProperty("envelope");
+            var handoffSessionId = failureEnvelope
+                .GetProperty("correlation")
+                .GetProperty("authoringSessionId")
+                .GetString()!;
+            var handoffReadCapability = failureEnvelope.GetProperty("readCapabilityId").GetString()!;
+            Assert.Equal(runId, failureEnvelope.GetProperty("correlation").GetProperty("runId").GetString());
+            Assert.Equal(instanceId, failureEnvelope.GetProperty("target").GetProperty("agentInstanceId").GetString());
+
+            var sessionService = (TestAgentSessionService)typeof(BrokerServer)
+                .GetField("_testAgentSessions", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(broker)!;
+            var binding = sessionService.GetRunBinding(new MauiTestAgentRunBindingRequest
+            {
+                SessionId = handoffSessionId,
+                ReadCapabilityId = handoffReadCapability,
+                RunId = runId,
+            });
+            Assert.True(binding.Ok, binding.Error?.Message);
+
+            using var repeatedHandoffResponse = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-handoff",
+                new
+                {
+                    runId,
+                    flowName = "inspector-workbench.md",
+                    markdown,
+                    flow,
+                });
+            Assert.Equal(HttpStatusCode.OK, repeatedHandoffResponse.StatusCode);
+            using var repeatedHandoff = JsonDocument.Parse(await repeatedHandoffResponse.Content.ReadAsStringAsync());
+            Assert.Equal(
+                handoffSessionId,
+                repeatedHandoff.RootElement
+                    .GetProperty("context")
+                    .GetProperty("failureRequest")
+                    .GetProperty("envelope")
+                    .GetProperty("correlation")
+                    .GetProperty("authoringSessionId")
+                    .GetString());
 
             const string hostile = "CorrectHorseBatteryStaple";
             using var import = new HttpRequestMessage(
@@ -504,6 +565,20 @@ public sealed class InspectorWorkbenchBrokerRouteTests
                         Selector = new FlowSelector { AutomationId = "label" },
                     },
                 },
+            },
+        },
+    };
+
+    private static MauiFlow FailingTapFlow() => new()
+    {
+        Name = "inspector-workbench-failure",
+        Steps =
+        {
+            new FlowStep
+            {
+                Seq = 1,
+                Action = FlowActions.Tap,
+                Target = new FlowSelector { AutomationId = "missing-control" },
             },
         },
     };

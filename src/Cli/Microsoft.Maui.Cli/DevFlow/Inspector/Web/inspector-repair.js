@@ -43,18 +43,13 @@ export function renderRepairPanel(helpers) {
     classify.disabled = state.classifying || !repair;
     helpers.agentGuide?.(root, {
       title: 'Diagnose with your agent',
-      description: 'Your agent can inspect the bounded failure details and prepare a safe suggestion. It cannot apply the change.',
+      description: 'Copy an exact, time-limited handoff for this failed run. The agent cannot apply a change.',
       steps: [
-        'Ask the agent to classify the latest failed test.',
+        'The Inspector identifies this exact failed test run.',
         'If a safe control replacement exists, the agent prepares an inert suggestion.',
         'You review, validate, and apply any change here.',
       ],
-      prompt: [
-        'Use only the restricted DevFlow test-agent tools.',
-        'Inspect the latest failed local DevFlow test and explain the failure in plain language.',
-        'If a selector-only repair is safely eligible, create an inert proposal for human review.',
-        'Do not approve, apply, roll back, or edit source.',
-      ].join(' '),
+      prompt: () => helpers.run?.prepareFailureAgentPrompt?.(),
     });
   } else if (eligibility?.eligible !== true && !proposal) {
     const unavailable = document.createElement('section');

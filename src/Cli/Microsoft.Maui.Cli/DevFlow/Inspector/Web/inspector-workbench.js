@@ -510,22 +510,30 @@ export function createInspectorWorkbench(options = {}) {
           copy.className = 'df-workbench-action df-agent-guide-copy';
           copy.textContent = config.buttonLabel || 'Copy prompt for your agent';
           copy.addEventListener('click', async () => {
-            const value = typeof config.prompt === 'function' ? config.prompt() : config.prompt;
-            const prompt = String(value || '').trim().slice(0, 8192);
-            if (!prompt) {
-              setStatus('No agent prompt is available yet.');
-              return;
-            }
             copy.disabled = true;
-            const copied = await copyText(prompt);
-            copy.textContent = copied ? 'Prompt copied' : 'Copy failed';
-            setStatus(copied
-              ? 'Copied instructions. Paste them into your coding agent chat.'
-              : 'Could not copy the agent prompt.');
-            win.setTimeout(() => {
-              copy.disabled = false;
-              copy.textContent = config.buttonLabel || 'Copy prompt for your agent';
-            }, 1600);
+            copy.textContent = 'Preparing prompt…';
+            try {
+              const value = typeof config.prompt === 'function' ? await config.prompt() : config.prompt;
+              const prompt = String(value || '').trim().slice(0, 8192);
+              if (!prompt) {
+                copy.textContent = 'Prompt unavailable';
+                setStatus('No agent prompt is available yet.');
+                return;
+              }
+              const copied = await copyText(prompt);
+              copy.textContent = copied ? 'Prompt copied' : 'Copy failed';
+              setStatus(copied
+                ? 'Copied an exact, time-limited run handoff. Paste it into your coding agent chat.'
+                : 'Could not copy the agent prompt.');
+            } catch (error) {
+              copy.textContent = 'Prompt unavailable';
+              setStatus(error?.message || 'Could not prepare the restricted agent handoff.');
+            } finally {
+              win.setTimeout(() => {
+                copy.disabled = false;
+                copy.textContent = config.buttonLabel || 'Copy prompt for your agent';
+              }, 1600);
+            }
           });
           actions.append(copy);
           guide.append(actions);

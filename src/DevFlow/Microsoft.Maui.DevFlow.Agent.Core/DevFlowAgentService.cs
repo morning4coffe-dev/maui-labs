@@ -1306,6 +1306,12 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     .FirstOrDefault(element => string.Equals(element.Id, targetId, StringComparison.Ordinal));
             });
         }
+        if (string.Equals(action, "tap", StringComparison.Ordinal) &&
+            target is not null &&
+            !IsReplayableRecordedTapTarget(target))
+        {
+            return null;
+        }
 
         var observedProperty = action == "fill"
             ? "Text"
@@ -1428,6 +1434,20 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                 observedElements,
                 route)
         };
+    }
+
+    internal static bool IsReplayableRecordedTapTarget(ElementInfo target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        if (target.Traits?.Contains("interactive", StringComparer.OrdinalIgnoreCase) == true)
+            return true;
+
+        return target.Type is
+            "Picker" or
+            "DatePicker" or
+            "TimePicker" or
+            "Slider" or
+            "Stepper";
     }
 
     private SelectorObservationPayload? CreateSelectorObservation(

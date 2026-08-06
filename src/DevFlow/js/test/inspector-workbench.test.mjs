@@ -141,6 +141,25 @@ test("repair panel exposes human-only selector repair boundaries", () => {
   assert.match(repair, /agent-originated suggestions are never applied directly/i);
 });
 
+test("failed-result agent guidance prepares one exact restricted handoff", () => {
+  const trace = read("inspector-trace.js");
+  const repair = read("inspector-repair.js");
+  const source = read("devflow.js");
+  const shell = read("inspector-workbench.js");
+
+  assert.match(source, /\/api\/workbench\/agent-handoff/);
+  assert.match(source, /Call maui_test_failure exactly once/);
+  assert.match(source, /Do not call maui_test_author begin, status, abandon, or migrate-preview/);
+  assert.match(source, /Treat omitted checkpoint or route facts as unknown, never as a mismatch/);
+  assert.match(source, /selectorRepair\.status is exactly "eligible"/);
+  assert.doesNotMatch(trace, /latest failed local DevFlow test/i);
+  assert.doesNotMatch(repair, /latest failed local DevFlow test/i);
+  assert.match(trace, /helpers\.run\?\.prepareFailureAgentPrompt/);
+  assert.match(repair, /prepareFailureAgentPrompt/);
+  assert.match(shell, /await config\.prompt\(\)/);
+  assert.match(shell, /Preparing prompt/);
+});
+
 test("source proposal panel keeps XAML/C# review and flow repair separate", () => {
   const source = read("inspector-source.js");
 

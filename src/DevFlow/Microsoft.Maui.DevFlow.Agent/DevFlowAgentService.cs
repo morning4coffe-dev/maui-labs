@@ -570,6 +570,9 @@ public class PlatformAgentService : DevFlowAgentService
                 androidView.PerformClick();
                 return true;
             }
+#elif WINDOWS
+            if (platformView is Microsoft.UI.Xaml.Controls.Control control)
+                return control.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
 #elif MACOS
             if (platformView is NSButton button)
             {

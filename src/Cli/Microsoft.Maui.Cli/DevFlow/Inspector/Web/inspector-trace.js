@@ -338,19 +338,13 @@ function renderResultsSummary(root, helpers, state, controller, snapshot, report
   if (failed) {
     helpers.agentGuide?.(banner, {
       title: 'Diagnose this failure with your agent',
-      description: 'Your agent can inspect the bounded result, explain what failed, and prepare a safe suggestion for you to review.',
+      description: 'Copy an exact, time-limited handoff. Your agent can explain this run without searching for files, sessions, or tokens.',
       steps: [
-        'The agent classifies the latest local failure.',
+        'The Inspector identifies this exact failed run.',
         'It explains whether to fix the test, inspect the app, or retry later.',
         'Any repair remains a suggestion until you validate and approve it.',
       ],
-      prompt: [
-        'Use only the restricted DevFlow test-agent tools.',
-        'Inspect the latest failed local DevFlow test and explain the failure in plain language.',
-        'Recommend the next safe action.',
-        'If a selector-only repair is eligible, create an inert proposal for human review only.',
-        'Do not apply repairs or source changes.',
-      ].join(' '),
+      prompt: () => helpers.run?.prepareFailureAgentPrompt?.(),
     });
   }
 }

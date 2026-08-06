@@ -893,6 +893,117 @@ public class InspectorPageTests : IAsyncLifetime
     }
 
     [LiveInspectorFact]
+    public async Task TestWorkbenchFailedResult_CopiesExactRestrictedAgentHandoff()
+    {
+        const string name = "recording-2026-08-04T07-33-09.md";
+        await CaptureClipboardWritesAsync();
+        string? handoffRequest = null;
+        await _page.RouteAsync("**/api/workbench/run/journal*", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body =
+                """
+                {
+                  "ok": true,
+                  "restored": false,
+                  "pending": false,
+                  "run": {
+                    "runId": "run-copy-handoff",
+                    "state": "failed",
+                    "terminal": true,
+                    "totalSteps": 1,
+                    "completedSteps": 1,
+                    "firstDivergence": 1,
+                    "report": {
+                      "runId": "run-copy-handoff",
+                      "outcome": { "status": "failed", "terminal": true },
+                      "failure": {
+                        "class": "drive-failed",
+                        "code": "drive-failed",
+                        "category": "action",
+                        "phase": "dispatch",
+                        "stepId": "1"
+                      },
+                      "steps": [
+                        {
+                          "stepId": "1",
+                          "sequence": 1,
+                          "action": "tap",
+                          "failureClass": "drive-failed"
+                        }
+                      ]
+                    }
+                  }
+                }
+                """,
+        }));
+        await _page.RouteAsync("**/api/workbench/agent-handoff", async route =>
+        {
+            handoffRequest = route.Request.PostData;
+            await route.FulfillAsync(new()
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body =
+                    """
+                    {
+                      "ok": true,
+                      "context": {
+                        "testName": "recording-2026-08-04T07-33-09.md",
+                        "runId": "run-copy-handoff",
+                        "failureRequest": {
+                          "runId": "run-copy-handoff",
+                          "runCapabilityToken": "run-read-capability",
+                          "envelope": {
+                            "requestId": "handoff-failure",
+                            "correlation": {
+                              "authoringSessionId": "author-handoff",
+                              "runId": "run-copy-handoff"
+                            },
+                            "readCapabilityId": "read-handoff"
+                          }
+                        },
+                        "improvementsEnvelope": {
+                          "requestId": "handoff-improvements",
+                          "correlation": { "authoringSessionId": "author-handoff" },
+                          "readCapabilityId": "read-handoff"
+                        },
+                        "patchEnvelope": {
+                          "requestId": "handoff-patch",
+                          "correlation": { "authoringSessionId": "author-handoff" },
+                          "readCapabilityId": "read-handoff"
+                        }
+                      }
+                    }
+                    """,
+            });
+        });
+
+        await _page.GotoAsync(BaseUrl);
+        await OpenSavedTestAsync(name);
+        await _page.Locator("#df-workbench-stage-results").ClickAsync();
+        var guide = _page.Locator("#df-workbench-panel-trace .df-agent-guide");
+        await guide.Locator("summary").ClickAsync();
+        await guide.GetByRole(
+            AriaRole.Button,
+            new() { Name = "Copy prompt for your agent", Exact = true }).ClickAsync();
+
+        await Expect(_page.Locator("#df-workbench-status")).ToContainTextAsync(
+            "Copied an exact, time-limited run handoff");
+        var copied = await _page.EvaluateAsync<string>("() => window.__copiedDevFlowData");
+        Assert.Contains("Call maui_test_failure exactly once", copied, StringComparison.Ordinal);
+        Assert.Contains("run-copy-handoff", copied, StringComparison.Ordinal);
+        Assert.DoesNotContain("latest failed local", copied, StringComparison.OrdinalIgnoreCase);
+
+        Assert.False(string.IsNullOrWhiteSpace(handoffRequest));
+        using var request = JsonDocument.Parse(handoffRequest);
+        Assert.Equal("run-copy-handoff", request.RootElement.GetProperty("runId").GetString());
+        Assert.True(request.RootElement.TryGetProperty("markdown", out var markdown));
+        Assert.Contains("json maui-test", markdown.GetString(), StringComparison.Ordinal);
+    }
+
+    [LiveInspectorFact]
     public async Task ClickSendsTapToAgent()
     {
         await _page.GotoAsync(BaseUrl);

@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Reflection;
+using System.Text.Json;
 using Microsoft.Maui.Cli.DevFlow;
 using Microsoft.Maui.Cli.DevFlow.Broker;
 using Microsoft.Maui.Cli.DevFlow.Mcp;
@@ -170,6 +171,163 @@ public class TestAgentSessionServiceTests
             Context = oneShot,
         }).OrdinaryReplayAllowed);
         Assert.Null(resettable.ManualOneShotAuthorization);
+    }
+
+    [Fact]
+    public void FailureDiagnostic_DriveRejectionPreservesCanonicalFacts()
+    {
+        using var document = JsonDocument.Parse(
+            """
+            {
+              "run": {
+                "state": "failed",
+                "report": {
+                  "outcome": { "status": "failed" },
+                  "failure": {
+                    "class": "drive-failed",
+                    "code": "drive-failed",
+                    "category": "action",
+                    "phase": "dispatch",
+                    "repairEligible": false,
+                    "legacyKind": "drive",
+                    "stepId": "1"
+                  },
+                  "steps": [
+                    {
+                      "stepId": "1",
+                      "sequence": 1,
+                      "action": "tap",
+                      "selector": {
+                        "automationId": "NewTodoEntry",
+                        "quality": "durable"
+                      },
+                      "targetResolution": { "status": "resolved", "matchCount": 1 },
+                      "actionability": [
+                        { "visible": true, "enabled": true, "hasBounds": true },
+                        { "boundsStable": true }
+                      ],
+                      "dispatch": {
+                        "acknowledgementState": "rejected",
+                        "completionCertainty": "completed"
+                      },
+                      "observedCheckpoint": { "route": "//native" }
+                    }
+                  ]
+                }
+              }
+            }
+            """);
+
+        var diagnostic = TestAgentFailureTool.ReadDiagnostic(document.RootElement);
+
+        Assert.Equal(MauiFlowFailureClasses.DriveFailed, diagnostic.Classification.Code);
+        Assert.Equal("action", diagnostic.Classification.Category);
+        Assert.Null(diagnostic.Facts.CheckpointMatches);
+        Assert.Null(diagnostic.Facts.RouteMatches);
+        Assert.Equal(1, diagnostic.FailedStep?.MatchCount);
+        Assert.Equal("rejected", diagnostic.FailedStep?.AcknowledgementState);
+        Assert.Contains("not a selector or route failure", diagnostic.PlainLanguage, StringComparison.Ordinal);
+        Assert.False(diagnostic.SelectorRepair.Eligible);
+        Assert.Contains("Do not create a selector repair", diagnostic.NextSafeAction, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void FailureDiagnostic_FragileContainerTapRecommendsReviewInsteadOfRepair()
+    {
+        using var document = JsonDocument.Parse(
+            """
+            {
+              "run": {
+                "state": "failed",
+                "report": {
+                  "outcome": { "status": "failed" },
+                  "failure": {
+                    "class": "drive-failed",
+                    "phase": "dispatch",
+                    "legacyKind": "drive",
+                    "stepId": "3"
+                  },
+                  "steps": [
+                    {
+                      "stepId": "3",
+                      "sequence": 3,
+                      "action": "tap",
+                      "selector": {
+                        "typeIndex": { "type": "MainPage", "index": 0 },
+                        "quality": "fragile"
+                      },
+                      "targetResolution": { "status": "resolved", "matchCount": 1 },
+                      "actionability": [
+                        { "visible": true, "enabled": true, "hasBounds": true, "boundsStable": true }
+                      ],
+                      "dispatch": {
+                        "acknowledgementState": "rejected",
+                        "completionCertainty": "completed"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            """);
+
+        var diagnostic = TestAgentFailureTool.ReadDiagnostic(document.RootElement);
+
+        Assert.True(diagnostic.FailedStep?.FragileSelector);
+        Assert.Equal("typeIndex", diagnostic.FailedStep?.SelectorKind);
+        Assert.Equal("MainPage", diagnostic.FailedStep?.SelectorType);
+        Assert.Contains("recording likely captured the wrong control", diagnostic.PlainLanguage, StringComparison.Ordinal);
+        Assert.Contains("Return to Review", diagnostic.NextSafeAction, StringComparison.Ordinal);
+        Assert.False(diagnostic.SelectorRepair.Eligible);
+    }
+
+    [Fact]
+    public void FailureDiagnostic_VerifiedMissingSelectorIsRepairEligible()
+    {
+        using var document = JsonDocument.Parse(
+            """
+            {
+              "run": {
+                "state": "failed",
+                "report": {
+                  "outcome": { "status": "failed" },
+                  "failure": {
+                    "class": "locator-not-found",
+                    "code": "locator-not-found",
+                    "category": "selector",
+                    "phase": "resolution",
+                    "legacyKind": "not-found",
+                    "stepId": "2"
+                  },
+                  "steps": [
+                    {
+                      "stepId": "2",
+                      "sequence": 2,
+                      "action": "tap",
+                      "targetResolution": { "status": "not-found", "matchCount": 0 },
+                      "expectedCheckpoint": {
+                        "agentInstanceId": "instance-a",
+                        "route": "//native"
+                      },
+                      "observedCheckpoint": {
+                        "agentInstanceId": "instance-a",
+                        "route": "//native"
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+            """);
+
+        var diagnostic = TestAgentFailureTool.ReadDiagnostic(document.RootElement);
+
+        Assert.Equal(MauiFlowFailureClasses.LocatorNotFound, diagnostic.Classification.Code);
+        Assert.True(diagnostic.Facts.CheckpointVerified);
+        Assert.True(diagnostic.Facts.CheckpointMatches);
+        Assert.True(diagnostic.Facts.RouteMatches);
+        Assert.True(diagnostic.SelectorRepair.Eligible);
+        Assert.Equal("eligible", diagnostic.SelectorRepair.Status);
     }
 
     [Fact]

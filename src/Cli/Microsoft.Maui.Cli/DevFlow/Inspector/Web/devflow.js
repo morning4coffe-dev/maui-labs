@@ -4303,6 +4303,26 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     try { sessionStorage.removeItem(workbenchRunStorageKey()); } catch {}
   }
 
+  function failureAgentPrompt(context) {
+    const testName = context?.testName || authoringDraft.flowName || currentAuthoringFlow()?.name || 'the selected test';
+    const failureRequest = context?.failureRequest;
+    const improvementsEnvelope = context?.improvementsEnvelope;
+    const patchEnvelope = context?.patchEnvelope;
+    if (!failureRequest || !improvementsEnvelope || !patchEnvelope)
+      throw new Error('The Inspector did not return a complete restricted diagnostic handoff.');
+
+    return [
+      'Use only the restricted DevFlow test-agent tools.',
+      `Diagnose the exact failed local run for "${testName}". Do not search for or choose a different "latest" run.`,
+      `Call maui_test_failure exactly once and pass this exact object as its request argument: ${JSON.stringify(failureRequest)}.`,
+      'Do not call maui_test_author begin, status, abandon, or migrate-preview, and do not call maui_test_run or maui_test_trace to rediscover context.',
+      'Explain the response plainLanguage in concise user language and recommend its nextSafeAction. Treat omitted checkpoint or route facts as unknown, never as a mismatch.',
+      `Only when selectorRepair.status is exactly "eligible", call maui_test_improvements with this exact envelope: ${JSON.stringify(improvementsEnvelope)}. Then create at most one inert selector-only maui_test_patch proposal using this exact object as request.envelope: ${JSON.stringify(patchEnvelope)}. Preserve every action, assertion, value, and step order.`,
+      'When selectorRepair.status is not "eligible", stop without a proposal.',
+      'Do not approve, apply, run, abandon the handoff, edit source, or change the app.',
+    ].join(' ');
+  }
+
   function createOpaqueIdempotencyKey() {
     if (window.crypto?.randomUUID) return `inspector-${crypto.randomUUID()}`;
     return `inspector-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -4902,6 +4922,30 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       },
       async legacyQuickReplay() {
         await legacyQuickReplay();
+      },
+      async prepareFailureAgentPrompt() {
+        const current = flowAndPlan();
+        const run = state.run;
+        if (!run?.runId || !run.terminal || !run.report?.failure)
+          throw new Error('Open a terminal failed local result before preparing an agent handoff.');
+        if (!current.flow)
+          throw new Error('The loaded semantic test is unavailable.');
+
+        const stored = readWorkbenchRunStorage();
+        const capabilityToken = stored?.runId === run.runId
+          ? stored.capabilityToken
+          : run.capabilityToken;
+        const response = await inspectorApi.postDetailed('/api/workbench/agent-handoff', {
+          runId: run.runId,
+          capabilityToken,
+          flowName: current.flowName,
+          markdown: authoringDraft.markdown,
+          flow: current.flow,
+          plan: current.plan,
+        });
+        if (!response.ok || response.body?.ok !== true || !response.body?.context)
+          throw new Error(response.body?.error || response.error || 'Could not prepare the restricted agent handoff.');
+        return failureAgentPrompt(response.body.context);
       },
       async bindReproduction() {
         const imported = state.reproduction;

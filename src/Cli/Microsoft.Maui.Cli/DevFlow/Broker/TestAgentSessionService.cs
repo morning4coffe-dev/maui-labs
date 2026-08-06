@@ -2155,7 +2155,7 @@ internal sealed class TestAgentSessionService
             FlowDigest = session.FlowDigest,
         };
 
-    private static string ComputePlanDigest(MauiTestPlan plan)
+    internal static string ComputePlanDigest(MauiTestPlan plan)
     {
         var bytes = JsonSerializer.SerializeToUtf8Bytes(plan, MauiTestingJsonContext.Default.MauiTestPlan);
         return Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();

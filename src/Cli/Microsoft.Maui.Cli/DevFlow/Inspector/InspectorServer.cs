@@ -93,6 +93,8 @@ public sealed class InspectorServer : IDisposable
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, WorkbenchRepairClassification> _workbenchRepairClassifications =
         new(StringComparer.Ordinal);
+    private readonly Dictionary<string, WorkbenchAgentHandoff> _workbenchAgentHandoffs =
+        new(StringComparer.Ordinal);
     private PerformanceOwnership? _performanceOwnership;
     private byte[]? _lastReplayEvidence;
     private static readonly TimeSpan ScreenshotCacheDuration = TimeSpan.FromMilliseconds(200);
@@ -109,6 +111,7 @@ public sealed class InspectorServer : IDisposable
     private const int MaxRetainedWorkbenchRuns = 16;
     private const int MaxRetainedWorkbenchEvidence = 8;
     private const int MaxRetainedWorkbenchRepairClassifications = 32;
+    private const int MaxRetainedWorkbenchAgentHandoffs = 16;
     private const int MaxCachedWorkbenchEvidenceBytes = 16 * 1024 * 1024;
     private const int MaxSelectorVerifyAmbiguityMatches = 20;
 
@@ -2741,6 +2744,13 @@ public sealed class InspectorServer : IDisposable
                 : JsonResponse(405, new { ok = false, error = "Method not allowed." });
         }
 
+        if (string.Equals(path, "/api/workbench/agent-handoff", StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? await HandleWorkbenchAgentHandoffAsync(services, request.Body)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
         if (string.Equals(path, "/api/workbench/run/preflight", StringComparison.OrdinalIgnoreCase))
         {
             return request.Method == "POST"
@@ -5279,6 +5289,227 @@ public sealed class InspectorServer : IDisposable
         return JsonResponse(200, new { ok = true, restored = false, pending, run = latestTerminal });
     }
 
+    private async Task<(int, string, byte[])> HandleWorkbenchAgentHandoffAsync(
+        InspectorWorkflowServices services,
+        string? body)
+    {
+        if (_testAgentSessions is null || _testAgentTargetStateRefresh is null)
+            return JsonResponse(501, new { ok = false, error = "Restricted test-agent handoff is unavailable in this host." });
+
+        WorkbenchAgentHandoffRequest? request;
+        try
+        {
+            request = string.IsNullOrWhiteSpace(body)
+                ? null
+                : JsonSerializer.Deserialize<WorkbenchAgentHandoffRequest>(body, WorkbenchJsonOptions);
+        }
+        catch (JsonException)
+        {
+            return JsonResponse(400, new { ok = false, error = "The agent handoff request is not valid JSON." });
+        }
+
+        if (request is null || string.IsNullOrWhiteSpace(request.RunId))
+            return JsonResponse(400, new { ok = false, error = "A semantic flow and exact failed run are required." });
+
+        var flow = request.Flow;
+        if (!string.IsNullOrWhiteSpace(request.Markdown))
+        {
+            var parsed = Testing.FlowMarkdown.Parse(request.Markdown);
+            if (!parsed.Ok || parsed.Flow is null)
+                return JsonResponse(400, new { ok = false, error = parsed.Error ?? "The loaded Markdown test is invalid." });
+            flow = parsed.Flow;
+        }
+        if (flow is null)
+            return JsonResponse(400, new { ok = false, error = "A semantic flow and exact failed run are required." });
+
+        var runToken = ResolveWorkbenchRunToken(request.RunId, request.CapabilityToken);
+        var access = services.GetRunStatus(request.RunId, runToken);
+        if (access.Run is null)
+            return JsonResponse(access.StatusCode, new { ok = false, error = access.Error ?? "The failed run is unavailable." });
+        if (access.Run.Terminal != true || access.Run.Report?.Failure is null)
+            return JsonResponse(409, new { ok = false, error = "Agent diagnosis is available only for a terminal failed local run." });
+        if (string.IsNullOrWhiteSpace(runToken))
+            return JsonResponse(403, new { ok = false, error = "The retained run read capability is unavailable." });
+        if (!string.Equals(access.Run.Target.AgentId, _agentId, StringComparison.Ordinal) ||
+            !string.Equals(access.Run.Target.AgentInstanceId, _agentInstanceId, StringComparison.Ordinal))
+        {
+            return JsonResponse(409, new { ok = false, error = "The failed run belongs to a different app instance." });
+        }
+
+        var flowDigest = Testing.MauiFlowRunReportSerializer.ComputeFlowDigest(flow);
+        if (!string.Equals(flowDigest, access.Run.FlowDigest, StringComparison.Ordinal))
+            return JsonResponse(409, new { ok = false, error = "The loaded test no longer matches the failed run." });
+        if (!string.IsNullOrWhiteSpace(request.Plan?.Flow?.Digest) &&
+            !string.Equals(request.Plan.Flow.Digest, flowDigest, StringComparison.Ordinal))
+        {
+            return JsonResponse(409, new { ok = false, error = "The loaded plan no longer matches the failed run." });
+        }
+
+        var planDigest = request.Plan is null
+            ? "none"
+            : TestAgentSessionService.ComputePlanDigest(request.Plan);
+        var key = $"{request.RunId}\n{flowDigest}\n{planDigest}";
+        WorkbenchAgentHandoff? existing;
+        lock (_workbenchRunGate)
+            _workbenchAgentHandoffs.TryGetValue(key, out existing);
+        if (existing is not null && existing.ExpiresAt > DateTimeOffset.UtcNow)
+        {
+            var readable = _testAgentSessions.GetSnapshotForRead(existing.SessionId, existing.ReadCapabilityId);
+            if (readable.Ok)
+                return JsonResponse(200, new { ok = true, context = existing.Context });
+            lock (_workbenchRunGate)
+                _workbenchAgentHandoffs.Remove(key);
+        }
+
+        if (string.IsNullOrWhiteSpace(_agentId) || string.IsNullOrWhiteSpace(_agentInstanceId))
+            return JsonResponse(409, new { ok = false, error = "The Inspector does not have an exact test-agent target." });
+
+        var targetState = await _testAgentTargetStateRefresh(new Testing.MauiTestAgentTargetState
+        {
+            AgentId = _agentId,
+            AgentInstanceId = _agentInstanceId,
+        }).ConfigureAwait(false);
+        if (targetState is null)
+            return JsonResponse(409, new { ok = false, error = "The exact app instance is no longer available for agent handoff." });
+
+        var target = new Testing.MauiTestAgentTarget
+        {
+            AgentId = targetState.AgentId,
+            AgentInstanceId = targetState.AgentInstanceId,
+            AppBuildFingerprint = targetState.AppBuildFingerprint,
+            SeedFingerprint = targetState.SeedFingerprint,
+            BackendStateFingerprint = targetState.BackendStateFingerprint,
+        };
+        var handoffId = Guid.NewGuid().ToString("N");
+        var begun = _testAgentSessions.Begin(new Testing.MauiTestAgentSessionBeginRequest
+        {
+            Envelope = new Testing.MauiTestAgentRequestEnvelope
+            {
+                RequestId = $"handoff-begin-{handoffId}",
+                IdempotencyKey = $"handoff-begin-{handoffId}",
+                Target = target,
+                Correlation = new Testing.MauiTestAgentCorrelation
+                {
+                    PlanId = request.Plan?.PlanId,
+                    PlanRevision = request.Plan?.Revision,
+                    FlowId = request.Plan?.Flow?.FlowId,
+                    FlowRevision = request.Plan?.Flow?.Revision,
+                    FlowDigest = flowDigest,
+                    RunId = request.RunId,
+                },
+                Provenance = HandoffProvenance(),
+                Intent = "Diagnose the exact failed Inspector test run and prepare only an eligible inert selector proposal.",
+                DeadlineMs = 30_000,
+                PolicyVersion = Testing.MauiTestAgentProtocolVersions.PolicyVersion,
+            },
+            TargetState = targetState,
+            Plan = request.Plan,
+            Flow = flow,
+            DurationSeconds = 600,
+        });
+        var snapshot = begun.Snapshot;
+        if (!begun.Ok || snapshot is null ||
+            string.IsNullOrWhiteSpace(snapshot.SessionId) ||
+            string.IsNullOrWhiteSpace(snapshot.ReadCapabilityId))
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = begun.Error?.Message ?? "The restricted diagnostic handoff could not be created.",
+            });
+        }
+
+        var bound = _testAgentSessions.BindRun(new Testing.MauiTestAgentRunBindingRequest
+        {
+            SessionId = snapshot.SessionId,
+            ReadCapabilityId = snapshot.ReadCapabilityId,
+            RunId = request.RunId,
+            RunCapabilityToken = runToken,
+        });
+        if (!bound.Ok)
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = bound.Error?.Message ?? "The failed run could not be bound to the diagnostic handoff.",
+            });
+        }
+
+        var failureEnvelope = HandoffEnvelope(snapshot, target, request.RunId, "failure", handoffId);
+        var improvementsEnvelope = HandoffEnvelope(snapshot, target, request.RunId, "improvements", handoffId);
+        var patchEnvelope = HandoffEnvelope(snapshot, target, request.RunId, "patch", handoffId);
+        var context = new WorkbenchAgentHandoffContext
+        {
+            TestName = request.FlowName ?? request.Plan?.Flow?.Path ?? flow.Name,
+            RunId = request.RunId,
+            ExpiresAt = snapshot.ExpiresAt,
+            FailureRequest = new Testing.MauiTestAgentTraceRequest
+            {
+                Envelope = failureEnvelope,
+                RunId = request.RunId,
+                RunCapabilityToken = runToken,
+            },
+            ImprovementsEnvelope = improvementsEnvelope,
+            PatchEnvelope = patchEnvelope,
+        };
+        var handoff = new WorkbenchAgentHandoff(
+            snapshot.SessionId,
+            snapshot.ReadCapabilityId,
+            snapshot.ExpiresAt ?? DateTimeOffset.UtcNow.AddMinutes(10),
+            context);
+        lock (_workbenchRunGate)
+        {
+            _workbenchAgentHandoffs[key] = handoff;
+            while (_workbenchAgentHandoffs.Count > MaxRetainedWorkbenchAgentHandoffs)
+            {
+                var oldest = _workbenchAgentHandoffs.OrderBy(static pair => pair.Value.ExpiresAt).First();
+                _workbenchAgentHandoffs.Remove(oldest.Key);
+            }
+        }
+
+        return JsonResponse(200, new { ok = true, context });
+    }
+
+    private static Testing.MauiTestAgentRequestEnvelope HandoffEnvelope(
+        Testing.MauiTestAgentAuthoringSnapshot snapshot,
+        Testing.MauiTestAgentTarget target,
+        string runId,
+        string operation,
+        string handoffId)
+        => new()
+        {
+            RequestId = $"handoff-{operation}-{handoffId}",
+            IdempotencyKey = $"handoff-{operation}-{handoffId}",
+            Target = target,
+            Correlation = new Testing.MauiTestAgentCorrelation
+            {
+                AuthoringSessionId = snapshot.SessionId,
+                PlanId = snapshot.Plan?.PlanId,
+                PlanRevision = snapshot.Plan?.Revision,
+                PlanDigest = snapshot.PlanDigest,
+                FlowId = snapshot.Plan?.Flow?.FlowId,
+                FlowRevision = snapshot.FlowRevision,
+                FlowDigest = snapshot.FlowDigest,
+                RunId = runId,
+            },
+            Provenance = HandoffProvenance(),
+            Intent = "Diagnose the exact failed Inspector test run.",
+            ReadCapabilityId = snapshot.ReadCapabilityId,
+            DeadlineMs = 30_000,
+            PolicyVersion = Testing.MauiTestAgentProtocolVersions.PolicyVersion,
+        };
+
+    private static Testing.MauiActorProvenance HandoffProvenance()
+        => new()
+        {
+            ActorKind = "agent",
+            ActorId = "user-selected-agent",
+            Channel = "mcp",
+            Provider = "devflow-inspector-handoff",
+            Intent = "diagnose-failure",
+            RecordedAt = DateTimeOffset.UtcNow,
+        };
+
     private (int, string, byte[]) HandleWorkbenchEvidenceDownload(
         InspectorWorkflowServices services,
         string runId,
@@ -5598,6 +5829,13 @@ public sealed class InspectorServer : IDisposable
         {
             _workbenchRunCapabilities.Remove(runId);
             _workbenchEvidence.Remove(runId);
+            foreach (var key in _workbenchAgentHandoffs
+                         .Where(pair => string.Equals(pair.Value.Context.RunId, runId, StringComparison.Ordinal))
+                         .Select(static pair => pair.Key)
+                         .ToArray())
+            {
+                _workbenchAgentHandoffs.Remove(key);
+            }
             foreach (var token in _workbenchRepairClassifications
                          .Where(pair => string.Equals(pair.Value.ReportRunId, runId, StringComparison.Ordinal))
                          .Select(static pair => pair.Key)
@@ -5943,6 +6181,32 @@ public sealed class InspectorServer : IDisposable
         DateTimeOffset CreatedAt,
         WorkbenchEvidenceConsent EvidenceConsent,
         string? IdempotencyKey);
+
+    private sealed record WorkbenchAgentHandoff(
+        string SessionId,
+        string ReadCapabilityId,
+        DateTimeOffset ExpiresAt,
+        WorkbenchAgentHandoffContext Context);
+
+    private sealed class WorkbenchAgentHandoffContext
+    {
+        [JsonPropertyName("testName")] public string? TestName { get; init; }
+        [JsonPropertyName("runId")] public string? RunId { get; init; }
+        [JsonPropertyName("expiresAt")] public DateTimeOffset? ExpiresAt { get; init; }
+        [JsonPropertyName("failureRequest")] public Testing.MauiTestAgentTraceRequest? FailureRequest { get; init; }
+        [JsonPropertyName("improvementsEnvelope")] public Testing.MauiTestAgentRequestEnvelope? ImprovementsEnvelope { get; init; }
+        [JsonPropertyName("patchEnvelope")] public Testing.MauiTestAgentRequestEnvelope? PatchEnvelope { get; init; }
+    }
+
+    private sealed class WorkbenchAgentHandoffRequest
+    {
+        [JsonPropertyName("runId")] public string? RunId { get; set; }
+        [JsonPropertyName("capabilityToken")] public string? CapabilityToken { get; set; }
+        [JsonPropertyName("flowName")] public string? FlowName { get; set; }
+        [JsonPropertyName("markdown")] public string? Markdown { get; set; }
+        [JsonPropertyName("flow")] public Testing.MauiFlow? Flow { get; set; }
+        [JsonPropertyName("plan")] public Testing.MauiTestPlan? Plan { get; set; }
+    }
 
     private sealed record WorkbenchEvidence(
         byte[] Bytes,

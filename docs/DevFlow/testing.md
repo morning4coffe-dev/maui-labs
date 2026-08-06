@@ -37,7 +37,11 @@ second, separate **Allow one run** decision.
 
 After a failure, **Results** offers **Diagnose this failure with your agent**. The agent can explain
 the bounded failure and prepare an inert control-update suggestion, but it cannot apply the
-repair. **Repair** keeps review, validation, approval, and apply under human control. In
+repair. Copying the prompt creates a ten-minute, run-bound handoff containing the exact failed run,
+target, and read capabilities. The agent calls `maui_test_failure` directly; it does not create a
+draft, search for a “latest” run, migrate a flow, or infer that omitted checkpoint facts are
+mismatches. Only an explicitly eligible pre-dispatch missing-selector result may continue to one
+inert selector proposal. **Repair** keeps review, validation, approval, and apply under human control. In
 **Improve**, the equivalent agent prompt asks for a read-only quality review of fragile controls,
 missing expected results, and incomplete coverage.
 
@@ -72,6 +76,10 @@ Canvas may save the same bounded bundle through the host bridge; no host gets an
 Saving or committing never starts replay. Run/Trace and **Improve** are separate, read-only
 diagnostic surfaces; they never rewrite the loaded flow, select a fallback, apply a repair, or
 write application source.
+
+Recording retains only successful semantic interactions that can be replayed. A tap on a plain
+page or layout container with no interactive role or tap gesture is ignored rather than becoming
+a fragile type/index step. Interactive controls and gesture-bearing containers remain recordable.
 
 Run readiness separates admission blockers from verification limitations. A stale canonical
 flow/plan digest binding must be reviewed and saved again before Run unlocks. A missing independent

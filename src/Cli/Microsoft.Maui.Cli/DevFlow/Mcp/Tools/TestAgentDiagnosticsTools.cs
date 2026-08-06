@@ -13,7 +13,7 @@ namespace Microsoft.Maui.Cli.DevFlow.Mcp.Tools;
 public sealed class TestAgentTraceTool
 {
     [McpServerTool(Name = "maui_test_trace"),
-     System.ComponentModel.Description("Read a bounded safe projection of a broker-owned local run report. It never returns raw screenshots, source, logs, network bodies, file content, or imported artifact content.")]
+     System.ComponentModel.Description("Read a bounded safe projection of one explicitly named broker-owned local run. Prefer the exact run-bound request copied from the Inspector Results handoff; do not create or migrate an authoring draft to discover a run. It never returns raw screenshots, source, logs, network bodies, file content, or imported artifact content.")]
     public static async Task<string> Trace(
         [System.ComponentModel.Description("MCP session injected by the server and used for the local broker")] McpAgentSession session,
         [System.ComponentModel.Description("Typed trace request with envelope, runId, and target/run-bound capability token when needed")] MauiTestAgentTraceRequest request)
@@ -51,6 +51,7 @@ public sealed class TestAgentTraceTool
         return TestAgentToolSupport.Success(request.Envelope.RequestId, new
         {
             run = TestAgentRunTool.SafeRunProjection(result.Value),
+            diagnostic = TestAgentFailureTool.ReadDiagnostic(result.Value),
             trust = new
             {
                 state = "locally-produced",
@@ -107,7 +108,7 @@ public sealed class TestAgentTraceTool
 public sealed class TestAgentFailureTool
 {
     [McpServerTool(Name = "maui_test_failure"),
-     System.ComponentModel.Description("Return deterministic failure classification and bounded facts for a broker-owned run. It does not expose raw app logs, user text, network content, screenshots, source, or model prompts.")]
+     System.ComponentModel.Description("Return the canonical classification, plain-language explanation, next safe action, and bounded failed-step facts for one explicitly named broker-owned run. Prefer the exact run-bound request copied from the Inspector Results handoff; do not create or migrate an authoring draft to discover a run. It does not expose raw app logs, user text, network content, screenshots, source, or model prompts.")]
     public static async Task<string> Failure(
         [System.ComponentModel.Description("MCP session injected by the server and used for the local broker")] McpAgentSession session,
         [System.ComponentModel.Description("Typed trace-shaped request with envelope, runId, and target/run-bound capability token")] MauiTestAgentTraceRequest request)
@@ -142,60 +143,277 @@ public sealed class TestAgentFailureTool
                 retryable: true));
         }
 
-        var facts = ReadFailureFacts(result.Value);
-        var classification = MauiFlowFailureClassifier.Classify(facts);
+        var diagnostic = ReadDiagnostic(result.Value);
         return TestAgentToolSupport.Success(request.Envelope.RequestId, new
         {
             runId,
-            classification = new
-            {
-                @class = classification.FailureClass,
-                code = classification.Code,
-                category = classification.Category,
-                phase = classification.Phase,
-                retryable = classification.Retryable,
-                repairEligible = classification.RepairEligible,
-            },
-            facts = new
-            {
-                terminalOutcome = facts.TerminalOutcome,
-                failureClass = facts.FailureClass,
-                completionCertain = facts.CompletionCertain,
-                beforeDispatch = facts.BeforeDispatch,
-                checkpointVerified = facts.CheckpointVerified,
-                checkpointMatches = facts.CheckpointMatches,
-                routeMatches = facts.RouteMatches,
-            },
+            diagnostic.Classification,
+            diagnostic.Facts,
+            diagnostic.FailedStep,
+            diagnostic.PlainLanguage,
+            diagnostic.NextSafeAction,
+            diagnostic.SelectorRepair,
         });
     }
 
-    private static MauiFlowFailureFacts ReadFailureFacts(JsonElement response)
+    internal static TestAgentFailureDiagnostic ReadDiagnostic(JsonElement response)
     {
-        var run = response.ValueKind == JsonValueKind.Object &&
-                  response.TryGetProperty("run", out var nested) &&
-                  nested.ValueKind == JsonValueKind.Object
-            ? nested
-            : default;
-        var terminalState = String(run, "state");
-        var failure = run.ValueKind == JsonValueKind.Object &&
-                      run.TryGetProperty("report", out var report) &&
-                      report.ValueKind == JsonValueKind.Object &&
-                      report.TryGetProperty("failure", out var nestedFailure) &&
-                      nestedFailure.ValueKind == JsonValueKind.Object
-            ? nestedFailure
-            : default;
-        return new MauiFlowFailureFacts
+        var run = Object(response, "run");
+        var report = Object(run, "report");
+        var failure = Object(report, "failure");
+        var failedStepId = String(failure, "stepId");
+        var failedStep = Array(report, "steps")
+            .FirstOrDefault(step =>
+                string.Equals(String(step, "stepId"), failedStepId, StringComparison.Ordinal));
+        var facts = ReadFailureFacts(run, report, failure, failedStep);
+        var classification = MauiFlowFailureClassifier.Classify(facts);
+        var projection = ReadFailedStep(failedStep);
+        var explanation = Explain(classification, projection);
+        var nextAction = NextSafeAction(classification, projection);
+        return new TestAgentFailureDiagnostic
         {
-            TerminalOutcome = terminalState,
-            FailureClass = String(failure, "class"),
-            LegacyFailureKind = String(failure, "legacyKind"),
-            CompletionCertain = terminalState == MauiFlowRunOutcomes.UnknownCompletion ? false : true,
-            BeforeDispatch = String(failure, "phase") == "preflight",
-            CheckpointVerified = Bool(failure, "repairEligible") == true,
-            CheckpointMatches = Bool(failure, "repairEligible") == true,
-            RouteMatches = Bool(failure, "repairEligible") == true,
+            Classification = new TestAgentFailureClassification
+            {
+                Class = classification.FailureClass,
+                Code = classification.Code,
+                Category = classification.Category,
+                Phase = classification.Phase,
+                Retryable = classification.Retryable,
+                RepairEligible = classification.RepairEligible,
+            },
+            Facts = new TestAgentFailureFactsProjection
+            {
+                TerminalOutcome = facts.TerminalOutcome,
+                FailureClass = facts.FailureClass,
+                CompletionCertain = facts.CompletionCertain,
+                BeforeDispatch = facts.BeforeDispatch,
+                CheckpointVerified = facts.CheckpointVerified,
+                CheckpointMatches = facts.CheckpointMatches,
+                RouteMatches = facts.RouteMatches,
+            },
+            FailedStep = projection,
+            PlainLanguage = explanation,
+            NextSafeAction = nextAction,
+            SelectorRepair = new TestAgentSelectorRepairAdvice
+            {
+                Status = classification.RepairEligible ? "eligible" : "ineligible",
+                Eligible = classification.RepairEligible,
+                ProposalRecommended = classification.RepairEligible,
+                Reason = classification.RepairEligible
+                    ? "The failure is a verified pre-dispatch missing-selector failure, so one inert selector-only proposal may be prepared for human review."
+                    : "This failure is not a verified pre-dispatch missing-selector failure. Do not create a selector repair proposal.",
+            },
         };
     }
+
+    private static MauiFlowFailureFacts ReadFailureFacts(
+        JsonElement run,
+        JsonElement report,
+        JsonElement failure,
+        JsonElement failedStep)
+    {
+        var terminalState = String(run, "state");
+        var outcome = Object(report, "outcome");
+        var dispatch = Object(failedStep, "dispatch");
+        var expectedCheckpoint = Object(failedStep, "expectedCheckpoint");
+        var observedCheckpoint = Object(failedStep, "observedCheckpoint");
+        var failureClass = String(failure, "class");
+        var completionCertainty = String(dispatch, "completionCertainty") ??
+            String(failedStep, "completionCertainty");
+        var phase = String(failure, "phase");
+        bool? checkpointVerified = expectedCheckpoint.ValueKind == JsonValueKind.Object
+            ? observedCheckpoint.ValueKind == JsonValueKind.Object
+            : null;
+        bool? checkpointMatches = checkpointVerified == true
+            ? CheckpointMatches(expectedCheckpoint, observedCheckpoint)
+            : checkpointVerified == false
+                ? false
+                : null;
+        var expectedRoute = String(expectedCheckpoint, "route");
+        bool? routeMatches = string.IsNullOrWhiteSpace(expectedRoute)
+            ? null
+            : observedCheckpoint.ValueKind == JsonValueKind.Object &&
+              string.Equals(expectedRoute, String(observedCheckpoint, "route"), StringComparison.Ordinal);
+        return new MauiFlowFailureFacts
+        {
+            TerminalOutcome = String(outcome, "status") ?? terminalState,
+            FailureClass = failureClass,
+            LegacyFailureKind = String(failure, "legacyKind"),
+            FlowInvalid = failureClass == MauiFlowFailureClasses.FlowInvalid,
+            SchemaUnsupported = failureClass == MauiFlowFailureClasses.SchemaUnsupported,
+            CapabilityMissing = failureClass == MauiFlowFailureClasses.CapabilityMissing,
+            ResetFailed = failureClass == MauiFlowFailureClasses.ResetFailed,
+            ActionRejected = string.IsNullOrWhiteSpace(failureClass) &&
+                string.Equals(String(dispatch, "acknowledgementState"), "rejected", StringComparison.Ordinal),
+            AgentDisconnected = failureClass == MauiFlowFailureClasses.AgentDisconnected,
+            TransportFailure = failureClass == MauiFlowFailureClasses.Transport,
+            CompletionCertain = string.Equals(completionCertainty, "unknown", StringComparison.Ordinal)
+                ? false
+                : !string.IsNullOrWhiteSpace(completionCertainty) ||
+                  IsTerminalState(terminalState),
+            BeforeDispatch = phase is "validation" or "preflight" or "resolution" or "actionability",
+            CheckpointVerified = checkpointVerified,
+            CheckpointMatches = checkpointMatches,
+            RouteMatches = routeMatches,
+        };
+    }
+
+    private static TestAgentFailedStepProjection? ReadFailedStep(JsonElement step)
+    {
+        if (step.ValueKind != JsonValueKind.Object)
+            return null;
+
+        var resolution = Object(step, "targetResolution");
+        var dispatch = Object(step, "dispatch");
+        var actionability = Array(step, "actionability");
+        bool? visible = null;
+        bool? enabled = null;
+        bool? hasBounds = null;
+        bool? boundsStable = null;
+        foreach (var observation in actionability)
+        {
+            visible = Bool(observation, "visible") ?? visible;
+            enabled = Bool(observation, "enabled") ?? enabled;
+            hasBounds = Bool(observation, "hasBounds") ?? hasBounds;
+            boundsStable = Bool(observation, "boundsStable") ?? boundsStable;
+        }
+
+        return new TestAgentFailedStepProjection
+        {
+            Sequence = Number(step, "sequence"),
+            StepId = String(step, "stepId"),
+            Action = String(step, "action"),
+            SelectorKind = SelectorKind(Object(step, "selector")),
+            SelectorQuality = String(Object(step, "selector"), "quality"),
+            SelectorType = String(Object(Object(step, "selector"), "typeIndex"), "type"),
+            TargetResolutionStatus = String(resolution, "status"),
+            MatchCount = Number(resolution, "matchCount"),
+            Visible = visible,
+            Enabled = enabled,
+            HasBounds = hasBounds,
+            BoundsStable = boundsStable,
+            AcknowledgementState = String(dispatch, "acknowledgementState") ??
+                String(step, "acknowledgementState"),
+            CompletionCertainty = String(dispatch, "completionCertainty") ??
+                String(step, "completionCertainty"),
+        };
+    }
+
+    private static string Explain(
+        MauiFlowFailureClassification classification,
+        TestAgentFailedStepProjection? step)
+    {
+        var prefix = step?.Sequence is { } sequence
+            ? $"Step {sequence} ({step.Action ?? "action"})"
+            : "The failed step";
+        return classification.Code switch
+        {
+            MauiFlowFailureClasses.LocatorNotFound =>
+                $"{prefix} could not find its control before any app action was sent.",
+            MauiFlowFailureClasses.LocatorAmbiguous =>
+                $"{prefix} matched more than one control, so DevFlow refused to choose one.",
+            MauiFlowFailureClasses.DriveFailed
+                when step?.FragileSelector == true =>
+                $"{prefix} resolved a fragile {step.SelectorKind ?? "selector"} to one {step.SelectorType ?? "target"}, but that target rejected the action. The recording likely captured the wrong control; automatic selector repair is not eligible after dispatch.",
+            MauiFlowFailureClasses.DriveFailed
+                when step?.MatchCount == 1 &&
+                     step.Visible != false &&
+                     step.Enabled != false &&
+                     string.Equals(step.AcknowledgementState, "rejected", StringComparison.Ordinal) =>
+                $"{prefix} found exactly one visible and enabled control, but the app rejected the command during dispatch. This is an action or driver failure, not a selector or route failure.",
+            MauiFlowFailureClasses.ActionRejected =>
+                $"{prefix} was rejected before the requested app action could complete.",
+            MauiFlowFailureClasses.RouteStateDrift =>
+                "The app route did not match the route required by the saved test.",
+            MauiFlowFailureClasses.PreconditionUnsatisfied =>
+                "The app state did not match the saved test preconditions.",
+            MauiFlowFailureClasses.AssertionFailed =>
+                $"{prefix} ran, but its expected result was not observed.",
+            MauiFlowFailureClasses.Transport or MauiFlowFailureClasses.AgentDisconnected =>
+                "DevFlow lost reliable communication with the app while the test was running.",
+            MauiFlowFailureClasses.UnknownCompletion =>
+                "DevFlow cannot prove whether the in-flight app action completed.",
+            _ =>
+                $"{prefix} failed with canonical code '{classification.Code}'.",
+        };
+    }
+
+    private static string NextSafeAction(
+        MauiFlowFailureClassification classification,
+        TestAgentFailedStepProjection? step)
+        => classification.Code switch
+        {
+            MauiFlowFailureClasses.LocatorNotFound when classification.RepairEligible =>
+                "Review one inert selector-only proposal. Validate it against the live app before any human approval or apply action.",
+            MauiFlowFailureClasses.LocatorNotFound or MauiFlowFailureClasses.LocatorAmbiguous =>
+                "Open the failed step in Results or Improve and choose the intended control. Do not let an agent guess.",
+            MauiFlowFailureClasses.DriveFailed when step?.FragileSelector == true =>
+                "Return to Review, remove or replace the failed step, and record the intended interactive control again. Check the test before saving. Do not create an automatic selector repair.",
+            MauiFlowFailureClasses.DriveFailed
+                when step?.MatchCount == 1 &&
+                     string.Equals(step.AcknowledgementState, "rejected", StringComparison.Ordinal) =>
+                "Open the failed step in Results and verify the same action manually. If manual interaction works, retry once after reconnecting DevFlow; if it fails again, investigate the platform action driver. Do not create a selector repair.",
+            MauiFlowFailureClasses.RouteStateDrift or MauiFlowFailureClasses.PreconditionUnsatisfied =>
+                "Restore the saved starting state, then run a fresh test. Do not repair the selector.",
+            MauiFlowFailureClasses.Transport or MauiFlowFailureClasses.AgentDisconnected =>
+                "Reconnect the exact app instance and run a fresh test. Do not reuse an uncertain result for repair.",
+            MauiFlowFailureClasses.UnknownCompletion =>
+                "Inspect the app state before doing anything else. Do not retry, repair, or continue until completion is known.",
+            _ =>
+                "Open the failed step in Results and address the reported failure class. Do not create a selector repair unless selectorRepair.status is 'eligible'.",
+        };
+
+    private static string? SelectorKind(JsonElement selector)
+    {
+        var declared = String(selector, "selectorKind");
+        if (!string.IsNullOrWhiteSpace(declared))
+            return declared;
+        if (!string.IsNullOrWhiteSpace(String(selector, "automationId")))
+            return "automationId";
+        if (Object(selector, "typeIndex").ValueKind == JsonValueKind.Object)
+            return "typeIndex";
+        if (!string.IsNullOrWhiteSpace(String(selector, "text")))
+            return "text";
+        if (!string.IsNullOrWhiteSpace(String(selector, "id")))
+            return "runtimeId";
+        return null;
+    }
+
+    private static bool CheckpointMatches(JsonElement expected, JsonElement observed)
+    {
+        foreach (var name in new[]
+                 {
+                     "appBuildFingerprint", "agentInstanceId", "seedFingerprint",
+                     "backendStateFingerprint", "route", "window", "modal",
+                 })
+        {
+            var expectedValue = String(expected, name);
+            if (!string.IsNullOrWhiteSpace(expectedValue) &&
+                !string.Equals(expectedValue, String(observed, name), StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool IsTerminalState(string? state)
+        => state is not null &&
+           state is not "queued" and not "acquiring-lease" and not "preparing" and not "running";
+
+    private static JsonElement Object(JsonElement source, string name)
+        => source.ValueKind == JsonValueKind.Object &&
+           source.TryGetProperty(name, out var value) &&
+           value.ValueKind == JsonValueKind.Object
+            ? value
+            : default;
+
+    private static IReadOnlyList<JsonElement> Array(JsonElement source, string name)
+        => source.ValueKind == JsonValueKind.Object &&
+           source.TryGetProperty(name, out var value) &&
+           value.ValueKind == JsonValueKind.Array
+            ? value.EnumerateArray().Select(static item => item.Clone()).ToArray()
+            : [];
 
     private static string? String(JsonElement source, string name)
         => source.ValueKind == JsonValueKind.Object &&
@@ -204,12 +422,78 @@ public sealed class TestAgentFailureTool
             ? value.GetString()
             : null;
 
+    private static int? Number(JsonElement source, string name)
+        => source.ValueKind == JsonValueKind.Object &&
+           source.TryGetProperty(name, out var value) &&
+           value.TryGetInt32(out var number)
+            ? number
+            : null;
+
     private static bool? Bool(JsonElement source, string name)
         => source.ValueKind == JsonValueKind.Object &&
            source.TryGetProperty(name, out var value) &&
            value.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? value.GetBoolean()
             : null;
+}
+
+internal sealed class TestAgentFailureDiagnostic
+{
+    public TestAgentFailureClassification Classification { get; init; } = new();
+    public TestAgentFailureFactsProjection Facts { get; init; } = new();
+    public TestAgentFailedStepProjection? FailedStep { get; init; }
+    public string PlainLanguage { get; init; } = "";
+    public string NextSafeAction { get; init; } = "";
+    public TestAgentSelectorRepairAdvice SelectorRepair { get; init; } = new();
+}
+
+internal sealed class TestAgentFailureClassification
+{
+    public string Class { get; init; } = MauiFlowFailureClasses.Infrastructure;
+    public string Code { get; init; } = MauiFlowFailureClasses.Infrastructure;
+    public string Category { get; init; } = "infrastructure";
+    public string Phase { get; init; } = "execution";
+    public bool Retryable { get; init; }
+    public bool RepairEligible { get; init; }
+}
+
+internal sealed class TestAgentFailureFactsProjection
+{
+    public string? TerminalOutcome { get; init; }
+    public string? FailureClass { get; init; }
+    public bool? CompletionCertain { get; init; }
+    public bool? BeforeDispatch { get; init; }
+    public bool? CheckpointVerified { get; init; }
+    public bool? CheckpointMatches { get; init; }
+    public bool? RouteMatches { get; init; }
+}
+
+internal sealed class TestAgentFailedStepProjection
+{
+    public int? Sequence { get; init; }
+    public string? StepId { get; init; }
+    public string? Action { get; init; }
+    public string? SelectorKind { get; init; }
+    public string? SelectorQuality { get; init; }
+    public string? SelectorType { get; init; }
+    public bool FragileSelector => string.Equals(SelectorQuality, "fragile", StringComparison.Ordinal) ||
+        SelectorKind is "typeIndex" or "text" or "runtimeId";
+    public string? TargetResolutionStatus { get; init; }
+    public int? MatchCount { get; init; }
+    public bool? Visible { get; init; }
+    public bool? Enabled { get; init; }
+    public bool? HasBounds { get; init; }
+    public bool? BoundsStable { get; init; }
+    public string? AcknowledgementState { get; init; }
+    public string? CompletionCertainty { get; init; }
+}
+
+internal sealed class TestAgentSelectorRepairAdvice
+{
+    public string Status { get; init; } = "ineligible";
+    public bool Eligible { get; init; }
+    public bool ProposalRecommended { get; init; }
+    public string Reason { get; init; } = "";
 }
 
 /// <summary>Inert patch proposal storage only; no agent path can apply or approve a patch.</summary>

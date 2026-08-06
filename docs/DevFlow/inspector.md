@@ -82,6 +82,15 @@ the save decision to **Requests**. Saving and running remain separate human deci
 Results and Improve expose equivalent contextual prompts for diagnosis and read-only quality
 review; agent repair suggestions are never applied directly.
 
+For a failed local run, copying **Diagnose this failure with your agent** creates a ten-minute,
+run-bound restricted-agent handoff. The prompt already names the exact test, run, target, authoring
+session, and read capabilities, so the agent calls `maui_test_failure` once instead of creating a
+temporary draft, guessing the latest run, or using migration/run-status calls to recover context.
+The tool returns the canonical class, bounded failed-step facts, a plain-language explanation, and
+the next safe action. Missing route/checkpoint facts remain unknown rather than becoming false
+mismatches. An inert selector proposal is allowed only when the response explicitly marks a
+verified pre-dispatch missing-selector failure eligible.
+
 Each workflow tab uses progressive disclosure. **Steps** shows only Goal recovery, active recording,
 or the captured-step summary that is currently relevant. **Review** withholds save/run actions until
 steps and an expected result exist. **Run** sends unsaved work back to Review and exposes one
@@ -445,6 +454,10 @@ Recording is owned by the broker and scoped to the current app. The current vali
 holder controls it. The agent observes successful supported mutations from every host, so a
 workflow can begin in the browser, continue through Canvas or MCP after lease handoff, and stop in
 VS Code without separate local recorders.
+
+Successful taps are recorded only when the resolved target is an interactive control or has a tap
+gesture. Plain page/layout-container taps are omitted instead of producing fragile type/index
+steps that cannot be replayed.
 
 The Workflow panel can also load an existing test from the registered app project's top-level
 `maui-tests` directory or from an OS-selected `.md` file. Project files are confined to that

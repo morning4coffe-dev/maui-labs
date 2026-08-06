@@ -681,6 +681,39 @@ internal sealed class TestAgentSessionService
                     retryable: false));
             }
 
+            var requestDigest = DigestMutationRequest(request);
+            if (_idempotency.TryGetValue(envelope.IdempotencyKey!, out var priorIdempotency))
+            {
+                if (FixedEquals(priorIdempotency.RequestDigest, requestDigest) &&
+                    priorIdempotency.AuthorizationId is { } priorAuthorizationId &&
+                    _authorizations.TryGetValue(priorAuthorizationId, out var priorAuthorization))
+                {
+                    return new MauiTestAgentMutationAuthorizationResult
+                    {
+                        Ok = true,
+                        DispatchAllowed = true,
+                        AuthorizationId = priorAuthorization.AuthorizationId,
+                        RemainingActions = priorAuthorization.RemainingActions,
+                        GrantDigest = priorAuthorization.GrantDigest,
+                    };
+                }
+
+                AppendAuditLocked(
+                    session,
+                    "mutation-denied",
+                    envelope,
+                    "idempotency-reused",
+                    null,
+                    null,
+                    null,
+                    MauiTestAgentErrorCodes.IdempotencyReused);
+                return AuthorizationFailure(Error(
+                    MauiTestAgentErrorCodes.IdempotencyReused,
+                    MauiTestAgentErrorCategories.Conflict,
+                    "This idempotency key has already been used for a different request.",
+                    retryable: false));
+            }
+
             if (string.IsNullOrWhiteSpace(envelope.ApprovalGrantId))
                 return AuthorizationFailure(Error(
                     MauiTestAgentErrorCodes.MutationGrantRequired,
@@ -745,20 +778,6 @@ internal sealed class TestAgentSessionService
                 return AuthorizationFailure(scopeError);
             }
 
-            var requestDigest = DigestMutationRequest(request);
-            if (_idempotency.TryGetValue(envelope.IdempotencyKey!, out var idempotency))
-            {
-                var reused = FixedEquals(idempotency.RequestDigest, requestDigest)
-                    ? MauiTestAgentErrorCodes.IdempotencyReused
-                    : MauiTestAgentErrorCodes.IdempotencyReused;
-                AppendAuditLocked(session, "mutation-denied", envelope, "idempotency-reused", grantDigest, null, null, reused);
-                return AuthorizationFailure(Error(
-                    reused,
-                    MauiTestAgentErrorCategories.Conflict,
-                    "This idempotency key has already been admitted. The broker will not dispatch it again.",
-                    retryable: false));
-            }
-
             grant.RemainingActions--;
             if (grant.RemainingActions == 0 &&
                 grant.ApprovalRequestId is { } approvalRequestId &&
@@ -784,8 +803,11 @@ internal sealed class TestAgentSessionService
                 requestDigest,
                 request.Action!,
                 DigestAction(request),
-                now));
-            _idempotency.Add(envelope.IdempotencyKey!, new IdempotencyRecord(requestDigest, session.SessionId, now));
+                now,
+                grant.RemainingActions));
+            _idempotency.Add(
+                envelope.IdempotencyKey!,
+                new IdempotencyRecord(requestDigest, session.SessionId, now, authorizationId: authorizationId));
             AppendAuditLocked(session, "mutation-authorized", envelope, "authorized", grantDigest, DigestAction(request), null, null);
 
             return new MauiTestAgentMutationAuthorizationResult
@@ -1245,6 +1267,30 @@ internal sealed class TestAgentSessionService
             // The service stores only a hash and therefore cannot reveal a token after it has been
             // bound. The MCP process retains it for its own lifetime; this route remains a safe
             // existence check rather than a credential recovery mechanism.
+            return new MauiTestAgentRunBindingResult { Ok = true, RunId = request.RunId };
+        }
+    }
+
+    internal MauiTestAgentRunBindingResult ValidateRunBinding(MauiTestAgentRunBindingRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        lock (_gate)
+        {
+            PurgeExpiredLocked();
+            if (!TryGetReadableSessionLocked(request.SessionId, request.ReadCapabilityId, out var session, out var error))
+                return RunBindingFailure(error!);
+            if (string.IsNullOrWhiteSpace(request.RunId) ||
+                string.IsNullOrWhiteSpace(request.RunCapabilityToken) ||
+                !session!.Runs.TryGetValue(request.RunId, out var capability) ||
+                !FixedEquals(capability, Hash(request.RunCapabilityToken)))
+            {
+                return RunBindingFailure(Error(
+                    MauiTestAgentErrorCodes.ReadCapabilityRequired,
+                    MauiTestAgentErrorCategories.Authorization,
+                    "The supplied run capability is not bound to this authoring session and run.",
+                    retryable: false));
+            }
+
             return new MauiTestAgentRunBindingResult { Ok = true, RunId = request.RunId };
         }
     }
@@ -1802,7 +1848,9 @@ internal sealed class TestAgentSessionService
            string.Equals(expected.AgentInstanceId, actual.AgentInstanceId, StringComparison.Ordinal) &&
            MatchesOptional(expected.AppBuildFingerprint, actual.AppBuildFingerprint) &&
            MatchesOptional(expected.SeedFingerprint, actual.SeedFingerprint) &&
-           MatchesOptional(expected.BackendStateFingerprint, actual.BackendStateFingerprint);
+           MatchesOptional(expected.BackendStateFingerprint, actual.BackendStateFingerprint) &&
+           MatchesOptional(expected.Route, actual.Route) &&
+           MatchesOptional(expected.Window, actual.Window);
 
     private static bool MatchesOptional(string? expected, string? actual)
         => IsUnspecifiedFingerprint(expected) || string.Equals(expected, actual, StringComparison.Ordinal);
@@ -2557,7 +2605,8 @@ internal sealed class TestAgentSessionService
             string requestDigest,
             string action,
             string actionDigest,
-            DateTimeOffset createdAt)
+            DateTimeOffset createdAt,
+            int remainingActions)
         {
             AuthorizationId = authorizationId;
             SessionId = sessionId;
@@ -2566,6 +2615,7 @@ internal sealed class TestAgentSessionService
             Action = action;
             CreatedAt = createdAt;
             ActionDigest = actionDigest;
+            RemainingActions = remainingActions;
         }
 
         public string AuthorizationId { get; }
@@ -2575,6 +2625,7 @@ internal sealed class TestAgentSessionService
         public string Action { get; }
         public string ActionDigest { get; }
         public DateTimeOffset CreatedAt { get; }
+        public int RemainingActions { get; }
         public bool Consumed { get; set; }
         public bool Completed { get; set; }
         public string? Outcome { get; set; }
@@ -2587,18 +2638,21 @@ internal sealed class TestAgentSessionService
             string requestDigest,
             string? sessionId,
             DateTimeOffset createdAt,
-            string? approvalRequestId = null)
+            string? approvalRequestId = null,
+            string? authorizationId = null)
         {
             RequestDigest = requestDigest;
             SessionId = sessionId;
             CreatedAt = createdAt;
             ApprovalRequestId = approvalRequestId;
+            AuthorizationId = authorizationId;
         }
 
         public string RequestDigest { get; }
         public string? SessionId { get; }
         public DateTimeOffset CreatedAt { get; }
         public string? ApprovalRequestId { get; }
+        public string? AuthorizationId { get; }
     }
 
     private enum SessionState

@@ -92,6 +92,7 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             var agentId = agents.RootElement[0].GetProperty("id").GetString()!;
             var inspectorBase = $"http://127.0.0.1:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}";
             _ = await http.GetAsync($"{inspectorBase}/");
+            _ = await http.GetAsync($"{inspectorBase}/");
             var inspector = await GetInspectorAsync(broker, agentId);
             var token = (string)typeof(InspectorServer)
                 .GetField("_readToken", BindingFlags.Instance | BindingFlags.NonPublic)!
@@ -183,6 +184,7 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             var agentId = registration.GetProperty("id").GetString()!;
             var instanceId = registration.GetProperty("instanceId").GetString()!;
             var inspectorBase = $"http://127.0.0.1:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}";
+            _ = await http.GetAsync($"{inspectorBase}/");
 
             // This first request constructs the per-agent Inspector, but cannot read the
             // token-gated workbench target facts.
@@ -359,6 +361,328 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             Assert.Equal(
                 "imported-artifact",
                 importedBody.RootElement.GetProperty("status").GetProperty("identity").GetProperty("namespace").GetString());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            broker.Dispose();
+            await brokerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
+    public async Task WorkbenchPreflight_UsesBrokerObservedCheckpointFactsAndRequirementCapabilities()
+    {
+        var brokerPort = FreePort();
+        var agentPort = FreePort();
+        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var cancellation = new CancellationTokenSource();
+        var brokerTask = broker.RunAsync(cancellation.Token);
+        await WaitForBrokerAsync(brokerPort);
+
+        using var agent = new AgentHttpServer(agentPort);
+        agent.MapGet("/api/v1/agent/status", _ => Task.FromResult(HttpResponse.Json(new
+        {
+            running = true,
+            agent = new { name = "DevFlow", instanceId = "preflight-instance", version = "1" },
+            app = new { name = "Preflight Test", build = "build-2", packageId = "com.example.preflight", version = "1.0" },
+            device = new { platform = "android", deviceType = "emulator", idiom = "phone" },
+            capabilities = new { ui = true, logs = true, mutations = true },
+            route = "/checkout",
+            window = "main",
+            modal = "sheet",
+            locale = "fr-FR",
+            theme = "dark",
+            orientation = "landscape",
+            displayProfile = "tablet",
+        })));
+        agent.Start();
+
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri($"ws://127.0.0.1:{brokerPort}/ws/agent"), CancellationToken.None);
+        await SendAsync(socket, $$"""
+            {"type":"register","project":"workbench-preflight-test","tfm":"net10.0","platform":"android","appName":"Preflight Test","currentPort":{{agentPort}}}
+            """);
+        await ReceiveAsync(socket);
+
+        try
+        {
+            using var http = new HttpClient();
+            using var agents = JsonDocument.Parse(await http.GetStringAsync($"http://127.0.0.1:{brokerPort}/api/agents"));
+            var registration = agents.RootElement[0];
+            var agentId = registration.GetProperty("id").GetString()!;
+            var instanceId = registration.GetProperty("instanceId").GetString()!;
+            var inspectorBase = $"http://127.0.0.1:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}";
+
+            _ = await http.GetAsync($"{inspectorBase}/");
+            var inspector = await GetInspectorAsync(broker, agentId);
+            var inspectorToken = (string)typeof(InspectorServer)
+                .GetField("_readToken", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(inspector)!;
+            http.DefaultRequestHeaders.Add("X-DevFlow-Inspector-Token", inspectorToken);
+
+            using var target = JsonDocument.Parse(await http.GetStringAsync($"{inspectorBase}/api/workbench/target"));
+            var brokerCapabilities = target.RootElement.GetProperty("broker");
+            Assert.False(brokerCapabilities.GetProperty("repairValidationAvailable").GetBoolean());
+            var observed = target.RootElement.GetProperty("target").GetProperty("observedCheckpoint");
+            Assert.Equal("build-2", observed.GetProperty("appBuildFingerprint").GetString());
+            Assert.Equal("/checkout", observed.GetProperty("route").GetString());
+            Assert.Equal("main", observed.GetProperty("window").GetString());
+            Assert.Equal("sheet", observed.GetProperty("modal").GetString());
+            Assert.Equal("fr-FR", observed.GetProperty("locale").GetString());
+            Assert.Equal("dark", observed.GetProperty("theme").GetString());
+            Assert.Equal("landscape", observed.GetProperty("orientation").GetString());
+            Assert.Equal("tablet", observed.GetProperty("displayProfile").GetString());
+
+            using var preflight = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/run/preflight",
+                new
+                {
+                    run = new
+                    {
+                        agentId,
+                        agentInstanceId = instanceId,
+                        idempotencyKey = "workbench-preflight-checkpoint-key",
+                        markdown = FlowMarkdown.Serialize(AssertOnlyFlow()),
+                        plan = new
+                        {
+                            schema = 1,
+                            sideEffectPolicy = "none",
+                            requiredPlatforms = new[] { "android" },
+                            checkpoint = new
+                            {
+                                appBuildFingerprint = "build-2",
+                                route = "/checkout",
+                                window = "main",
+                                modal = "sheet",
+                                locale = "fr-FR",
+                                theme = "dark",
+                                orientation = "landscape",
+                                displayProfile = "tablet",
+                            },
+                            requirements = new
+                            {
+                                requiredCapabilities = new[]
+                                {
+                                    new { name = "logs", required = true },
+                                },
+                                requiredSemantics = Array.Empty<object>(),
+                            },
+                        },
+                    },
+                    evidence = new { includeScreenshot = false, includeWorkflow = false },
+                });
+            Assert.Equal(HttpStatusCode.OK, preflight.StatusCode);
+            using var preflightBody = JsonDocument.Parse(await preflight.Content.ReadAsStringAsync());
+            Assert.True(preflightBody.RootElement.GetProperty("ok").GetBoolean());
+            if (preflightBody.RootElement.TryGetProperty("errors", out var errors))
+            {
+                Assert.True(
+                    errors.ValueKind == JsonValueKind.Null ||
+                    !errors.EnumerateArray().Any());
+            }
+        }
+        finally
+        {
+            cancellation.Cancel();
+            broker.Dispose();
+            await brokerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
+    public async Task WorkbenchPreflight_RecognizesCanonicalWorkflowCommandLedgerCapability()
+    {
+        var brokerPort = FreePort();
+        var agentPort = FreePort();
+        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var cancellation = new CancellationTokenSource();
+        var brokerTask = broker.RunAsync(cancellation.Token);
+        await WaitForBrokerAsync(brokerPort);
+
+        using var agent = new AgentHttpServer(agentPort);
+        agent.MapGet("/api/v1/agent/status", _ => Task.FromResult(HttpResponse.Json(new
+        {
+            running = true,
+            agent = new { name = "DevFlow", instanceId = "ledger-instance", version = "1" },
+            app = new { name = "Ledger Test", build = "build-ledger", packageId = "com.example.ledger", version = "1.0" },
+            device = new { platform = "android", deviceType = "emulator", idiom = "phone" },
+            capabilities = new { ui = true, mutations = true, workflowCommandLedger = true },
+            route = "/ledger",
+        })));
+        agent.Start();
+
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri($"ws://127.0.0.1:{brokerPort}/ws/agent"), CancellationToken.None);
+        await SendAsync(socket, $$"""
+            {"type":"register","project":"workbench-ledger-capability-test","tfm":"net10.0","platform":"android","appName":"Ledger Test","currentPort":{{agentPort}}}
+            """);
+        await ReceiveAsync(socket);
+
+        try
+        {
+            using var http = new HttpClient();
+            using var agents = JsonDocument.Parse(await http.GetStringAsync($"http://127.0.0.1:{brokerPort}/api/agents"));
+            var registration = agents.RootElement[0];
+            var agentId = registration.GetProperty("id").GetString()!;
+            var instanceId = registration.GetProperty("instanceId").GetString()!;
+            var inspectorBase = $"http://127.0.0.1:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}";
+
+            _ = await http.GetAsync($"{inspectorBase}/");
+            var inspector = await GetInspectorAsync(broker, agentId);
+            var inspectorToken = (string)typeof(InspectorServer)
+                .GetField("_readToken", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(inspector)!;
+            http.DefaultRequestHeaders.Add("X-DevFlow-Inspector-Token", inspectorToken);
+
+            using var preflight = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/run/preflight",
+                new
+                {
+                    run = new
+                    {
+                        agentId,
+                        agentInstanceId = instanceId,
+                        idempotencyKey = "workbench-preflight-ledger-key",
+                        markdown = FlowMarkdown.Serialize(AssertOnlyFlow()),
+                        plan = new
+                        {
+                            schema = 1,
+                            sideEffectPolicy = "none",
+                            checkpoint = new
+                            {
+                                route = "/ledger",
+                            },
+                            requirements = new
+                            {
+                                requiredCapabilities = new[]
+                                {
+                                    new { name = "agent.workflowCommandLedger", required = true },
+                                },
+                                requiredSemantics = Array.Empty<object>(),
+                            },
+                        },
+                    },
+                    evidence = new { includeScreenshot = false, includeWorkflow = false },
+                });
+            Assert.Equal(HttpStatusCode.OK, preflight.StatusCode);
+            using var preflightBody = JsonDocument.Parse(await preflight.Content.ReadAsStringAsync());
+            Assert.True(preflightBody.RootElement.GetProperty("ok").GetBoolean());
+            if (preflightBody.RootElement.TryGetProperty("errors", out var errors))
+                Assert.True(errors.ValueKind == JsonValueKind.Null || !errors.EnumerateArray().Any());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            broker.Dispose();
+            await brokerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
+    public async Task WorkbenchRunJournal_StatusAndCancel_UseServerHeldCapabilityWithoutBrowserEcho()
+    {
+        var brokerPort = FreePort();
+        var agentPort = FreePort();
+        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var cancellation = new CancellationTokenSource();
+        var brokerTask = broker.RunAsync(cancellation.Token);
+        await WaitForBrokerAsync(brokerPort);
+
+        using var agent = new AgentHttpServer(agentPort);
+        agent.MapGet("/api/v1/agent/status", _ => Task.FromResult(HttpResponse.Json(new
+        {
+            running = true,
+            agent = new { name = "DevFlow", instanceId = "recovery-instance", version = "1" },
+            app = new { name = "Recovery Test", build = "build-recovery", packageId = "com.example.recovery", version = "1.0" },
+            device = new { platform = "test", deviceType = "emulator", idiom = "phone" },
+            capabilities = new { ui = true, mutations = true, workflowCommandLedger = true },
+            route = "/home",
+        })));
+        agent.Start();
+
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri($"ws://127.0.0.1:{brokerPort}/ws/agent"), CancellationToken.None);
+        await SendAsync(socket, $$"""
+            {"type":"register","project":"workbench-recovery-test","tfm":"net10.0","platform":"test","appName":"Recovery Test","currentPort":{{agentPort}}}
+            """);
+        await ReceiveAsync(socket);
+
+        try
+        {
+            using var http = new HttpClient();
+            using var agents = JsonDocument.Parse(await http.GetStringAsync($"http://127.0.0.1:{brokerPort}/api/agents"));
+            var registration = agents.RootElement[0];
+            var agentId = registration.GetProperty("id").GetString()!;
+            var instanceId = registration.GetProperty("instanceId").GetString()!;
+            var inspectorBase = $"http://127.0.0.1:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}";
+            _ = await http.GetAsync($"{inspectorBase}/");
+
+            var inspector = await GetInspectorAsync(broker, agentId);
+            var inspectorToken = (string)typeof(InspectorServer)
+                .GetField("_readToken", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(inspector)!;
+            var inspectorLeaseId = (string)typeof(InspectorServer)
+                .GetField("_fallbackMutationLeaseId", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(inspector)!;
+            http.DefaultRequestHeaders.Add("X-DevFlow-Inspector-Token", inspectorToken);
+
+            using var leaseClaim = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/leases/{Uri.EscapeDataString(agentId)}",
+                new
+                {
+                    action = "claim",
+                    leaseId = inspectorLeaseId,
+                    holderKind = "web-inspector",
+                    label = "DevFlow Web Inspector",
+                });
+            Assert.Equal(HttpStatusCode.OK, leaseClaim.StatusCode);
+
+            using var start = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/run/start",
+                new
+                {
+                    run = new
+                    {
+                        agentId,
+                        agentInstanceId = instanceId,
+                        idempotencyKey = "recovery-key",
+                        markdown = FlowMarkdown.Serialize(FailingTapFlow()),
+                    },
+                    evidence = new { includeScreenshot = false, includeWorkflow = false },
+                });
+            Assert.Equal(HttpStatusCode.Accepted, start.StatusCode);
+            using var startBody = JsonDocument.Parse(await start.Content.ReadAsStringAsync());
+            var runId = startBody.RootElement.GetProperty("run").GetProperty("runId").GetString()!;
+            var runToken = startBody.RootElement.GetProperty("capabilityToken").GetString()!;
+            Assert.False(string.IsNullOrWhiteSpace(runToken));
+
+            using var journal = JsonDocument.Parse(await http.GetStringAsync($"{inspectorBase}/api/workbench/run/journal"));
+            Assert.True(journal.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal(runId, journal.RootElement.GetProperty("run").GetProperty("runId").GetString());
+            Assert.False(journal.RootElement.GetProperty("run").TryGetProperty("capabilityToken", out _));
+
+            using var status = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/run/{Uri.EscapeDataString(runId)}/status",
+                new { });
+            Assert.Equal(HttpStatusCode.OK, status.StatusCode);
+            using var statusBody = JsonDocument.Parse(await status.Content.ReadAsStringAsync());
+            Assert.Equal(runId, statusBody.RootElement.GetProperty("run").GetProperty("runId").GetString());
+            Assert.False(statusBody.RootElement.GetProperty("run").TryGetProperty("capabilityToken", out _));
+
+            using var cancel = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/run/{Uri.EscapeDataString(runId)}/cancel",
+                new { });
+            Assert.Equal(HttpStatusCode.OK, cancel.StatusCode);
+            using var cancelBody = JsonDocument.Parse(await cancel.Content.ReadAsStringAsync());
+            Assert.Equal(runId, cancelBody.RootElement.GetProperty("run").GetProperty("runId").GetString());
+            Assert.False(cancelBody.RootElement.GetProperty("run").TryGetProperty("capabilityToken", out _));
         }
         finally
         {

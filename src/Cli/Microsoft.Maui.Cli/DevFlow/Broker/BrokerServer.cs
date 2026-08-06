@@ -1402,6 +1402,16 @@ public class BrokerServer : IDisposable
             return;
         }
 
+        if (string.Equals(normalizedPath, "/api/test-agent/runs/validate", StringComparison.OrdinalIgnoreCase))
+        {
+            var request = await ReadWorkflowRunBodyAsync<Microsoft.Maui.DevFlow.Testing.MauiTestAgentRunBindingRequest>(context, maxBodyChars);
+            if (request is null)
+                return;
+            var result = _testAgentSessions.ValidateRunBinding(request);
+            await WriteTypedJsonResponseAsync(context, TestAgentStatusCode(result.Error), result);
+            return;
+        }
+
         await WriteTypedJsonResponseAsync(context, 404, new Microsoft.Maui.DevFlow.Testing.MauiTestAgentToolResult
         {
             Error = TestAgentRouteError(
@@ -1470,6 +1480,31 @@ public class BrokerServer : IDisposable
                 Window = status.Window,
                 ObservedAt = DateTimeOffset.UtcNow,
             };
+        }
+        catch (HttpRequestException)
+        {
+            return null;
+        }
+        catch (System.Net.Sockets.SocketException)
+        {
+            return null;
+        }
+    }
+
+    private static bool RequiresWorkflowRunCapabilities(MauiTestPlan? plan)
+        => plan?.Requirements?.RequiredCapabilities.Count > 0 ||
+           plan?.Requirements?.RequiredSemantics.Count > 0;
+
+    private static async Task<MauiFlowCapabilitySet?> ReadWorkflowRunCapabilitiesAsync(AgentRegistration registration)
+    {
+        try
+        {
+            using var client = new Microsoft.Maui.DevFlow.Driver.AgentClient("localhost", registration.Port)
+            {
+                AutoAcquireMutationLease = false,
+            };
+            var status = await client.GetStatusAsync().ConfigureAwait(false);
+            return WorkflowRunCoordinator.BuildAvailableCapabilities(status);
         }
         catch (HttpRequestException)
         {
@@ -1587,6 +1622,13 @@ public class BrokerServer : IDisposable
                         WorkflowRunStartResult.Conflict(
                             "The requested agent instance is stale or no longer connected."));
                     return;
+                }
+
+                if (RequiresWorkflowRunCapabilities(request.Plan) &&
+                    request.AvailableCapabilities is null)
+                {
+                    request.AvailableCapabilities = await ReadWorkflowRunCapabilitiesAsync(connection.Registration)
+                        .ConfigureAwait(false);
                 }
 
                 var target = CreateWorkflowRunTarget(connection.Registration);

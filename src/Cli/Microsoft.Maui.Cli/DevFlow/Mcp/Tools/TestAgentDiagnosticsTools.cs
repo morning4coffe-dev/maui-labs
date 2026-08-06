@@ -30,14 +30,20 @@ public sealed class TestAgentTraceTool
         var sessionResult = await TestAgentToolSupport.SessionAsync(session, request.Envelope).ConfigureAwait(false);
         if (sessionResult.Value?.Ok != true)
             return TestAgentToolSupport.BrokerFailure(request.Envelope.RequestId, sessionResult);
-        if (!TryRunAccess(session, request, out var runId, out var token, out var error))
-            return TestAgentToolSupport.Failure(request.Envelope.RequestId, error!);
+        var access = await GetBoundRunAccessAsync(
+            session,
+            request.Envelope,
+            request.RunId,
+            request.RunCapabilityToken,
+            "trace").ConfigureAwait(false);
+        if (access.Error is not null)
+            return TestAgentToolSupport.Failure(request.Envelope.RequestId, access.Error);
 
         var brokerPort = await session.GetBrokerPortAsync().ConfigureAwait(false);
         var result = await TestAgentBrokerClient.PostWorkflowRunAsync(
             brokerPort,
-            $"/api/workflow-runs/{Uri.EscapeDataString(runId!)}/status",
-            new WorkflowRunAccessRequest { CapabilityToken = token },
+            $"/api/workflow-runs/{Uri.EscapeDataString(access.RunId!)}/status",
+            new WorkflowRunAccessRequest { CapabilityToken = access.CapabilityToken },
             DevFlowCliJsonContext.Default.WorkflowRunAccessRequest).ConfigureAwait(false);
         if (!result.HasValue)
         {
@@ -66,40 +72,68 @@ public sealed class TestAgentTraceTool
         });
     }
 
-    internal static bool TryRunAccess(
+    internal static async Task<TestAgentBoundRunAccess> GetBoundRunAccessAsync(
         McpAgentSession session,
-        MauiTestAgentTraceRequest request,
-        out string? runId,
-        out string? capabilityToken,
-        out MauiTestAgentError? error)
+        MauiTestAgentRequestEnvelope? envelope,
+        string? requestedRunId,
+        string? requestedCapabilityToken,
+        string operation)
     {
-        runId = request.RunId ?? request.Envelope?.Correlation?.RunId;
-        capabilityToken = request.RunCapabilityToken;
-        error = null;
+        var expectedRunId = envelope?.Correlation?.RunId;
+        var runId = requestedRunId ?? expectedRunId;
         if (string.IsNullOrWhiteSpace(runId))
         {
-            error = TestAgentToolSupport.Error(
+            return TestAgentBoundRunAccess.Failure(TestAgentToolSupport.Error(
                 MauiTestAgentErrorCodes.InvalidRequest,
                 MauiTestAgentErrorCategories.Validation,
-                "trace requires a runId or envelope.correlation.runId.",
-                retryable: false);
-            return false;
+                $"{operation} requires envelope.correlation.runId.",
+                retryable: false));
         }
+        if (!string.Equals(expectedRunId, runId, StringComparison.Ordinal))
+        {
+            return TestAgentBoundRunAccess.Failure(TestAgentToolSupport.Error(
+                MauiTestAgentErrorCodes.MutationGrantScopeDenied,
+                MauiTestAgentErrorCategories.Authorization,
+                $"{operation} must use the exact runId bound in the authoring-session envelope.",
+                retryable: false));
+        }
+        var capabilityToken = requestedCapabilityToken;
         if (string.IsNullOrWhiteSpace(capabilityToken) &&
-            request.Envelope?.Correlation?.AuthoringSessionId is { Length: > 0 } sessionId)
+            envelope?.Correlation?.AuthoringSessionId is { Length: > 0 } sessionId)
         {
             session.TryGetTestRunCapability(sessionId, runId, out capabilityToken);
         }
-        if (string.IsNullOrWhiteSpace(capabilityToken))
+        if (string.IsNullOrWhiteSpace(capabilityToken) ||
+            envelope?.Correlation?.AuthoringSessionId is not { Length: > 0 } authoringSessionId)
         {
-            error = TestAgentToolSupport.Error(
+            return TestAgentBoundRunAccess.Failure(TestAgentToolSupport.Error(
                 MauiTestAgentErrorCodes.ReadCapabilityRequired,
                 MauiTestAgentErrorCategories.Authorization,
                 "A target/run-bound capability token from run start is required.",
-                retryable: false);
-            return false;
+                retryable: false));
         }
-        return true;
+
+        var brokerPort = await session.GetBrokerPortAsync().ConfigureAwait(false);
+        var binding = await TestAgentBrokerClient.ValidateRunBindingAsync(
+            brokerPort,
+            new MauiTestAgentRunBindingRequest
+            {
+                SessionId = authoringSessionId,
+                ReadCapabilityId = envelope.ReadCapabilityId,
+                RunId = runId,
+                RunCapabilityToken = capabilityToken,
+            }).ConfigureAwait(false);
+        if (binding.Value?.Ok == true)
+            return TestAgentBoundRunAccess.Success(runId, capabilityToken);
+
+        return TestAgentBoundRunAccess.Failure(
+            binding.Value?.Error ?? TestAgentToolSupport.Error(
+                MauiTestAgentErrorCodes.TargetUnavailable,
+                binding.TransportError is null
+                    ? MauiTestAgentErrorCategories.Transport
+                    : MauiTestAgentErrorCategories.Target,
+                binding.TransportError ?? "The broker could not validate the bound run capability.",
+                retryable: binding.StatusCode == 0));
     }
 }
 
@@ -125,14 +159,20 @@ public sealed class TestAgentFailureTool
         var sessionResult = await TestAgentToolSupport.SessionAsync(session, request.Envelope).ConfigureAwait(false);
         if (sessionResult.Value?.Ok != true)
             return TestAgentToolSupport.BrokerFailure(request.Envelope.RequestId, sessionResult);
-        if (!TestAgentTraceTool.TryRunAccess(session, request, out var runId, out var token, out var error))
-            return TestAgentToolSupport.Failure(request.Envelope.RequestId, error!);
+        var access = await TestAgentTraceTool.GetBoundRunAccessAsync(
+            session,
+            request.Envelope,
+            request.RunId,
+            request.RunCapabilityToken,
+            "failure").ConfigureAwait(false);
+        if (access.Error is not null)
+            return TestAgentToolSupport.Failure(request.Envelope.RequestId, access.Error);
 
         var brokerPort = await session.GetBrokerPortAsync().ConfigureAwait(false);
         var result = await TestAgentBrokerClient.PostWorkflowRunAsync(
             brokerPort,
-            $"/api/workflow-runs/{Uri.EscapeDataString(runId!)}/status",
-            new WorkflowRunAccessRequest { CapabilityToken = token },
+            $"/api/workflow-runs/{Uri.EscapeDataString(access.RunId!)}/status",
+            new WorkflowRunAccessRequest { CapabilityToken = access.CapabilityToken },
             DevFlowCliJsonContext.Default.WorkflowRunAccessRequest).ConfigureAwait(false);
         if (!result.HasValue)
         {
@@ -146,7 +186,7 @@ public sealed class TestAgentFailureTool
         var diagnostic = ReadDiagnostic(result.Value);
         return TestAgentToolSupport.Success(request.Envelope.RequestId, new
         {
-            runId,
+            runId = access.RunId,
             diagnostic.Classification,
             diagnostic.Facts,
             diagnostic.FailedStep,
@@ -435,6 +475,19 @@ public sealed class TestAgentFailureTool
            value.ValueKind is JsonValueKind.True or JsonValueKind.False
             ? value.GetBoolean()
             : null;
+}
+
+internal sealed class TestAgentBoundRunAccess
+{
+    public string? RunId { get; private init; }
+    public string? CapabilityToken { get; private init; }
+    public MauiTestAgentError? Error { get; private init; }
+
+    public static TestAgentBoundRunAccess Success(string runId, string capabilityToken)
+        => new() { RunId = runId, CapabilityToken = capabilityToken };
+
+    public static TestAgentBoundRunAccess Failure(MauiTestAgentError error)
+        => new() { Error = error };
 }
 
 internal sealed class TestAgentFailureDiagnostic

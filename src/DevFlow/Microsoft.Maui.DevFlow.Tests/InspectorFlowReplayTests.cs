@@ -52,6 +52,48 @@ public class InspectorFlowReplayTests
     }
 
     [Fact]
+    public async Task WorkflowFiles_Load_LegacySchemaVersion_NormalizesAuthoritativePayload()
+    {
+        var root = Path.Combine(Path.GetTempPath(), $"devflow-workflows-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(Path.Combine(root, "maui-tests"));
+        var project = Path.Combine(root, "App.csproj");
+        var markdown = """
+            # Legacy flow
+
+            ```json maui-test
+            {"schemaVersion":1,"name":"legacy","steps":[{"seq":1,"action":"back"}]}
+            ```
+            """;
+        await File.WriteAllTextAsync(project, "<Project />");
+        await File.WriteAllTextAsync(Path.Combine(root, "maui-tests", "legacy.md"), markdown);
+        try
+        {
+            await using var agent = new ReplayAgent(recording: false);
+            await using var inspector = await StartInspectorAsync(agent.Port, project);
+            using var http = new HttpClient();
+            var token = await ReadInspectorTokenAsync(http, inspector.Url);
+
+            var load = await AuthorizedPostAsync(
+                http,
+                $"{inspector.Url}/api/flows/files/load",
+                "{\"name\":\"legacy.md\"}",
+                token);
+            Assert.Equal(HttpStatusCode.OK, load.StatusCode);
+            using var loadJson = JsonDocument.Parse(await load.Content.ReadAsStringAsync());
+            var loadedMarkdown = loadJson.RootElement.GetProperty("markdown").GetString();
+            Assert.Contains("\"schema\": 1", loadedMarkdown, StringComparison.Ordinal);
+            Assert.DoesNotContain("schemaVersion", loadedMarkdown, StringComparison.Ordinal);
+            Assert.Contains(
+                loadJson.RootElement.GetProperty("warnings").EnumerateArray(),
+                warning => warning.GetString()?.Contains("Normalized a legacy schemaVersion payload", StringComparison.Ordinal) == true);
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    [Fact]
     public async Task WorkflowFiles_AreTokenGatedAndRejectUnsafeOrInvalidFiles()
     {
         var root = Path.Combine(Path.GetTempPath(), $"devflow-workflows-{Guid.NewGuid():N}");

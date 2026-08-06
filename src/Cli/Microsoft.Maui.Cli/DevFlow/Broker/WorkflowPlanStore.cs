@@ -18,17 +18,31 @@ internal sealed class WorkflowPlanStore
     internal const int MaxRepairHistoryEntries = 256;
     internal const long MaxRepairHistoryBytes = 1_048_576;
     internal const int MaxRepairHistoryLineBytes = 16_384;
+    internal const string BundleTransactionManifestFileName = "workflow-plan-store.transaction.json";
+
+    private const string DevFlowDirectoryName = ".devflow";
+    private const string BundleTransactionArtifactPrefix = ".devflow-txn-";
+    private const string BundleTransactionStatePreparing = "preparing";
+    private const string BundleTransactionStateStaged = "staged";
+    private const int MaxBundleTransactionFiles = 8;
 
     private static readonly ConcurrentDictionary<string, object> TransactionGates =
         new(OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
     private readonly string _projectRoot;
     private readonly string _workflowRoot;
+    private readonly WorkflowPlanStoreTestHooks? _testHooks;
 
     internal WorkflowPlanStore(string projectRoot)
+        : this(projectRoot, testHooks: null)
+    {
+    }
+
+    internal WorkflowPlanStore(string projectRoot, WorkflowPlanStoreTestHooks? testHooks)
     {
         _projectRoot = Path.GetFullPath(projectRoot ?? throw new ArgumentNullException(nameof(projectRoot)));
         _workflowRoot = Path.Combine(_projectRoot, "maui-tests");
+        _testHooks = testHooks;
     }
 
     internal string ProjectRoot => _projectRoot;
@@ -36,54 +50,64 @@ internal sealed class WorkflowPlanStore
 
     internal WorkflowPlanStoreResult List()
     {
-        if (!TryEnsureWorkflowRoot(create: false, out var error))
+        lock (TransactionGates.GetOrAdd(_projectRoot, static _ => new object()))
         {
-            return Directory.Exists(_workflowRoot)
-                ? WorkflowPlanStoreResult.Failure("workspace-unsafe", error!)
-                : WorkflowPlanStoreResult.Success();
-        }
+            if (!TryRecoverPendingBundleTransaction(out var recoveryError))
+                return WorkflowPlanStoreResult.Failure("recovery-failed", recoveryError!);
+            if (!TryEnsureWorkflowRoot(create: false, out var error))
+            {
+                return Directory.Exists(_workflowRoot)
+                    ? WorkflowPlanStoreResult.Failure("workspace-unsafe", error!)
+                    : WorkflowPlanStoreResult.Success();
+            }
 
-        try
-        {
-            var entries = Directory.EnumerateFiles(_workflowRoot, "*", SearchOption.TopDirectoryOnly)
-                .Where(static path => string.Equals(Path.GetExtension(path), ".md", StringComparison.OrdinalIgnoreCase))
-                .Select(static path => new FileInfo(path))
-                .Where(static info => (info.Attributes & FileAttributes.ReparsePoint) == 0 && info.Length <= MaxFileBytes)
-                .OrderByDescending(static info => info.LastWriteTimeUtc)
-                .ThenBy(static info => info.Name, StringComparer.OrdinalIgnoreCase)
-                .Take(MaxFiles)
-                .Select(info =>
-                {
-                    var sidecar = SidecarPath(info.Name);
-                    var hasPlan = File.Exists(sidecar) && !IsReparsePoint(sidecar);
-                    return new WorkflowPlanListItem
+            try
+            {
+                var entries = Directory.EnumerateFiles(_workflowRoot, "*", SearchOption.TopDirectoryOnly)
+                    .Where(static path => string.Equals(Path.GetExtension(path), ".md", StringComparison.OrdinalIgnoreCase))
+                    .Select(static path => new FileInfo(path))
+                    .Where(static info => (info.Attributes & FileAttributes.ReparsePoint) == 0 && info.Length <= MaxFileBytes)
+                    .OrderByDescending(static info => info.LastWriteTimeUtc)
+                    .ThenBy(static info => info.Name, StringComparer.OrdinalIgnoreCase)
+                    .Take(MaxFiles)
+                    .Select(info =>
                     {
-                        Name = info.Name,
-                        SidecarName = Path.GetFileName(sidecar),
-                        HasPlan = hasPlan,
-                        Size = info.Length,
-                        ModifiedAt = info.LastWriteTimeUtc,
-                    };
-                })
-                .ToArray();
-            return WorkflowPlanStoreResult.Success() with { Items = entries };
-        }
-        catch (Exception)
-        {
-            return WorkflowPlanStoreResult.Failure("workspace-read-failed", "Could not list project workflow tests.");
+                        var sidecar = SidecarPath(info.Name);
+                        var hasPlan = File.Exists(sidecar) && !IsReparsePoint(sidecar);
+                        return new WorkflowPlanListItem
+                        {
+                            Name = info.Name,
+                            SidecarName = Path.GetFileName(sidecar),
+                            HasPlan = hasPlan,
+                            Size = info.Length,
+                            ModifiedAt = info.LastWriteTimeUtc,
+                        };
+                    })
+                    .ToArray();
+                return WorkflowPlanStoreResult.Success() with { Items = entries };
+            }
+            catch (Exception)
+            {
+                return WorkflowPlanStoreResult.Failure("workspace-read-failed", "Could not list project workflow tests.");
+            }
         }
     }
 
     internal WorkflowPlanStoreResult Load(string? flowName)
     {
-        if (!TryReadSnapshot(flowName, out var snapshot, out var result))
-            return result;
-        return WorkflowPlanStoreResult.Success() with
+        lock (TransactionGates.GetOrAdd(_projectRoot, static _ => new object()))
         {
-            Snapshot = snapshot,
-            Errors = result.Errors,
-            Warnings = result.Warnings,
-        };
+            if (!TryRecoverPendingBundleTransaction(out var recoveryError))
+                return WorkflowPlanStoreResult.Failure("recovery-failed", recoveryError!);
+            if (!TryReadSnapshot(flowName, out var snapshot, out var result))
+                return result;
+            return WorkflowPlanStoreResult.Success() with
+            {
+                Snapshot = snapshot,
+                Errors = result.Errors,
+                Warnings = result.Warnings,
+            };
+        }
     }
 
     internal WorkflowPlanStoreResult Validate(
@@ -92,74 +116,78 @@ internal sealed class WorkflowPlanStore
         string? planJson,
         bool requireSidecar = false)
     {
-        if (!TryReadCommitBaseline(flowName, out var committed, out var readResult))
-            return readResult;
-
-        if (!TryParseFlow(markdown, out var draftFlow, out var canonicalMarkdown, out var errors, out var warnings))
+        lock (TransactionGates.GetOrAdd(_projectRoot, static _ => new object()))
         {
-            return WorkflowPlanStoreResult.Failure("flow-invalid", "The flow draft is invalid.") with
+            if (!TryRecoverPendingBundleTransaction(out var recoveryError))
+                return WorkflowPlanStoreResult.Failure("recovery-failed", recoveryError!);
+            if (!TryReadCommitBaseline(flowName, createWorkflowRoot: false, out var committed, out var readResult))
+                return readResult;
+
+            if (!TryParseFlow(markdown, out var draftFlow, out var canonicalMarkdown, out var errors, out var warnings))
             {
+                return WorkflowPlanStoreResult.Failure("flow-invalid", "The flow draft is invalid.") with
+                {
+                    Errors = errors,
+                    Warnings = warnings,
+                };
+            }
+
+            ValidateAuthoringFlow(draftFlow!, committed!.Flow, errors, warnings);
+            var digest = MauiFlowRunReportSerializer.ComputeFlowDigest(draftFlow!);
+            MauiTestPlan? plan = null;
+            string? canonicalPlan = null;
+            if (!string.IsNullOrWhiteSpace(planJson))
+            {
+                if (!TryPreparePlan(
+                    planJson,
+                    committed.Name!,
+                    digest,
+                    committed.Plan?.PlanId,
+                    committed.Plan?.Revision,
+                    out plan,
+                    out canonicalPlan,
+                    out var planErrors,
+                    out var planWarnings))
+                {
+                    errors.AddRange(planErrors);
+                    warnings.AddRange(planWarnings);
+                }
+                else
+                {
+                    warnings.AddRange(planWarnings);
+                    AddPlanCoverageWarnings(draftFlow!, plan!, warnings);
+                }
+            }
+            else if (requireSidecar)
+            {
+                errors.Add("A plan sidecar is required before this flow can be committed.");
+            }
+
+            return WorkflowPlanStoreResult.Success() with
+            {
+                Snapshot = new WorkflowAuthoringSnapshot
+                {
+                    Name = committed.Name,
+                    Markdown = canonicalMarkdown,
+                    Flow = draftFlow,
+                    FlowDigest = digest,
+                    PlanJson = canonicalPlan,
+                    Plan = plan,
+                    PlanDigest = canonicalPlan is null ? null : ComputeDigest(canonicalPlan),
+                },
                 Errors = errors,
                 Warnings = warnings,
             };
         }
-
-        ValidateAuthoringFlow(draftFlow!, committed!.Flow, errors, warnings);
-        var digest = MauiFlowRunReportSerializer.ComputeFlowDigest(draftFlow!);
-        MauiTestPlan? plan = null;
-        string? canonicalPlan = null;
-        if (!string.IsNullOrWhiteSpace(planJson))
-        {
-            if (!TryPreparePlan(
-                planJson,
-                committed.Name!,
-                digest,
-                committed.Plan?.PlanId,
-                committed.Plan?.Revision,
-                out plan,
-                out canonicalPlan,
-                out var planErrors,
-                out var planWarnings))
-            {
-                errors.AddRange(planErrors);
-                warnings.AddRange(planWarnings);
-            }
-            else
-            {
-                warnings.AddRange(planWarnings);
-                AddPlanCoverageWarnings(draftFlow!, plan!, warnings);
-            }
-        }
-        else if (requireSidecar)
-        {
-            errors.Add("A plan sidecar is required before this flow can be committed.");
-        }
-
-        return WorkflowPlanStoreResult.Success() with
-        {
-            Snapshot = new WorkflowAuthoringSnapshot
-            {
-                Name = committed.Name,
-                Markdown = canonicalMarkdown,
-                Flow = draftFlow,
-                FlowDigest = digest,
-                PlanJson = canonicalPlan,
-                Plan = plan,
-                PlanDigest = canonicalPlan is null ? null : ComputeDigest(canonicalPlan),
-            },
-            Errors = errors,
-            Warnings = warnings,
-        };
     }
 
     internal WorkflowPlanStoreResult Save(WorkflowPlanSaveRequest request)
     {
-        if (!TryReadSnapshot(request.FlowName, out var current, out var readResult))
-            return readResult;
-
         lock (TransactionGates.GetOrAdd(_projectRoot, static _ => new object()))
         {
-            if (!TryReadSnapshot(request.FlowName, out current, out readResult))
+            if (!TryRecoverPendingBundleTransaction(out var recoveryError))
+                return WorkflowPlanStoreResult.Failure("recovery-failed", recoveryError!);
+            if (!TryReadSnapshot(request.FlowName, out var current, out var readResult))
                 return readResult;
             if (!MatchesExpectedRevision(current!, request, out var stale))
                 return stale;
@@ -201,12 +229,11 @@ internal sealed class WorkflowPlanStore
 
     internal WorkflowPlanStoreResult Commit(WorkflowBundleCommitRequest request)
     {
-        if (!TryReadCommitBaseline(request.FlowName, out var current, out var readResult))
-            return readResult;
-
         lock (TransactionGates.GetOrAdd(_projectRoot, static _ => new object()))
         {
-            if (!TryReadCommitBaseline(request.FlowName, out current, out readResult))
+            if (!TryRecoverPendingBundleTransaction(out var recoveryError))
+                return WorkflowPlanStoreResult.Failure("recovery-failed", recoveryError!);
+            if (!TryReadCommitBaseline(request.FlowName, createWorkflowRoot: true, out var current, out var readResult))
                 return readResult;
             if (!MatchesExpectedRevision(current!, request, out var stale))
                 return stale;
@@ -284,25 +311,30 @@ internal sealed class WorkflowPlanStore
     /// </summary>
     internal WorkflowRepairFlowApplyResult ApplySelectorRepair(WorkflowRepairFlowApplyRequest request)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        var proposal = request.Proposal;
-        if (!HasRepairBaseline(proposal, out var error))
-            return WorkflowRepairFlowApplyResult.Failure("repair-baseline-invalid", error!);
-        var validProposal = proposal!;
-        var baseFlow = validProposal.BaseFlow!;
+        lock (TransactionGates.GetOrAdd(_projectRoot, static _ => new object()))
+        {
+            if (!TryRecoverPendingBundleTransaction(out var recoveryError))
+                return WorkflowRepairFlowApplyResult.Failure("recovery-failed", recoveryError!);
+            ArgumentNullException.ThrowIfNull(request);
+            var proposal = request.Proposal;
+            if (!HasRepairBaseline(proposal, out var error))
+                return WorkflowRepairFlowApplyResult.Failure("repair-baseline-invalid", error!);
+            var validProposal = proposal!;
+            var baseFlow = validProposal.BaseFlow!;
 
-        return PersistSelectorRepair(
-            validProposal,
-            request.ExpectedFlowDigest ?? baseFlow.Digest,
-            request.ExpectedFlowRevision ?? baseFlow.Revision,
-            validProposal.ProposedSelector,
-            verifyPatch: true,
-            MauiFlowRepairOutcomeStates.Applied,
-            request.Reviewer,
-            request.GrantDigest,
-            request.ValidationRunIds,
-            [],
-            request.RecordedAt ?? DateTimeOffset.UtcNow);
+            return PersistSelectorRepair(
+                validProposal,
+                request.ExpectedFlowDigest ?? baseFlow.Digest,
+                request.ExpectedFlowRevision ?? baseFlow.Revision,
+                validProposal.ProposedSelector,
+                verifyPatch: true,
+                MauiFlowRepairOutcomeStates.Applied,
+                request.Reviewer,
+                request.GrantDigest,
+                request.ValidationRunIds,
+                [],
+                request.RecordedAt ?? DateTimeOffset.UtcNow);
+        }
     }
 
     /// <summary>
@@ -311,27 +343,32 @@ internal sealed class WorkflowPlanStore
     /// </summary>
     internal WorkflowRepairFlowApplyResult RollbackSelectorRepair(WorkflowRepairFlowRollbackRequest request)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        var proposal = request.Proposal;
-        if (!HasRepairBaseline(proposal, out var error) || proposal!.OldSelector is null)
+        lock (TransactionGates.GetOrAdd(_projectRoot, static _ => new object()))
         {
-            return WorkflowRepairFlowApplyResult.Failure(
-                "rollback-baseline-invalid",
-                error ?? "The repair proposal has no prior selector.");
-        }
+            if (!TryRecoverPendingBundleTransaction(out var recoveryError))
+                return WorkflowRepairFlowApplyResult.Failure("recovery-failed", recoveryError!);
+            ArgumentNullException.ThrowIfNull(request);
+            var proposal = request.Proposal;
+            if (!HasRepairBaseline(proposal, out var error) || proposal!.OldSelector is null)
+            {
+                return WorkflowRepairFlowApplyResult.Failure(
+                    "rollback-baseline-invalid",
+                    error ?? "The repair proposal has no prior selector.");
+            }
 
-        return PersistSelectorRepair(
-            proposal,
-            request.ExpectedAppliedFlowDigest,
-            request.ExpectedAppliedFlowRevision,
-            proposal.OldSelector,
-            verifyPatch: false,
-            MauiFlowRepairOutcomeStates.Reverted,
-            request.Reviewer,
-            request.GrantDigest,
-            [],
-            request.VerificationRunIds,
-            request.RecordedAt ?? DateTimeOffset.UtcNow);
+            return PersistSelectorRepair(
+                proposal,
+                request.ExpectedAppliedFlowDigest,
+                request.ExpectedAppliedFlowRevision,
+                proposal.OldSelector,
+                verifyPatch: false,
+                MauiFlowRepairOutcomeStates.Reverted,
+                request.Reviewer,
+                request.GrantDigest,
+                [],
+                request.VerificationRunIds,
+                request.RecordedAt ?? DateTimeOffset.UtcNow);
+        }
     }
 
     /// <summary>
@@ -342,24 +379,18 @@ internal sealed class WorkflowPlanStore
     /// </summary>
     internal WorkflowRepairHistoryAppendResult AppendRepairHistory(WorkflowRepairHistoryAppendRequest request)
     {
-        ArgumentNullException.ThrowIfNull(request);
-        if (request.Proposal?.BaseFlow?.Path is not { Length: > 0 } flowName)
-        {
-            return WorkflowRepairHistoryAppendResult.Failure(
-                "repair-baseline-invalid",
-                "The repair proposal has no canonical flow path.");
-        }
-
-        if (!TryReadSnapshot(flowName, out var current, out var readResult))
-        {
-            return WorkflowRepairHistoryAppendResult.Failure(
-                readResult.Code ?? "flow-read-failed",
-                readResult.Error ?? "The repair flow could not be loaded.");
-        }
-
         lock (TransactionGates.GetOrAdd(_projectRoot, static _ => new object()))
         {
-            if (!TryReadSnapshot(flowName, out current, out readResult))
+            if (!TryRecoverPendingBundleTransaction(out var recoveryError))
+                return WorkflowRepairHistoryAppendResult.Failure("recovery-failed", recoveryError!);
+            ArgumentNullException.ThrowIfNull(request);
+            if (request.Proposal?.BaseFlow?.Path is not { Length: > 0 } flowName)
+            {
+                return WorkflowRepairHistoryAppendResult.Failure(
+                    "repair-baseline-invalid",
+                    "The repair proposal has no canonical flow path.");
+            }
+            if (!TryReadSnapshot(flowName, out var current, out var readResult))
             {
                 return WorkflowRepairHistoryAppendResult.Failure(
                     readResult.Code ?? "flow-read-failed",
@@ -536,26 +567,31 @@ internal sealed class WorkflowPlanStore
         string? markdown,
         string? planJson)
     {
-        if (!TryReadCommitBaseline(flowName, out var committed, out var readResult))
-            return readResult;
+        lock (TransactionGates.GetOrAdd(_projectRoot, static _ => new object()))
+        {
+            if (!TryRecoverPendingBundleTransaction(out var recoveryError))
+                return WorkflowPlanStoreResult.Failure("recovery-failed", recoveryError!);
+            if (!TryReadCommitBaseline(flowName, createWorkflowRoot: false, out var committed, out var readResult))
+                return readResult;
 
-        var validation = Validate(flowName, markdown, planJson, requireSidecar: false);
-        if (!validation.Ok || validation.Snapshot is null)
-            return validation;
+            var validation = Validate(flowName, markdown, planJson, requireSidecar: false);
+            if (!validation.Ok || validation.Snapshot is null)
+                return validation;
 
-        var flowDiff = DeterministicDiff(
-            $"committed/{committed!.Name}",
-            $"draft/{committed.Name}",
-            committed.Flow is null ? string.Empty : FlowMarkdown.Serialize(committed.Flow),
-            validation.Snapshot.Markdown!);
-        var planDiff = string.IsNullOrWhiteSpace(planJson)
-            ? string.Empty
-            : DeterministicDiff(
-                $"committed/{Path.GetFileName(SidecarPath(committed.Name!))}",
-                $"draft/{Path.GetFileName(SidecarPath(committed.Name!))}",
-                committed.PlanJson ?? string.Empty,
-                validation.Snapshot.PlanJson ?? string.Empty);
-        return validation with { Diff = string.Join(Environment.NewLine, new[] { flowDiff, planDiff }.Where(static value => !string.IsNullOrEmpty(value))) };
+            var flowDiff = DeterministicDiff(
+                $"committed/{committed!.Name}",
+                $"draft/{committed.Name}",
+                committed.Flow is null ? string.Empty : FlowMarkdown.Serialize(committed.Flow),
+                validation.Snapshot.Markdown!);
+            var planDiff = string.IsNullOrWhiteSpace(planJson)
+                ? string.Empty
+                : DeterministicDiff(
+                    $"committed/{Path.GetFileName(SidecarPath(committed.Name!))}",
+                    $"draft/{Path.GetFileName(SidecarPath(committed.Name!))}",
+                    committed.PlanJson ?? string.Empty,
+                    validation.Snapshot.PlanJson ?? string.Empty);
+            return validation with { Diff = string.Join(Environment.NewLine, new[] { flowDiff, planDiff }.Where(static value => !string.IsNullOrEmpty(value))) };
+        }
     }
 
     private static WorkflowFlowIdentity ReadFlowIdentity(MauiFlow flow)
@@ -857,29 +893,12 @@ internal sealed class WorkflowPlanStore
 
     private bool TryEnsureRepairHistoryRoot(out string? root, out string? error)
     {
-        root = null;
-        error = null;
-        if (!TryEnsureWorkflowRoot(create: true, out error))
+        if (!TryResolveDevFlowRoot(create: true, out root, out error))
             return false;
-        try
-        {
-            root = Path.Combine(_workflowRoot, ".devflow");
-            if (!Directory.Exists(root))
-                Directory.CreateDirectory(root);
-            if (IsReparsePoint(root) || PathContainsReparsePoint(_workflowRoot, root))
-            {
-                error = "The repair history directory cannot be a symbolic link or reparse point.";
-                root = null;
-                return false;
-            }
+        if (root is not null)
             return true;
-        }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
-        {
-            error = "The repair history directory could not be resolved safely.";
-            root = null;
-            return false;
-        }
+        error = "The repair history directory could not be resolved safely.";
+        return false;
     }
 
     private bool WriteRepairBundle(IReadOnlyList<(string Path, string Content)> files, out string? error)
@@ -896,7 +915,7 @@ internal sealed class WorkflowPlanStore
         try
         {
             var full = Path.GetFullPath(path);
-            var historyRoot = Path.Combine(_workflowRoot, ".devflow");
+            var historyRoot = Path.Combine(_workflowRoot, DevFlowDirectoryName);
             return IsUnderRoot(full, historyRoot) &&
                 string.Equals(Path.GetDirectoryName(full), historyRoot, PathComparison) &&
                 full.EndsWith(".repair-history.jsonl", StringComparison.OrdinalIgnoreCase) &&
@@ -913,6 +932,439 @@ internal sealed class WorkflowPlanStore
         => flowId is { Length: > 0 and <= 128 } &&
            flowId.All(static character =>
                char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.');
+
+    private bool TryResolveDevFlowRoot(bool create, out string? root, out string? error)
+    {
+        root = null;
+        error = null;
+        if (create)
+        {
+            if (!TryEnsureWorkflowRoot(create: true, out error))
+                return false;
+        }
+        else
+        {
+            if (!Directory.Exists(_workflowRoot))
+                return true;
+            if (!TryEnsureWorkflowRoot(create: false, out error))
+                return false;
+        }
+
+        try
+        {
+            root = Path.Combine(_workflowRoot, DevFlowDirectoryName);
+            if (!Directory.Exists(root))
+            {
+                if (!create)
+                {
+                    root = null;
+                    return true;
+                }
+
+                Directory.CreateDirectory(root);
+            }
+
+            if (IsReparsePoint(root) || PathContainsReparsePoint(_workflowRoot, root))
+            {
+                error = "The repair history directory cannot be a symbolic link or reparse point.";
+                root = null;
+                return false;
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException)
+        {
+            error = "The repair history directory could not be resolved safely.";
+            root = null;
+            return false;
+        }
+    }
+
+    private bool TryRecoverPendingBundleTransaction(out string? error)
+    {
+        error = null;
+        if (!TryResolveDevFlowRoot(create: false, out var devFlowRoot, out error))
+            return false;
+        if (devFlowRoot is null)
+            return true;
+
+        var manifestPath = BundleTransactionManifestPath(devFlowRoot);
+        if (!File.Exists(manifestPath))
+            return true;
+        if (!TryReadBundleTransactionManifest(manifestPath, out var manifest, out error))
+            return false;
+        return TryRecoverBundleTransaction(manifest!, manifestPath, out error);
+    }
+
+    private bool TryReadBundleTransactionManifest(
+        string manifestPath,
+        out BundleTransactionManifest? manifest,
+        out string? error)
+    {
+        manifest = null;
+        if (!TryReadSafeFile(manifestPath, out var json, out error))
+            return false;
+
+        try
+        {
+            manifest = JsonSerializer.Deserialize<BundleTransactionManifest>(json!);
+            if (manifest?.Schema != 1 ||
+                !string.Equals(manifest.State, BundleTransactionStatePreparing, StringComparison.Ordinal) &&
+                !string.Equals(manifest.State, BundleTransactionStateStaged, StringComparison.Ordinal) ||
+                !IsSafeTransactionGeneration(manifest.Generation) ||
+                manifest.Files is not { Count: > 0 and <= MaxBundleTransactionFiles })
+            {
+                error = "The pending workflow transaction manifest is invalid.";
+                manifest = null;
+                return false;
+            }
+
+            return true;
+        }
+        catch (JsonException)
+        {
+            error = "The pending workflow transaction manifest is invalid.";
+            manifest = null;
+            return false;
+        }
+    }
+
+    private bool TryRecoverBundleTransaction(
+        BundleTransactionManifest manifest,
+        string manifestPath,
+        out string? error)
+    {
+        error = null;
+        if (!TryResolveBundleTransactionFiles(manifest, out var files, out error))
+            return false;
+
+        var finalize = false;
+        if (string.Equals(manifest.State, BundleTransactionStateStaged, StringComparison.Ordinal) &&
+            !TryIsCommittedBundle(files, out finalize, out error))
+        {
+            return false;
+        }
+
+        if (finalize)
+        {
+            if (!TryFinalizeRecoveredBundle(files, out error))
+                return false;
+        }
+        else if (!TryRollbackRecoveredBundle(files, out error))
+        {
+            return false;
+        }
+
+        if (!TryDeleteBundleTransactionManifest(manifestPath, out error))
+            return false;
+        return true;
+    }
+
+    private bool TryResolveBundleTransactionFiles(
+        BundleTransactionManifest manifest,
+        out List<StagedFile> files,
+        out string? error)
+    {
+        files = [];
+        error = null;
+        var seen = new HashSet<string>(PathComparer);
+        foreach (var file in manifest.Files)
+        {
+            if (string.IsNullOrWhiteSpace(file.RelativePath))
+            {
+                error = "The pending workflow transaction manifest is invalid.";
+                files.Clear();
+                return false;
+            }
+
+            string target;
+            try
+            {
+                target = Path.GetFullPath(Path.Combine(_workflowRoot, file.RelativePath));
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException)
+            {
+                error = "The pending workflow transaction manifest is invalid.";
+                files.Clear();
+                return false;
+            }
+
+            if (!IsExpectedBundleTransactionPath(target) || !seen.Add(target))
+            {
+                error = "The pending workflow transaction refers to a non-canonical path.";
+                files.Clear();
+                return false;
+            }
+
+            var temporary = TemporaryPath(target, manifest.Generation!);
+            var backup = BackupPath(target, manifest.Generation!);
+            if (!IsExpectedTransactionArtifactPath(target, temporary, manifest.Generation!, ".tmp") ||
+                !IsExpectedTransactionArtifactPath(target, backup, manifest.Generation!, ".bak"))
+            {
+                error = "The pending workflow transaction refers to a non-canonical path.";
+                files.Clear();
+                return false;
+            }
+
+            foreach (var candidate in new[] { target, temporary, backup })
+            {
+                if (!TryGetTransactionFileState(candidate, out _, out error))
+                {
+                    files.Clear();
+                    return false;
+                }
+            }
+
+            files.Add(new StagedFile(target, temporary, backup, file.OriginalExisted));
+        }
+
+        return true;
+    }
+
+    private bool TryIsCommittedBundle(
+        IReadOnlyList<StagedFile> files,
+        out bool committed,
+        out string? error)
+    {
+        committed = true;
+        error = null;
+        foreach (var file in files)
+        {
+            if (!TryGetTransactionFileState(file.Path, out var canonicalExists, out error) ||
+                !TryGetTransactionFileState(file.TemporaryPath, out var temporaryExists, out error))
+            {
+                committed = false;
+                return false;
+            }
+
+            if (!canonicalExists || temporaryExists)
+            {
+                committed = false;
+                return true;
+            }
+        }
+
+        return true;
+    }
+
+    private bool TryFinalizeRecoveredBundle(
+        IReadOnlyList<StagedFile> files,
+        out string? error)
+    {
+        error = null;
+        try
+        {
+            foreach (var file in files)
+            {
+                if (!TryGetTransactionFileState(file.BackupPath, out var backupExists, out error))
+                    return false;
+                if (backupExists)
+                    File.Delete(file.BackupPath);
+                if (!TryGetTransactionFileState(file.TemporaryPath, out var temporaryExists, out error))
+                    return false;
+                if (temporaryExists)
+                    File.Delete(file.TemporaryPath);
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            error = "The pending workflow transaction could not be finalized safely.";
+            return false;
+        }
+    }
+
+    private bool TryRollbackRecoveredBundle(
+        IReadOnlyList<StagedFile> files,
+        out string? error)
+    {
+        error = null;
+        try
+        {
+            foreach (var file in files.Reverse())
+            {
+                if (!TryGetTransactionFileState(file.Path, out var canonicalExists, out error) ||
+                    !TryGetTransactionFileState(file.TemporaryPath, out var temporaryExists, out error) ||
+                    !TryGetTransactionFileState(file.BackupPath, out var backupExists, out error))
+                {
+                    return false;
+                }
+
+                if (backupExists)
+                {
+                    if (canonicalExists)
+                        File.Delete(file.Path);
+                    if (file.OriginalExisted)
+                        File.Move(file.BackupPath, file.Path);
+                    else
+                        File.Delete(file.BackupPath);
+                }
+                else if (file.OriginalExisted)
+                {
+                    if (!canonicalExists)
+                    {
+                        error = "The pending workflow transaction could not be rolled back safely.";
+                        return false;
+                    }
+                }
+                else if (canonicalExists)
+                {
+                    File.Delete(file.Path);
+                }
+
+                if (temporaryExists)
+                    File.Delete(file.TemporaryPath);
+            }
+
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            error = "The pending workflow transaction could not be rolled back safely.";
+            return false;
+        }
+    }
+
+    private bool TryDeleteBundleTransactionManifest(string manifestPath, out string? error)
+    {
+        error = null;
+        try
+        {
+            if (File.Exists(manifestPath))
+                File.Delete(manifestPath);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            error = "The pending workflow transaction manifest could not be cleaned up safely.";
+            return false;
+        }
+    }
+
+    private bool TryGetTransactionFileState(string path, out bool exists, out string? error)
+    {
+        exists = false;
+        error = null;
+        try
+        {
+            if (Directory.Exists(path))
+            {
+                error = "The pending workflow transaction refers to a non-file path.";
+                return false;
+            }
+
+            if (!File.Exists(path))
+                return true;
+
+            if (IsReparsePoint(path) || PathContainsReparsePoint(_workflowRoot, path))
+            {
+                error = "Refusing to recover through a symbolic link, reparse point, or non-canonical path.";
+                return false;
+            }
+
+            exists = true;
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            error = "The pending workflow transaction could not be inspected safely.";
+            return false;
+        }
+    }
+
+    private bool IsExpectedBundleTransactionPath(string path)
+        => IsExpectedTopLevelPath(path) || IsExpectedRepairBundlePath(path);
+
+    private static bool IsSafeTransactionGeneration(string? generation)
+        => generation is { Length: 24 } &&
+           generation.All(static character => char.IsAsciiLetterOrDigit(character));
+
+    private static string CreateTransactionGeneration()
+        => Convert.ToHexString(RandomNumberGenerator.GetBytes(12)).ToLowerInvariant();
+
+    private static string TemporaryPath(string path, string generation)
+        => path + BundleTransactionArtifactPrefix + generation + ".tmp";
+
+    private static string BackupPath(string path, string generation)
+        => path + BundleTransactionArtifactPrefix + generation + ".bak";
+
+    private static string BundleTransactionManifestPath(string devFlowRoot)
+        => Path.Combine(devFlowRoot, BundleTransactionManifestFileName);
+
+    private static string BundleTransactionManifestTempPath(string devFlowRoot, string generation)
+        => Path.Combine(devFlowRoot, $"workflow-plan-store.transaction.{generation}.tmp");
+
+    private static bool IsExpectedTransactionArtifactPath(
+        string canonicalPath,
+        string artifactPath,
+        string generation,
+        string suffix)
+    {
+        try
+        {
+            return string.Equals(
+                Path.GetFullPath(artifactPath),
+                Path.GetFullPath(canonicalPath) + BundleTransactionArtifactPrefix + generation + suffix,
+                PathComparison);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private bool TryWriteBundleTransactionManifest(
+        string devFlowRoot,
+        BundleTransactionManifest manifest,
+        out string? error)
+    {
+        error = null;
+        var manifestPath = BundleTransactionManifestPath(devFlowRoot);
+        var temporaryPath = BundleTransactionManifestTempPath(devFlowRoot, manifest.Generation!);
+        try
+        {
+            var node = JsonSerializer.SerializeToNode(manifest) as JsonObject;
+            if (node is null)
+            {
+                error = "The pending workflow transaction manifest is invalid.";
+                return false;
+            }
+
+            var content = CanonicalizeJson(node, indented: true);
+            using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+            {
+                writer.Write(content);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+
+            File.Move(temporaryPath, manifestPath, overwrite: true);
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)
+        {
+            error = "The pending workflow transaction manifest could not be written safely.";
+            return false;
+        }
+        finally
+        {
+            try { File.Delete(temporaryPath); } catch { }
+        }
+    }
+
+    private void InvokeTransactionPhase(
+        WorkflowPlanStoreTransactionPhase phase,
+        string generation,
+        string? path = null)
+        => _testHooks?.OnTransactionEvent?.Invoke(new WorkflowPlanStoreTransactionEvent
+        {
+            Generation = generation,
+            Phase = phase,
+            Path = path,
+        });
 
     private static string? SafeHistoryToken(string? value)
     {
@@ -1054,6 +1506,7 @@ internal sealed class WorkflowPlanStore
 
     private bool TryReadCommitBaseline(
         string? flowName,
+        bool createWorkflowRoot,
         out WorkflowAuthoringSnapshot? snapshot,
         out WorkflowPlanStoreResult result)
     {
@@ -1063,12 +1516,31 @@ internal sealed class WorkflowPlanStore
             result = WorkflowPlanStoreResult.Failure("flow-name-invalid", nameError!);
             return false;
         }
-        if (!TryEnsureWorkflowRoot(create: true, out var rootError))
+        if (createWorkflowRoot)
         {
-            result = WorkflowPlanStoreResult.Failure("workspace-unsafe", rootError!);
-            return false;
+            if (!TryEnsureWorkflowRoot(create: true, out var rootError))
+            {
+                result = WorkflowPlanStoreResult.Failure("workspace-unsafe", rootError!);
+                return false;
+            }
         }
-        if (File.Exists(FlowPath(name!)))
+        else
+        {
+            if (!TryEnsureProjectRootForRead(out var rootError))
+            {
+                result = WorkflowPlanStoreResult.Failure("workspace-unsafe", rootError!);
+                return false;
+            }
+
+            if (Directory.Exists(_workflowRoot) &&
+                !TryEnsureWorkflowRoot(create: false, out rootError))
+            {
+                result = WorkflowPlanStoreResult.Failure("workspace-unsafe", rootError!);
+                return false;
+            }
+        }
+
+        if (Directory.Exists(_workflowRoot) && File.Exists(FlowPath(name!)))
             return TryReadSnapshot(name, out snapshot, out result);
 
         snapshot = new WorkflowAuthoringSnapshot { Name = name };
@@ -1340,6 +1812,27 @@ internal sealed class WorkflowPlanStore
         }
     }
 
+    private bool TryEnsureProjectRootForRead(out string? error)
+    {
+        error = null;
+        try
+        {
+            if (!Directory.Exists(_projectRoot))
+                return true;
+            if (IsReparsePoint(_projectRoot))
+            {
+                error = "The project root cannot be a symbolic link or reparse point.";
+                return false;
+            }
+            return true;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+        {
+            error = "The project workflow directory could not be resolved safely.";
+            return false;
+        }
+    }
+
     private bool TryEnsureWorkflowRoot(bool create, out string? error)
     {
         error = null;
@@ -1422,97 +1915,126 @@ internal sealed class WorkflowPlanStore
         error = null;
         if (!TryEnsureWorkflowRoot(create: true, out error))
             return false;
+        if (!TryResolveDevFlowRoot(create: true, out var devFlowRoot, out error) || devFlowRoot is null)
+        {
+            error ??= "The repair history directory could not be resolved safely.";
+            return false;
+        }
 
+        var generation = CreateTransactionGeneration();
         var staged = new List<StagedFile>(files.Count);
-        var preserveBackups = false;
+        foreach (var (path, content) in files)
+        {
+            if (!isExpectedPath(path) || PathContainsReparsePoint(_workflowRoot, path))
+            {
+                error = "Refusing to write through a symbolic link, reparse point, or non-canonical path.";
+                return false;
+            }
+            if (!TryGetTransactionFileState(path, out var originalExisted, out error))
+                return false;
+            if (Encoding.UTF8.GetByteCount(content) > MaxFileBytes)
+            {
+                error = "The workflow bundle exceeds the 1 MB per-file limit.";
+                return false;
+            }
+
+            staged.Add(new StagedFile(
+                path,
+                TemporaryPath(path, generation),
+                BackupPath(path, generation),
+                originalExisted));
+        }
+
+        var manifest = new BundleTransactionManifest
+        {
+            Generation = generation,
+            State = BundleTransactionStatePreparing,
+            Files = staged
+                .Select(file => new BundleTransactionManifestFile
+                {
+                    RelativePath = Path.GetRelativePath(_workflowRoot, file.Path),
+                    OriginalExisted = file.OriginalExisted,
+                })
+                .ToList(),
+        };
+        var manifestPath = BundleTransactionManifestPath(devFlowRoot);
+        var transactionClosed = false;
+        var simulatedTermination = false;
+        var preserveArtifacts = false;
         try
         {
-            foreach (var (path, content) in files)
-            {
-                if (!isExpectedPath(path) ||
-                    (File.Exists(path) && (IsReparsePoint(path) || PathContainsReparsePoint(_workflowRoot, path))))
-                {
-                    error = "Refusing to write through a symbolic link, reparse point, or non-canonical path.";
-                    return false;
-                }
-                if (Encoding.UTF8.GetByteCount(content) > MaxFileBytes)
-                {
-                    error = "The workflow bundle exceeds the 1 MB per-file limit.";
-                    return false;
-                }
+            if (!TryWriteBundleTransactionManifest(devFlowRoot, manifest, out error))
+                return false;
+            InvokeTransactionPhase(WorkflowPlanStoreTransactionPhase.ManifestPrepared, generation);
 
-                var temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-                using (var stream = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            for (var index = 0; index < files.Count; index++)
+            {
+                var content = files[index].Content;
+                var item = staged[index];
+                using (var stream = new FileStream(item.TemporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                 using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
                 {
                     writer.Write(content);
                     writer.Flush();
                     stream.Flush(flushToDisk: true);
                 }
-                staged.Add(new StagedFile(path, temporary));
+                InvokeTransactionPhase(WorkflowPlanStoreTransactionPhase.TemporaryWritten, generation, item.Path);
             }
+
+            manifest.State = BundleTransactionStateStaged;
+            if (!TryWriteBundleTransactionManifest(devFlowRoot, manifest, out error))
+                return false;
+            InvokeTransactionPhase(WorkflowPlanStoreTransactionPhase.ManifestStaged, generation);
 
             foreach (var item in staged)
             {
-                if (!File.Exists(item.Path))
+                if (!item.OriginalExisted)
                     continue;
-                item.BackupPath = item.Path + "." + Guid.NewGuid().ToString("N") + ".bak";
                 File.Move(item.Path, item.BackupPath);
+                InvokeTransactionPhase(WorkflowPlanStoreTransactionPhase.BackupMoved, generation, item.Path);
             }
             foreach (var item in staged)
             {
                 File.Move(item.TemporaryPath, item.Path);
-                item.Committed = true;
+                InvokeTransactionPhase(WorkflowPlanStoreTransactionPhase.CanonicalReplaced, generation, item.Path);
             }
             foreach (var item in staged)
             {
-                if (item.BackupPath is not null)
+                if (item.OriginalExisted && File.Exists(item.BackupPath))
                     File.Delete(item.BackupPath);
+                InvokeTransactionPhase(WorkflowPlanStoreTransactionPhase.BackupDeleted, generation, item.Path);
             }
+            if (!TryDeleteBundleTransactionManifest(manifestPath, out error))
+                return false;
+            transactionClosed = true;
+            InvokeTransactionPhase(WorkflowPlanStoreTransactionPhase.ManifestDeleted, generation);
             return true;
+        }
+        catch (WorkflowPlanStoreSimulatedTerminationException)
+        {
+            simulatedTermination = true;
+            throw;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            var restored = RollBack(staged);
-            preserveBackups = !restored;
-            error = restored
-                ? "The flow and plan were not saved; the previous committed bundle was restored."
+            var recovered = TryRecoverBundleTransaction(manifest, manifestPath, out _);
+            preserveArtifacts = !recovered;
+            error = recovered
+                ? "The workflow bundle was not saved; the previous committed bundle was restored."
                 : "The bundle write failed and the previous revision could not be fully restored.";
             return false;
         }
         finally
         {
-            foreach (var item in staged)
+            if (!simulatedTermination && !transactionClosed && !preserveArtifacts)
             {
-                try { File.Delete(item.TemporaryPath); } catch { }
-                try
+                foreach (var item in staged)
                 {
-                    if (!preserveBackups && item.BackupPath is not null && File.Exists(item.BackupPath))
-                        File.Delete(item.BackupPath);
+                    try { File.Delete(item.TemporaryPath); } catch { }
+                    try { File.Delete(item.BackupPath); } catch { }
                 }
-                catch { }
             }
         }
-    }
-
-    private static bool RollBack(IEnumerable<StagedFile> staged)
-    {
-        var restored = true;
-        foreach (var item in staged.Reverse())
-        {
-            try
-            {
-                if (item.Committed && File.Exists(item.Path))
-                    File.Delete(item.Path);
-                if (item.BackupPath is not null && File.Exists(item.BackupPath))
-                    File.Move(item.BackupPath, item.Path);
-            }
-            catch
-            {
-                restored = false;
-            }
-        }
-        return restored;
     }
 
     private string FlowPath(string flowName) => Path.Combine(_workflowRoot, flowName);
@@ -1687,20 +2209,69 @@ internal sealed class WorkflowPlanStore
 
     private static readonly StringComparison PathComparison =
         OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+    private static readonly StringComparer PathComparer =
+        OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal;
 
     private sealed class StagedFile
     {
-        public StagedFile(string path, string temporaryPath)
+        public StagedFile(string path, string temporaryPath, string backupPath, bool originalExisted)
         {
             Path = path;
             TemporaryPath = temporaryPath;
+            BackupPath = backupPath;
+            OriginalExisted = originalExisted;
         }
 
         public string Path { get; }
         public string TemporaryPath { get; }
-        public string? BackupPath { get; set; }
-        public bool Committed { get; set; }
+        public string BackupPath { get; }
+        public bool OriginalExisted { get; }
     }
+}
+
+internal sealed class WorkflowPlanStoreTestHooks
+{
+    public Action<WorkflowPlanStoreTransactionEvent>? OnTransactionEvent { get; init; }
+}
+
+internal sealed class WorkflowPlanStoreSimulatedTerminationException : IOException
+{
+    public WorkflowPlanStoreSimulatedTerminationException(string? message = null)
+        : base(message ?? "Simulated process termination.")
+    {
+    }
+}
+
+internal enum WorkflowPlanStoreTransactionPhase
+{
+    ManifestPrepared,
+    TemporaryWritten,
+    ManifestStaged,
+    BackupMoved,
+    CanonicalReplaced,
+    BackupDeleted,
+    ManifestDeleted,
+}
+
+internal sealed class WorkflowPlanStoreTransactionEvent
+{
+    public string? Generation { get; init; }
+    public WorkflowPlanStoreTransactionPhase Phase { get; init; }
+    public string? Path { get; init; }
+}
+
+internal sealed class BundleTransactionManifest
+{
+    public int Schema { get; init; } = 1;
+    public string? Generation { get; set; }
+    public string? State { get; set; }
+    public List<BundleTransactionManifestFile> Files { get; set; } = [];
+}
+
+internal sealed class BundleTransactionManifestFile
+{
+    public string? RelativePath { get; init; }
+    public bool OriginalExisted { get; init; }
 }
 
 internal record WorkflowPlanSaveRequest

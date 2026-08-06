@@ -405,6 +405,79 @@ public class TestAgentSessionServiceTests
     }
 
     [Fact]
+    public async Task TestAgentRunTool_BindFailureAfterStartedRunReturnsManualRecoveryWithoutRetry()
+    {
+        var completionRecorded = false;
+        var response = await TestAgentRunTool.BindStartedRunAsync(
+            "request-run",
+            "run_accepted",
+            "capability_accepted",
+            () => Task.FromResult(new TestAgentBrokerResponse<MauiTestAgentRunBindingResult>(
+                503,
+                new MauiTestAgentRunBindingResult
+                {
+                    Error = TestAgentToolSupport.Error(
+                        MauiTestAgentErrorCodes.TargetUnavailable,
+                        MauiTestAgentErrorCategories.Transport,
+                        "The broker could not persist the run binding.",
+                        retryable: true),
+                },
+                null)),
+            () =>
+            {
+                completionRecorded = true;
+                return Task.CompletedTask;
+            });
+
+        Assert.True(completionRecorded);
+        Assert.NotNull(response);
+        using var document = JsonDocument.Parse(response);
+        Assert.False(document.RootElement.GetProperty("ok").GetBoolean());
+        Assert.Equal(MauiTestAgentErrorCodes.UnknownCompletion, document.RootElement.GetProperty("error").GetProperty("code").GetString());
+        var recovery = document.RootElement.GetProperty("recovery");
+        Assert.Equal("started-unbound", recovery.GetProperty("state").GetString());
+        Assert.Equal("run_accepted", recovery.GetProperty("runId").GetString());
+        Assert.Equal("capability_accepted", recovery.GetProperty("runCapabilityToken").GetString());
+        Assert.False(recovery.GetProperty("automaticRetryAllowed").GetBoolean());
+    }
+
+    [Fact]
+    public async Task TestAgentActionTool_BindFailureAfterStartedRunReturnsTheSameManualRecoveryShape()
+    {
+        var completionRecorded = false;
+        var response = await TestAgentActionTool.BindStartedActionRunAsync(
+            "request-action",
+            "run_action",
+            "capability_action",
+            () => Task.FromResult(new TestAgentBrokerResponse<MauiTestAgentRunBindingResult>(
+                409,
+                new MauiTestAgentRunBindingResult
+                {
+                    Error = TestAgentToolSupport.Error(
+                        MauiTestAgentErrorCodes.SessionExpired,
+                        MauiTestAgentErrorCategories.State,
+                        "The authoring session expired before binding.",
+                        retryable: false),
+                },
+                null)),
+            () =>
+            {
+                completionRecorded = true;
+                return Task.CompletedTask;
+            });
+
+        Assert.True(completionRecorded);
+        Assert.NotNull(response);
+        using var document = JsonDocument.Parse(response);
+        Assert.False(document.RootElement.GetProperty("ok").GetBoolean());
+        Assert.Equal(MauiTestAgentErrorCodes.UnknownCompletion, document.RootElement.GetProperty("error").GetProperty("code").GetString());
+        var recovery = document.RootElement.GetProperty("recovery");
+        Assert.Equal("run_action", recovery.GetProperty("runId").GetString());
+        Assert.Equal("capability_action", recovery.GetProperty("runCapabilityToken").GetString());
+        Assert.False(recovery.GetProperty("automaticRetryAllowed").GetBoolean());
+    }
+
+    [Fact]
     public void Begin_MissingExplicitInstance_IsRejected()
     {
         var service = new TestAgentSessionService();
@@ -477,7 +550,7 @@ public class TestAgentSessionServiceTests
     }
 
     [Fact]
-    public void Grant_RejectsStaleTargetValueLimitAndIdempotencyReuseBeforeDispatch()
+    public void Grant_RejectsStaleTargetAndValueLimit_WhileIdenticalAuthorizationRetriesReturnPriorAuthorization()
     {
         var fixture = BeginFixture();
         var grant = fixture.IssueGrant(new MauiTestAgentMutationScope
@@ -529,9 +602,133 @@ public class TestAgentSessionServiceTests
             MauiTestAgentActions.Fill,
             selector: new FlowSelector { AutomationId = "query" },
             value: "ok");
-        Assert.False(replay.Ok);
-        Assert.Equal(MauiTestAgentErrorCodes.IdempotencyReused, replay.Error?.Code);
-        Assert.False(replay.DispatchAllowed);
+        Assert.True(replay.Ok, replay.Error?.Message);
+        Assert.True(replay.DispatchAllowed);
+        Assert.Equal(allowed.AuthorizationId, replay.AuthorizationId);
+        Assert.Equal(allowed.RemainingActions, replay.RemainingActions);
+
+        var differentRequest = fixture.Authorize(
+            "fill-once",
+            grant.GrantId!,
+            MauiTestAgentActions.Fill,
+            selector: new FlowSelector { AutomationId = "query" },
+            value: "o");
+        Assert.False(differentRequest.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.IdempotencyReused, differentRequest.Error?.Code);
+    }
+
+    [Fact]
+    public void MutationAuthorization_RejectsAttestedRouteAndWindowDrift()
+    {
+        var fixture = BeginFixture();
+        var grant = fixture.IssueGrant(Scope(MauiTestAgentActions.Tap));
+
+        var routeDrift = fixture.Authorize(
+            "route-drift",
+            grant.GrantId!,
+            MauiTestAgentActions.Tap,
+            selector: new FlowSelector { AutomationId = "save" },
+            state: new MauiTestAgentTargetState
+            {
+                AgentId = fixture.State.AgentId,
+                AgentInstanceId = fixture.State.AgentInstanceId,
+                AppBuildFingerprint = fixture.State.AppBuildFingerprint,
+                SeedFingerprint = fixture.State.SeedFingerprint,
+                BackendStateFingerprint = fixture.State.BackendStateFingerprint,
+                Route = "//other",
+                Window = fixture.State.Window,
+            });
+        Assert.False(routeDrift.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.TargetStale, routeDrift.Error?.Code);
+
+        var windowDrift = fixture.Authorize(
+            "window-drift",
+            grant.GrantId!,
+            MauiTestAgentActions.Tap,
+            selector: new FlowSelector { AutomationId = "save" },
+            state: new MauiTestAgentTargetState
+            {
+                AgentId = fixture.State.AgentId,
+                AgentInstanceId = fixture.State.AgentInstanceId,
+                AppBuildFingerprint = fixture.State.AppBuildFingerprint,
+                SeedFingerprint = fixture.State.SeedFingerprint,
+                BackendStateFingerprint = fixture.State.BackendStateFingerprint,
+                Route = fixture.State.Route,
+                Window = "secondary-window",
+            });
+        Assert.False(windowDrift.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.TargetStale, windowDrift.Error?.Code);
+    }
+
+    [Fact]
+    public void RunBinding_RejectsAnotherBoundRunsCapabilityToken()
+    {
+        var fixture = BeginFixture();
+        const string firstRunId = "run-first";
+        const string firstToken = "run-token-first";
+        const string secondRunId = "run-second";
+        const string secondToken = "run-token-second";
+
+        Assert.True(fixture.Service.BindRun(new MauiTestAgentRunBindingRequest
+        {
+            SessionId = fixture.SessionId,
+            ReadCapabilityId = fixture.ReadCapability,
+            RunId = firstRunId,
+            RunCapabilityToken = firstToken,
+        }).Ok);
+        Assert.True(fixture.Service.BindRun(new MauiTestAgentRunBindingRequest
+        {
+            SessionId = fixture.SessionId,
+            ReadCapabilityId = fixture.ReadCapability,
+            RunId = secondRunId,
+            RunCapabilityToken = secondToken,
+        }).Ok);
+
+        var substituted = fixture.Service.ValidateRunBinding(new MauiTestAgentRunBindingRequest
+        {
+            SessionId = fixture.SessionId,
+            ReadCapabilityId = fixture.ReadCapability,
+            RunId = firstRunId,
+            RunCapabilityToken = secondToken,
+        });
+        Assert.False(substituted.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.ReadCapabilityRequired, substituted.Error?.Code);
+
+        var exact = fixture.Service.ValidateRunBinding(new MauiTestAgentRunBindingRequest
+        {
+            SessionId = fixture.SessionId,
+            ReadCapabilityId = fixture.ReadCapability,
+            RunId = firstRunId,
+            RunCapabilityToken = firstToken,
+        });
+        Assert.True(exact.Ok, exact.Error?.Message);
+    }
+
+    [Fact]
+    public void MutationAuthorization_RejectsExpiredDeadlineBeforeGrantConsumption()
+    {
+        var fixture = BeginFixture();
+        var grant = fixture.IssueGrant(Scope(MauiTestAgentActions.Tap));
+        var envelope = fixture.Envelope("expired-deadline", grant.GrantId!);
+        envelope.DeadlineMs = 0;
+
+        var expired = fixture.Service.AuthorizeMutation(new MauiTestAgentMutationAuthorizationRequest
+        {
+            Envelope = envelope,
+            Action = MauiTestAgentActions.Tap,
+            Selector = new FlowSelector { AutomationId = "save" },
+            SideEffectClass = "ui",
+            CurrentTargetState = fixture.State,
+        });
+        Assert.False(expired.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.DeadlineExpired, expired.Error?.Code);
+
+        var stillUsable = fixture.Authorize(
+            "deadline-grant-still-usable",
+            grant.GrantId!,
+            MauiTestAgentActions.Tap,
+            selector: new FlowSelector { AutomationId = "save" });
+        Assert.True(stillUsable.Ok, stillUsable.Error?.Message);
     }
 
     [Fact]
@@ -1364,6 +1561,8 @@ public class TestAgentSessionServiceTests
         AgentInstanceId = "instance-a",
         AppBuildFingerprint = "build-a",
         SeedFingerprint = "seed-a",
+        Route = "//home",
+        Window = "main-window",
     };
 
     private static MauiTestAgentRequestEnvelope Envelope(MauiTestAgentTarget target, string key) => new()

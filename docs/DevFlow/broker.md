@@ -358,7 +358,7 @@ not a device lifecycle, reset, repair, or source-editing API.
    and an optional bounded `timeoutMs`. A safety-aware caller may additionally send a
    non-executable `plan` and host-observed `context` containing reset, precondition,
    compensator, and independent-oracle evidence.
-4. Save the returned `capabilityToken`. It is required in the JSON body for status and cancel.
+4. Save the returned `capabilityToken`. It is required in the JSON body for status and cancel unless the Inspector restores the run from its server-held journal after a reload or host handoff.
 
 ````json
 {

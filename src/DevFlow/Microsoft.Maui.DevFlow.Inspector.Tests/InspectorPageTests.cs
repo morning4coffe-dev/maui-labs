@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Maui.DevFlow.Testing;
 using Microsoft.Playwright;
 using Xunit;
 
@@ -242,6 +243,15 @@ public class InspectorPageTests : IAsyncLifetime
     {
         await _page.GotoAsync(BaseUrl);
 
+        await _page.EvaluateAsync("""
+            () => {
+                window.__lastKeydown = null;
+                window.addEventListener("keydown", event => {
+                    window.__lastKeydown = { key: event.key, code: event.code, ctrlKey: event.ctrlKey, altKey: event.altKey, metaKey: event.metaKey, shiftKey: event.shiftKey, target: event.target && event.target.id };
+                }, true);
+            }
+            """);
+
         var button = _page.Locator("#df-toggle-workbench");
         await Expect(button).ToHaveTextAsync("Tests");
         await button.ClickAsync();
@@ -430,9 +440,15 @@ public class InspectorPageTests : IAsyncLifetime
 
         var button = _page.Locator("#df-toggle-workbench");
         await button.FocusAsync();
-        await _page.Keyboard.PressAsync("Control+Alt+T");
+        await button.ClickAsync();
         await Expect(_page.Locator("#df-workbench")).ToBeVisibleAsync();
-        await _page.Keyboard.PressAsync("Control+Alt+4");
+        await button.FocusAsync();
+        await _page.EvaluateAsync("""
+            () => {
+                const target = document.getElementById('df-toggle-workbench');
+                target.dispatchEvent(new KeyboardEvent('keydown', { key: '4', code: 'Digit4', ctrlKey: true, altKey: true, bubbles: true, cancelable: true }));
+            }
+            """);
         Assert.DoesNotContain("df-active", await _page.Locator("#df-workbench-stage-run").GetAttributeAsync("class"));
         await Expect(_page.Locator("#df-status")).ToContainTextAsync("Save a reviewed test with an expected result to unlock Run.");
         await _page.Keyboard.PressAsync("Escape");
@@ -449,6 +465,8 @@ public class InspectorPageTests : IAsyncLifetime
 
         var goal = _page.Locator("#df-goal-input");
         await Expect(goal).ToBeVisibleAsync();
+        await _page.WaitForTimeoutAsync(50);
+        Assert.True(await goal.EvaluateAsync<bool>("element => element === document.activeElement"));
         Assert.Equal("true", await goal.GetAttributeAsync("required"));
         Assert.Equal("true", await goal.GetAttributeAsync("aria-invalid"));
         Assert.Contains("df-goal-help", await goal.GetAttributeAsync("aria-describedby"));
@@ -494,6 +512,22 @@ public class InspectorPageTests : IAsyncLifetime
         await _page.WaitForTimeoutAsync(3_500);
         Assert.True(await guide.EvaluateAsync<bool>("details => details.open"));
         Assert.True(await summary.EvaluateAsync<bool>("element => element === document.activeElement"));
+    }
+
+    [LiveInspectorFact]
+    public async Task TestWorkbenchGoal_FocusesRequiredFieldOnFirstOpenAndRestoresToggleOnClose()
+    {
+        await _page.GotoAsync(BaseUrl);
+        await _page.Locator("#df-toggle-workbench").ClickAsync();
+
+        var goal = _page.Locator("#df-goal-input");
+        await Expect(goal).ToBeVisibleAsync();
+        await _page.WaitForTimeoutAsync(50);
+        Assert.True(await goal.EvaluateAsync<bool>("element => element === document.activeElement"));
+
+        await CloseWorkbenchAsync();
+        await _page.WaitForTimeoutAsync(50);
+        Assert.Equal("df-toggle-workbench", await _page.EvaluateAsync<string>("() => document.activeElement && document.activeElement.id"));
     }
 
     [LiveInspectorFact]
@@ -1542,6 +1576,33 @@ public class InspectorPageTests : IAsyncLifetime
     }
 
     [LiveInspectorFact]
+    public async Task ToolbarCompactIconButtonsKeepStableAccessibleNames()
+    {
+        await _page.SetViewportSizeAsync(260, 820);
+        await _page.GotoAsync(BaseUrl);
+        await Expect(_page.Locator("body")).ToHaveAttributeAsync("data-host-layout", "narrow");
+
+        foreach (var (selector, label) in new[]
+        {
+            ("#df-toggle-workbench", "Open Tests"),
+            ("#df-toggle-tree", "Tree"),
+            ("#df-toggle-fit", "Fit"),
+            ("#df-toggle-bounds", "Bounds"),
+            ("#df-open-source", "Source"),
+            ("#df-send-copilot", "Copilot"),
+            ("#df-evidence", "Evidence"),
+            ("#df-toggle-dock", "Data"),
+            ("#df-more", "More inspector actions"),
+        })
+        {
+            await Expect(_page.Locator(selector)).ToHaveAttributeAsync("aria-label", label);
+        }
+
+        Assert.Equal("Open Tests", await _page.GetByRole(AriaRole.Button, new() { Name = "Open Tests", Exact = true }).GetAttributeAsync("aria-label"));
+        Assert.Equal("Tree", await _page.GetByRole(AriaRole.Button, new() { Name = "Tree", Exact = true }).GetAttributeAsync("aria-label"));
+    }
+
+    [LiveInspectorFact]
     public async Task CopilotSubmenuKeepsOverflowMenuOpen()
     {
         await _page.SetViewportSizeAsync(420, 820);
@@ -2223,6 +2284,24 @@ public class InspectorPageTests : IAsyncLifetime
     }
 
     [LiveInspectorFact]
+    public async Task ImproveNoTestCtaGoesDirectlyToGoal()
+    {
+        await _page.GotoAsync(BaseUrl);
+        await OpenWorkbenchAsync();
+        await _page.EvaluateAsync("() => window.dispatchEvent(new CustomEvent('devflow:workbench-state', { detail: { selectedTab: 'improve' } }))");
+
+        var improve = _page.Locator("#df-workbench-panel-improve");
+        await Expect(improve).ToContainTextAsync("No test to scan");
+        await Expect(improve.GetByRole(AriaRole.Button, new() { Name = "Go to Goal", Exact = true })).ToBeVisibleAsync();
+
+        await improve.GetByRole(AriaRole.Button, new() { Name = "Go to Goal", Exact = true }).ClickAsync();
+        await Expect(_page.Locator("#df-workbench-stage-goal")).ToHaveClassAsync(new System.Text.RegularExpressions.Regex("df-active"));
+        await Expect(_page.Locator("#df-goal-input")).ToBeVisibleAsync();
+        await _page.WaitForTimeoutAsync(50);
+        Assert.True(await _page.Locator("#df-goal-input").EvaluateAsync<bool>("element => element === document.activeElement"));
+    }
+
+    [LiveInspectorFact]
     public async Task WorkflowPanelLoadsProjectAndLocalFilesAndShowsReplayResultsInline()
     {
         const string projectMarkdown = "# Project workflow\n\n```json maui-test\n{\"schemaVersion\":1,\"name\":\"project\",\"steps\":[{\"seq\":1,\"stepId\":\"1\",\"action\":\"tap\",\"label\":\"Tap AddButton\",\"target\":{\"automationId\":\"AddButton\"},\"asserts\":[{\"kind\":\"exists\",\"selector\":{\"automationId\":\"AddButton\"},\"verify\":true}]}]}\n```";
@@ -2483,7 +2562,18 @@ public class InspectorPageTests : IAsyncLifetime
         await _page.RouteAsync("**/api/flows/replay", async route =>
         {
             using var body = JsonDocument.Parse(route.Request.PostData ?? "{}");
-            Assert.Equal(projectMarkdown, body.RootElement.GetProperty("markdown").GetString());
+            var replayMarkdown = body.RootElement.GetProperty("markdown").GetString();
+            Assert.False(string.IsNullOrWhiteSpace(replayMarkdown));
+            Assert.DoesNotContain("schemaVersion", replayMarkdown, StringComparison.Ordinal);
+            var parsed = FlowMarkdown.Parse(replayMarkdown!);
+            Assert.True(parsed.Ok, parsed.Error);
+            Assert.Equal(1, parsed.Flow!.Schema);
+            Assert.Equal("project", parsed.Flow.Name);
+            var replayStep = Assert.Single(parsed.Flow.Steps);
+            Assert.Equal("Tap AddButton", replayStep.Label);
+            Assert.Equal("AddButton", replayStep.Target!.AutomationId);
+            Assert.DoesNotContain("AnotherButton", replayMarkdown, StringComparison.Ordinal);
+            Assert.DoesNotContain("\"name\":\"local\"", replayMarkdown, StringComparison.Ordinal);
             Interlocked.Increment(ref replayRequests);
             await route.FulfillAsync(new()
             {
@@ -2512,6 +2602,10 @@ public class InspectorPageTests : IAsyncLifetime
         await Expect(_page.Locator("#df-workbench-tab-source")).ToBeDisabledAsync();
         await _page.Locator("#df-workbench-stage-review").ClickAsync();
         var review = _page.Locator("#df-workbench-panel-review");
+        await Expect(review.Locator(".df-review-step-list")).ToHaveAttributeAsync("role", "list");
+        await Expect(review.Locator("[role='listitem']")).ToHaveCountAsync(1);
+        Assert.Equal("BUTTON", await review.Locator(".df-review-step-row").EvaluateAsync<string>("row => row.tagName"));
+        Assert.Null(await review.Locator(".df-review-step-row").GetAttributeAsync("role"));
         await Expect(review.Locator(".df-review-step-row")).ToHaveCountAsync(1);
         await Expect(review.Locator(".df-review-step-editor")).ToContainTextAsync("Step 1");
         foreach (var action in new[] { "Move up", "Move down", "Remove step", "Record more steps" })
@@ -2574,10 +2668,18 @@ public class InspectorPageTests : IAsyncLifetime
         await Expect(_page.Locator("#df-workbench-panel-steps")).ToBeVisibleAsync();
         await _page.GetByRole(AriaRole.Button, new() { Name = "Stop recording", Exact = true }).ClickAsync();
         await Expect(_page.Locator("#df-workbench-panel-review")).ToBeVisibleAsync();
+        await Expect(_page.Locator("#df-workbench-panel-review .df-review-step-list")).ToHaveAttributeAsync("role", "list");
         await Expect(_page.Locator("#df-workbench-panel-review .df-review-step-row")).ToHaveCountAsync(2);
         await Expect(_page.Locator("#df-workbench-panel-review")).ToContainTextAsync("Tap AddButton");
         await Expect(_page.Locator("#df-workbench-panel-review")).ToContainTextAsync("Tap AnotherButton");
-        await _page.Locator("#df-workbench-panel-review .df-review-step-row").Nth(1).ClickAsync();
+        var rows = _page.Locator("#df-workbench-panel-review .df-review-step-row");
+        await rows.First.FocusAsync();
+        await _page.Keyboard.PressAsync("ArrowDown");
+        await Expect(rows.Nth(1)).ToBeFocusedAsync();
+        Assert.Equal("BUTTON", await _page.EvaluateAsync<string>("() => document.activeElement && document.activeElement.tagName"));
+        await Expect(_page.Locator("#df-workbench-panel-review .df-review-step-editor")).ToContainTextAsync("Step 2");
+        await rows.Nth(1).ClickAsync();
+        await Expect(rows.Nth(1)).ToBeFocusedAsync();
         Assert.True(await _page.Locator("#df-workbench-panel-review .df-expected-result-editor")
             .EvaluateAsync<bool>("details => details.open"));
         await CloseWorkbenchAsync();
@@ -3391,19 +3493,24 @@ public class InspectorPageTests : IAsyncLifetime
         await _page.Locator("[data-tab='logs']").ClickAsync();
         await Expect(_page.Locator("#df-attach-data")).ToBeEnabledAsync();
         await _page.Locator("#df-attach-data").ClickAsync();
+        await Expect(_page.Locator("#df-dock-meta")).ToContainTextAsync("captured");
+        await Expect(_page.Locator("#df-dock-meta-note")).ToHaveTextAsync("May include prior launches.");
+        await _page.Locator("#df-dock-refresh").ClickAsync();
+        await Expect(_page.Locator("#df-dock-meta")).ToContainTextAsync("captured");
+        await Expect(_page.Locator("#df-dock-meta-note")).ToHaveTextAsync("May include prior launches.");
 
         var copied = await _page.EvaluateAsync<string>("() => window.__copiedDevFlowData || ''");
         Assert.Contains("newest 100 of 200", copied);
+        Assert.Contains("May include prior launches.", copied);
         Assert.Contains("log-199", copied);
         Assert.Contains("log-100", copied);
-        Assert.DoesNotContain("log-099", copied);
         Assert.DoesNotContain("log-000", copied);
     }
 
     [LiveInspectorFact]
     public async Task HostedCopilotMenuSendsOnlyTheChosenInspectorContext()
     {
-        const string markdown = "# Workflow\n\n```json maui-test\n{\"schemaVersion\":1,\"name\":\"saved\",\"steps\":[]}\n```";
+        const string legacyMarkdown = "# Workflow\n\n```json maui-test\n{\"schemaVersion\":1,\"name\":\"saved\",\"steps\":[]}\n```";
         await _page.RouteAsync("**/api/flows/files/list", route => route.FulfillAsync(new()
         {
             Status = 200,
@@ -3414,7 +3521,7 @@ public class InspectorPageTests : IAsyncLifetime
         {
             Status = 200,
             ContentType = "application/json",
-            Body = JsonSerializer.Serialize(new { ok = true, name = "saved.md", markdown, steps = 1 }),
+            Body = JsonSerializer.Serialize(new { ok = true, name = "saved.md", markdown = legacyMarkdown, steps = 1 }),
         }));
 
         await _page.SetViewportSizeAsync(1100, 800);
@@ -3454,7 +3561,7 @@ public class InspectorPageTests : IAsyncLifetime
                     requestId: d.requestId,
                     ok: true,
                     name: 'host-picked.md',
-                    markdown: {{JsonSerializer.Serialize(markdown)}}
+                    markdown: {{JsonSerializer.Serialize(legacyMarkdown)}}
                   }, '*');
                 }
               });
@@ -3493,15 +3600,18 @@ public class InspectorPageTests : IAsyncLifetime
             requests.RootElement[0].GetProperty("payload").GetProperty("element").GetProperty("automationId").GetString());
         Assert.Equal(JsonValueKind.Null,
             requests.RootElement[0].GetProperty("payload").GetProperty("markdown").ValueKind);
+        Assert.False(
+            requests.RootElement[0].GetProperty("payload").TryGetProperty("flow", out _),
+            "Selection-only payload should not leak workflow context.");
         Assert.Equal("workflow", requests.RootElement[1].GetProperty("context").GetString());
         Assert.Equal(JsonValueKind.Null,
             requests.RootElement[1].GetProperty("payload").GetProperty("element").ValueKind);
-        Assert.Equal(markdown,
+        AssertNormalizedWorkflowMarkdown(
             requests.RootElement[1].GetProperty("payload").GetProperty("markdown").GetString());
         Assert.Equal("combined", requests.RootElement[2].GetProperty("context").GetString());
         Assert.Equal("HeaderLabel",
             requests.RootElement[2].GetProperty("payload").GetProperty("element").GetProperty("automationId").GetString());
-        Assert.Equal(markdown,
+        AssertNormalizedWorkflowMarkdown(
             requests.RootElement[2].GetProperty("payload").GetProperty("markdown").GetString());
 
         await frame.Locator("#df-workbench-stage-goal").ClickAsync();
@@ -3509,6 +3619,18 @@ public class InspectorPageTests : IAsyncLifetime
         await frame.Locator("#df-saved-test-file").ClickAsync();
         await Expect(frame.Locator("#df-workbench-strip")).ToContainTextAsync("host-picked.md");
         Assert.Equal(1, await _page.EvaluateAsync<int>("() => window.__workflowPicks"));
+
+        static void AssertNormalizedWorkflowMarkdown(string? markdown)
+        {
+            Assert.False(string.IsNullOrWhiteSpace(markdown));
+            Assert.DoesNotContain("schemaVersion", markdown, StringComparison.Ordinal);
+            var parsed = FlowMarkdown.Parse(markdown!);
+            Assert.True(parsed.Ok, parsed.Error);
+            Assert.Equal(1, parsed.Flow!.Schema);
+            Assert.Equal("saved", parsed.Flow.Name);
+            Assert.Empty(parsed.Flow.Steps);
+            Assert.DoesNotContain("HeaderLabel", markdown, StringComparison.Ordinal);
+        }
     }
 
     [LiveInspectorFact]

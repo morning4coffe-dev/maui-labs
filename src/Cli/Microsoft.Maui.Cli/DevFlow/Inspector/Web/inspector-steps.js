@@ -7,6 +7,8 @@ function list(value) {
 }
 
 let selectedReviewStepKey = null;
+let pendingReviewFocusKey = null;
+let pendingReviewFocusIndex = null;
 const selectorChecks = new Map();
 
 function stepKey(step, index) {
@@ -700,9 +702,25 @@ function renderReviewEditor(root, flow, draft, authoring, helpers) {
   const layout = el('div', { className: 'df-review-layout' });
   const rail = el('div', {
     className: 'df-review-step-list',
-    role: 'listbox',
+    role: 'list',
     'aria-label': 'Recorded steps',
   });
+
+  const focusStepRow = (index) => {
+    setTimeout(() => {
+      root.querySelector(`[data-step-index="${index}"]`)?.focus();
+    }, 50);
+  };
+
+  const selectStep = (index, focus = false) => {
+    const step = steps[index];
+    if (!step) return;
+    selectedReviewStepKey = stepKey(step, index);
+    pendingReviewFocusKey = focus ? selectedReviewStepKey : null;
+    pendingReviewFocusIndex = focus ? index : null;
+    authoring.clearAttention?.();
+    helpers.rerender?.();
+  };
 
   for (let index = 0; index < steps.length; index++) {
     const step = steps[index];
@@ -710,11 +728,15 @@ function renderReviewEditor(root, flow, draft, authoring, helpers) {
     const selected = index === selectedIndex;
     const issues = stepIssues(draft, step, index);
     const blocking = issues.some((issue) => issue?.blocking === true);
+    const item = el('div', {
+      className: 'df-review-step-item',
+      role: 'listitem',
+      'aria-current': selected ? 'step' : null,
+    });
     const row = el('button', {
       className: `df-review-step-row${selected ? ' df-selected' : ''}${blocking ? ' df-review-step-blocked' : ''}`,
       type: 'button',
-      role: 'option',
-      'aria-selected': String(selected),
+      'data-step-index': String(index),
     });
     row.append(
       el('span', { className: 'df-review-step-number', text: String(index + 1) }),
@@ -726,12 +748,19 @@ function renderReviewEditor(root, flow, draft, authoring, helpers) {
           : `${step.action || 'action'} · ${list(step.asserts).filter((assertion) => assertion?.verify !== false).length} expected result${list(step.asserts).filter((assertion) => assertion?.verify !== false).length === 1 ? '' : 's'}`,
       }),
     );
-    row.addEventListener('click', () => {
-      selectedReviewStepKey = key;
-      authoring.clearAttention?.();
-      helpers.rerender?.();
+    row.addEventListener('click', () => selectStep(index, true));
+    row.addEventListener('keydown', (event) => {
+      let next = null;
+      if (event.key === 'ArrowDown' || event.key === 'ArrowRight') next = Math.min(steps.length - 1, index + 1);
+      else if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') next = Math.max(0, index - 1);
+      else if (event.key === 'Home') next = 0;
+      else if (event.key === 'End') next = steps.length - 1;
+      if (next == null || next === index) return;
+      event.preventDefault();
+      selectStep(next, true);
     });
-    rail.append(row);
+    item.append(row);
+    rail.append(item);
   }
   layout.append(rail);
 
@@ -848,6 +877,14 @@ function renderReviewEditor(root, flow, draft, authoring, helpers) {
   detail.append(stepDetails);
   layout.append(detail);
   root.append(layout);
+  if (pendingReviewFocusIndex === selectedIndex) {
+    const focusIndex = selectedIndex;
+    pendingReviewFocusIndex = null;
+    pendingReviewFocusKey = null;
+    setTimeout(() => {
+      root.querySelector(`[data-step-index="${focusIndex}"]`)?.focus();
+    }, 0);
+  }
 }
 
 export function renderStepsPanel(helpers) {
@@ -940,10 +977,13 @@ export function renderStepsPanel(helpers) {
     for (let index = 0; index < flow.steps.length; index++) {
       const step = flow.steps[index];
       const verified = list(step.asserts).filter((assertion) => assertion?.verify !== false).length;
+      const item = el('div', {
+        className: 'df-review-step-item',
+        role: 'listitem',
+      });
       const row = el('button', {
         className: 'df-review-step-row',
         type: 'button',
-        role: 'listitem',
       });
       row.append(
         el('span', { className: 'df-review-step-number', text: String(index + 1) }),
@@ -957,7 +997,8 @@ export function renderStepsPanel(helpers) {
         selectedReviewStepKey = stepKey(step, index);
         helpers.selectStage?.('review');
       });
-      timeline.append(row);
+      item.append(row);
+      timeline.append(item);
     }
     root.append(timeline);
 

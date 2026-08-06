@@ -79,6 +79,7 @@ public sealed class TestAgentActionTool
                     snapshot.Value.Snapshot.TargetState,
                     target.State),
                 TimeoutMs = 30_000,
+                DeadlineMs = envelope.DeadlineMs,
             };
             runJson = TestAgentBrokerClient.SerializeWorkflowRunRequest(
                 runRequest,
@@ -142,15 +143,28 @@ public sealed class TestAgentActionTool
             if (envelope.Correlation?.AuthoringSessionId is { Length: > 0 } sessionId && runCapability is not null)
             {
                 session.RememberTestRunCapability(sessionId, runId!, runCapability);
-                await TestAgentBrokerClient.BindRunAsync(
-                    brokerPort,
-                    new MauiTestAgentRunBindingRequest
-                    {
-                        SessionId = sessionId,
-                        ReadCapabilityId = envelope.ReadCapabilityId,
-                        RunId = runId,
-                        RunCapabilityToken = runCapability,
-                    }).ConfigureAwait(false);
+                var bindingFailure = await BindStartedActionRunAsync(
+                    envelope.RequestId,
+                    runId!,
+                    runCapability,
+                    () => TestAgentBrokerClient.BindRunAsync(
+                        brokerPort,
+                        new MauiTestAgentRunBindingRequest
+                        {
+                            SessionId = sessionId,
+                            ReadCapabilityId = envelope.ReadCapabilityId,
+                            RunId = runId,
+                            RunCapabilityToken = runCapability,
+                        }),
+                    () => CompleteAsync(
+                        session,
+                        authorization.Value.AuthorizationId,
+                        "unknown-completion",
+                        request,
+                        runId,
+                        "run-binding-unavailable")).ConfigureAwait(false);
+                if (bindingFailure is not null)
+                    return bindingFailure;
             }
         }
 
@@ -191,6 +205,19 @@ public sealed class TestAgentActionTool
 
     internal static string ResolveSideEffectClass(MauiTestAgentActionRequest request)
         => request.Execute ? request.SideEffectClass ?? "ui" : "authoring";
+
+    internal static Task<string?> BindStartedActionRunAsync(
+        string? requestId,
+        string runId,
+        string runCapabilityToken,
+        Func<Task<TestAgentBrokerResponse<MauiTestAgentRunBindingResult>>> bind,
+        Func<Task> recordUnknownCompletion)
+        => TestAgentRunTool.BindStartedRunAsync(
+            requestId,
+            runId,
+            runCapabilityToken,
+            bind,
+            recordUnknownCompletion);
 
     private static bool TryCreateActionFlow(
         MauiTestAgentActionRequest request,

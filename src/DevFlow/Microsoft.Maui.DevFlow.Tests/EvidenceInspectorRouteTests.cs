@@ -103,6 +103,35 @@ public class EvidenceInspectorRouteTests
     }
 
     [Fact]
+    public async Task Preview_ReflectsRequestedWorkflowAndScreenshotOptions()
+    {
+        await using var agent = new FakeEvidenceAgent();
+        var port = FreePort();
+        var inspector = new InspectorServer(port, "127.0.0.1", agent.Port);
+        inspector.Start();
+        try
+        {
+            using var http = CreateTokenClient(inspector);
+            var response = await http.PostAsync(
+                $"http://127.0.0.1:{port}/api/evidence/preview",
+                Json("{\"includeScreenshot\":true,\"includeWorkflow\":true,\"workflow\":\"# Repro\\n1. Tap\"}"));
+            using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+
+            Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+            var plan = body.RootElement.GetProperty("plan");
+            Assert.True(plan.GetProperty("screenshot").GetProperty("requested").GetBoolean());
+            Assert.True(plan.GetProperty("screenshot").GetProperty("included").GetBoolean());
+            Assert.Contains(
+                plan.GetProperty("included").EnumerateArray(),
+                entry => entry.GetProperty("name").GetString() == EvidenceFormat.WorkflowEntry);
+        }
+        finally
+        {
+            await inspector.StopAsync();
+        }
+    }
+
+    [Fact]
     public async Task Capture_ReturnsAValidBundleWithoutAScreenshotByDefault()
     {
         await using var agent = new FakeEvidenceAgent();

@@ -30,7 +30,10 @@ internal static class TestAgentToolSupport
         return CliJson.SerializeUntyped(response, indented: false);
     }
 
-    internal static string Failure(string? requestId, MauiTestAgentError error)
+    internal static string Failure(
+        string? requestId,
+        MauiTestAgentError error,
+        TestAgentRunRecovery? recovery = null)
     {
         var response = new JsonObject
         {
@@ -38,6 +41,8 @@ internal static class TestAgentToolSupport
             ["requestId"] = requestId,
             ["error"] = JsonSerializer.SerializeToNode(error, OutputJsonOptions),
         };
+        if (recovery is not null)
+            response["recovery"] = JsonSerializer.SerializeToNode(recovery, OutputJsonOptions);
         return CliJson.SerializeUntyped(response, indented: false);
     }
 
@@ -252,4 +257,17 @@ internal sealed class TestAgentTargetResolution
 
     public static TestAgentTargetResolution Failure(MauiTestAgentError error)
         => new() { Error = error };
+}
+
+/// <summary>
+/// Bounded manual-recovery context returned only when the broker confirmed a run start but the
+/// restricted profile could not persist its authoring-session binding. It is deliberately a
+/// failure payload so callers must not automatically retry the original mutation.
+/// </summary>
+internal sealed class TestAgentRunRecovery
+{
+    public string State { get; init; } = "started-unbound";
+    public string RunId { get; init; } = "";
+    public string RunCapabilityToken { get; init; } = "";
+    public bool AutomaticRetryAllowed { get; init; }
 }

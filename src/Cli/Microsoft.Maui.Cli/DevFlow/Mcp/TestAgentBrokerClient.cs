@@ -183,6 +183,18 @@ internal static class TestAgentBrokerClient
             MauiTestingJsonContext.Default.MauiTestAgentRunBindingResult,
             cancellationToken);
 
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentRunBindingResult>> ValidateRunBindingAsync(
+        int brokerPort,
+        MauiTestAgentRunBindingRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/runs/validate",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentRunBindingRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentRunBindingResult,
+            cancellationToken);
+
     internal static string SerializeWorkflowRunRequest<TRequest>(
         TRequest request,
         JsonTypeInfo<TRequest> requestType)

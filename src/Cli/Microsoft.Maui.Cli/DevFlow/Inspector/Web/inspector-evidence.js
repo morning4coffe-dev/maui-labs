@@ -68,6 +68,21 @@ export function evidenceFileName(plan) {
 }
 
 /**
+ * Builds the preview request body. The authoritative preview must match the exact choices the
+ * user confirmed before capture can proceed.
+ */
+export function buildPreviewBody({ choice, elementId, workflow }) {
+  const confirmed = choice && typeof choice === 'object' ? choice : {};
+  const body = {
+    includeScreenshot: !!confirmed.includeScreenshot,
+    includeWorkflow: !!confirmed.includeWorkflow,
+  };
+  if (elementId) body.elementId = String(elementId);
+  if (confirmed.includeWorkflow && typeof workflow === 'string' && workflow.trim()) body.workflow = workflow;
+  return body;
+}
+
+/**
  * Builds the capture request body. Pure — unit tested — because it is the last gate before app
  * data leaves the browser: anything not explicitly confirmed in the dialog must not appear here.
  */
@@ -84,8 +99,23 @@ export function buildCaptureBody({ choice, elementId, workflow }) {
  * `deps.api` is the shared inspector API (token-stamped POST helper).
  */
 export function createEvidenceController(deps) {
-  const { basePath, inspectorToken, api, setStatus, getSelectedId, getWorkflow } = deps;
+  const {
+    basePath,
+    inspectorToken,
+    api,
+    setStatus,
+    getSelectedId,
+    getWorkflow,
+    showEvidenceDialog: presentEvidenceDialog = showEvidenceDialog,
+    showEvidenceFinalDialog: presentEvidenceFinalDialog = showEvidenceFinalDialog,
+    downloadBlob: saveEvidenceBlob = downloadBlob,
+  } = deps;
   let busy = false;
+
+  async function previewEvidence(body) {
+    const response = await api.postDetailed('/api/evidence/preview', body);
+    return response && response.body && response.body.ok ? response.body.plan : null;
+  }
 
   async function open() {
     if (busy) return;
@@ -95,23 +125,40 @@ export function createEvidenceController(deps) {
       const elementId = typeof getSelectedId === 'function' ? getSelectedId() : null;
       const workflow = typeof getWorkflow === 'function' ? getWorkflow() : null;
       const hasWorkflow = typeof workflow === 'string' && !!workflow.trim();
-      const response = await api.postDetailed('/api/evidence/preview', {
-        includeScreenshot: false,
+      const initialPlan = await previewEvidence(buildPreviewBody({
+        choice: { includeScreenshot: false, includeWorkflow: false },
         elementId: elementId || undefined,
-      });
-      const plan = response && response.body && response.body.ok ? response.body.plan : null;
-      if (!plan) {
+      }));
+      if (!initialPlan) {
         setStatus('Could not prepare the evidence preview.');
         return;
       }
 
-      const view = formatEvidencePlan(plan);
-      const choice = await showEvidenceDialog(view, { hasWorkflow });
+      const initialView = formatEvidencePlan(initialPlan);
+      const choice = await presentEvidenceDialog(initialView, { hasWorkflow });
       if (!choice) {
         setStatus('Evidence capture cancelled.');
         return;
       }
 
+      const needsAuthoritativeReview = choice.includeScreenshot || choice.includeWorkflow;
+      const authoritativePlan = needsAuthoritativeReview
+        ? await previewEvidence(buildPreviewBody({ choice, elementId: elementId || undefined, workflow }))
+        : initialPlan;
+      if (!authoritativePlan) {
+        setStatus('Could not refresh the evidence preview.');
+        return;
+      }
+
+      const authoritativeView = formatEvidencePlan(authoritativePlan);
+      if (needsAuthoritativeReview) {
+        setStatus('Review the final evidence preview before downloading…');
+        const confirmed = await presentEvidenceFinalDialog(authoritativeView, { hasWorkflow, choice });
+        if (!confirmed) {
+          setStatus('Evidence capture cancelled.');
+          return;
+        }
+      }
       setStatus(choice.includeScreenshot ? 'Capturing evidence with a screenshot…' : 'Capturing evidence…');
       const headers = { 'Content-Type': 'application/json' };
       if (inspectorToken) headers['X-DevFlow-Inspector-Token'] = inspectorToken;
@@ -126,8 +173,8 @@ export function createEvidenceController(deps) {
       }
 
       const blob = await captured.blob();
-      downloadBlob(blob, view.fileName);
-      setStatus(`Evidence bundle downloaded: ${view.fileName}`);
+      saveEvidenceBlob(blob, authoritativeView.fileName);
+      setStatus(`Evidence bundle downloaded: ${authoritativeView.fileName}`);
     } catch (error) {
       console.error('evidence capture failed:', error);
       setStatus('Could not capture evidence.');
@@ -157,39 +204,57 @@ function downloadBlob(blob, fileName) {
  * cancel, focus restored.
  */
 function showEvidenceDialog(view, options) {
-  const hasWorkflow = !!(options && options.hasWorkflow);
   return new Promise((resolve) => {
-    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-    const backdrop = document.createElement('div');
-    backdrop.className = 'df-evidence-backdrop';
-    const box = document.createElement('div');
-    box.className = 'df-evidence-dialog';
-    box.setAttribute('role', 'dialog');
-    box.setAttribute('aria-modal', 'true');
+    renderEvidenceDialog(view, options, resolve, false);
+  });
+}
 
-    const heading = document.createElement('h2');
-    heading.id = 'df-evidence-title';
-    heading.textContent = view.title;
-    box.setAttribute('aria-labelledby', heading.id);
+function showEvidenceFinalDialog(view, options) {
+  return new Promise((resolve) => {
+    renderEvidenceDialog(view, options, resolve, true);
+  });
+}
 
-    const description = document.createElement('p');
-    description.id = 'df-evidence-desc';
-    description.className = 'df-evidence-desc';
-    description.textContent = `${view.summary || 'No app data was available.'} — ${view.redaction}.`;
-    box.setAttribute('aria-describedby', description.id);
+function renderEvidenceDialog(view, options, resolve, finalReview) {
+  const hasWorkflow = !!(options && options.hasWorkflow);
+  const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+  const backdrop = document.createElement('div');
+  backdrop.className = 'df-evidence-backdrop';
+  const box = document.createElement('div');
+  box.className = 'df-evidence-dialog';
+  box.setAttribute('role', 'dialog');
+  box.setAttribute('aria-modal', 'true');
 
-    box.append(heading, description);
-    box.appendChild(buildList('Included', view.includes.map(entryLabel)));
-    if (view.excludes.length) box.appendChild(buildList('Excluded', view.excludes.map(entryLabel)));
-    box.appendChild(buildList('Never captured', view.never));
-    if (view.limits) {
-      const limits = document.createElement('p');
-      limits.className = 'df-evidence-desc';
-      limits.textContent = `Limits: ${view.limits}.`;
-      box.appendChild(limits);
-    }
-    if (view.warnings.length) box.appendChild(buildList('Warnings', view.warnings, 'df-evidence-warn'));
+  const heading = document.createElement('h2');
+  heading.id = 'df-evidence-title';
+  heading.textContent = view.title;
+  box.setAttribute('aria-labelledby', heading.id);
 
+  const description = document.createElement('p');
+  description.id = 'df-evidence-desc';
+  description.className = 'df-evidence-desc';
+  description.textContent = `${view.summary || 'No app data was available.'} — ${view.redaction}.${finalReview ? ' Final review — this is the exact bundle that will be downloaded if you confirm.' : ''}`;
+  box.setAttribute('aria-describedby', description.id);
+
+  box.append(heading, description);
+  box.appendChild(buildList('Included', view.includes.map(entryLabel)));
+  if (view.excludes.length) box.appendChild(buildList('Excluded', view.excludes.map(entryLabel)));
+  box.appendChild(buildList('Never captured', view.never));
+  if (view.limits) {
+    const limits = document.createElement('p');
+    limits.className = 'df-evidence-desc';
+    limits.textContent = `Limits: ${view.limits}.`;
+    box.appendChild(limits);
+  }
+  if (view.warnings.length) box.appendChild(buildList('Warnings', view.warnings, 'df-evidence-warn'));
+  if (!finalReview) {
+    const note = document.createElement('p');
+    note.className = 'df-evidence-desc';
+    note.textContent = 'If you opt in to workflow or screenshot capture, DevFlow will refresh this preview and ask you to confirm the final bundle again.';
+    box.appendChild(note);
+  }
+
+  if (!finalReview) {
     const screenshotRow = document.createElement('div');
     screenshotRow.className = 'df-evidence-opt';
     const checkbox = document.createElement('input');
@@ -248,7 +313,6 @@ function showEvidenceDialog(view, options) {
         return;
       }
       if (event.key !== 'Tab') return;
-      // Keep focus inside the dialog: it is a decision point, not a page overlay.
       const first = focusables[0];
       const last = focusables[focusables.length - 1];
       if (!box.contains(document.activeElement)) {
@@ -276,7 +340,64 @@ function showEvidenceDialog(view, options) {
     backdrop.appendChild(box);
     document.body.appendChild(backdrop);
     cancel.focus();
-  });
+    return;
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'df-evidence-actions';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'df-tool-btn';
+  cancel.textContent = 'Cancel';
+  const confirm = document.createElement('button');
+  confirm.type = 'button';
+  confirm.className = 'df-tool-btn df-evidence-primary';
+  confirm.textContent = 'Confirm and download';
+  actions.append(cancel, confirm);
+  box.appendChild(actions);
+
+  let done = false;
+  const focusables = [cancel, confirm];
+  const finish = (value) => {
+    if (done) return;
+    done = true;
+    document.removeEventListener('keydown', onKey, true);
+    backdrop.remove();
+    if (previousFocus && previousFocus.isConnected) previousFocus.focus();
+    resolve(value);
+  };
+  const onKey = (event) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      finish(null);
+      return;
+    }
+    if (event.key !== 'Tab') return;
+    const first = focusables[0];
+    const last = focusables[focusables.length - 1];
+    if (!box.contains(document.activeElement)) {
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+      return;
+    }
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  cancel.addEventListener('click', () => finish(null));
+  confirm.addEventListener('click', () => finish(true));
+  backdrop.addEventListener('click', (event) => { if (event.target === backdrop) finish(null); });
+  document.addEventListener('keydown', onKey, true);
+
+  backdrop.appendChild(box);
+  document.body.appendChild(backdrop);
+  cancel.focus();
 }
 
 function entryLabel(entry) {

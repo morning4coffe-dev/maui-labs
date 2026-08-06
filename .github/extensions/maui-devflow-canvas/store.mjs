@@ -785,7 +785,11 @@ export class LiveStore {
       // Agent unreachable — the instant local selection stands.
       if (!local) this._log("hit-test", { x, y, error: String(e?.message || e) }, false);
     }
-    return this.state.selectedElement;
+    // Only the local hit can still be reported here: every path where the agent resolved an
+    // element returns above. When nothing was hit at all, report the miss instead of handing
+    // back the previous selection — a stale element would look like a successful hit-test and
+    // send the caller on to tap/fill the wrong control.
+    return local ? this.state.selectedElement : null;
   }
 
   // ── Selection → agent context ───────────────────────────────────────────────
@@ -999,8 +1003,8 @@ export class LiveStore {
   async resize(width, height) {
     const r = await this.device.resize(width, height);
     this._log("resize", { width, height, error: r.ok ? undefined : r.error }, r.ok);
-    // A resize DOES change window metadata, so do a full refresh.
-    await this.refresh();
+    // A resize DOES change window metadata, so do a full refresh when it succeeds.
+    if (r.ok) await this.refresh();
     return r;
   }
 

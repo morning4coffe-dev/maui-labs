@@ -1729,9 +1729,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   }
 
   function setLoadedWorkflow(markdown, name, source, steps, loadGeneration = null) {
-    if (typeof markdown !== 'string' || !markdown.trim()) return false;
+    const normalized = normalizeLoadedWorkflowMarkdown(markdown);
+    if (!normalized.ok) {
+      setStatus(normalized.error || 'Could not load the selected workflow.');
+      return { ok: false, migrated: false };
+    }
     const generation = loadGeneration ?? ++authoringLoadGeneration;
-    if (generation !== authoringLoadGeneration) return false;
+    if (generation !== authoringLoadGeneration) return { ok: false, migrated: false };
+    markdown = normalized.markdown;
     lastMarkdown = markdown;
     lastMarkdownName = String(name || 'workflow.md');
     lastMarkdownSource = source || 'file';
@@ -1754,7 +1759,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     dismissTimeline();
     updateFlowButtons();
     updateHostButtons();
-    return true;
+    return { ok: true, migrated: normalized.migrated === true };
   }
 
   async function loadProjectWorkflow(name) {
@@ -1767,8 +1772,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       setStatus((result && result.error) || 'Could not load the selected project workflow.');
       return;
     }
-    setLoadedWorkflow(result.markdown, result.name || name, 'project', result.steps, generation);
-    setStatus(`Loaded ${result.name || name} from the project.`);
+    const loaded = setLoadedWorkflow(result.markdown, result.name || name, 'project', result.steps, generation);
+    if (!loaded?.ok) return;
+    setStatus(loaded.migrated
+      ? `Loaded ${result.name || name} and normalized its legacy schemaVersion payload. Save the test to persist the migrated schema field.`
+      : `Loaded ${result.name || name} from the project.`);
   }
 
   async function loadWorkflowFile(file) {
@@ -1779,11 +1787,13 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
     try {
       const markdown = await file.text();
-      if (!setLoadedWorkflow(markdown, file.name, 'file', null)) {
-        setStatus('The selected workflow file is empty.');
+      const loaded = setLoadedWorkflow(markdown, file.name, 'file', null);
+      if (!loaded?.ok) {
         return;
       }
-      setStatus(`Loaded ${file.name}. Replay validates it before driving the app.`);
+      setStatus(loaded.migrated
+        ? `Loaded ${file.name} and normalized its legacy schemaVersion payload. Save the test to persist the migrated schema field.`
+        : `Loaded ${file.name}. Replay validates it before driving the app.`);
     } catch {
       setStatus('Could not read the selected workflow file.');
     }
@@ -1793,8 +1803,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     if (hostHas('workflowFilePicker')) {
       const result = await requestHost('devflow:pickWorkflow', {}, 300000);
       if (result && result.ok && typeof result.markdown === 'string') {
-        setLoadedWorkflow(result.markdown, result.name || 'workflow.md', 'file', result.steps);
-        setStatus(`Loaded ${result.name || 'workflow.md'}.`);
+        const loaded = setLoadedWorkflow(result.markdown, result.name || 'workflow.md', 'file', result.steps);
+        if (!loaded?.ok) return;
+        setStatus(loaded.migrated
+          ? `Loaded ${result.name || 'workflow.md'} and normalized its legacy schemaVersion payload. Save the test to persist the migrated schema field.`
+          : `Loaded ${result.name || 'workflow.md'}.`);
       } else if (result && result.error) {
         setStatus(result.error);
       }
@@ -2296,6 +2309,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   const dockTabsEl = document.getElementById('df-dock-tabs');
   const dockBodyEl = document.getElementById('df-dock-body');
   const dockMetaEl = document.getElementById('df-dock-meta');
+  const dockMetaNoteEl = document.getElementById('df-dock-meta-note');
   const dockCollapseBtn = document.getElementById('df-dock-collapse');
   const dockRefreshBtn = document.getElementById('df-dock-refresh');
   const dockCloseBtn = document.getElementById('df-dock-close');
@@ -2341,6 +2355,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   }
   function dockEmpty(msg) { dockBodyEl.replaceChildren(elh('div', { class: 'df-empty', text: msg })); }
   function setDockMeta(text) { if (dockMetaEl) dockMetaEl.textContent = text || ''; }
+  function setDockMetaNote(text) { if (dockMetaNoteEl) dockMetaNoteEl.textContent = text || ''; }
   function clearDockSnapshot() {
     dockSnapshot = null;
     updateDataAttachButton();
@@ -2486,8 +2501,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
 
   function renderLogs(j) {
     const logs = j && j.logs;
+    const historyNote = 'May include prior launches.';
     if (!Array.isArray(logs) || !logs.length) {
       clearDockSnapshot();
+      setDockMetaNote('');
+      setDockMeta('');
       dockEmpty(j && j.error ? j.error : 'No logs.');
       return;
     }
@@ -2503,11 +2521,12 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       frag.append(row);
     }
     dockBodyEl.replaceChildren(frag);
+    setDockMetaNote(historyNote);
     // The logs API returns entries newest first.
     const captured = logs.slice(0, 100);
     recordDockSnapshot(
       'logs',
-      `Logs · ${captured.length === logs.length ? logs.length : `newest ${captured.length} of ${logs.length}`}`,
+      `Logs · ${captured.length === logs.length ? logs.length : `newest ${captured.length} of ${logs.length}`} · ${historyNote}`,
       captured,
       logs.length,
       { capturedCount: captured.length });
@@ -3266,6 +3285,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
     dockEmpty('Loading…');
     setDockMeta('loading…');
+    setDockMetaNote('');
     try {
       await tabLoaders[name](generation);
       if (!dockLoadIsCurrent(name, generation)) return;
@@ -3323,6 +3343,52 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     const match = /```json maui-test\s*\r?\n([\s\S]*?)\r?\n```/.exec(markdown);
     if (!match) return null;
     try { return JSON.parse(match[1]); } catch { return null; }
+  }
+
+  function normalizeLoadedWorkflowMarkdown(markdown) {
+    if (typeof markdown !== 'string' || !markdown.trim()) {
+      return { ok: false, error: 'Empty workflow document.' };
+    }
+    const match = /```json maui-test\s*\r?\n([\s\S]*?)\r?\n```/.exec(markdown);
+    if (!match) {
+      return { ok: false, error: 'No ```json maui-test``` block found in the test file.' };
+    }
+
+    let flow = null;
+    try {
+      flow = JSON.parse(match[1]);
+    } catch {
+      return { ok: false, error: 'Invalid JSON in the maui-test block.' };
+    }
+    if (!flow || typeof flow !== 'object') return { ok: false, error: 'The maui-test block must contain a JSON object.' };
+
+    let migrated = false;
+    let normalizedFlow = flow;
+    if (!Number.isInteger(flow.schema)) {
+      if (Number.isInteger(flow.schemaVersion)) {
+        normalizedFlow = { ...flow, schema: flow.schemaVersion };
+        delete normalizedFlow.schemaVersion;
+        migrated = true;
+      } else if (Object.prototype.hasOwnProperty.call(flow, 'schemaVersion')) {
+        return {
+          ok: false,
+          error: 'Legacy maui-test blocks using schemaVersion must be migrated to an integer schema field before loading. Replace schemaVersion with schema or re-save the flow from a current DevFlow host.',
+        };
+      } else {
+        return { ok: false, error: 'The maui-test block requires an integer schema.' };
+      }
+    }
+
+    if (!Array.isArray(normalizedFlow.steps)) {
+      return { ok: false, error: 'The maui-test block requires a steps[] array.' };
+    }
+
+    return {
+      ok: true,
+      flow: normalizedFlow,
+      markdown: migrated ? replaceAuthoringFlow(markdown, normalizedFlow) : markdown,
+      migrated,
+    };
   }
 
   function replaceAuthoringFlow(markdown, flow) {
@@ -3517,8 +3583,13 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
     authoringDraft.diff = typeof response.diff === 'string' ? response.diff : null;
     if (response.flow) {
+      const canonicalMarkdown = response.flow.document &&
+          typeof response.flow.markdown === 'string' &&
+          response.flow.markdown.includes('"schemaVersion"')
+        ? replaceAuthoringFlow(response.flow.markdown, response.flow.document) || response.flow.markdown
+        : response.flow.markdown || authoringDraft.markdown;
       authoringDraft.flowName = response.flow.name || authoringDraft.flowName;
-      authoringDraft.markdown = response.flow.markdown || authoringDraft.markdown;
+      authoringDraft.markdown = canonicalMarkdown;
       authoringDraft.flow = response.flow.document || parseAuthoringFlow(authoringDraft.markdown);
       authoringDraft.flowDigest = response.flow.digest || authoringDraft.flowDigest;
     }
@@ -4624,6 +4695,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           flowName: current.flowName,
           flowDigest: authoringDraft.flowDigest,
           planDigest: authoringDraft.planDigest,
+          brokerCapabilities: state.brokerCapabilities,
           readiness: authoringReadiness(),
           agent: inspectorAgent,
           importedMode: traceController?.state?.().mode === 'imported',
@@ -5244,6 +5316,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       classificationToken: null,
       checkpoint: null,
       proposal: null,
+      validationAvailable: null,
       generation: null,
       error: null,
       history: [],
@@ -5269,6 +5342,12 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       if (message) workbenchAnnouncement(message, failure);
     }
 
+    function applyValidationAvailability(body) {
+      if (body && Object.prototype.hasOwnProperty.call(body, 'repairValidationAvailable')) {
+        state.validationAvailable = body.repairValidationAvailable === true;
+      }
+    }
+
     function baseFlow(flow) {
       const digest = authoringDraft.flowDigest || null;
       return {
@@ -5290,6 +5369,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         ...state,
         history: [...state.history],
         current: current(),
+        validationAvailable:
+          state.validationAvailable === false ||
+          runController?.state?.().brokerCapabilities?.repairValidationAvailable === false
+            ? false
+            : state.validationAvailable === true ||
+                runController?.state?.().brokerCapabilities?.repairValidationAvailable === true
+              ? true
+              : null,
         canMutate: isWriter && connected && !capturedTraceMode,
       }),
       async classify() {
@@ -5323,6 +5410,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
             state.error = response.body?.error || response.error || 'Repair eligibility classification failed.';
             return;
           }
+          applyValidationAvailability(response.body);
           state.eligibility = response.body.eligibility || null;
           state.classificationToken = response.body.classificationToken || null;
           state.checkpoint = response.body.currentCheckpoint || null;
@@ -5369,6 +5457,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
             },
             agentOriginated: false,
           });
+          applyValidationAvailability(response.body);
           state.generation = response.body?.generation || null;
           const proposal = Array.isArray(response.body?.proposals) ? response.body.proposals[0] : null;
           state.proposal = proposal || null;
@@ -5394,6 +5483,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           setRepairState(state.error, true);
           return;
         }
+        applyValidationAvailability(response.body);
         state.proposal = response.body.proposal;
         setRepairState('Selector-only diff preview loaded. Assertions, actions, values, and order are unchanged.');
       },
@@ -5402,6 +5492,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         if (!id) return;
         const response = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/status`, {});
         if (response.ok && response.body?.proposal) {
+          applyValidationAvailability(response.body);
           state.proposal = response.body.proposal;
           setRepairState();
         } else {
@@ -5417,6 +5508,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           reasonCode: 'human-rejected',
         });
         if (response.ok && response.body?.proposal) {
+          applyValidationAvailability(response.body);
           state.proposal = response.body.proposal;
           setRepairState('The proposal was rejected. The flow and source remain unchanged.');
         } else {
@@ -5435,6 +5527,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           policy: 'repair-policy-v1',
         });
         if (response.ok && response.body?.proposal) {
+          applyValidationAvailability(response.body);
           state.proposal = response.body.proposal;
           state.proposal.grant = response.body.grant;
           setRepairState('Human approval was recorded. Apply remains a separate explicit action.');
@@ -5447,6 +5540,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       async validate() {
         const id = state.proposal?.proposal?.proposalId || state.proposal?.proposalId;
         if (!id) return;
+        if (state.validationAvailable === false) {
+          state.error = 'Transient validation is unavailable until a lifecycle-capable host is connected.';
+          setRepairState(state.error, true);
+          return;
+        }
         const issued = await inspectorApi.postDetailed('/api/workbench/repair/grant', {
           proposalId: id,
           kind: 'validation',
@@ -5459,12 +5557,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           setRepairState(state.error, true);
           return;
         }
+        applyValidationAvailability(issued.body);
         state.proposal = issued.body.proposal;
         const result = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/validate`, {
           validationGrant: issued.body.grant,
           replaySafety: current().report?.replayEligibility || null,
         });
         if (result.ok && result.body?.proposal) {
+          applyValidationAvailability(result.body);
           state.proposal = result.body.proposal;
           setRepairState('Transient validation completed without committing a flow change.', result.body.validation?.passed !== true);
         } else {

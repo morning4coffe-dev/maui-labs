@@ -66,20 +66,20 @@
       </div>
       <span class="df-sep"></span>
       <button id="df-toggle-workbench" class="df-tool-btn df-workbench-entry" type="button" title="Open Tests (Ctrl/Cmd+Alt+T)" aria-label="Open Tests" aria-controls="df-workbench" aria-expanded="false" aria-pressed="false" aria-keyshortcuts="Control+Alt+T Meta+Alt+T"><svg class="df-ic"><use href="#i-tests"/></svg><span class="df-btn-label">Tests</span><span id="df-test-agent-request-badge" class="df-agent-request-badge" hidden></span></button>
-      <button id="df-toggle-tree" class="df-tool-btn df-active" title="Show/hide the element tree" aria-expanded="true" aria-controls="df-tree"><svg class="df-ic"><use href="#i-tree"/></svg><span class="df-btn-label">Tree</span></button>
-      <button id="df-toggle-fit" class="df-tool-btn df-active" title="Fit the app view to the available space (toggle to see it at 1:1 actual size)" aria-pressed="true"><svg class="df-ic"><use href="#i-fit"/></svg><span class="df-btn-label">Fit</span></button>
+      <button id="df-toggle-tree" class="df-tool-btn df-active" aria-label="Tree" title="Show/hide the element tree" aria-expanded="true" aria-controls="df-tree"><svg class="df-ic"><use href="#i-tree"/></svg><span class="df-btn-label">Tree</span></button>
+      <button id="df-toggle-fit" class="df-tool-btn df-active" aria-label="Fit" title="Fit the app view to the available space (toggle to see it at 1:1 actual size)" aria-pressed="true"><svg class="df-ic"><use href="#i-fit"/></svg><span class="df-btn-label">Fit</span></button>
       <div id="df-toolbar-secondary" class="df-toolbar-secondary" aria-label="More inspector actions">
-        <button id="df-toggle-bounds" class="df-tool-btn" title="Outline every element" aria-pressed="false"><svg class="df-ic"><use href="#i-bounds"/></svg><span class="df-btn-label">Bounds</span></button>
-        <button id="df-open-source" class="df-tool-btn" aria-disabled="true" title="Open the selected element's XAML source in your editor. Enabled when the selected element is defined in XAML with source mapping available."><svg class="df-ic"><use href="#i-source"/></svg><span class="df-btn-label">Source</span></button>
-        <button id="df-send-copilot" class="df-tool-btn" aria-disabled="true" aria-haspopup="menu" aria-expanded="false" aria-controls="df-copilot-menu" title="Choose specific Inspector context to add to Copilot"><svg class="df-ic"><use href="#i-copilot"/></svg><span class="df-btn-label">Copilot</span><svg class="df-ic-xs df-menu-chevron"><use href="#i-chevron"/></svg></button>
-        <button id="df-evidence" class="df-tool-btn" title="Capture a shareable, redacted evidence bundle (.mauitrace). You review exactly what it contains before it downloads."><svg class="df-ic"><use href="#i-evidence"/></svg><span class="df-btn-label">Evidence</span></button>
-        <button id="df-toggle-dock" class="df-tool-btn" title="Show app data: Problems, Layout, Performance, Logs, Network, Preferences, Device, Sensors, Files" aria-pressed="false"><svg class="df-ic"><use href="#i-data"/></svg><span class="df-btn-label">Data</span></button>
+        <button id="df-toggle-bounds" class="df-tool-btn" aria-label="Bounds" title="Outline every element" aria-pressed="false"><svg class="df-ic"><use href="#i-bounds"/></svg><span class="df-btn-label">Bounds</span></button>
+        <button id="df-open-source" class="df-tool-btn" aria-label="Source" aria-disabled="true" title="Open the selected element's XAML source in your editor. Enabled when the selected element is defined in XAML with source mapping available."><svg class="df-ic"><use href="#i-source"/></svg><span class="df-btn-label">Source</span></button>
+        <button id="df-send-copilot" class="df-tool-btn" aria-label="Copilot" aria-disabled="true" aria-haspopup="menu" aria-expanded="false" aria-controls="df-copilot-menu" title="Choose specific Inspector context to add to Copilot"><svg class="df-ic"><use href="#i-copilot"/></svg><span class="df-btn-label">Copilot</span><svg class="df-ic-xs df-menu-chevron"><use href="#i-chevron"/></svg></button>
+        <button id="df-evidence" class="df-tool-btn" aria-label="Evidence" title="Capture a shareable, redacted evidence bundle (.mauitrace). You review exactly what it contains before it downloads."><svg class="df-ic"><use href="#i-evidence"/></svg><span class="df-btn-label">Evidence</span></button>
+        <button id="df-toggle-dock" class="df-tool-btn" aria-label="Data" title="Show app data: Problems, Layout, Performance, Logs, Network, Preferences, Device, Sensors, Files" aria-pressed="false"><svg class="df-ic"><use href="#i-data"/></svg><span class="df-btn-label">Data</span></button>
       </div>
-      <button id="df-more" class="df-tool-btn df-more-btn df-hidden" title="More inspector actions" aria-haspopup="menu" aria-expanded="false" aria-controls="df-toolbar-overflow"><svg class="df-ic"><use href="#i-more"/></svg><span class="df-btn-label">More</span></button>
+      <button id="df-more" class="df-tool-btn df-more-btn df-hidden" aria-label="More inspector actions" title="More inspector actions" aria-haspopup="menu" aria-expanded="false" aria-controls="df-toolbar-overflow"><svg class="df-ic"><use href="#i-more"/></svg><span class="df-btn-label">More</span></button>
       <div id="df-toolbar-overflow" class="df-toolbar-overflow df-hidden" role="menu" aria-label="More inspector actions"></div>
       <span class="df-spacer"></span>
       <span id="df-presence" class="df-presence" role="status" aria-live="polite" aria-atomic="true" title="Who can drive this app right now"></span>
-      <button id="df-take-control" class="df-tool-btn df-hidden" title="Another session is driving this app, click to take control"><svg class="df-ic"><use href="#i-key"/></svg><span class="df-btn-label">Take control</span></button>
+      <button id="df-take-control" class="df-tool-btn df-hidden" aria-label="Take control" title="Another session is driving this app, click to take control"><svg class="df-ic"><use href="#i-key"/></svg><span class="df-btn-label">Take control</span></button>
     </div>
     <div id="df-status" class="df-status" role="status" aria-live="polite"></div>
     <div id="df-body">
@@ -197,6 +197,7 @@
         </div>
         <span id="df-problems-status" class="df-sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
         <span id="df-dock-meta" class="df-dock-meta"></span>
+        <span id="df-dock-meta-note" class="df-dock-meta"></span>
         <button id="df-attach-data" class="df-icon-btn" title="Add the current Data context to Copilot" aria-label="Add current Data context to Copilot" disabled><svg class="df-ic"><use href="#i-attach"/></svg></button>
         <button id="df-dock-collapse" class="df-icon-btn" title="Collapse data panel" aria-expanded="true"><svg class="df-ic"><use href="#i-chevron"/></svg></button>
         <button id="df-dock-refresh" class="df-icon-btn" title="Refresh this tab"><svg class="df-ic"><use href="#i-refresh"/></svg></button>

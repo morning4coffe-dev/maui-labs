@@ -20,8 +20,8 @@ export function activate(context: vscode.ExtensionContext): void {
       (startupHints?: InspectorStartupHints) => openInspector(startupHints),
     )
   );
-  registerSelectionTool(context);
-  registerDataSnapshotTool(context);
+  registerSelectionTool(context, () => activePanelState);
+  registerDataSnapshotTool(context, () => activePanelState);
 }
 
 // The element the human currently has selected in the inspector (fed by devflow:selectionChanged over
@@ -84,10 +84,15 @@ interface TestBundle {
   flowDigest?: unknown;
   planDigest?: unknown;
 }
-let currentSelection: SelectedElement | null = null;
-let currentDataSnapshot: DataSnapshot | null = null;
+interface PanelBridgeState {
+  bridgeId: string;
+  selection: SelectedElement | null;
+  dataSnapshot: DataSnapshot | null;
+}
+const panelStates = new WeakMap<vscode.WebviewPanel, PanelBridgeState>();
+let activePanelState: PanelBridgeState | null = null;
 
-function registerSelectionTool(context: vscode.ExtensionContext): void {
+function registerSelectionTool(context: vscode.ExtensionContext, getState: () => PanelBridgeState | null): void {
   // A Language Model Tool lets Copilot (agent mode) resolve "the selected element" / "fix the selected
   // item" to the control the human highlighted in the inspector — the VS Code equivalent of the canvas
   // get_selection action. Typed via `any` so we don't require a newer @types/vscode; the runtime API
@@ -100,8 +105,9 @@ function registerSelectionTool(context: vscode.ExtensionContext): void {
         invoke: async () => {
           const ToolResult = (vscode as any).LanguageModelToolResult;
           const TextPart = (vscode as any).LanguageModelTextPart;
-          const text = currentSelection
-            ? "The user has this .NET MAUI element selected in the MAUI DevFlow Inspector:\n" + JSON.stringify(currentSelection, null, 2)
+          const state = getState();
+          const text = state?.selection
+            ? "The user has this .NET MAUI element selected in the MAUI DevFlow Inspector:\n" + JSON.stringify(state.selection, null, 2)
             : "No element is currently selected in the MAUI DevFlow Inspector. Ask the user to click an element in the Inspector (or open it via 'MAUI DevFlow: Open Inspector').";
           return new ToolResult([new TextPart(text)]);
         },
@@ -112,7 +118,7 @@ function registerSelectionTool(context: vscode.ExtensionContext): void {
   }
 }
 
-function registerDataSnapshotTool(context: vscode.ExtensionContext): void {
+function registerDataSnapshotTool(context: vscode.ExtensionContext, getState: () => PanelBridgeState | null): void {
   const lm: any = (vscode as any).lm;
   if (!lm || typeof lm.registerTool !== "function") return;
   try {
@@ -121,10 +127,11 @@ function registerDataSnapshotTool(context: vscode.ExtensionContext): void {
         invoke: async () => {
           const ToolResult = (vscode as any).LanguageModelToolResult;
           const TextPart = (vscode as any).LanguageModelTextPart;
-          const text = currentDataSnapshot
+          const state = getState();
+          const text = state?.dataSnapshot
             ? "The user attached this point-in-time, redacted .NET MAUI DevFlow Data snapshot. " +
               "Use followUpTools when deeper or fresher data is needed:\n" +
-              JSON.stringify(currentDataSnapshot, null, 2)
+              JSON.stringify(state.dataSnapshot, null, 2)
             : "No DevFlow Data snapshot is currently attached. Ask the user to open Data in the MAUI DevFlow Inspector and use the paperclip button.";
           return new ToolResult([new TextPart(text)]);
         },
@@ -196,27 +203,28 @@ async function openInspector(startupHints?: InspectorStartupHints): Promise<void
   // *fragment*, so it never reaches the broker over HTTP — only the iframe's own script reads it.
   let nonce = randomToken();
   let bridgeId = randomToken();
+  const panelState: PanelBridgeState = {
+    bridgeId,
+    selection: null,
+    dataSnapshot: null,
+  };
+  panelStates.set(panel, panelState);
+  activePanelState = panelState;
 
   // Register the message handler BEFORE the webview HTML loads so no early bridge message is lost.
   panel.webview.onDidReceiveMessage(async (msg: BridgeMessage | undefined) => {
+    if (!msg || typeof msg.bridgeId !== "string" || msg.bridgeId !== panelState.bridgeId) return;
+    if (requiresBridgeRequestId(msg.type) && typeof msg.requestId !== "string") return;
+    activePanelState = panelState;
+
     const requestBridgeId = bridgeId;
     let result: BridgeResult;
     try {
-      result = await handleBridgeMessage(msg);
+      result = await handleBridgeMessage(msg, panelState);
     } catch (error) {
       result = { ok: false, error: `The VS Code host could not handle the request: ${String(error)}` };
     }
-    if (typeof msg?.requestId === "string" &&
-        (msg.type === "devflow:attachData" ||
-         msg.type === "devflow:attachCopilot" ||
-         msg.type === "devflow:pickWorkflow" ||
-         msg.type === "devflow:saveTestBundle" ||
-         msg.type === "devflow:loadTestBundle" ||
-         msg.type === "devflow:pickTrace" ||
-         msg.type === "devflow:openSourceDiff" ||
-         msg.type === "devflow:applySourceProposal" ||
-         msg.type === "devflow:applyCSharpSourceProposal" ||
-         msg.type === "devflow:getCSharpSourceSelection")) {
+    if (typeof msg.requestId === "string" && isBridgeResultMessage(msg.type)) {
       if (requestBridgeId !== bridgeId) return;
       await panel.webview.postMessage({
         type: "devflow:hostResult",
@@ -243,12 +251,7 @@ async function openInspector(startupHints?: InspectorStartupHints): Promise<void
     try {
       const refreshed = await discoverBroker({ bootstrap: "never", brokerPort });
       if (!refreshed || refreshed.agents.length === 0) return;
-      const nextAgent = refreshed.agents.find((candidate) => candidate.id === agent.id) ??
-        refreshed.agents.find((candidate) =>
-          candidate.project === agent.project &&
-          candidate.tfm === agent.tfm &&
-          candidate.platform === agent.platform &&
-          candidate.appName === agent.appName);
+      const nextAgent = selectRefreshedAgent(refreshed.agents, agent);
       if (!nextAgent) return;
 
       const refreshedState = readBrokerState();
@@ -264,8 +267,8 @@ async function openInspector(startupHints?: InspectorStartupHints): Promise<void
 
       const nextRuntimeIdentity = agentRuntimeIdentity(nextAgent);
       if (nextRuntimeIdentity !== runtimeIdentity) {
-        currentSelection = null;
-        currentDataSnapshot = null;
+        panelState.selection = null;
+        panelState.dataSnapshot = null;
       }
 
       agent = nextAgent;
@@ -282,11 +285,13 @@ async function openInspector(startupHints?: InspectorStartupHints): Promise<void
       );
       nonce = randomToken();
       bridgeId = randomToken();
+      panelState.bridgeId = bridgeId;
       panel.title = `MAUI DevFlow Inspector · ${title}`;
-      panel.webview.options = {
+            panel.webview.options = {
         enableScripts: true,
+        retainContextWhenHidden: true,
         portMapping: [{ webviewPort: refreshed.port, extensionHostPort: refreshed.port }],
-      };
+      } as any;
       panel.webview.html = renderHost(inspectorUrl, title, nonce, bridgeId);
     } catch {
       // Keep the last frame visible while the broker is restarting; the next interval retries discovery.
@@ -297,6 +302,8 @@ async function openInspector(startupHints?: InspectorStartupHints): Promise<void
   panel.onDidDispose(() => {
     disposed = true;
     clearInterval(restartWatcher);
+    panelStates.delete(panel);
+    if (activePanelState === panelState) activePanelState = null;
   });
 }
 
@@ -339,10 +346,62 @@ function inspectorConnectionSignature(
   ].join("|");
 }
 
+function normalizeAgentIdentityPart(value: string | null | undefined): string | null {
+  const trimmed = typeof value === "string" ? value.trim() : "";
+  return trimmed ? trimmed : null;
+}
+
+function sameAgentIdentity(current: AgentRegistration, candidate: AgentRegistration): boolean {
+  const identityParts = [
+    normalizeAgentIdentityPart(current.project),
+    normalizeAgentIdentityPart(current.tfm),
+    normalizeAgentIdentityPart(current.platform),
+    normalizeAgentIdentityPart(current.appName),
+  ];
+  if (identityParts.some((part) => part == null)) return false;
+  return identityParts[0] === normalizeAgentIdentityPart(candidate.project) &&
+    identityParts[1] === normalizeAgentIdentityPart(candidate.tfm) &&
+    identityParts[2] === normalizeAgentIdentityPart(candidate.platform) &&
+    identityParts[3] === normalizeAgentIdentityPart(candidate.appName);
+}
+
+function selectRefreshedAgent(agents: AgentRegistration[], current: AgentRegistration): AgentRegistration | null {
+  const sameIdentityMatches = agents.filter((candidate) => sameAgentIdentity(current, candidate));
+  const currentId = normalizeAgentIdentityPart(current.id);
+  if (currentId) {
+    const exactIdMatches = sameIdentityMatches.filter((candidate) => normalizeAgentIdentityPart(candidate.id) === currentId);
+    if (exactIdMatches.length === 1) return exactIdMatches[0];
+    if (exactIdMatches.length > 1) return null;
+  }
+
+  return sameIdentityMatches.length === 1 ? sameIdentityMatches[0] : null;
+}
+
+function requiresBridgeRequestId(type: string | undefined): boolean {
+  return type === "devflow:sendToCopilot" ||
+    type === "devflow:attachCopilot" ||
+    type === "devflow:pickWorkflow" ||
+    type === "devflow:attachData" ||
+    type === "devflow:openSource" ||
+    type === "devflow:recordingComplete" ||
+    type === "devflow:saveTestBundle" ||
+    type === "devflow:loadTestBundle" ||
+    type === "devflow:pickTrace" ||
+    type === "devflow:openSourceDiff" ||
+    type === "devflow:applySourceProposal" ||
+    type === "devflow:applyCSharpSourceProposal" ||
+    type === "devflow:getCSharpSourceSelection";
+}
+
+function isBridgeResultMessage(type: string | undefined): boolean {
+  return requiresBridgeRequestId(type);
+}
+
 // ── Host bridge handlers (the shared inspector calls these via postMessage → relay → extension) ──
 
 interface BridgeMessage {
   type?: string;
+  bridgeId?: string;
   payload?: CopilotPayload;
   file?: string;
   line?: number;
@@ -379,14 +438,17 @@ interface CopilotPayload {
   appName?: string | null;
 }
 
-async function handleBridgeMessage(msg: BridgeMessage | undefined): Promise<BridgeResult> {
+async function handleBridgeMessage(msg: BridgeMessage | undefined, panelState: PanelBridgeState): Promise<BridgeResult> {
   if (!msg || typeof msg.type !== "string") return { ok: false, error: "Invalid DevFlow bridge message." };
+  if (typeof msg.bridgeId !== "string" || msg.bridgeId !== panelState.bridgeId) {
+    return { ok: false, error: "Invalid or stale DevFlow bridge message." };
+  }
   switch (msg.type) {
     case "devflow:sendToCopilot":
-      await sendToCopilot(msg.payload);
+      await sendToCopilot(msg.payload, panelState);
       return { ok: true };
     case "devflow:attachCopilot":
-      await sendToCopilot(msg.payload);
+      await sendToCopilot(msg.payload, panelState);
       return { ok: true, message: "Added Inspector context to Copilot." };
     case "devflow:pickWorkflow":
       return await pickWorkflowFile();
@@ -411,10 +473,10 @@ async function handleBridgeMessage(msg: BridgeMessage | undefined): Promise<Brid
     case "devflow:getCSharpSourceSelection":
       return await getCSharpSourceSelection();
     case "devflow:selectionChanged":
-      currentSelection = msg.element ?? null;
+      panelState.selection = msg.element ?? null;
       return { ok: true };
     case "devflow:attachData":
-      return await attachDataToCopilot(msg.snapshot);
+      return await attachDataToCopilot(msg.snapshot, panelState);
     default:
       return { ok: false, error: "Unsupported DevFlow bridge message." };
   }
@@ -691,10 +753,11 @@ async function pickTraceArtifact(): Promise<BridgeResult> {
   }
 }
 
-async function sendToCopilot(payload: CopilotPayload | undefined): Promise<void> {
+async function sendToCopilot(payload: CopilotPayload | undefined, panelState: PanelBridgeState): Promise<void> {
   const carriesElement = !!payload && Object.prototype.hasOwnProperty.call(payload, "element");
-  const el = carriesElement ? payload?.element : currentSelection;
-  if (el) currentSelection = el; // keep the language-model tool in sync with what we're attaching
+  if (carriesElement) panelState.selection = payload?.element ?? null;
+  const el = panelState.selection;
+
 
   const bits: string[] = [];
   if (el) {
@@ -756,7 +819,7 @@ async function pickWorkflowFile(): Promise<BridgeResult> {
 const dataSnapshotScopes = new Set(["logs", "network", "preferences", "device", "sensors", "files", "alerts"]);
 const DATA_SNAPSHOT_MAX_BYTES = 20_000;
 
-async function attachDataToCopilot(snapshot: DataSnapshot | undefined): Promise<BridgeResult> {
+async function attachDataToCopilot(snapshot: DataSnapshot | undefined, panelState: PanelBridgeState): Promise<BridgeResult> {
   if (!snapshot || snapshot.kind !== "dataSnapshot" || snapshot.redacted !== true
       || !dataSnapshotScopes.has(snapshot.scope) || typeof snapshot.title !== "string") {
     const error = "The Data snapshot was invalid and was not added to Copilot.";
@@ -774,14 +837,14 @@ async function attachDataToCopilot(snapshot: DataSnapshot | undefined): Promise<
     vscode.window.showWarningMessage(`DevFlow: ${error}`);
     return { ok: false, error };
   }
-  currentDataSnapshot = JSON.parse(serialized) as DataSnapshot;
-  const fallback = "MAUI DevFlow Data snapshot:\n" + JSON.stringify(currentDataSnapshot, null, 2);
+  panelState.dataSnapshot = JSON.parse(serialized) as DataSnapshot;
+  const fallback = "MAUI DevFlow Data snapshot:\n" + JSON.stringify(panelState.dataSnapshot, null, 2);
   return await attachToolContext(
     "maui-devflow_getDataSnapshot",
     "#mauiData ",
     fallback,
     "",
-    `Added ${currentDataSnapshot.title} to Copilot.`,
+    `Added ${panelState.dataSnapshot.title} to Copilot.`,
     "Copied the Data context for Copilot.",
     "DevFlow: Copilot Chat unavailable — Data context copied to the clipboard.");
 }

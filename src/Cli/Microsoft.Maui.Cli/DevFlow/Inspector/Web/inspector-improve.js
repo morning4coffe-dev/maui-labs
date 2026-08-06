@@ -373,7 +373,7 @@ export function renderImprovePanel(helpers) {
       'df-workbench-intro',
       'Record or open a test first. You can then check it here or ask your agent to review its quality.'
     ));
-    empty.append(button('Go to Steps', () => helpers.selectStage?.('record')));
+    empty.append(button('Go to Goal', () => { if (helpers.focusGoal) helpers.focusGoal(); else helpers.selectStage?.('goal'); }));
     root.append(empty);
     return root;
   }

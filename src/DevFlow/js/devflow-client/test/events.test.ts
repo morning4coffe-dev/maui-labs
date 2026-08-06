@@ -32,6 +32,130 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs = 3000): Promise<T> {
   });
 }
 
+function acceptUpgrade(request: http.IncomingMessage, socket: Duplex): void {
+  const key = String(request.headers["sec-websocket-key"] || "");
+  const accept = createHash("sha1").update(key + webSocketGuid).digest("base64");
+  socket.on("error", () => {});
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+    "Upgrade: websocket\r\n" +
+    "Connection: Upgrade\r\n" +
+    "Sec-WebSocket-Accept: " + accept + "\r\n\r\n",
+  );
+}
+
+test("event stream reconnects after a silent half-open socket exceeds watchdog", async () => {
+  const acceptedSockets = new Set<Duplex>();
+  let upgrades = 0;
+  let resolveSecondUpgrade!: () => void;
+  const secondUpgrade = new Promise<void>((resolve) => {
+    resolveSecondUpgrade = resolve;
+  });
+  const server = http.createServer();
+  server.on("upgrade", (request, socket) => {
+    upgrades++;
+    acceptedSockets.add(socket);
+    socket.once("close", () => acceptedSockets.delete(socket));
+    acceptUpgrade(request, socket);
+    if (upgrades === 2) resolveSecondUpgrade();
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const stream = openEventStream({
+    resolvePort: async () => port,
+    watchdogMs: 40,
+    onStatus: () => {},
+    onEvent: () => {},
+  });
+
+  try {
+    await withTimeout(secondUpgrade, 1000);
+    assert.equal(upgrades, 2);
+  } finally {
+    stream.close();
+    for (const socket of acceptedSockets) socket.destroy();
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("event stream watchdog resets while activity continues", async () => {
+  const acceptedSockets = new Set<Duplex>();
+  let upgrades = 0;
+  let eventCount = 0;
+  const server = http.createServer();
+  server.on("upgrade", (request, socket) => {
+    upgrades++;
+    acceptedSockets.add(socket);
+    socket.once("close", () => acceptedSockets.delete(socket));
+    acceptUpgrade(request, socket);
+    let tick = 0;
+    const timer = setInterval(() => {
+      socket.write(serverTextFrame({ type: "treeChange", data: { tick: ++tick } }));
+    }, 20);
+    socket.once("close", () => clearInterval(timer));
+    socket.write(serverTextFrame({ type: "treeChange", data: { tick: ++tick } }));
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const stream = openEventStream({
+    resolvePort: async () => port,
+    watchdogMs: 60,
+    onStatus: () => {},
+    onEvent: () => { eventCount++; },
+  });
+
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    assert.equal(upgrades, 1);
+    assert.ok(eventCount >= 4);
+  } finally {
+    stream.close();
+    for (const socket of acceptedSockets) socket.destroy();
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("closing the event stream cancels the watchdog and reconnect timer", async () => {
+  const acceptedSockets = new Set<Duplex>();
+  let upgrades = 0;
+  let resolveConnected!: () => void;
+  const connected = new Promise<void>((resolve) => {
+    resolveConnected = resolve;
+  });
+  const server = http.createServer();
+  server.on("upgrade", (request, socket) => {
+    upgrades++;
+    acceptedSockets.add(socket);
+    socket.once("close", () => acceptedSockets.delete(socket));
+    acceptUpgrade(request, socket);
+    resolveConnected();
+  });
+
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const port = (server.address() as AddressInfo).port;
+  const stream = openEventStream({
+    resolvePort: async () => port,
+    watchdogMs: 80,
+    onStatus: () => {},
+    onEvent: () => {},
+  });
+
+  try {
+    await withTimeout(connected);
+    stream.close();
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(upgrades, 1);
+  } finally {
+    for (const socket of acceptedSockets) socket.destroy();
+    server.closeAllConnections();
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("event stream upgrades, subscribes, and delivers tree changes", async () => {
   const subscriptions: unknown[] = [];
   const acceptedSockets = new Set<Duplex>();

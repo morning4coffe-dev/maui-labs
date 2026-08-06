@@ -794,7 +794,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         var packageId = TryGetAppInfoString(() => AppInfo.Current.PackageName) ?? "unknown";
         var appVersion = TryGetAppInfoString(() => AppInfo.Current.VersionString) ?? "unknown";
         var appBuild = TryGetAppInfoString(() => AppInfo.Current.BuildString) ?? "unknown";
-        var result = await DispatchAsync(() =>
+        var result = await DispatchAsync(async () =>
         {
             var cdpWebViews = GetCdpWebViewsSnapshot();
             var window = GetWindow(windowIndex);
@@ -1436,6 +1436,53 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         };
     }
 
+    private static string NormalizeShellRoute(string? route)
+        => ShellActivationLogic.NormalizeShellRoute(route);
+
+    private static async Task<string> ActivateShellItemAsync(Shell shell, ShellItem item)
+    {
+        var route = ShellActivationLogic.ResolveShellItemRoute(item);
+        if (!string.IsNullOrWhiteSpace(route))
+        {
+            try
+            {
+                await shell.GoToAsync(route);
+                return "ok";
+            }
+            catch
+            {
+                // Fall through to the safe item-selection fallback.
+            }
+        }
+
+        shell.CurrentItem = item;
+        return "ok";
+    }
+
+    private static async Task<string> ActivateShellSectionAsync(Shell shell, ShellSection section)
+    {
+        var route = ShellActivationLogic.ResolveShellSectionRoute(section);
+        if (!string.IsNullOrWhiteSpace(route))
+        {
+            try
+            {
+                await shell.GoToAsync(route);
+                return "ok";
+            }
+            catch
+            {
+                // Fall through to the direct section selection fallback.
+            }
+        }
+
+        if (shell.CurrentItem is not null)
+        {
+            shell.CurrentItem.CurrentItem = section;
+            return "ok";
+        }
+
+        return "Unable to activate the requested Shell section.";
+    }
     internal static bool IsReplayableRecordedTapTarget(ElementInfo target)
     {
         ArgumentNullException.ThrowIfNull(target);
@@ -2005,7 +2052,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
         var windowIndex = ParseWindowIndex(request);
 
-        var result = await DispatchAsync(() =>
+        var result = await DispatchAsync(async () =>
         {
             var window = GetWindow(windowIndex);
             if (window == null) return (object?)null;
@@ -2553,7 +2600,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         if (!request.RouteParams.TryGetValue("id", out var id))
             return HttpResponse.Error("Element ID required");
 
-        var result = await DispatchAsync(() =>
+        var result = await DispatchAsync(async () =>
         {
             var element = _treeWalker.GetElementById(id, _app);
             if (element is null) return null;
@@ -2773,7 +2820,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             return HttpResponse.Error("value is required");
 
         var startedAtUtc = DateTime.UtcNow;
-        var result = await DispatchAsync(() =>
+        var result = await DispatchAsync(async () =>
         {
             var el = _treeWalker.GetElementById(id, _app);
             if (el == null)
@@ -2992,7 +3039,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             return nativeResult == "ok" ? HttpResponse.Ok("Tapped") : HttpResponse.Error(nativeResult);
         }
 
-        var result = await DispatchAsync(() =>
+        var result = await DispatchAsync(async () =>
         {
             var el = _treeWalker.GetElementById(body.ElementId, _app);
             if (el == null) return "Element not found";
@@ -3025,17 +3072,22 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     ((IMenuItemController)ti).Activate();
                     return "ok";
                 case VisualTreeWalker.BackButtonMarker back:
-                    back.Navigation.PopAsync();
+                    await back.Navigation.PopAsync();
                     return "ok";
                 case VisualTreeWalker.FlyoutButtonMarker flyoutBtn:
                     flyoutBtn.Shell.FlyoutIsPresented = true;
                     return "ok";
+                case ShellItem shellItem:
+                {
+                    var shell = FindAncestor<Shell>(shellItem) ?? Shell.Current;
+                    return shell != null
+                        ? await ActivateShellItemAsync(shell, shellItem)
+                        : "Unable to activate the requested Shell item.";
+                }
                 case VisualTreeWalker.ShellFlyoutItemMarker flyoutItem:
-                    flyoutItem.Shell.CurrentItem = flyoutItem.Item;
-                    return "ok";
+                    return await ActivateShellItemAsync(flyoutItem.Shell, flyoutItem.Item);
                 case VisualTreeWalker.ShellTabMarker shellTab:
-                    shellTab.Shell.CurrentItem.CurrentItem = shellTab.Section;
-                    return "ok";
+                    return await ActivateShellSectionAsync(shellTab.Shell, shellTab.Section);
                 case VisualTreeWalker.FlyoutToggleMarker flyoutToggle:
                     flyoutToggle.FlyoutPage.IsPresented = !flyoutToggle.FlyoutPage.IsPresented;
                     return "ok";
@@ -3473,7 +3525,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
             return nativeResult == "ok" ? HttpResponse.Ok("Text set") : HttpResponse.Error(nativeResult);
         }
 
-        var result = await DispatchAsync(() =>
+        var result = await DispatchAsync(async () =>
         {
             var el = _treeWalker.GetElementById(body.ElementId, _app);
             if (el == null) return "Element not found";
@@ -3728,7 +3780,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
         var startedAtUtc = DateTime.UtcNow;
         var windowIndex = ParseWindowIndex(request);
-        var result = await DispatchAsync(() =>
+        var result = await DispatchAsync(async () =>
         {
             var window = GetWindow(windowIndex);
             if (window?.Handler?.PlatformView == null)
@@ -3874,7 +3926,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
 
         var startedAtUtc = DateTime.UtcNow;
         var keyValue = body.Key ?? body.Text ?? string.Empty;
-        var result = await DispatchAsync(() =>
+        var result = await DispatchAsync(async () =>
         {
             object? el = null;
             if (!string.IsNullOrWhiteSpace(body.ElementId))

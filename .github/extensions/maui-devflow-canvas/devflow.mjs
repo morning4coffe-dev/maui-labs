@@ -13,6 +13,11 @@ function num(v, fallback = 0) {
   return Number.isFinite(n) ? n : fallback;
 }
 
+function normalizeResizeDimension(value) {
+  const n = num(value, NaN);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  return Math.round(n);
+}
 function largestWindowBounds(roots) {
   const rootCandidates = (roots || []).filter((root) => root?.type === "Window");
   const candidates = rootCandidates.length ? rootCandidates : (roots || []);
@@ -34,6 +39,46 @@ function largestWindowBounds(roots) {
 // PNG magic: 0x89 'P' ... (8-byte signature). Cheap guard so we never write a JSON error
 // body or a truncated buffer to a .png file.
 const isPng = (b) => !!b && b.length > 8 && b[0] === 0x89 && b[1] === 0x50;
+
+function isTapVisible(el) {
+  return el?.isVisible !== false && el?.state?.displayed !== false && el?.isEnabled !== false && el?.state?.enabled !== false && Number(el?.opacity ?? 1) !== 0;
+}
+
+function isSyntheticElement(el) {
+  return String(el?.fullType || "").startsWith("Microsoft.Maui.DevFlow.Agent.Core.");
+}
+
+function isActionableOrSynthetic(el) {
+  return isSyntheticElement(el) || (Array.isArray(el?.traits) && el.traits.some((t) => String(t).toLowerCase() === "interactive"));
+}
+
+function normalizeText(value) {
+  return String(value ?? "").trim();
+}
+
+function exactSelectorMatch(sel, el) {
+  if (sel?.id != null) return String(el?.id) === String(sel.id);
+  if (sel?.automationId != null) return String(el?.automationId ?? "") === String(sel.automationId);
+  if (sel?.text != null) return normalizeText(el?.text) === normalizeText(sel.text);
+  return false;
+}
+
+function visibleCandidateLabel(el) {
+  const bits = [String(el?.id ?? "?")];
+  if (el?.automationId) bits.push(`automationId=${el.automationId}`);
+  if (el?.text) bits.push(`text=${el.text}`);
+  bits.push(`type=${el?.type ?? "?"}`);
+  return bits.join(" · ");
+}
+
+// The mutation lease is one global lock with a short TTL that any other DevFlow host
+// (browser Inspector, VS Code, CLI, MCP) may legitimately hold for a moment — running
+// several hosts against one app is a supported workflow. The shared client already marks
+// `lease-held` as retriable but nothing acts on it, so a neighbouring host holding the lock
+// for a second turns into a hard failure for the caller. Waiting briefly converts the
+// transient case into success; the cap keeps a genuinely busy app from wedging the turn.
+const LEASE_RETRY_BUDGET_MS = 6000;
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 export class DevflowDevice {
   constructor(opts = {}) {
@@ -176,6 +221,9 @@ export class DevflowDevice {
     return r.ok ? { ok: true, value: r.value } : { ok: false, error: r.error.message };
   }
 
+  // Back-compat shim: resolves to the first match. Kept for replay.mjs (legacy offline
+  // fixture) and the recorder selftest. New callers should use _resolveTarget, which
+  // refuses to guess between several matches.
   async _resolveElementId(sel) {
     if (sel == null) return null;
     if (typeof sel === "object") {
@@ -189,22 +237,79 @@ export class DevflowDevice {
     return String(sel);
   }
 
+  // Resolve a drive target (tap/fill) to EXACTLY one element id.
+  //
+  // A non-id selector that matches several elements is rejected instead of silently
+  // resolving to the first hit. MAUI CollectionView/BindableLayout rows reuse the same
+  // AutomationId and text for every row, so "the first match" is arbitrary — picking it
+  // can fire a destructive action (delete, confirm, pay) on a row the caller never meant.
+  // The error names the candidates so a caller can re-issue with an explicit id.
+  async _resolveTarget(sel) {
+    if (sel == null) return { error: "no target given — pass id, automationId, or text" };
+    if (typeof sel !== "object") return { id: String(sel) };
+    if (sel.id != null) return { id: String(sel.id) };
+    if (!sel.automationId && !sel.text) {
+      return { error: "no target given — pass id, automationId, or text" };
+    }
+
+    const label = sel.automationId
+      ? `automationId "${sel.automationId}"`
+      : `text "${sel.text}"`;
+    const q = await this.query({ automationId: sel.automationId, text: sel.text });
+    if (!q.ok) return { error: q.error || `could not resolve ${label}` };
+
+    const matches = (q.elements || []).filter((el) => el?.id != null);
+    const visible = matches.filter(isTapVisible);
+    if (visible.length === 0) return { error: `no visible element matches ${label}` };
+
+    const exactVisible = visible.filter((el) => exactSelectorMatch(sel, el));
+    const actionableExact = exactVisible.filter(isActionableOrSynthetic);
+    const actionableVisible = visible.filter(isActionableOrSynthetic);
+
+    const pick = (items) => (items.length === 1 ? { id: String(items[0].id) } : null);
+    const ambiguous = (items) => ({
+      error:
+        `${label} is ambiguous: ${items.length} visible elements match (${items.slice(0, 5).map(visibleCandidateLabel).join(", ")}${items.length > 5 ? `, +${items.length - 5} more` : ""}). ` +
+        `Re-issue with an explicit id to choose one.`,
+    });
+
+    return pick(actionableExact) ||
+      (actionableExact.length > 1 ? ambiguous(actionableExact) : null) ||
+      pick(exactVisible) ||
+      (exactVisible.length > 1 ? ambiguous(exactVisible) : null) ||
+      pick(actionableVisible) ||
+      (actionableVisible.length > 1 ? ambiguous(actionableVisible) : null) ||
+      pick(visible) ||
+      ambiguous(visible);
+  }
+
+  // Run a mutation, waiting out transient mutation-lease contention from another host.
+  // Returns the raw client result so callers keep their existing success/error shapes.
+  async _mutate(run) {
+    const deadline = Date.now() + LEASE_RETRY_BUDGET_MS;
+    for (let attempt = 1; ; attempt++) {
+      const r = await run();
+      if (r.ok || r.error?.kind !== "lease-held" || Date.now() >= deadline) return r;
+      await sleep(Math.min(200 * attempt, 1000));
+    }
+  }
+
   async setProperty(id, name, value) {
-    const r = await this._client.setProperty(id, name, String(value));
+    const r = await this._mutate(() => this._client.setProperty(id, name, String(value)));
     return r.ok ? { ok: true } : { ok: false, error: r.error.message };
   }
 
   async tap(sel) {
-    const id = await this._resolveElementId(sel);
-    if (!id) return { ok: false, error: "tap: could not resolve element" };
-    const r = await this._client.tap({ elementId: id });
+    const target = await this._resolveTarget(sel);
+    if (target.error) return { ok: false, error: `tap: ${target.error}` };
+    const r = await this._mutate(() => this._client.tap({ elementId: target.id }));
     return r.ok ? { ok: true } : { ok: false, error: r.error.message };
   }
 
   async fill(sel, text) {
-    const id = await this._resolveElementId(sel);
-    if (!id) return { ok: false, error: "fill: could not resolve element" };
-    const r = await this._client.fill(id, String(text));
+    const target = await this._resolveTarget(sel);
+    if (target.error) return { ok: false, error: `fill: ${target.error}` };
+    const r = await this._mutate(() => this._client.fill(target.id, String(text)));
     return r.ok ? { ok: true } : { ok: false, error: r.error.message };
   }
 
@@ -218,22 +323,27 @@ export class DevflowDevice {
       args.x = num(x);
       args.y = num(y);
     }
-    const r = await this._client.scroll(args);
+    const r = await this._mutate(() => this._client.scroll(args));
     return r.ok ? { ok: true } : { ok: false, error: r.error.message };
   }
 
   async navigate(route) {
-    const r = await this._client.navigate(String(route));
+    const r = await this._mutate(() => this._client.navigate(String(route)));
     return r.ok ? { ok: true } : { ok: false, error: r.error.message };
   }
 
   async back() {
-    const r = await this._client.back();
+    const r = await this._mutate(() => this._client.back());
     return r.ok ? { ok: true } : { ok: false, error: r.error.message };
   }
 
   async resize(width, height) {
-    const r = await this._client.resize(Number(width), Number(height));
+    const normalizedWidth = normalizeResizeDimension(width);
+    const normalizedHeight = normalizeResizeDimension(height);
+    if (normalizedWidth == null || normalizedHeight == null) {
+      return { ok: false, error: "resize requires positive, finite width and height" };
+    }
+    const r = await this._mutate(() => this._client.resize(normalizedWidth, normalizedHeight));
     return r.ok ? { ok: true } : { ok: false, error: r.error.message };
   }
 
@@ -244,7 +354,7 @@ export class DevflowDevice {
   }
 
   async themeSet(theme) {
-    const r = await this._client.setTheme(String(theme));
+    const r = await this._mutate(() => this._client.setTheme(String(theme)));
     if (r.ok && r.value) this._info.theme = r.value.requestedTheme || r.value.theme || String(theme);
     return r.ok ? { ok: true, data: r.value } : { ok: false, error: r.error.message };
   }

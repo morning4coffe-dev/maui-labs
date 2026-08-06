@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 
 namespace Microsoft.Maui.DevFlow.Testing;
@@ -51,20 +52,25 @@ public static class FlowMarkdown
             using var document = JsonDocument.Parse(jsonText);
             if (document.RootElement.ValueKind != JsonValueKind.Object)
                 return FlowParseResult.Fail("The maui-test block must contain a JSON object.", file);
-            if (!TryGetProperty(document.RootElement, "schema", out var schema) ||
+            var normalizedJson = NormalizeLegacySchema(document.RootElement, out var schemaError);
+            if (schemaError is not null)
+                return FlowParseResult.Fail(schemaError, file);
+
+            using var normalizedDocument = JsonDocument.Parse(normalizedJson);
+            if (!TryGetProperty(normalizedDocument.RootElement, "schema", out var schema) ||
                 schema.ValueKind != JsonValueKind.Number ||
                 !schema.TryGetInt32(out _))
             {
                 return FlowParseResult.Fail("The maui-test block requires an integer schema.", file);
             }
-            if (!TryGetProperty(document.RootElement, "steps", out var steps) ||
+            if (!TryGetProperty(normalizedDocument.RootElement, "steps", out var steps) ||
                 steps.ValueKind != JsonValueKind.Array)
             {
                 return FlowParseResult.Fail("The maui-test block requires a steps[] array.", file);
             }
 
             flow = JsonSerializer.Deserialize(
-                document.RootElement.GetRawText(),
+                normalizedDocument.RootElement.GetRawText(),
                 MauiFlowJsonContext.Default.MauiFlow);
         }
         catch (JsonException ex)
@@ -95,6 +101,33 @@ public static class FlowMarkdown
 
         value = default;
         return false;
+    }
+
+    private static string NormalizeLegacySchema(JsonElement root, out string? error)
+    {
+        error = null;
+        if (TryGetProperty(root, "schema", out _))
+            return root.GetRawText();
+
+        if (!TryGetProperty(root, "schemaVersion", out var legacySchema))
+            return root.GetRawText();
+
+        if (legacySchema.ValueKind != JsonValueKind.Number || !legacySchema.TryGetInt32(out var schema))
+        {
+            error = "Legacy maui-test blocks using schemaVersion must be migrated to an integer schema field before loading. Replace schemaVersion with schema or re-save the flow from a current DevFlow host.";
+            return root.GetRawText();
+        }
+
+        var node = JsonNode.Parse(root.GetRawText()) as JsonObject;
+        if (node is null)
+        {
+            error = "Legacy maui-test blocks using schemaVersion must be migrated to an integer schema field before loading. Replace schemaVersion with schema or re-save the flow from a current DevFlow host.";
+            return root.GetRawText();
+        }
+
+        node["schema"] = schema;
+        node.Remove("schemaVersion");
+        return node.ToJsonString();
     }
 
     /// <summary>Render a flow as a dual-layer <c>.md</c> (human prose + authoritative json block).</summary>

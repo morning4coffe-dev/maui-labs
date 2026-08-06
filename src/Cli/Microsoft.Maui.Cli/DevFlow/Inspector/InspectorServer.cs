@@ -2019,13 +2019,22 @@ public sealed class InspectorServer : IDisposable
                 });
             }
 
+            var migratedLegacySchema = markdown.Contains("\"schemaVersion\"", StringComparison.Ordinal);
+            var normalizedMarkdown = migratedLegacySchema
+                ? Testing.FlowMarkdown.ReplaceAuthoritativePayload(markdown, parsed.Flow) ?? markdown
+                : markdown;
+
             return JsonResponse(200, new
             {
                 ok = true,
                 name,
-                markdown,
+                markdown = normalizedMarkdown,
                 steps = parsed.Flow.Steps.Count,
-                warnings = validation.Warnings
+                warnings = migratedLegacySchema
+                    ? validation.Warnings.Concat([
+                        "Normalized a legacy schemaVersion payload in the loaded draft. Save the test to persist the migrated schema field."
+                    ])
+                    : validation.Warnings
             });
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DecoderFallbackException)
@@ -4422,6 +4431,7 @@ public sealed class InspectorServer : IDisposable
                 classificationToken,
                 currentCheckpoint = current,
                 repairAuthority = "human-approved-only",
+                repairValidationAvailable = _repairValidationAvailable,
             });
         }
         catch (Exception exception) when (IsAgentUnavailableException(exception))
@@ -4492,6 +4502,7 @@ public sealed class InspectorServer : IDisposable
             history,
             automaticApply = false,
             sourceWrite = false,
+            repairValidationAvailable = _repairValidationAvailable,
         });
     }
 
@@ -4547,6 +4558,7 @@ public sealed class InspectorServer : IDisposable
             proposal = result.Proposal,
             code = result.Code,
             error = result.Error,
+            repairValidationAvailable = _repairValidationAvailable,
         });
     }
 
@@ -4567,6 +4579,7 @@ public sealed class InspectorServer : IDisposable
             code = result.Code,
             error = result.Error,
             selectorOnly = result.Proposal?.Proposal.Patch?.SelectorOnly == true,
+            repairValidationAvailable = _repairValidationAvailable,
         });
     }
 
@@ -4589,6 +4602,7 @@ public sealed class InspectorServer : IDisposable
             history,
             code = result.Code,
             error = result.Error,
+            repairValidationAvailable = _repairValidationAvailable,
         });
     }
 
@@ -4636,6 +4650,7 @@ public sealed class InspectorServer : IDisposable
             code = recorded.Code,
             error = recorded.Error,
             flowChanged = false,
+            repairValidationAvailable = _repairValidationAvailable,
         });
     }
 
@@ -4681,6 +4696,7 @@ public sealed class InspectorServer : IDisposable
             history,
             code = issued.Code,
             error = issued.Error,
+            repairValidationAvailable = _repairValidationAvailable,
         });
     }
 
@@ -5041,10 +5057,23 @@ public sealed class InspectorServer : IDisposable
                 return JsonResponse(503, new { ok = false, error = "The selected agent did not return target status." });
 
             var target = services.Target;
+            var capabilities = services.GetCapabilities();
             return JsonResponse(200, new
             {
                 ok = true,
-                broker = services.GetCapabilities(),
+                broker = new
+                {
+                    schema = capabilities.Schema,
+                    supported = capabilities.Supported,
+                    requiresExplicitAgentInstance = capabilities.RequiresExplicitAgentInstance,
+                    requiresIdempotencyKey = capabilities.RequiresIdempotencyKey,
+                    capabilityTokenRequired = capabilities.CapabilityTokenRequired,
+                    states = capabilities.States,
+                    maxTimeoutMs = capabilities.MaxTimeoutMs,
+                    maxSteps = capabilities.MaxSteps,
+                    workflowCommandLedger = capabilities.WorkflowCommandLedger,
+                    repairValidationAvailable = _repairValidationAvailable,
+                },
                 target = new
                 {
                     agentId = target.AgentId,
@@ -5068,6 +5097,12 @@ public sealed class InspectorServer : IDisposable
                         agentInstanceId = target.AgentInstanceId,
                         appBuildFingerprint = SafeWorkbenchText(status.App?.Build),
                         route = SafeWorkbenchText(status.Route),
+                        window = SafeWorkbenchText(status.Window),
+                        modal = SafeWorkbenchText(status.Modal),
+                        locale = SafeWorkbenchText(status.Locale),
+                        theme = SafeWorkbenchText(status.Theme),
+                        orientation = SafeWorkbenchText(status.Orientation),
+                        displayProfile = SafeWorkbenchText(status.DisplayProfile),
                     },
                     capabilities = status.Capabilities,
                 },
@@ -5632,11 +5667,18 @@ public sealed class InspectorServer : IDisposable
                         AgentInstanceId = services.Target.AgentInstanceId,
                         AppBuildFingerprint = SafeWorkbenchText(status.App?.Build),
                         Route = SafeWorkbenchText(status.Route),
+                        Window = SafeWorkbenchText(status.Window),
+                        Modal = SafeWorkbenchText(status.Modal),
+                        Locale = SafeWorkbenchText(status.Locale),
+                        Theme = SafeWorkbenchText(status.Theme),
+                        Orientation = SafeWorkbenchText(status.Orientation),
+                        DisplayProfile = SafeWorkbenchText(status.DisplayProfile),
                     },
                     CheckedAt = DateTimeOffset.UtcNow,
                     EvidenceReference = "inspector-live-target",
                 },
             };
+            request.AvailableCapabilities = WorkflowRunCoordinator.BuildAvailableCapabilities(status);
             return WorkbenchRunRequestResult.Success(request);
         }
         catch (Exception exception) when (IsAgentUnavailableException(exception))
@@ -6754,7 +6796,7 @@ public sealed class InspectorServer : IDisposable
     {
         try
         {
-            var plan = await Evidence.EvidenceCapture.PreviewAsync(_client, ReadEvidenceRequest(body, includeWorkflow: false));
+            var plan = await Evidence.EvidenceCapture.PreviewAsync(_client, ReadEvidenceRequest(body, includeWorkflow: ReadBoolField(body, "includeWorkflow")));
             return Ok(Evidence.EvidenceJson.Serialize(new Evidence.EvidencePreviewResponse { Ok = true, Plan = plan }));
         }
         catch (Exception ex) when (IsAgentUnavailableException(ex))

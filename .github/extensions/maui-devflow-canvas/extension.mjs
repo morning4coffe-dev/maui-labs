@@ -33,6 +33,7 @@ function deviceOpts(input = {}) {
     input.projectRoot || input.workingDirectory || process.env.MAUI_DEVFLOW_PROJECT_ROOT;
   if (platform) o.platform = String(platform);
   if (device) o.device = String(device);
+  if (input.mutationLeaseId) o.mutationLeaseId = String(input.mutationLeaseId);
   if (projectRoot) o.projectRoot = String(projectRoot);
   if (agentPort) {
     const parsed = Number(agentPort);
@@ -60,7 +61,7 @@ let sharedSession = null;
 function ensure(instanceId, input = {}) {
   let st = instances.get(instanceId);
   if (!st) {
-    const store = new LiveStore(deviceOpts(input));
+    const store = new LiveStore(deviceOpts({ ...input, mutationLeaseId: instanceId }));
     const recorder = new Recorder();
     st = {
       store,

@@ -1352,6 +1352,14 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         {
             timeout = TimeSpan.FromMilliseconds(request.TimeoutMs.Value);
         }
+        if (request.DeadlineMs is { } deadlineMs)
+        {
+            if (deadlineMs <= 0)
+                return PreparedStart.Invalid(400, "deadlineMs must be a positive duration.");
+
+            timeout = TimeSpan.FromMilliseconds(
+                Math.Min(timeout.TotalMilliseconds, deadlineMs));
+        }
 
         var canonicalFlow = CanonicalizeFlow(flow);
         var clonedFlow = JsonSerializer.Deserialize(canonicalFlow, Testing.MauiFlowJsonContext.Default.MauiFlow);
@@ -1385,6 +1393,29 @@ internal sealed class WorkflowRunCoordinator : IDisposable
                 "The plan references a stale flow digest. Refresh or commit the matching flow and plan before replay.");
         }
 
+        var requirementErrors = new List<string>();
+        var requirementWarnings = new List<string>();
+        ValidatePlanExecutionRequirements(
+            request.Plan,
+            target,
+            request.AvailableCapabilities,
+            requirementErrors,
+            requirementWarnings);
+        if (requirementErrors.Count > 0)
+        {
+            return PreparedStart.Invalid(
+                409,
+                "The test plan requirements are not satisfied for the connected target.",
+                requirementErrors,
+                validation.Warnings
+                    .Concat(requirementWarnings)
+                    .Concat(admission.Reasons
+                        .Where(static reason => reason.Blocking != true)
+                        .Select(static reason => reason.Message ?? reason.Code ?? "Replay admission warning."))
+                    .ToArray(),
+                admission);
+        }
+
         var reproductionError = ValidateReproductionExpectation(
             request.ReproductionExpectation,
             target,
@@ -1399,6 +1430,7 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             ComputeSafetyDigest(safetyRequest),
             ComputeReproductionDigest(request.ReproductionExpectation));
         var warnings = validation.Warnings
+            .Concat(requirementWarnings)
             .Concat(admission.Reasons
                 .Where(static reason => reason.Blocking != true)
                 .Select(static reason => reason.Message ?? reason.Code ?? "Replay admission warning."))
@@ -1469,6 +1501,116 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         }
 
         return null;
+    }
+
+    private static void ValidatePlanExecutionRequirements(
+        Testing.MauiTestPlan? plan,
+        WorkflowRunTarget target,
+        Testing.MauiFlowCapabilitySet? available,
+        List<string> errors,
+        List<string> warnings)
+    {
+        if (plan is null)
+            return;
+
+        var actualPlatform = NormalizePlatformTag(target.Platform);
+        var requiredPlatforms = plan.RequiredPlatforms
+            .Where(static platform => !string.IsNullOrWhiteSpace(platform))
+            .Select(NormalizePlatformTag)
+            .Where(static platform => !string.IsNullOrWhiteSpace(platform))
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (requiredPlatforms.Length > 0)
+        {
+            if (string.IsNullOrWhiteSpace(actualPlatform))
+            {
+                errors.Add("requiredPlatforms are declared, but the connected target did not report a platform.");
+            }
+            else if (!requiredPlatforms.Contains(actualPlatform, StringComparer.Ordinal))
+            {
+                errors.Add(
+                    $"requiredPlatforms [{string.Join(", ", requiredPlatforms)}] do not include the connected platform '{target.Platform}'.");
+            }
+        }
+
+        var requirementValidation = Testing.MauiFlowRequirementValidator.Validate(plan.Requirements, available);
+        errors.AddRange(requirementValidation.Errors.Select(FormatRequirementViolation));
+        warnings.AddRange(requirementValidation.Warnings.Select(FormatRequirementViolation));
+    }
+
+    private static string FormatRequirementViolation(Testing.MauiFlowRequirementViolation violation)
+        => string.IsNullOrWhiteSpace(violation.Code)
+            ? violation.Message
+            : $"[{violation.Code}] {violation.Message}";
+
+    internal static Testing.MauiFlowCapabilitySet BuildAvailableCapabilities(AgentStatus? status)
+    {
+        var capabilities = new Testing.MauiFlowCapabilitySet();
+        AddCapability(capabilities, status?.Capabilities?.Ui == true, "ui", "agent.ui");
+        AddCapability(capabilities, "screenshots", status?.Capabilities?.Screenshots == true);
+        AddCapability(capabilities, status?.Capabilities?.WebView == true, "webview", "agent.webview");
+        AddCapability(capabilities, "network", status?.Capabilities?.Network == true);
+        AddCapability(capabilities, "logs", status?.Capabilities?.Logs == true);
+        AddCapability(capabilities, "sensors", status?.Capabilities?.Sensors == true);
+        AddCapability(capabilities, "storage", status?.Capabilities?.Storage == true);
+        AddCapability(capabilities, "profiler", status?.Capabilities?.Profiler == true);
+        AddCapability(capabilities, "jobs", status?.Capabilities?.Jobs == true);
+        AddCapability(capabilities, status?.Capabilities?.Theme == true, "theme", "app.theme", "agent.theme");
+        AddCapability(capabilities, status?.Capabilities?.Mutations == true, "mutations", "agent.mutations");
+        AddCapability(
+            capabilities,
+            status?.Capabilities?.WorkflowCommandLedger == true,
+            "workflowCommandLedger",
+            "agent.workflowCommandLedger");
+        return capabilities;
+    }
+
+    private static void AddCapability(
+        Testing.MauiFlowCapabilitySet available,
+        string name,
+        bool present)
+    {
+        if (!present)
+            return;
+
+        available.Capabilities.Add(new Testing.MauiFlowCapability
+        {
+            Name = name,
+            Version = 1,
+        });
+    }
+
+    private static void AddCapability(
+        Testing.MauiFlowCapabilitySet available,
+        bool present,
+        params string[] names)
+    {
+        if (!present)
+            return;
+
+        foreach (var name in names.Where(static value => !string.IsNullOrWhiteSpace(value)))
+        {
+            if (available.Capabilities.Any(capability => string.Equals(capability.Name, name, StringComparison.Ordinal)))
+                continue;
+
+            AddCapability(available, name, present: true);
+        }
+    }
+
+    private static string NormalizePlatformTag(string? value)
+    {
+        var normalized = value?.Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(normalized))
+            return string.Empty;
+
+        normalized = normalized.Replace('_', '-').Replace(' ', '-');
+        return normalized switch
+        {
+            "winui" or "windows" => "windows",
+            "ios-simulator" => "ios",
+            "mac-catalyst" => "maccatalyst",
+            _ => normalized,
+        };
     }
 
     private static bool HasNullFlowMembers(Testing.MauiFlow flow)
@@ -1836,8 +1978,10 @@ internal sealed class WorkflowRunStartRequest
     [JsonPropertyName("markdown")] public string? Markdown { get; set; }
     [JsonPropertyName("flow")] public Testing.MauiFlow? Flow { get; set; }
     [JsonPropertyName("timeoutMs")] public int? TimeoutMs { get; set; }
+    [JsonPropertyName("deadlineMs")] public int? DeadlineMs { get; set; }
     [JsonPropertyName("plan")] public Testing.MauiTestPlan? Plan { get; set; }
     [JsonPropertyName("context")] public Testing.MauiFlowRunContext? Context { get; set; }
+    [JsonPropertyName("availableCapabilities")] public Testing.MauiFlowCapabilitySet? AvailableCapabilities { get; set; }
     /// <summary>
     /// Optional host-supplied current-workspace fingerprints recorded with the newly executed
     /// local run. They are not imported evidence and do not grant proposal authority by themselves.

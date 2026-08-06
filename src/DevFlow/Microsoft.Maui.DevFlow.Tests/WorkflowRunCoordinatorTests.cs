@@ -141,6 +141,107 @@ public class WorkflowRunCoordinatorTests
     }
 
     [Fact]
+    public void Preflight_PlanRequirements_RejectsMismatchedPlatformMissingCapabilityAndUnsupportedSemantic()
+    {
+        var leases = new RecordingLeaseRegistry();
+        var executed = false;
+        var coordinator = new WorkflowRunCoordinator(
+            leases,
+            (_, _) =>
+            {
+                executed = true;
+                return Task.FromResult(PassingReport());
+            });
+        var request = Request("requirements", "requirements-key");
+        request.Plan = new MauiTestPlan
+        {
+            RequiredPlatforms = ["windows"],
+            Requirements = new MauiFlowRequirements
+            {
+                RequiredCapabilities =
+                [
+                    new MauiCapabilityRequirement { Name = "logs", Required = true },
+                ],
+                RequiredSemantics =
+                [
+                    new MauiRequiredSemantic { Name = "future.checkpoint.v9", Required = true },
+                ],
+            },
+        };
+        request.AvailableCapabilities = new MauiFlowCapabilitySet
+        {
+            Capabilities =
+            [
+                new MauiFlowCapability { Name = "ui", Version = 1 },
+            ],
+        };
+
+        var rejected = coordinator.Preflight(
+            request,
+            new WorkflowRunTarget("agent", "instance", 12345, "android", "Test app"),
+            static () => true);
+
+        Assert.False(rejected.Ok);
+        Assert.Equal(409, rejected.StatusCode);
+        Assert.Contains(rejected.Errors!, error => error.Contains("requiredPlatforms", StringComparison.Ordinal));
+        Assert.Contains(rejected.Errors!, error => error.Contains("[capability-missing]", StringComparison.Ordinal));
+        Assert.Contains(rejected.Errors!, error => error.Contains("[required-semantics-unsupported]", StringComparison.Ordinal));
+        Assert.Empty(leases.Actions);
+        Assert.False(executed);
+    }
+
+    [Fact]
+    public void Preflight_PlanRequirements_AllowsMatchingPlatformCapabilityAndSemantic()
+    {
+        var leases = new RecordingLeaseRegistry();
+        var executed = false;
+        var coordinator = new WorkflowRunCoordinator(
+            leases,
+            (_, _) =>
+            {
+                executed = true;
+                return Task.FromResult(PassingReport());
+            });
+        var request = Request("requirements-ok", "requirements-ok-key");
+        request.Plan = new MauiTestPlan
+        {
+            RequiredPlatforms = ["windows"],
+            Requirements = new MauiFlowRequirements
+            {
+                RequiredCapabilities =
+                [
+                    new MauiCapabilityRequirement { Name = "logs", Required = true },
+                ],
+                RequiredSemantics =
+                [
+                    new MauiRequiredSemantic { Name = "canonical-run", Required = true },
+                ],
+            },
+        };
+        request.AvailableCapabilities = new MauiFlowCapabilitySet
+        {
+            Capabilities =
+            [
+                new MauiFlowCapability { Name = "logs", Version = 1 },
+            ],
+            Semantics =
+            [
+                new MauiSupportedSemantic { Name = "canonical-run", Version = 1 },
+            ],
+        };
+
+        var admitted = coordinator.Preflight(
+            request,
+            new WorkflowRunTarget("agent", "instance", 12345, "windows", "Test app"),
+            static () => true);
+
+        Assert.True(admitted.Ok, admitted.Error);
+        Assert.Empty(admitted.Errors ?? Array.Empty<string>());
+        Assert.Empty(leases.Actions);
+        Assert.False(executed);
+    }
+
+    [Fact]
     public async Task Run_ProgressCallback_UpdatesCurrentStepAndBoundedCountsBeforeTerminalReport()
     {
         var progressRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -338,6 +439,33 @@ public class WorkflowRunCoordinatorTests
             });
 
         var start = coordinator.Start(Request("timeout", "timeout-key", timeoutMs: 25), Target(), static () => true);
+        var terminal = await WaitForTerminalAsync(coordinator, start);
+
+        Assert.Equal("timed-out", terminal.State);
+        Assert.Equal(MauiFlowFailureClasses.Timeout, terminal.Report!.Failure!.Class);
+    }
+
+    [Fact]
+    public async Task Start_TinyDeadlineCapsALongerRequestedTimeout()
+    {
+        var coordinator = new WorkflowRunCoordinator(
+            new RecordingLeaseRegistry(),
+            async (_, cancellationToken) =>
+            {
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return PassingReport();
+            },
+            new WorkflowRunCoordinatorOptions
+            {
+                DefaultTimeout = TimeSpan.FromMilliseconds(10),
+                MaximumTimeout = TimeSpan.FromSeconds(1),
+                HeartbeatInterval = TimeSpan.FromMilliseconds(5)
+            });
+
+        var start = coordinator.Start(
+            Request("deadline", "deadline-key", timeoutMs: 500, deadlineMs: 25),
+            Target(),
+            static () => true);
         var terminal = await WaitForTerminalAsync(coordinator, start);
 
         Assert.Equal("timed-out", terminal.State);
@@ -686,6 +814,7 @@ public class WorkflowRunCoordinatorTests
         string name,
         string idempotencyKey,
         int? timeoutMs = null,
+        int? deadlineMs = null,
         string agentId = "agent",
         string instanceId = "instance") => new()
     {
@@ -693,6 +822,7 @@ public class WorkflowRunCoordinatorTests
         AgentInstanceId = instanceId,
         IdempotencyKey = idempotencyKey,
         TimeoutMs = timeoutMs,
+        DeadlineMs = deadlineMs,
         Flow = new MauiFlow
         {
             Name = name,

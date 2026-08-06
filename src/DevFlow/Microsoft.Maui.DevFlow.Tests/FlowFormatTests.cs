@@ -179,6 +179,33 @@ public class FlowFormatTests
     }
 
     [Fact]
+    public void Parse_LegacySchemaVersion_NormalizesToIntegerSchema()
+    {
+        var result = FlowMarkdown.Parse("""
+            ```json maui-test
+            {"schemaVersion":1,"name":"legacy","steps":[{"seq":1,"action":"back"}]}
+            ```
+            """);
+
+        Assert.True(result.Ok, result.Error);
+        Assert.Equal(1, result.Flow!.Schema);
+        Assert.Single(result.Flow.Steps);
+    }
+
+    [Fact]
+    public void Parse_LegacySchemaVersionWithoutIntegerValue_FailsWithMigrationGuidance()
+    {
+        var result = FlowMarkdown.Parse("""
+            ```json maui-test
+            {"schemaVersion":"one","name":"legacy","steps":[{"seq":1,"action":"back"}]}
+            ```
+            """);
+
+        Assert.False(result.Ok);
+        Assert.Contains("Replace schemaVersion with schema", result.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void Serialize_RoundTrips()
     {
         var original = FlowMarkdown.Parse(SampleMd).Flow!;

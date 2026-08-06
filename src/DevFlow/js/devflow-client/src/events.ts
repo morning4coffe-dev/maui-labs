@@ -37,6 +37,8 @@ export interface EventStreamOptions {
   events?: string[];
   /** Capability recheck interval for polling-only agents. Default 60000ms. */
   unsupportedRetryMs?: number;
+  /** Steady-state inactivity watchdog for a connected socket. Default 60000ms. */
+  watchdogMs?: number;
 }
 
 /** Open a self-reconnecting event stream. Returns a handle with `close()`. */
@@ -44,6 +46,7 @@ export function openEventStream(opts: EventStreamOptions): EventStreamHandle {
   const { resolvePort, onEvent } = opts;
   const onStatus = opts.onStatus ?? (() => {});
   const subscribeEvents = opts.events && opts.events.length ? opts.events : ["all"];
+  const steadyStateWatchdogMs = Math.max(1, opts.watchdogMs ?? 60_000);
 
   let active = true;
   let socket: Socket | null = null;
@@ -51,12 +54,23 @@ export function openEventStream(opts: EventStreamOptions): EventStreamHandle {
   let backoff = 500;
   let reconnectTimer: NodeJS.Timeout | null = null;
   let reconnecting = false;
+  let watchdogTimer: NodeJS.Timeout | null = null;
+  let watchdogGeneration = 0;
+
+  const clearWatchdog = () => {
+    watchdogGeneration++;
+    if (watchdogTimer) {
+      clearTimeout(watchdogTimer);
+      watchdogTimer = null;
+    }
+  };
 
   const teardown = () => {
     if (reconnectTimer) {
       clearTimeout(reconnectTimer);
       reconnectTimer = null;
     }
+    clearWatchdog();
     try {
       socket?.destroy();
     } catch {
@@ -69,6 +83,21 @@ export function openEventStream(opts: EventStreamOptions): EventStreamHandle {
     }
     socket = null;
     req = null;
+  };
+
+  const armWatchdog = () => {
+    if (!active || !socket) return;
+    clearWatchdog();
+    const generation = watchdogGeneration;
+    watchdogTimer = setTimeout(() => {
+      if (!active || !socket || generation !== watchdogGeneration) return;
+      scheduleReconnect();
+    }, steadyStateWatchdogMs);
+  };
+
+  const noteActivity = () => {
+    if (!active || !socket) return;
+    armWatchdog();
   };
 
   const scheduleReconnect = () => {
@@ -199,6 +228,7 @@ export function openEventStream(opts: EventStreamOptions): EventStreamHandle {
       } catch {
         /* ignore */
       }
+      armWatchdog();
 
       const reader = new FrameReader({
         onMessage: (opcode, data) => {
@@ -213,6 +243,7 @@ export function openEventStream(opts: EventStreamOptions): EventStreamHandle {
           }
         },
         onPing: (payload) => {
+          noteActivity();
           try {
             socket?.write(encodeFrame(OPCODE.PONG, payload));
           } catch {
@@ -220,12 +251,15 @@ export function openEventStream(opts: EventStreamOptions): EventStreamHandle {
           }
         },
         onPong: () => {
-          /* no-op */
+          noteActivity();
         },
         onClose: () => scheduleReconnect(),
       });
 
-      socket.on("data", (chunk: Buffer) => reader.push(chunk));
+      socket.on("data", (chunk: Buffer) => {
+        noteActivity();
+        reader.push(chunk);
+      });
       socket.on("close", () => scheduleReconnect());
       socket.on("error", () => scheduleReconnect());
     });

@@ -7,6 +7,7 @@ export function renderRepairPanel(helpers) {
   const hasFailedRun = !!state.current?.report?.failure;
   const lifecycle = state.proposal?.state || proposal?.state || null;
   const canMutate = state.canMutate === true;
+  const validationAvailable = state.validationAvailable !== false;
   const reasons = Array.isArray(eligibility?.reasons) ? eligibility.reasons : [];
   const ambiguous = eligibility?.failureCode === 'locator-ambiguous' ||
     reasons.some((reason) => String(reason?.code || '').includes('locator-ambiguous'));
@@ -118,9 +119,16 @@ export function renderRepairPanel(helpers) {
       const preview = helpers.action(proposalCard, 'Review suggested update', () => repair?.preview?.());
       preview.classList.add('df-authoring-primary');
     } else if (lifecycle === 'previewed' && !(proposal.validationRunIds?.length)) {
-      const validate = helpers.action(proposalCard, 'Try this update', () => repair?.validate?.());
-      validate.classList.add('df-authoring-primary');
-      validate.disabled = !repair || !canMutate;
+      if (validationAvailable) {
+        const validate = helpers.action(proposalCard, 'Try this update', () => repair?.validate?.());
+        validate.classList.add('df-authoring-primary');
+        validate.disabled = !repair || !canMutate;
+      } else {
+        const unavailable = document.createElement('p');
+        unavailable.className = 'df-workbench-note';
+        unavailable.textContent = 'Transient validation is unavailable until a lifecycle-capable host is connected.';
+        proposalCard.append(unavailable);
+      }
     } else if (lifecycle === 'previewed' && proposal.validationRunIds?.length && !agentOriginated) {
       const approval = helpers.action(proposalCard, 'Approve update', () => repair?.requestApproval?.());
       approval.classList.add('df-authoring-primary');

@@ -663,6 +663,7 @@ export function createInspectorWorkbench(options = {}) {
 
   function open(tab = state.selectedTab, focus = true) {
     const firstOpen = !opened;
+    const focusGoalOnOpen = firstOpen && tab === 'plan' && state.selectedStage === 'goal';
     if (!opened) {
       if (pendingReturnFocus !== null) {
         win.clearTimeout(pendingReturnFocus);
@@ -684,6 +685,14 @@ export function createInspectorWorkbench(options = {}) {
     }
     if (focus) {
       win.setTimeout(() => {
+        if (focusGoalOnOpen) {
+          const goal = root.querySelector('#df-goal-input');
+          if (goal instanceof HTMLElement && goal.getClientRects().length > 0) {
+            goal.focus({ preventScroll: true });
+            goal.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
+            return;
+          }
+        }
         const target = tabs.find((button) => button.dataset.workbenchTab === state.selectedTab);
         target?.focus();
         target?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
@@ -769,58 +778,61 @@ export function createInspectorWorkbench(options = {}) {
       return;
     }
     if (trapFocus(event)) return;
-    if (isEditableTarget(event.target)) return;
-    if (!(event.ctrlKey || event.metaKey) || !event.altKey) {
-      if (opened && state.selectedTab === 'trace' && event.key === '[') {
-        event.preventDefault();
-        trace?.previousStep?.();
-        return;
-      }
-      if (opened && state.selectedTab === 'trace' && event.key === ']') {
-        event.preventDefault();
-        trace?.nextStep?.();
-      }
-      return;
-    }
     const key = event.key.toLowerCase();
-    if (key === 't') {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      toggle();
-      return;
-    }
-    const stageNumber = Number(key);
-    if (stageNumber >= 1 && stageNumber <= WORKBENCH_STAGES.length) {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      const stage = WORKBENCH_STAGES[stageNumber - 1];
-      const button = stageButtons.find((candidate) => candidate.dataset.workbenchStage === stage);
-      if (button?.disabled) {
-        setStatus(button.title);
+    if ((event.ctrlKey || event.metaKey) && event.altKey) {
+      if (key === 't') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        toggle();
         return;
       }
-      openStage(stage);
-      return;
-    }
-    if (key === 'r') {
-      event.preventDefault();
-      event.stopImmediatePropagation();
-      const runTab = tabs.find((button) => button.dataset.workbenchTab === 'run');
-      if (runTab?.disabled) {
-        setStatus(runTab.title);
+      const shortcutDigit = /^Digit([1-9])$/.test(event.code) || /^Numpad([1-9])$/.test(event.code)
+        ? event.code.slice(-1)
+        : key;
+      const stageNumber = Number(shortcutDigit);
+      if (stageNumber >= 1 && stageNumber <= WORKBENCH_STAGES.length) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const stage = WORKBENCH_STAGES[stageNumber - 1];
+        const button = stageButtons.find((candidate) => candidate.dataset.workbenchStage === stage);
+        if (button?.disabled) {
+          setStatus(button.title);
+          return;
+        }
+        openStage(stage);
         return;
       }
-      openStage('run');
-      run?.openPreflight?.();
-      setStatus('Run check opened. Review and explicitly approve before starting.');
+      if (key === 'r') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        const runTab = tabs.find((button) => button.dataset.workbenchTab === 'run');
+        if (runTab?.disabled) {
+          setStatus(runTab.title);
+          return;
+        }
+        openStage('run');
+        run?.openPreflight?.();
+        setStatus('Run check opened. Review and explicitly approve before starting.');
+        return;
+      }
+      if (key === 'c') {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        open('run');
+        run?.requestCancel?.();
+        setStatus('Cancellation confirmation opened. No run was changed yet.');
+      }
       return;
     }
-    if (key === 'c') {
+    if (isEditableTarget(event.target)) return;
+    if (opened && state.selectedTab === 'trace' && event.key === '[') {
       event.preventDefault();
-      event.stopImmediatePropagation();
-      open('run');
-      run?.requestCancel?.();
-      setStatus('Cancellation confirmation opened. No run was changed yet.');
+      trace?.previousStep?.();
+      return;
+    }
+    if (opened && state.selectedTab === 'trace' && event.key === ']') {
+      event.preventDefault();
+      trace?.nextStep?.();
     }
   }
 

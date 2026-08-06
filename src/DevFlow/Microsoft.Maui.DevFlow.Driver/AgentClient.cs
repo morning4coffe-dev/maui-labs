@@ -452,13 +452,25 @@ public class AgentClient : IDisposable
             : new SocketException((int)SocketError.ConnectionRefused);
     }
 
-    private static async Task<List<IPAddress>> ResolveLoopbackCandidatesAsync(string host, CancellationToken cancellationToken)
+    internal static async Task<List<IPAddress>> ResolveLoopbackCandidatesAsync(
+        string host,
+        CancellationToken cancellationToken,
+        Func<string, CancellationToken, Task<IPAddress[]>>? resolveHostAddressesAsync = null)
     {
+        if (IsLoopbackAlias(host))
+        {
+            var loopbackOnly = new List<IPAddress> { IPAddress.Loopback };
+            if (Socket.OSSupportsIPv6)
+                loopbackOnly.Add(IPAddress.IPv6Loopback);
+            return loopbackOnly;
+        }
+
+        resolveHostAddressesAsync ??= Dns.GetHostAddressesAsync;
         var ordered = new List<IPAddress>();
 
         try
         {
-            foreach (var address in await Dns.GetHostAddressesAsync(host, cancellationToken).ConfigureAwait(false))
+            foreach (var address in await resolveHostAddressesAsync(host, cancellationToken).ConfigureAwait(false))
             {
                 if ((address.AddressFamily == AddressFamily.InterNetwork
                         || address.AddressFamily == AddressFamily.InterNetworkV6)
@@ -468,7 +480,7 @@ public class AgentClient : IDisposable
         }
         catch (Exception ex) when (ex is (SocketException or OperationCanceledException) && !cancellationToken.IsCancellationRequested)
         {
-            // DNS lookup failed (unusual for "localhost") — fall through to the explicit loopbacks below.
+            // DNS lookup failed (unusual for non-loopback hosts) — fall through to the explicit loopbacks below.
         }
 
         // The built-in agent listens on IPv4 loopback. Keep all resolved candidates as fallbacks,
@@ -480,7 +492,6 @@ public class AgentClient : IDisposable
 
         return ordered;
     }
-
     private static string BuildLoopbackFailureMessage(List<Exception> failures)
         => "Could not connect to the DevFlow agent on any loopback address. "
             + string.Join("; ", failures.Select(f => f.Message));

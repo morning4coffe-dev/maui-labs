@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { existsSync } from "node:fs";
 import { DevflowDevice } from "../devflow.mjs";
+import { LiveStore } from "../store.mjs";
 
 // Minimal valid-enough PNG (8-byte signature + padding) to pass the adapter's magic check.
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0, 0, 0]);
@@ -17,6 +18,8 @@ let PORT = 0;
 const taps = [];
 const fills = [];
 const props = [];
+const leaseClaims = [];
+const resizeBodies = [];
 
 before(async () => {
   server = http.createServer((req, res) => {
@@ -45,14 +48,14 @@ before(async () => {
       });
     }
     if (req.method === "POST" && p === "/api/v1/agent/lease") {
-      return readBody((b) => json({
+      return readBody((b) => { leaseClaims.push(b.leaseId); return json({
         ok: true,
         allowed: true,
         youHold: true,
         heldByOther: false,
         leaseId: b.leaseId,
         authority: "agent",
-      }));
+      }); });
     }
     if (req.method === "GET" && p === "/api/v1/ui/tree") {
       return json([{ id: "root", type: "Page", fullType: "P", windowBounds: { x: 0, y: 0, width: 390, height: 844 }, children: [{ id: "btn", type: "Button", fullType: "B", automationId: "submit", text: "Go", windowBounds: { x: 0, y: 0, width: 1000, height: 2000 } }] }]);
@@ -67,8 +70,9 @@ before(async () => {
       return json({ id: decodeURIComponent(p.split("/").pop()), type: "Button", fullType: "B" });
     }
     if (req.method === "POST" && p === "/api/v1/ui/actions/tap") return readBody((b) => { taps.push(b.elementId); json({ success: true }); });
-    if (req.method === "POST" && p === "/api/v1/ui/actions/fill") return readBody((b) => { fills.push(b); json({ success: true }); });
-    if (req.method === "POST" && (p === "/api/v1/ui/actions/back" || p === "/api/v1/ui/actions/navigate" || p === "/api/v1/ui/actions/resize")) {
+    if (req.method === "POST" && p === "/api/v1/ui/actions/fill") return readBody((b) => { fills.push({ ...b, leaseId: req.headers["x-devflow-lease"] }); return json({ success: true }); });
+    if (req.method === "POST" && p === "/api/v1/ui/actions/resize") return readBody((b) => { resizeBodies.push(b); return json({ success: true }); });
+    if (req.method === "POST" && (p === "/api/v1/ui/actions/back" || p === "/api/v1/ui/actions/navigate")) {
       return readBody(() => json({ success: true }));
     }
     if (req.method === "GET" && p === "/api/v1/ui/screenshot") {
@@ -86,7 +90,7 @@ before(async () => {
 
 after(() => new Promise((r) => server.close(r)));
 
-const dev = () => new DevflowDevice({ brokerPort: PORT, agentPort: PORT, bootstrapBroker: "never" });
+const dev = () => new DevflowDevice({ brokerPort: PORT, agentPort: PORT, bootstrapBroker: "never", mutationLeaseId: "canvas-instance-1" });
 
 test("getRoots returns {ok, roots} and updates info.window", async () => {
   const d = dev();
@@ -184,5 +188,30 @@ test("logs parses JSON entries", async () => {
   assert.equal(r.ok, true);
   assert.equal(Array.isArray(r.data), true);
   assert.equal(r.data[0].message, "hi");
+  d.dispose();
+});
+test("fill refresh fill reuses one stable mutation lease id", async () => {
+  const store = new LiveStore({ brokerPort: PORT, agentPort: PORT, bootstrapBroker: "never", mutationLeaseId: "canvas-instance-1" });
+  leaseClaims.length = 0;
+  fills.length = 0;
+  await store.refresh();
+  const first = await store.fill({ id: "btn" }, "first");
+  assert.equal(first.ok, true);
+  await store.refresh();
+  const second = await store.fill({ id: "btn" }, "second");
+  assert.equal(second.ok, true);
+  assert.ok(leaseClaims.length >= 1);
+  assert.deepEqual([...new Set(leaseClaims)], ["canvas-instance-1"]);
+  assert.ok(fills.every((entry) => entry.leaseId === "canvas-instance-1"));
+  store.device.dispose();
+});
+
+test("fractional resize normalizes before transport and keeps the agent connection", async () => {
+  const d = dev();
+  resizeBodies.length = 0;
+  const result = await d.resize(400.4, 799.6);
+  assert.deepEqual(result, { ok: true });
+  assert.deepEqual(resizeBodies.at(-1), { width: 400, height: 800 });
+  assert.equal(d.whichPort(), PORT);
   d.dispose();
 });

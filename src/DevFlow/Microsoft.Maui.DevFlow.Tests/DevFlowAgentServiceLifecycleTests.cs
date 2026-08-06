@@ -268,6 +268,66 @@ public class DevFlowAgentServiceLifecycleTests
         Assert.Throws<InvalidOperationException>(() => new DevFlowAgentService(options));
     }
 
+    [Fact]
+    public async Task Tap_ShellItem_NavigatesSemanticallyViaHttp()
+    {
+        var port = GetFreePort();
+        using var service = new DevFlowAgentService(new AgentOptions { Port = port });
+        using var client = new AgentClient("localhost", port);
+
+        var shell = new Shell();
+        var nativeItem = BuildShellItem("Native", "native");
+        var dialogsItem = BuildShellItem("Dialogs", "dialogs");
+        shell.Items.Add(nativeItem);
+        shell.Items.Add(dialogsItem);
+        shell.CurrentItem = nativeItem;
+
+        var currentItemChanged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        shell.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(Shell.CurrentItem) && ReferenceEquals(shell.CurrentItem, dialogsItem))
+                currentItemChanged.TrySetResult();
+        };
+
+        var app = new TestApplication([shell]);
+#pragma warning disable CS0618
+        app.MainPage = shell;
+#pragma warning restore CS0618
+        service.StartServerOnly(new ImmediateDispatcher());
+        service.BindApp(app);
+
+        var shellItem = Assert.Single(await client.QueryAsync(type: "ShellItem", text: "Dialogs"));
+        Assert.Equal("ShellItem", shellItem.Type);
+        Assert.Equal("Microsoft.Maui.Controls.ShellItem", shellItem.FullType);
+
+        var tapTask = client.TapAsync(shellItem.Id);
+        await currentItemChanged.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(tapTask.IsCompleted);
+        Assert.True(await tapTask);
+        Assert.Same(dialogsItem, shell.CurrentItem);
+    }
+
+    private static ShellItem BuildShellItem(string title, string route)
+    {
+        var item = new ShellItem { Title = title, Route = route };
+        var section = new ShellSection { Title = title, Route = route };
+        section.Items.Add(new ShellContent
+        {
+            ContentTemplate = new DataTemplate(() => new ContentPage { Title = title }),
+        });
+        item.Items.Add(section);
+        return item;
+    }
+
+    private sealed class TestApplication(IEnumerable<IVisualTreeElement> children)
+        : Application, IVisualTreeElement
+    {
+        private readonly IReadOnlyList<IVisualTreeElement> _children = new List<IVisualTreeElement>(children);
+
+        IReadOnlyList<IVisualTreeElement> IVisualTreeElement.GetVisualChildren() => _children;
+
+        IVisualTreeElement? IVisualTreeElement.GetVisualParent() => null;
+    }
     private static async Task<AgentStatus?> WaitForStatusAsync(AgentClient client)
     {
         for (int i = 0; i < 10; i++)

@@ -392,6 +392,7 @@ body.df-show-all .devflow-element { outline: 1px solid var(--df-outline-all); }
 .df-dock-tab:hover, .df-panel-tab:hover { background: var(--df-surface-2); }
 .df-dock-tab.df-active, .df-panel-tab.df-active { background: var(--df-accent); color: var(--df-accent-fg); }
 .df-dock-meta { color: var(--df-muted); font-size: 11px; white-space: nowrap; margin-right: 4px; }
+.df-dock-meta-note { margin-right: 8px; }
 #df-dock-body { flex: 1 1 auto; overflow: auto; padding: 0 10px 8px; font: 12px var(--df-mono); }
 #df-dock-body .df-empty { color: var(--df-muted); padding: 12px; font-family: var(--df-font); }
 #df-dock-body table { border-collapse: collapse; width: 100%; font-size: 12px; }

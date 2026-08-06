@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   buildCaptureBody,
+  createEvidenceController,
   evidenceFileName,
   formatEvidencePlan,
 } from "../../../Cli/Microsoft.Maui.Cli/DevFlow/Inspector/Web/inspector-evidence.js";
@@ -107,4 +108,166 @@ test("the capture body carries only what the dialog confirmed", () => {
     { includeScreenshot: false },
   );
   assert.deepEqual(buildCaptureBody({}), { includeScreenshot: false });
+});
+
+
+test("evidence controller re-previews confirmed options, then requires a second confirmation", async () => {
+  const previewBodies = [];
+  const captureBodies = [];
+  const downloads = [];
+  const dialogs = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    captureBodies.push({ url, body: JSON.parse(options.body) });
+    return { ok: true, blob: async () => ({}) };
+  };
+
+  const makePlan = (body, suffix) => ({
+    source: "inspector",
+    formatVersion: 1,
+    redactionVersion: 1,
+    app: { name: "Sample App" },
+    platform: { name: "Windows" },
+    counts: { treeElements: 1 },
+    included: body.includeWorkflow
+      ? [
+          { name: "manifest.json", description: "Bundle description" },
+          { name: "workflow.md", description: "Loaded workflow steps" },
+          ...(body.includeScreenshot ? [{ name: "screenshot.png", description: "Captured screenshot" }] : []),
+        ]
+      : [
+          { name: "manifest.json", description: "Bundle description" },
+          ...(body.includeScreenshot ? [{ name: "screenshot.png", description: "Captured screenshot" }] : []),
+        ],
+    excluded: body.includeScreenshot || body.includeWorkflow
+      ? []
+      : [{ name: "screenshot.png", reason: "Screenshots are opt-in and were not requested." }],
+    neverIncluded: ["Element Text/Value content"],
+    screenshot: {
+      requested: !!body.includeScreenshot,
+      included: !!body.includeScreenshot,
+      omittedReason: body.includeScreenshot ? null : "Screenshots are opt-in and were not requested.",
+    },
+    suggestedFileName: `${suffix}.mauitrace`,
+    warnings: body.includeWorkflow || body.includeScreenshot
+      ? ["Final preview includes the opted-in capture surface."]
+      : ["Screenshots and workflow are omitted until you opt in."],
+  });
+
+  const api = {
+    async postDetailed(path, body) {
+      assert.equal(path, "/api/evidence/preview");
+      previewBodies.push(body);
+      return { body: { ok: true, plan: makePlan(body, previewBodies.length === 1 ? "initial" : "final") } };
+    },
+  };
+
+  try {
+    const controller = createEvidenceController({
+      basePath: "https://example.test",
+      api,
+      setStatus() {},
+      getSelectedId: () => "e1",
+      getWorkflow: () => "# Repro\n1. Tap",
+      showEvidenceDialog: async (view, options) => {
+        dialogs.push({ phase: "first", view, options });
+        assert.equal(options.hasWorkflow, true);
+        assert.equal(view.screenshotRequested, false);
+        assert.deepEqual(view.includes.map((entry) => entry.name), ["manifest.json"]);
+        assert.deepEqual(view.warnings, ["Screenshots and workflow are omitted until you opt in."]);
+        return { includeScreenshot: true, includeWorkflow: true };
+      },
+      showEvidenceFinalDialog: async (view, options) => {
+        dialogs.push({ phase: "final", view, options });
+        assert.equal(options.hasWorkflow, true);
+        assert.equal(view.screenshotRequested, true);
+        assert.deepEqual(view.includes.map((entry) => entry.name), ["manifest.json", "workflow.md", "screenshot.png"]);
+        assert.deepEqual(view.warnings, ["Final preview includes the opted-in capture surface."]);
+        assert.equal(view.fileName, "final.mauitrace");
+        return true;
+      },
+      downloadBlob: (blob, fileName) => downloads.push(fileName),
+    });
+
+    await controller.open();
+
+    assert.deepEqual(previewBodies, [
+      { includeScreenshot: false, includeWorkflow: false, elementId: "e1" },
+      { includeScreenshot: true, includeWorkflow: true, elementId: "e1", workflow: "# Repro\n1. Tap" },
+    ]);
+    assert.deepEqual(captureBodies, [
+      {
+        url: "https://example.test/api/evidence/capture",
+        body: { includeScreenshot: true, elementId: "e1", workflow: "# Repro\n1. Tap" },
+      },
+    ]);
+    assert.deepEqual(downloads, ["final.mauitrace"]);
+    assert.equal(dialogs.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("evidence controller cancels cleanly after the second confirmation", async () => {
+  const previewBodies = [];
+  const captureBodies = [];
+  const downloads = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (url, options) => {
+    captureBodies.push({ url, body: JSON.parse(options.body) });
+    return { ok: true, blob: async () => ({}) };
+  };
+
+  const makePlan = (body, suffix) => ({
+    source: "inspector",
+    formatVersion: 1,
+    redactionVersion: 1,
+    app: { name: "Sample App" },
+    platform: { name: "Windows" },
+    counts: { treeElements: 1 },
+    included: body.includeScreenshot
+      ? [{ name: "manifest.json", description: "Bundle description" }, { name: "screenshot.png", description: "Captured screenshot" }]
+      : [{ name: "manifest.json", description: "Bundle description" }],
+    excluded: body.includeScreenshot ? [] : [{ name: "screenshot.png", reason: "Screenshots are opt-in and were not requested." }],
+    neverIncluded: ["Element Text/Value content"],
+    screenshot: {
+      requested: !!body.includeScreenshot,
+      included: !!body.includeScreenshot,
+      omittedReason: body.includeScreenshot ? null : "Screenshots are opt-in and were not requested.",
+    },
+    suggestedFileName: `${suffix}.mauitrace`,
+    warnings: body.includeScreenshot ? ["Final preview includes the opted-in capture surface."] : ["Screenshots and workflow are omitted until you opt in."],
+  });
+
+  const api = {
+    async postDetailed(path, body) {
+      assert.equal(path, "/api/evidence/preview");
+      previewBodies.push(body);
+      return { body: { ok: true, plan: makePlan(body, previewBodies.length === 1 ? "initial" : "final") } };
+    },
+  };
+
+  try {
+    const controller = createEvidenceController({
+      basePath: "https://example.test",
+      api,
+      setStatus() {},
+      getSelectedId: () => "e1",
+      getWorkflow: () => null,
+      showEvidenceDialog: async () => ({ includeScreenshot: true, includeWorkflow: false }),
+      showEvidenceFinalDialog: async () => false,
+      downloadBlob: (blob, fileName) => downloads.push(fileName),
+    });
+
+    await controller.open();
+
+    assert.deepEqual(previewBodies, [
+      { includeScreenshot: false, includeWorkflow: false, elementId: "e1" },
+      { includeScreenshot: true, includeWorkflow: false, elementId: "e1" },
+    ]);
+    assert.deepEqual(captureBodies, []);
+    assert.deepEqual(downloads, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

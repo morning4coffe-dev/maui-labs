@@ -85,7 +85,7 @@ public partial class DevFlowAgentService
             BindingMode = binding?.Mode.ToString(),
             SourceType = extended?.Source?.GetType().FullName,
             ConverterType = binding?.Converter?.GetType().FullName,
-            SourceFile = sourceInfo?.SourceUri?.LocalPath,
+            SourceFile = GetBindingSourceFile(sourceInfo?.SourceUri),
             SourceLine = sourceInfo?.LineNumber,
             SourceColumn = sourceInfo?.LinePosition
         };
@@ -93,6 +93,13 @@ public partial class DevFlowAgentService
         _problemStore.Add(problem);
         ScheduleProblemsChanged();
     }
+
+    internal static string? GetBindingSourceFile(Uri? sourceUri)
+        => sourceUri is null
+            ? null
+            : sourceUri.IsAbsoluteUri
+                ? sourceUri.LocalPath
+                : sourceUri.OriginalString;
 
     private void ScheduleProblemsChanged()
     {

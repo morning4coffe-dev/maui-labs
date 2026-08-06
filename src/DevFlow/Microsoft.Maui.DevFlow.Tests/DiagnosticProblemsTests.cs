@@ -119,6 +119,15 @@ public class DiagnosticProblemsTests
         Assert.True(redacted.Length <= 2049);
     }
 
+    [Fact]
+    public void BindingSourceFile_RelativeUri_DoesNotUseLocalPath()
+    {
+        var source = DevFlowAgentService.GetBindingSourceFile(
+            new Uri("Pages/MainPage.xaml", UriKind.Relative));
+
+        Assert.Equal("Pages/MainPage.xaml", source);
+    }
+
     private static CoreDiagnosticProblem Problem(string id, DateTime timestamp)
         => new()
         {

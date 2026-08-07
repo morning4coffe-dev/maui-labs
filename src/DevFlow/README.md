@@ -327,7 +327,9 @@ clean result; native and Blazor collectors will progressively make them availabl
 Geometry the active collector cannot read is reported as `incomplete`, never as a pass, and every
 report carries per-rule `coverage`, explicit `limitations`, stable suppression fingerprints,
 source-aware element references, and immutable snapshot/revision metadata. Element text, values,
-and property dictionaries remain excluded by default.
+and property dictionaries remain excluded by default. Inspector suppressions are exact project
+entries under `layoutDiagnostics.suppressions` in `.mauidevflow`; user-wide suppressions can be
+placed in `~/.mauidevflow/layout-diagnostics.json`.
 
 **Performance triage** starts a new profiler session only when none is active; otherwise callers
 must attach read-only to the existing session, and only the creator may stop it. Stopping captures

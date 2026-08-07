@@ -71,6 +71,8 @@ public sealed partial class InspectorServer
             "/api/network/detail" => await HandleNetworkDetailAsync(request.Body),
             "/api/problems" => await HandleProblemsAsync(request.Body),
             "/api/diagnostics/layout" => await HandleLayoutDiagnosticsAsync(request.Body),
+            "/api/diagnostics/suppress" => await HandleLayoutSuppressionAsync(request.Body, remove: false),
+            "/api/diagnostics/unsuppress" => await HandleLayoutSuppressionAsync(request.Body, remove: true),
             "/api/performance/start" => await HandlePerformanceStartAsync(
                 request.Body,
                 leaseId,

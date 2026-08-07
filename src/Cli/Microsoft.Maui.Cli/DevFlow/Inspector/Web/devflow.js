@@ -3317,7 +3317,18 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   }
 
   function setLayoutCopilotSnapshot(report, findingId) {
-    const payload = createLayoutDataPayload(report, findingId);
+    const payload = createLayoutDataPayload(
+      report,
+      findingId,
+      findingId
+        ? null
+        : {
+            outcome: layoutOptions.outcome,
+            minimumSeverity: layoutOptions.minimumSeverity,
+            minimumConfidence: layoutOptions.minimumConfidence,
+            rule: layoutOptions.rule,
+            includeSuppressed: layoutOptions.includeSuppressed,
+          });
     const title = findingId ? 'Selected layout finding' : 'Layout diagnostics';
     recordDockSnapshot(
       'layout',
@@ -3515,6 +3526,33 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           await openSource();
         });
         actions.append(source);
+      }
+      if (finding.outcome !== 'pass' && finding.id) {
+        const suppression = elh('button', {
+          type: 'button',
+          text: finding.suppressed ? 'Unsuppress' : 'Suppress',
+        });
+        suppression.addEventListener('click', async (event) => {
+          event.stopPropagation();
+          suppression.disabled = true;
+          const endpoint = finding.suppressed
+            ? '/api/diagnostics/unsuppress'
+            : '/api/diagnostics/suppress';
+          const result = await apiPost(endpoint, {
+            findingId: finding.id,
+            reason: finding.suppressed ? null : 'Suppressed in DevFlow Inspector',
+          });
+          if (!result || result.ok === false) {
+            suppression.disabled = false;
+            setStatus((result && (result.error || result.message)) || 'The layout suppression policy could not be changed.');
+            return;
+          }
+          setStatus(finding.suppressed
+            ? 'Removed the exact project layout suppression.'
+            : 'Saved an exact layout suppression in .mauidevflow.');
+          await runLayoutScan(dockViewGeneration);
+        });
+        actions.append(suppression);
       }
       const copilot = elh('button', { type: 'button', text: 'Add to Copilot' });
       copilot.addEventListener('click', async (event) => {

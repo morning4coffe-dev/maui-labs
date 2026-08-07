@@ -242,14 +242,17 @@ export function formatLayoutReport(report, filters = null) {
 }
 
 /** Builds the bounded, text-safe payload offered through the Inspector's Copilot bridge. */
-export function createLayoutDataPayload(report, selectedFindingId = null) {
+export function createLayoutDataPayload(report, selectedFindingId = null, filters = null) {
   const allFindings = Array.isArray(report && report.findings) ? report.findings : [];
   const selected = selectedFindingId
     ? allFindings.find((finding) => String(finding && finding.id) === selectedFindingId)
     : null;
-  const view = formatLayoutReport(selected
-    ? { ...report, findings: [selected] }
-    : report);
+  const projectedFindings = selectedFindingId
+    ? (selected ? [selected] : [])
+    : filters
+      ? filterLayoutFindings(allFindings, filters)
+      : allFindings;
+  const view = formatLayoutReport({ ...report, findings: projectedFindings });
   const findings = selectedFindingId
     ? view.findings
     : view.findings.slice(0, 100);
@@ -284,7 +287,7 @@ export function createLayoutDataPayload(report, selectedFindingId = null) {
       suppressionReason: finding.suppressionReason,
       limitations: finding.limitations,
     })),
-    truncated: !selectedFindingId && allFindings.length > findings.length,
+    truncated: !selectedFindingId && projectedFindings.length > findings.length,
   };
 }
 

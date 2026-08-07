@@ -21,6 +21,8 @@ public class InspectorDiagnosticsRouteTests
     public void DiagnosticsRoutesAreTokenGated()
     {
         Assert.True(InspectorServer.IsTokenGatedPath("/api/diagnostics/layout"));
+        Assert.True(InspectorServer.IsTokenGatedPath("/api/diagnostics/suppress"));
+        Assert.True(InspectorServer.IsTokenGatedPath("/api/diagnostics/unsuppress"));
         Assert.True(InspectorServer.IsTokenGatedPath("/api/performance/start"));
         Assert.True(InspectorServer.IsTokenGatedPath("/api/performance/snapshot"));
         Assert.True(InspectorServer.IsTokenGatedPath("/api/performance/stop"));
@@ -31,6 +33,8 @@ public class InspectorDiagnosticsRouteTests
     {
         Assert.False(InspectorServer.IsMutation("/api/diagnostics/layout"));
         Assert.False(InspectorServer.IsBlockedDuringReplay("/api/diagnostics/layout"));
+        Assert.False(InspectorServer.IsMutation("/api/diagnostics/suppress"));
+        Assert.False(InspectorServer.IsBlockedDuringReplay("/api/diagnostics/suppress"));
     }
 
     [Fact]
@@ -108,6 +112,67 @@ public class InspectorDiagnosticsRouteTests
         finally
         {
             await inspector.StopAsync();
+        }
+    }
+
+    [Fact]
+    public async Task SuppressRoute_WritesAnExactProjectPolicyWithoutReplacingOtherConfig()
+    {
+        var projectRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"devflow-layout-policy-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(projectRoot);
+        var configPath = Path.Combine(projectRoot, ".mauidevflow");
+        await File.WriteAllTextAsync(
+            configPath,
+            """{"port":9223,"custom":{"keep":true}}""");
+
+        await using var agent = new FakeDiagnosticsAgent();
+        var port = FreePort();
+        var inspector = new InspectorServer(
+            port,
+            "127.0.0.1",
+            agent.Port,
+            embedToken: null,
+            agentId: null,
+            appName: null,
+            platform: null,
+            project: projectRoot,
+            sessionId: null);
+        inspector.Start();
+        try
+        {
+            using var http = CreateTokenClient(inspector);
+            var scan = await http.PostAsync(
+                $"http://127.0.0.1:{port}/api/diagnostics/layout",
+                Json("""{"schemaVersion":"2.0","rules":["layout.visible-zero-area"]}"""));
+            Assert.True(scan.IsSuccessStatusCode, await scan.Content.ReadAsStringAsync());
+
+            var suppress = await http.PostAsync(
+                $"http://127.0.0.1:{port}/api/diagnostics/suppress",
+                Json("""{"findingId":"layout.visible-zero-area:e1:area","reason":"Intentional test fixture"}"""));
+            var responseBody = await suppress.Content.ReadAsStringAsync();
+            Assert.True(suppress.IsSuccessStatusCode, responseBody);
+
+            using var config = JsonDocument.Parse(await File.ReadAllTextAsync(configPath));
+            Assert.Equal(9223, config.RootElement.GetProperty("port").GetInt32());
+            Assert.True(config.RootElement.GetProperty("custom").GetProperty("keep").GetBoolean());
+            var suppression = Assert.Single(
+                config.RootElement
+                    .GetProperty("layoutDiagnostics")
+                    .GetProperty("suppressions")
+                    .EnumerateArray());
+            Assert.Equal(
+                "layout.visible-zero-area:e1:area",
+                suppression.GetProperty("fingerprint").GetString());
+            Assert.Equal(
+                "Intentional test fixture",
+                suppression.GetProperty("reason").GetString());
+        }
+        finally
+        {
+            await inspector.StopAsync();
+            Directory.Delete(projectRoot, recursive: true);
         }
     }
 

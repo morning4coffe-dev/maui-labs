@@ -54,6 +54,9 @@ public sealed partial class InspectorServer : IDisposable
     private readonly XamlAutomationIdProposalService _xamlSourceProposalService;
     private readonly CSharpAutomationIdProposalService _csharpSourceProposalService;
     private readonly InspectorAlertController _alertController;
+    private readonly object _layoutDiagnosticsLock = new();
+    private LayoutInspectionResult? _latestLayoutDiagnostics;
+    private string? _layoutDiagnosticsPolicyStartPath;
     // Per-inspector read token gating the data tabs (Logs/Network/Preferences/Device/Sensors/
     // Files) — the app data these expose (tokens in network, secrets in prefs/logs) exceeds the
     // visible tree. Injected into the served page as a <meta>; devflow.js echoes it back in the
@@ -6826,7 +6829,7 @@ public sealed partial class InspectorServer : IDisposable
             or
         "/api/source" or "/api/persistProperty" or "/api/logs" or "/api/network" or "/api/network/detail" or "/api/problems" or "/api/preferences"
             or "/api/device" or "/api/sensors" or "/api/geolocation"
-            or "/api/diagnostics/layout"
+            or "/api/diagnostics/layout" or "/api/diagnostics/suppress" or "/api/diagnostics/unsuppress"
             or "/api/performance/start" or "/api/performance/snapshot" or "/api/performance/stop"
             or "/api/files/roots" or "/api/files/list"
             or "/api/flows/files/list" or "/api/flows/files/load" or "/api/flows/replay/evidence"
@@ -6950,15 +6953,25 @@ public sealed partial class InspectorServer : IDisposable
         request.Stability ??= new LayoutStabilityOptions();
         request.Occlusion ??= new LayoutOcclusionOptions();
         request.Privacy ??= new LayoutPrivacyOptions();
-        request.Suppressions ??= [];
         request.MaxElements ??= 2000;
 
         try
         {
+            var policyStartPath = await ResolveLayoutDiagnosticsPolicyStartPathAsync();
+            var policy = policyStartPath is null
+                ? LayoutDiagnosticsPolicyLoader.LoadUserPolicy()
+                : LayoutDiagnosticsPolicyLoader.Load(policyStartPath);
+            request.Suppressions = policy.Suppressions.ToList();
             var report = await _client.AnalyzeLayoutAsync(request, _lifetimeCts.Token);
-            return report is null
-                ? Ok("{\"ok\":false,\"error\":\"Layout diagnostics are not supported by the connected agent.\"}")
-                : Ok(JsonSerializer.Serialize(new { ok = true, report }, CamelCase));
+            if (report is null)
+                return Ok("{\"ok\":false,\"error\":\"Layout diagnostics are not supported by the connected agent.\"}");
+
+            lock (_layoutDiagnosticsLock)
+            {
+                _latestLayoutDiagnostics = report;
+                _layoutDiagnosticsPolicyStartPath = policyStartPath;
+            }
+            return Ok(JsonSerializer.Serialize(new { ok = true, report }, CamelCase));
         }
         catch (LayoutDiagnosticsException ex)
         {
@@ -6970,6 +6983,201 @@ public sealed partial class InspectorServer : IDisposable
                 retryable = ex.Retryable,
             });
         }
+        catch (InvalidOperationException ex)
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = ex.Message,
+                type = "LayoutDiagnosticsPolicyError",
+            });
+        }
+        catch (IOException ex)
+        {
+            return JsonResponse(503, new
+            {
+                ok = false,
+                error = ex.Message,
+                type = "LayoutDiagnosticsPolicyUnavailable",
+                retryable = true,
+            });
+        }
+    }
+
+    private async Task<string?> ResolveLayoutDiagnosticsPolicyStartPathAsync()
+    {
+        lock (_layoutDiagnosticsLock)
+        {
+            if (!string.IsNullOrWhiteSpace(_layoutDiagnosticsPolicyStartPath))
+                return _layoutDiagnosticsPolicyStartPath;
+        }
+
+        string? resolved = null;
+        if (!string.IsNullOrWhiteSpace(_project) && Path.IsPathFullyQualified(_project))
+        {
+            resolved = _project;
+        }
+        else
+        {
+            var workflowRoot = await ResolveWorkflowRootAsync();
+            resolved = workflowRoot is null ? null : Path.GetDirectoryName(workflowRoot);
+        }
+
+        lock (_layoutDiagnosticsLock)
+            _layoutDiagnosticsPolicyStartPath = resolved;
+        return resolved;
+    }
+
+    private async Task<(int, string, byte[])> HandleLayoutSuppressionAsync(
+        string? body,
+        bool remove)
+    {
+        var findingId = ReadStringField(body, "findingId");
+        var reason = ReadStringField(body, "reason");
+        if (string.IsNullOrWhiteSpace(findingId) || findingId.Length > 512)
+            return BadRequest("findingId is required and must be 512 characters or fewer");
+        if (reason is { Length: > 512 })
+            return BadRequest("reason must be 512 characters or fewer");
+
+        LayoutFinding? finding;
+        lock (_layoutDiagnosticsLock)
+        {
+            finding = _latestLayoutDiagnostics?.Findings.FirstOrDefault(candidate =>
+                candidate.Id.Equals(findingId, StringComparison.OrdinalIgnoreCase));
+        }
+        if (finding is null)
+            return JsonResponse(404, new { ok = false, error = "Finding not found. Rescan Layout and try again." });
+
+        var policyStartPath = await ResolveLayoutDiagnosticsPolicyStartPathAsync();
+        if (policyStartPath is null)
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = "The registered app project could not be resolved, so its .mauidevflow policy cannot be changed.",
+                type = "ProjectUnavailable",
+            });
+        }
+
+        var suppressionKey = string.IsNullOrWhiteSpace(finding.SuppressionKey)
+            ? finding.Id
+            : finding.SuppressionKey;
+        try
+        {
+            if (remove)
+            {
+                var userMatches = LayoutDiagnosticsPolicyLoader.LoadUserPolicy()
+                    .Suppressions
+                    .Where(suppression => LayoutDiagnosticsSuppressionMatcher.Matches(suppression, finding))
+                    .ToList();
+                try
+                {
+                    LayoutDiagnosticsPolicyLoader.UpdateProjectPolicy(
+                        policyStartPath,
+                        projectPolicy =>
+                        {
+                            var exact = projectPolicy.Suppressions
+                                .Where(suppression => suppression.Fingerprint?.Equals(
+                                    suppressionKey,
+                                    StringComparison.OrdinalIgnoreCase) == true)
+                                .ToList();
+                            var broad = projectPolicy.Suppressions
+                                .Where(suppression =>
+                                    suppression.Fingerprint?.Equals(
+                                        suppressionKey,
+                                        StringComparison.OrdinalIgnoreCase) != true &&
+                                    LayoutDiagnosticsSuppressionMatcher.Matches(suppression, finding))
+                                .ToList();
+                            if (exact.Count == 0 || broad.Count > 0 || userMatches.Count > 0)
+                            {
+                                var provenance = new List<string>();
+                                if (exact.Count > 0) provenance.Add("project-exact");
+                                if (broad.Count > 0) provenance.Add("project-broad");
+                                if (userMatches.Count > 0) provenance.Add("user");
+                                throw new LayoutSuppressionConflictException(provenance);
+                            }
+
+                            projectPolicy.Suppressions.RemoveAll(suppression =>
+                                suppression.Fingerprint?.Equals(
+                                    suppressionKey,
+                                    StringComparison.OrdinalIgnoreCase) == true);
+                        });
+                }
+                catch (LayoutSuppressionConflictException ex)
+                {
+                    return JsonResponse(409, new
+                    {
+                        ok = false,
+                        findingId,
+                        suppressed = true,
+                        projectRemovable = false,
+                        provenance = ex.Provenance,
+                        error = ex.Provenance.Count == 0
+                            ? "No exact project suppression exists for this finding."
+                            : "This finding is also suppressed by a user or broad project policy. Edit that policy to unsuppress it.",
+                    });
+                }
+            }
+            else
+            {
+                LayoutDiagnosticsPolicyLoader.UpdateProjectPolicy(
+                    policyStartPath,
+                    projectPolicy =>
+                    {
+                        if (projectPolicy.Suppressions.Any(suppression =>
+                            suppression.Fingerprint?.Equals(
+                                suppressionKey,
+                                StringComparison.OrdinalIgnoreCase) == true))
+                        {
+                            return;
+                        }
+
+                        projectPolicy.Suppressions.Add(new LayoutSuppression
+                        {
+                            Fingerprint = suppressionKey,
+                            Reason = string.IsNullOrWhiteSpace(reason)
+                                ? "Suppressed in DevFlow Inspector"
+                                : reason.Trim(),
+                        });
+                    });
+            }
+
+            lock (_layoutDiagnosticsLock)
+                _latestLayoutDiagnostics = null;
+            return JsonResponse(200, new
+            {
+                ok = true,
+                findingId,
+                suppressed = !remove,
+                projectRemovable = !remove,
+                provenance = remove ? Array.Empty<string>() : ["project-exact"],
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = ex.Message,
+                type = "LayoutDiagnosticsPolicyError",
+            });
+        }
+        catch (IOException ex)
+        {
+            return JsonResponse(503, new
+            {
+                ok = false,
+                error = ex.Message,
+                type = "LayoutDiagnosticsPolicyUnavailable",
+                retryable = true,
+            });
+        }
+    }
+
+    private sealed class LayoutSuppressionConflictException(
+        IReadOnlyList<string> provenance) : Exception
+    {
+        public IReadOnlyList<string> Provenance { get; } = provenance;
     }
 
     private async Task<(int, string, byte[])> HandlePerformanceStartAsync(

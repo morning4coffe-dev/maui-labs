@@ -41,6 +41,7 @@ namespace Microsoft.Maui.Cli.DevFlow;
 [JsonSerializable(typeof(LayoutInspectionRequest))]
 [JsonSerializable(typeof(LayoutInspectionResult))]
 [JsonSerializable(typeof(LayoutDiagnosticsReport))]
+[JsonSerializable(typeof(LayoutDiagnosticsPolicy))]
 [JsonSerializable(typeof(LayoutRuleCatalog))]
 [JsonSerializable(typeof(PerformanceSummary))]
 [JsonSerializable(typeof(PropertyMutationResponse))]

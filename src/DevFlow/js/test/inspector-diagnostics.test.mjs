@@ -182,6 +182,17 @@ test("layout Copilot payload excludes captured text while retaining structural e
   assert.doesNotMatch(JSON.stringify(payload), /private visible text/);
 });
 
+test("layout Copilot payload follows the active Data filters", () => {
+  const payload = createLayoutDataPayload(layoutReport, null, {
+    outcome: "incomplete",
+    minimumSeverity: "info",
+    minimumConfidence: "low",
+    includeSuppressed: false,
+  });
+
+  assert.deepEqual(payload.findings.map((finding) => finding.outcome), ["incomplete"]);
+});
+
 const performanceSummary = {
   session: { sessionId: "s1", active: true, sampleCount: 12, sampledDurationMs: 5000, sampleIntervalMs: 250 },
   memory: {

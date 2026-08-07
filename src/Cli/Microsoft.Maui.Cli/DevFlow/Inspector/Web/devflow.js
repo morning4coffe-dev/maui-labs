@@ -3,7 +3,7 @@
 import { createInspectorApi } from './inspector-api.js';
 import { confirmModal } from './inspector-dialog.js';
 import { createDataSnapshot, isSecretContextKey, supportsDataContextScope } from './inspector-data-context.js';
-import { createLayoutDataPayload, formatLayoutReport, formatPerformanceSummary } from './inspector-diagnostics.js';
+import { createLayoutDataPayload, diffLayoutReports, formatLayoutReport, formatPerformanceSummary } from './inspector-diagnostics.js';
 import { createEvidenceController } from './inspector-evidence.js';
 import { createAgentRequestController } from './inspector-agent-requests.js';
 import { createInspectorHostBridge } from './inspector-host-bridge.js';
@@ -1045,6 +1045,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         }
         if (!document.hidden && !replaying
           && (!type || ['treeChange', 'navigation', 'lifecycle', 'themeChange', 'alert'].includes(type))) {
+          scheduleLayoutLiveScan(175);
           scheduleRefresh(150);
         }
       };
@@ -2592,6 +2593,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   // Performance polling is deliberately slow and only runs while a session is recording, so the
   // tab never becomes a background load on the app it is measuring.
   const PERFORMANCE_POLL_MS = 3000;
+  const LAYOUT_LIVE_POLL_MS = 2000;
   let performanceRecording = false;
   let performanceOwned = false;
   let performanceBusy = false;
@@ -3211,6 +3213,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   let latestLayoutReport = null;
   let selectedLayoutFindingId = null;
   let layoutScanBusy = false;
+  let layoutScanPending = false;
+  let layoutLiveTimer = null;
   const layoutRuleSet = [
     'layout.element-clipped',
     'layout.element-outside-window',
@@ -3233,10 +3237,23 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     minimumConfidence: 'low',
     rule: '',
     includeSuppressed: false,
+    live: false,
   };
 
   function clearLayoutOverlays() {
     layoutOverlays?.replaceChildren();
+  }
+
+  function scheduleLayoutLiveScan(delay = 200) {
+    if (!layoutOptions.live ||
+        dockActiveTab !== 'layout' ||
+        dockEl.classList.contains('df-hidden') ||
+        document.hidden) return;
+    if (layoutLiveTimer) clearTimeout(layoutLiveTimer);
+    layoutLiveTimer = setTimeout(() => {
+      layoutLiveTimer = null;
+      runLayoutScan(dockViewGeneration);
+    }, delay);
   }
 
   function layoutRegionPoints(region) {
@@ -3434,6 +3451,19 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       layoutOptions.includeSuppressed = suppressed.checked;
       renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
     });
+    const live = elh('input', { type: 'checkbox' });
+    live.checked = layoutOptions.live;
+    live.addEventListener('change', () => {
+      layoutOptions.live = live.checked;
+      setStatus(layoutOptions.live
+        ? 'Live layout diagnostics enabled. Relevant UI changes will trigger read-only rescans.'
+        : 'Live layout diagnostics disabled.');
+      if (layoutOptions.live) scheduleLayoutLiveScan(0);
+      else if (layoutLiveTimer) {
+        clearTimeout(layoutLiveTimer);
+        layoutLiveTimer = null;
+      }
+    });
     const rescan = elh('button', {
       type: 'button',
       text: layoutScanBusy ? 'Scanning…' : 'Rescan',
@@ -3444,6 +3474,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       rule,
       elh('label', null, selectedScope, elh('span', { text: 'Selected subtree' })),
       elh('label', null, suppressed, elh('span', { text: 'Suppressed' })),
+      elh('label', null, live, elh('span', { text: 'Live' })),
       rescan);
     header.append(controls);
     fragment.append(header);
@@ -3594,7 +3625,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   }
 
   async function runLayoutScan(generation) {
-    if (layoutScanBusy) return;
+    if (layoutScanBusy) {
+      layoutScanPending = true;
+      return;
+    }
     const scopedElementId = layoutOptions.selectedScope ? selectedId : null;
     if (layoutOptions.selectedScope && !scopedElementId) {
       setStatus('Select an element before scanning its subtree.');
@@ -3602,9 +3636,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
 
     layoutScanBusy = true;
+    layoutScanPending = false;
     clearLayoutOverlays();
-    dockEmpty('Scanning layout…');
+    if (!latestLayoutReport) dockEmpty('Scanning layout…');
     let result = null;
+    const previous = latestLayoutReport;
     try {
       result = await apiPost('/api/diagnostics/layout', {
         schemaVersion: '2.0',
@@ -3628,8 +3664,18 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     } finally {
       layoutScanBusy = false;
     }
-    if (dockLoadIsCurrent('layout', generation))
+    if (dockLoadIsCurrent('layout', generation)) {
+      const delta = result && result.ok !== false && result.report
+        ? diffLayoutReports(previous, result.report)
+        : null;
       renderLayoutDiagnostics(result);
+      if (delta) {
+        setStatus(
+          `Layout updated: ${delta.added.length} added, ${delta.updated.length} changed, ${delta.removed.length} removed.`);
+      }
+    }
+    if (layoutScanPending)
+      scheduleLayoutLiveScan(0);
   }
 
   // ── Performance triage tab ──
@@ -3900,7 +3946,13 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   async function loadTab(name) {
     const generation = ++dockViewGeneration;
     dockActiveTab = name;
-    if (name !== 'layout') clearLayoutOverlays();
+    if (name !== 'layout') {
+      clearLayoutOverlays();
+      if (layoutLiveTimer) {
+        clearTimeout(layoutLiveTimer);
+        layoutLiveTimer = null;
+      }
+    }
     networkDetailId = null;
     clearDockSnapshot();
     for (const b of dockTabsEl.querySelectorAll('.df-dock-tab')) {
@@ -3949,6 +4001,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     syncPaneChrome();
   }
   function closeDock(restore = false, preserveLayoutOverlay = false) {
+    if (layoutLiveTimer) {
+      clearTimeout(layoutLiveTimer);
+      layoutLiveTimer = null;
+    }
     if (!preserveLayoutOverlay) clearLayoutOverlays();
     dockEl.classList.add('df-hidden');
     document.body.classList.remove('df-dock-open', 'df-dock-collapsed');
@@ -7149,6 +7205,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     const j = await apiPost('/api/performance/snapshot', {});
     if (dockLoadIsCurrent('performance', generation)) renderPerformance(j);
   }, PERFORMANCE_POLL_MS);
+
+  setInterval(() => {
+    if (layoutOptions.live) scheduleLayoutLiveScan(0);
+  }, LAYOUT_LIVE_POLL_MS);
 
   // ── Presence / single-writer coordination ──
   function renderWriterPresence() {

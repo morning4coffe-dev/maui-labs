@@ -144,6 +144,52 @@ export function filterLayoutFindings(findings, filters = {}) {
   });
 }
 
+function findingSignature(finding) {
+  return JSON.stringify({
+    ruleId: finding && finding.ruleId,
+    subtype: finding && finding.subtype,
+    outcome: finding && finding.outcome,
+    severity: finding && finding.severity,
+    confidence: finding && finding.confidence,
+    actionability: finding && finding.actionability,
+    elementId: finding && finding.element && finding.element.id,
+    relatedElements: (Array.isArray(finding && finding.relatedElements)
+      ? finding.relatedElements
+      : []).map((related) => [
+        related && related.relation,
+        related && related.element && related.element.id,
+      ]),
+    message: finding && finding.message,
+    suppressed: finding && finding.suppressed === true,
+  });
+}
+
+export function diffLayoutReports(previous, current) {
+  if (!current || !Array.isArray(current.findings)) return null;
+  const previousFindings = Array.isArray(previous && previous.findings) ? previous.findings : [];
+  const previousById = new Map(previousFindings
+    .filter((finding) => finding && finding.id)
+    .map((finding) => [String(finding.id), finding]));
+  const currentById = new Map(current.findings
+    .filter((finding) => finding && finding.id)
+    .map((finding) => [String(finding.id), finding]));
+  const added = [];
+  const updated = [];
+  const removed = [];
+
+  for (const [id, finding] of currentById) {
+    const old = previousById.get(id);
+    if (!old) added.push(finding);
+    else if (findingSignature(old) !== findingSignature(finding)) updated.push(finding);
+  }
+  for (const id of previousById.keys()) {
+    if (!currentById.has(id)) removed.push(id);
+  }
+
+  if (!added.length && !updated.length && !removed.length) return null;
+  return { added, updated, removed };
+}
+
 /** Builds the view model the Layout tab renders. Pure: no DOM, no network. */
 export function formatLayoutReport(report, filters = null) {
   const summary = (report && report.summary) || {};

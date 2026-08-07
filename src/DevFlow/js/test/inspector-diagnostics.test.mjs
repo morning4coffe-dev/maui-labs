@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   LAYOUT_FINDING_LIMIT,
   createLayoutDataPayload,
+  diffLayoutReports,
   filterLayoutFindings,
   formatLayoutReport,
   formatPerformanceSummary,
@@ -191,6 +192,28 @@ test("layout Copilot payload follows the active Data filters", () => {
   });
 
   assert.deepEqual(payload.findings.map((finding) => finding.outcome), ["incomplete"]);
+});
+
+test("layout report deltas distinguish added changed and removed findings", () => {
+  const previous = {
+    findings: [
+      { id: "kept", ruleId: "a", outcome: "violation", severity: "serious", message: "before" },
+      { id: "removed", ruleId: "b", outcome: "observation", severity: "minor" },
+    ],
+  };
+  const current = {
+    findings: [
+      { id: "kept", ruleId: "a", outcome: "violation", severity: "serious", message: "after" },
+      { id: "added", ruleId: "c", outcome: "incomplete", severity: "info" },
+    ],
+  };
+
+  const delta = diffLayoutReports(previous, current);
+
+  assert.deepEqual(delta.added.map((finding) => finding.id), ["added"]);
+  assert.deepEqual(delta.updated.map((finding) => finding.id), ["kept"]);
+  assert.deepEqual(delta.removed, ["removed"]);
+  assert.equal(diffLayoutReports(current, current), null);
 });
 
 const performanceSummary = {

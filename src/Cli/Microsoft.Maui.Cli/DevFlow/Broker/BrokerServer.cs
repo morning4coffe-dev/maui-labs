@@ -18,7 +18,7 @@ namespace Microsoft.Maui.Cli.DevFlow.Broker;
 /// Central broker daemon that manages agent registration and port assignment.
 /// Agents connect via WebSocket; CLI queries via HTTP.
 /// </summary>
-public class BrokerServer : IDisposable
+public partial class BrokerServer : IDisposable
 {
     public const int DefaultPort = 19223;
     public const int PortRangeStart = 10223;
@@ -197,6 +197,16 @@ public class BrokerServer : IDisposable
             if (context.Request.IsWebSocketRequest && path == "/ws/agent")
             {
                 await HandleAgentWebSocket(context);
+                return;
+            }
+
+            // WebSocket upgrade for the device video stream. Proxied rather than handed to the
+            // browser directly: the device host authenticates with a bearer token that a browser
+            // cannot attach to a WebSocket, and that we must never place in a page anyway. The
+            // proxy holds it server-side and the browser presents only the embed token.
+            if (context.Request.IsWebSocketRequest && path.Equals("/ws/video", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleDeviceVideoWebSocket(context);
                 return;
             }
 

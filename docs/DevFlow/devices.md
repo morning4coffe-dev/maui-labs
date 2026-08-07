@@ -293,6 +293,50 @@ Prefer a **precondition** over a device step wherever one exists. A flow that gr
 up front never sees the prompt, and a test that sets up its own environment is deterministic in a
 way that one tapping through a dialog is not.
 
+## Live video
+
+Where the device reports `liveStream`, the Inspector replaces the polled screenshot with decoded
+H.264 painted onto the stage backdrop. Three properties matter more than the picture:
+
+- **It never touches the agent.** Frames come from the device host through the broker's proxy, so
+  video costs the app nothing — and keeps arriving after the app has died, which is what makes the
+  crash-survival view live rather than frozen.
+- **It never drives the tree.** Frame cadence and tree cadence are separate. 50 frames a second
+  must not mean 50 visual-tree pulls a second, so the video path schedules no refreshes at all.
+- **It always degrades.** No WebCodecs, no `liveStream` capability, a refused upstream, a decoder
+  error — every one falls back to the screenshot path the Inspector was already using.
+
+### Why it is proxied
+
+The browser never connects to the device host. That host authenticates control clients with a
+bearer token, and a browser cannot attach headers to a WebSocket — nor should that token ever be
+placed in a page, a URL, or a DOM a framed document could read. The broker holds it server-side and
+the page presents only the embed token, which also keeps the broker the single front door.
+
+The proxy is **one-directional** on purpose: the video channel carries frames out and nothing in.
+Input travels the HTTP control path where the mutation lease arbitrates it. A socket that also
+accepted commands would be a second, unarbitrated way to drive the device.
+
+### Cadence
+
+While video is live the screenshot fetch is skipped entirely, because it is a stale duplicate of
+pixels the stream is already painting. Video therefore makes the Inspector *cheaper*: the frame
+half of every poll disappears and the tree half is unchanged.
+
+### Stream framing
+
+H.264 arrives as an Annex-B byte stream that aligns to neither WebSocket messages nor frames, so
+`inspector-video.js` reassembles it:
+
+- NAL units are split on 3- and 4-byte start codes, and the trailing bytes are returned as a **raw
+  remainder including its start code** so the caller can prepend it to the next chunk. Returning
+  the payload alone would make the reassembled buffer begin mid-unit and silently drop exactly the
+  frames that straddle a message boundary.
+- Parameter sets (SPS/PPS) are accumulated and emitted with the picture that follows them. Feeding
+  an SPS as if it were a frame produces a decoder that configures and then never outputs anything.
+- Frames before the first keyframe are discarded: a decoder started mid-stream has no reference
+  frames, so they would decode to garbage. This is why a stream takes a moment to appear.
+
 ## Implementation
 
 | Type | Responsibility |
@@ -302,6 +346,8 @@ way that one tapping through a dialog is not.
 | `MobileCanvasDeviceSurface` | Adapter over a locally installed device host |
 | `MobileCanvasHost` | File-based discovery of that host |
 | `DeviceCoordinateSpace` | The full coordinate chain, with round-trip guarantees |
+| `inspector-video.js` | Annex-B reassembly and WebCodecs decoding for the live stream |
+| `BrokerServer.Video.cs` | Authenticated one-directional video proxy |
 | `DeviceIdentity` / `DeviceIdentityMatcher` | Pairing an app agent to its device |
 | `DeviceIdentityProvider` | Agent-side self-reporting (Agent.Core, with platform overrides) |
 

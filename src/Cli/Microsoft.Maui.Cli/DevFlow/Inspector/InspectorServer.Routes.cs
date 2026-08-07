@@ -120,6 +120,7 @@ public sealed partial class InspectorServer
             ["/inspector-dialog.js"] = new("inspector-dialog.js", "application/javascript"),
             ["/inspector-data-context.js"] = new("inspector-data-context.js", "application/javascript"),
             ["/inspector-diagnostics.js"] = new("inspector-diagnostics.js", "application/javascript"),
+            ["/inspector-video.js"] = new("inspector-video.js", "application/javascript"),
             ["/inspector-evidence.js"] = new("inspector-evidence.js", "application/javascript"),
             ["/inspector-study.js"] = new("inspector-study.js", "application/javascript"),
             ["/inspector-agent-requests.js"] = new("inspector-agent-requests.js", "application/javascript"),

@@ -380,7 +380,21 @@ input.df-field[type="checkbox"] { width: auto; flex: 0 0 auto; }
   overflow: hidden;
 }
 #df-stage.df-device-stage #app-viewport { box-shadow: 0 0 0 1px var(--df-border-subtle); }
-#app-viewport { position: absolute; top: 0; left: 0; transform-origin: top left; }
+
+/* The live video sits behind everything on the stage. The tree overlay is drawn on
+   #app-viewport above it, so the substrate swaps from a polled screenshot to a stream without the
+   overlay renderer knowing anything happened. */
+#df-device-video {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  display: block; z-index: 0; pointer-events: none;
+  background: #000;
+}
+
+/* Once frames are arriving the screenshot is a stale duplicate of the same pixels, so hide it
+   rather than compositing two versions of the app on top of each other. */
+body.df-video-live #screenshot { visibility: hidden; }
+
+#app-viewport { position: absolute; top: 0; left: 0; transform-origin: top left; z-index: 1; }
 #screenshot { display: block; pointer-events: none; user-select: none; }
 body.df-mode-inspect #app-viewport { cursor: crosshair; }
 .df-hit-candidates { display: flex; flex: 0 0 auto; align-items: center; gap: 5px; overflow-x: auto;

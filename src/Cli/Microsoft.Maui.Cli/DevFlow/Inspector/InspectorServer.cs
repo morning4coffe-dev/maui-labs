@@ -927,6 +927,11 @@ public sealed partial class InspectorServer : IDisposable
                 cornerRadius = display?["cornerRadius"]?.GetValue<double?>(),
                 orientation = display?["orientation"]?.GetValue<string>(),
                 canTap = true,
+                // Only advertise a stream the device actually offers. A client that opened a
+                // socket the host will refuse would sit on a blank canvas instead of falling
+                // straight back to the screenshot it already had.
+                canStream = device?["capabilities"]?["liveStream"]?.GetValue<bool>() ?? false,
+                brokerPort = brokerPort.Value,
             };
         }
         catch

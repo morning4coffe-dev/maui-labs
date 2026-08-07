@@ -222,12 +222,77 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   let stageScale = 1;
 
   function setDeviceContext(ctx) {
+    const previous = deviceContext && deviceContext.deviceId;
     deviceContext = ctx && ctx.deviceId ? ctx : null;
     // Deliberately NOT cleared when a refresh fails: the device outlives the app, and the last
     // known context is what makes the app's death survivable rather than terminal.
     try {
       document.body.classList.toggle('df-device-live', hasDeviceLayer());
     } catch (e) { /* pre-body call during init */ }
+
+    // Restart the stream when the device changes; leave it alone otherwise so a routine poll does
+    // not tear down a live decoder.
+    if (deviceContext && deviceContext.deviceId !== previous) startDeviceVideo();
+    else if (!deviceContext) stopDeviceVideo();
+  }
+
+  // ── Live device video ──────────────────────────────────────────────────────────────────────
+  // Replaces the polled screenshot with decoded H.264 where the device can stream it. Two
+  // properties matter more than the picture itself:
+  //
+  //   * It never touches the agent. Frames come from the device host through the broker's proxy,
+  //     so video costs the app nothing AND keeps arriving after the app has died.
+  //   * It never drives the tree. Frame cadence and tree cadence stay separate — 50 frames a
+  //     second must not mean 50 visual-tree pulls a second, so nothing here schedules a refresh.
+  let videoSurface = null;
+  let videoCanvas = null;
+
+  function deviceVideoUrl() {
+    if (!deviceContext || !deviceContext.canStream || !deviceContext.brokerPort) return null;
+    const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
+    const params = new URLSearchParams({ deviceId: deviceContext.deviceId, fps: '30' });
+    // Encode only what the panel can actually show. A narrow side panel should not pay to encode
+    // a full 3x framebuffer.
+    const box = deviceScreenBox();
+    if (box && stage && stage.clientWidth > 0) {
+      params.set('scale', String(Math.min(1, Math.max(0.1, stage.clientWidth / box.width))));
+    }
+    return `${scheme}://localhost:${deviceContext.brokerPort}/ws/video?${params.toString()}`;
+  }
+
+  async function startDeviceVideo() {
+    stopDeviceVideo();
+    const url = deviceVideoUrl();
+    if (!url || !stage) return;
+
+    try {
+      const mod = await import(`${basePath}/inspector-video.js`);
+      if (!mod.isVideoSupported(window)) return;   // screenshots remain, silently
+
+      if (!videoCanvas) {
+        videoCanvas = document.createElement('canvas');
+        videoCanvas.id = 'df-device-video';
+        stage.insertBefore(videoCanvas, stage.firstChild);
+      }
+
+      videoSurface = new mod.DeviceVideoSurface({
+        url,
+        canvas: videoCanvas,
+        scope: window,
+        onFrame: () => document.body.classList.add('df-video-live'),
+        onUnavailable: () => stopDeviceVideo(),
+      });
+      videoSurface.start();
+    } catch (e) {
+      // Any failure here means the Inspector keeps doing exactly what it did before.
+      stopDeviceVideo();
+    }
+  }
+
+  function stopDeviceVideo() {
+    try { if (videoSurface) videoSurface.stop(); } catch (e) { /* already stopped */ }
+    videoSurface = null;
+    document.body.classList.remove('df-video-live');
   }
 
   function hasDeviceLayer() {
@@ -301,8 +366,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       // The device the app is running inside, when it is paired with one. Absent for desktop apps
       // and machines with no device host, in which case every device path stays disabled.
       setDeviceContext(state.device);
-      // Update screenshot without flash
-      if (screenshot && state.screenshotUrl) {
+      // Cadence split: while video is live the screenshot is a stale duplicate of pixels the
+      // stream is already painting, so skip the fetch entirely. This is why video makes the
+      // Inspector cheaper rather than more expensive — the frame half of every poll disappears
+      // and the tree half is unchanged.
+      if (screenshot && state.screenshotUrl && !document.body.classList.contains('df-video-live')) {
         screenshot.src = state.screenshotUrl;
       }
 

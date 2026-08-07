@@ -38,6 +38,12 @@ internal static class EvidenceFormat
     public const string ScreenshotEntry = "screenshot.png";
     public const string WorkflowEntry = "workflow.md";
 
+    /// <summary>
+    /// The device the app was running on. Optional and additive: it answers "what was this
+    /// actually running on?", which is otherwise guesswork when reading someone else's bundle.
+    /// </summary>
+    public const string DeviceEntry = "device.json";
+
     /// <summary>The complete set of entry names a bundle may contain (ordinal match, flat names only).</summary>
     public static readonly IReadOnlyList<string> AllowedEntries =
     [
@@ -50,6 +56,7 @@ internal static class EvidenceFormat
         NetworkEntry,
         ScreenshotEntry,
         WorkflowEntry,
+        DeviceEntry,
     ];
 
     // ── Capture-side bounds ──────────────────────────────────────────────────────────────────

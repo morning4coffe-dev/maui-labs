@@ -218,7 +218,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   // Everything about that second space lives here, beside toAppCoords, rather than being
   // recomputed in each pointer handler. Six handlers each doing their own arithmetic is how an
   // overlay ends up correct in portrait and subtly wrong in landscape.
-  let deviceContext = null; // { deviceId, screenWidth, screenHeight, originX, originY, canTap }
+  let deviceContext = null; // { deviceId, originX, originY, screenWidth, screenHeight, canTap }
+  let stageScale = 1;
 
   function setDeviceContext(ctx) {
     deviceContext = ctx && ctx.deviceId ? ctx : null;
@@ -257,14 +258,24 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
 
   // Sends a tap to the device rather than the app. Used only when the app cannot service it:
   // outside the window, under a foreign window, or with no agent attached at all.
+  //
+  // Takes APP-space coordinates and converts them; callers already in device-screen space use
+  // deviceTapScreen instead. Keeping both entry points here means the app→device conversion
+  // exists exactly once.
   async function deviceTap(appX, appY) {
     const point = toDeviceCoords(appX, appY);
     if (!point) {
       setStatus('The app window position on the device is unknown, so a device tap cannot be placed.');
       return false;
     }
+    return deviceTapScreen(point.x, point.y);
+  }
+
+  // Sends a tap at a point already in device-screen points.
+  async function deviceTapScreen(x, y) {
+    if (!isFinite(x) || !isFinite(y)) return false;
     try {
-      const url = `${basePath}/api/device/tap?x=${encodeURIComponent(point.x)}&y=${encodeURIComponent(point.y)}`;
+      const url = `${basePath}/api/device/tap?x=${encodeURIComponent(x)}&y=${encodeURIComponent(y)}`;
       const resp = await fetch(url, { method: 'POST' });
       const body = await resp.json().catch(() => null);
       if (!resp.ok || (body && body.success === false)) {
@@ -737,8 +748,34 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
   });
 
-  // ── Wheel → Scroll ──
-  let scrollAccumX = 0, scrollAccumY = 0;
+  // Clicks on the device screen OUTSIDE the app window. This is the surface the app does not own:
+  // the status bar, OS navigation, the soft keyboard, and any system dialog sitting on top. The
+  // app agent cannot see or reach any of it, so these go straight to the device.
+  //
+  // Bound to the stage rather than the viewport because the viewport IS the app window — a click
+  // that misses the app never reaches it.
+  if (stage) {
+    stage.addEventListener('click', async (e) => {
+      if (e.target !== stage) return;          // the viewport handles its own clicks
+      if (isDragging) return;
+      if (mode === 'inspect' || e.altKey || e.shiftKey) return;  // selection is an app concept
+      if (!hasDeviceLayer()) return;
+
+      const dev = deviceScreenBox();
+      if (!dev) return;
+
+      // Stage-local pixels back to device points. The stage is the device screen, so this is a
+      // plain unscale — no window origin involved, because we are already in screen space.
+      const rect = stage.getBoundingClientRect();
+      const s = stageScale > 0 ? stageScale : 1;
+      const x = (e.clientX - rect.left) / s;
+      const y = (e.clientY - rect.top) / s;
+
+      await deviceTapScreen(x, y);
+    });
+  }
+
+  // ── Wheel → Scroll ──  let scrollAccumX = 0, scrollAccumY = 0;
   let scrollFlushTimer = null;
   let lastScrollX = 0, lastScrollY = 0;
 
@@ -2825,7 +2862,30 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       frag.append(jsonView(value));
     }
     dockBodyEl.replaceChildren(frag);
+    appendDeviceLayerSection();
     recordDockSnapshot('device', 'Device snapshot', normalizedDevice, Object.keys(normalizedDevice).length);
+  }
+
+  // The Device tab already showed the device as the APP sees it — model, OS, battery,
+  // connectivity. This adds the device as the HOST sees it, in the same tab rather than a new
+  // one: they describe the same physical device from two vantage points, and splitting them
+  // across panels would be the "two tools" failure in miniature.
+  function appendDeviceLayerSection() {
+    if (!deviceContext) return;
+
+    const frag = document.createDocumentFragment();
+    frag.append(elh('div', { class: 'df-section-title', text: 'Device layer' }));
+
+    const box = deviceScreenBox();
+    frag.append(jsonView({
+      deviceId: deviceContext.deviceId,
+      screen: box ? `${Math.round(box.width)} x ${Math.round(box.height)} pt` : 'unknown',
+      appWindowOrigin: box ? `${Math.round(box.originX)}, ${Math.round(box.originY)}` : 'unknown',
+      orientation: deviceContext.orientation || 'unknown',
+      canTap: !!deviceContext.canTap,
+    }));
+
+    dockBodyEl.append(frag);
   }
 
   function renderSensors(j) {
@@ -6811,15 +6871,48 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     const dw = parseFloat(viewport.dataset.width) || viewport.offsetWidth || 1;
     const dh = parseFloat(viewport.dataset.height) || viewport.offsetHeight || 1;
     if (!stage || !vpWrap) return;
+
+    // The substrate. Without a device layer the stage IS the app window, exactly as before. With
+    // one, the stage becomes the device SCREEN and the app window is inset within it at its real
+    // origin — which is what gives the OS chrome, the soft keyboard, and system dialogs somewhere
+    // to exist. The overlay renderer is untouched: elements stay anchored to #app-viewport, which
+    // still means the app window.
+    const dev = deviceScreenBox();
+    const boxW = dev ? dev.width : dw;
+    const boxH = dev ? dev.height : dh;
+
     let s = 1;
     if (fitMode) {
       const availW = vpWrap.clientWidth, availH = vpWrap.clientHeight;
-      if (availW > 0 && availH > 0) s = Math.min(availW / dw, availH / dh, 1);
+      if (availW > 0 && availH > 0) s = Math.min(availW / boxW, availH / boxH, 1);
       if (!(s > 0) || !isFinite(s)) s = 1;
     }
     viewport.style.transform = s === 1 ? 'none' : ('scale(' + s + ')');
-    stage.style.width = (dw * s) + 'px';
-    stage.style.height = (dh * s) + 'px';
+    viewport.style.left = (dev ? dev.originX * s : 0) + 'px';
+    viewport.style.top = (dev ? dev.originY * s : 0) + 'px';
+    stage.style.width = (boxW * s) + 'px';
+    stage.style.height = (boxH * s) + 'px';
+    stage.classList.toggle('df-device-stage', !!dev);
+    if (dev && dev.cornerRadius > 0) {
+      stage.style.borderRadius = (dev.cornerRadius * s) + 'px';
+    } else {
+      stage.style.borderRadius = '';
+    }
+    stageScale = s;
+  }
+
+  // The device screen in app-logical units, or null when there is no usable device layer. Every
+  // field must be present and positive: a partial box would place the app window somewhere
+  // plausible and wrong, which is harder to notice than not drawing a device at all.
+  function deviceScreenBox() {
+    if (!deviceContext) return null;
+    const width = Number(deviceContext.screenWidth);
+    const height = Number(deviceContext.screenHeight);
+    const originX = Number(deviceContext.originX);
+    const originY = Number(deviceContext.originY);
+    if (!(width > 0) || !(height > 0)) return null;
+    if (!isFinite(originX) || !isFinite(originY)) return null;
+    return { width, height, originX, originY, cornerRadius: Number(deviceContext.cornerRadius) || 0 };
   }
   function scheduleScale() {
     if (scaleRaf) cancelAnimationFrame(scaleRaf);

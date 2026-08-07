@@ -578,6 +578,15 @@ public class BrokerServer : IDisposable
                     ["agentId"] = entry.AgentId,
                     ["agentPort"] = entry.AgentPort,
                     ["pairing"] = entry.MatchConfidence.ToString().ToLowerInvariant(),
+                    ["display"] = entry.Device.Display is null ? null : new JsonObject
+                    {
+                        ["pointWidth"] = entry.Device.Display.PointWidth,
+                        ["pointHeight"] = entry.Device.Display.PointHeight,
+                        ["scale"] = entry.Device.Display.Scale,
+                        ["orientation"] = entry.Device.Display.Orientation,
+                        ["cornerRadius"] = entry.Device.Display.CornerRadius,
+                        ["cornerCurve"] = entry.Device.Display.CornerCurve,
+                    },
                     ["capabilities"] = new JsonObject
                     {
                         ["tap"] = entry.Device.Capabilities.Tap,

@@ -2,6 +2,7 @@ using System.CommandLine;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Maui.Cli.DevFlow.Broker;
+using Microsoft.Maui.DevFlow.Devices;
 
 namespace Microsoft.Maui.Cli.DevFlow;
 
@@ -25,11 +26,92 @@ internal static class DeviceCommands
             "Inspect and control the emulators and simulators DevFlow can reach");
 
         devicesCommand.Add(CreateListCommand(jsonOption, noJsonOption, output));
+        devicesCommand.Add(CreateSetupCommand(jsonOption, noJsonOption, output));
         devicesCommand.Add(CreateControlCommand("boot", "Boot a device and wait until it is ready", jsonOption, noJsonOption, output));
         devicesCommand.Add(CreateControlCommand("shutdown", "Power a device off without erasing it", jsonOption, noJsonOption, output));
 
         return devicesCommand;
     }
+
+    /// <summary>
+    /// <c>maui devflow devices setup</c> — reports what the device layer needs, and how to get it.
+    /// <para>
+    /// This deliberately diagnoses rather than downloads. Silently fetching and executing a binary
+    /// on a developer's machine is not something a diagnostic command should do, so it names the
+    /// exact state and the exact next step and leaves the decision with the human.
+    /// </para>
+    /// </summary>
+    private static Command CreateSetupCommand(
+        Option<bool> jsonOption,
+        Option<bool> noJsonOption,
+        IDevFlowOutputWriter output)
+    {
+        var command = new Command("setup", "Check what the device layer needs on this machine");
+
+        command.SetAction(async (ctx, ct) =>
+        {
+            var isJson = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+
+            IDeviceSurface surface = MobileCanvasHost.IsPresent()
+                ? new MobileCanvasDeviceSurface()
+                : new NullDeviceSurface();
+
+            var health = await surface.GetHealthAsync(ct);
+            var (state, action) = DescribeSetup(health);
+
+            if (isJson)
+            {
+                output.WriteRawJson(JsonSerializer.Serialize(new JsonObject
+                {
+                    ["available"] = health.Available,
+                    ["state"] = health.Availability.ToString().ToLowerInvariant(),
+                    ["reason"] = health.Reason,
+                    ["hostVersion"] = health.Version,
+                    ["stateFile"] = MobileCanvasHost.StateFilePath,
+                    ["nextStep"] = action,
+                }));
+                return;
+            }
+
+            Console.WriteLine(state);
+            if (!string.IsNullOrWhiteSpace(action))
+                Console.WriteLine(action);
+        });
+
+        return command;
+    }
+
+    /// <summary>
+    /// Turns a health state into a description and an actionable next step. Each state gets a
+    /// different instruction on purpose: "not installed" and "installed but unusable" look
+    /// identical to a user but need opposite responses.
+    /// </summary>
+    private static (string State, string Action) DescribeSetup(DeviceHostHealth health) =>
+        health.Availability switch
+        {
+            DeviceHostAvailability.Available =>
+                ($"Device layer ready{(health.Version is null ? "" : $" (host {health.Version})")}.",
+                 "Run 'maui devflow devices list' to see what is available."),
+
+            DeviceHostAvailability.Absent =>
+                ("No device host is running, so emulator and simulator control is unavailable.",
+                 "Install and start the Mobile Canvas host, then run this again. "
+                 + "DevFlow works without it — only device-level control is affected."),
+
+            DeviceHostAvailability.NotResponding =>
+                ("A device host was registered but is not responding.",
+                 "It most likely crashed or was stopped. Start it again, then run this."),
+
+            DeviceHostAvailability.Unauthorized =>
+                ("The device host rejected DevFlow's control token.",
+                 "The host was probably restarted and reissued one. Restart it, then run this."),
+
+            DeviceHostAvailability.Incompatible =>
+                ($"The device host speaks a protocol this build does not support. {health.Reason}",
+                 "Update DevFlow or the device host so their major versions match."),
+
+            _ => ("The device layer state could not be determined.", ""),
+        };
 
     private static Command CreateListCommand(
         Option<bool> jsonOption,

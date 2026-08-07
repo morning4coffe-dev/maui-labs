@@ -910,11 +910,22 @@ public sealed partial class InspectorServer : IDisposable
             if (x is null || y is null)
                 return null;
 
+            // The device screen size is what lets the Inspector render the app window inset within
+            // the device rather than as the whole world. Without it the fallthrough has no pixels
+            // to fall through to, so the substrate stays app-only.
+            var display = device?["display"];
+            var screenWidth = display?["pointWidth"]?.GetValue<double>() ?? 0;
+            var screenHeight = display?["pointHeight"]?.GetValue<double>() ?? 0;
+
             return new
             {
                 deviceId,
                 originX = x.Value,
                 originY = y.Value,
+                screenWidth,
+                screenHeight,
+                cornerRadius = display?["cornerRadius"]?.GetValue<double?>(),
+                orientation = display?["orientation"]?.GetValue<string>(),
                 canTap = true,
             };
         }

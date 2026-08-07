@@ -52,13 +52,22 @@ public class DeviceCommandsTests
     }
 
     [Fact]
-    public void DevicesCommand_ExposesListBootAndShutdown()
+    public void DevicesCommand_ExposesTheDeviceLayerVerbs()
     {
         var devices = CreateDevicesCommand();
 
         var names = devices.Subcommands.Select(c => c.Name).OrderBy(n => n).ToArray();
 
-        Assert.Equal(["boot", "list", "shutdown"], names);
+        Assert.Equal(["boot", "list", "setup", "shutdown"], names);
+    }
+
+    [Fact]
+    public void SetupCommand_TakesNoArguments()
+    {
+        // It reports what this machine needs; there is nothing to point it at.
+        var setup = CreateDevicesCommand().Subcommands.Single(c => c.Name == "setup");
+
+        Assert.Empty(setup.Arguments);
     }
 
     [Fact]

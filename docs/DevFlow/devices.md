@@ -143,15 +143,37 @@ failed, so the highest-fidelity layer that can service the click is chosen autom
 The last row is what turns the disconnected overlay from a dead end into something usable: the
 agent dies with the app, but the device does not, so a click can still dismiss a crash dialog.
 
-> **Status.** The crash-survival row works today. The *outside the app window* row is implemented
-> but not yet reachable: the Inspector currently renders only the app window, so there is no pixel
-> a user can click that maps outside it. It becomes reachable with the substrate swap — rendering
-> the device screen around the inset app window — which is not built yet. The predicate and its
-> arithmetic are in place and tested so the swap does not have to revisit them.
+> **Status.** The crash-survival row works today. The *outside the app window* row works when the
+> device reports its screen size: the Inspector then renders the device screen as the substrate
+> with the app window inset at its real origin, so there are finally pixels outside the app to
+> click. Where a device does not report a display, the Inspector falls back to rendering the app
+> window alone and only the crash-survival row applies.
 
 Everything about the second coordinate space lives beside `toAppCoords` in `devflow.js` rather than
 being recomputed per handler — six handlers each doing their own arithmetic is exactly how an
 overlay ends up correct in portrait and subtly wrong in landscape.
+
+## The substrate
+
+`#df-stage` was always a scaling wrapper around `#app-viewport`. With a device layer it becomes the
+**device screen**, and the app window is inset within it at the origin the app reported:
+
+```
+#df-stage        ← the device screen (clicks here go to the device)
+  └ #app-viewport ← the app window, inset at (originX, originY)
+      └ elements  ← the MAUI overlay, unchanged
+```
+
+`HtmlRenderer` is untouched. Elements are still positioned relative to `#app-viewport`, which still
+means the app window, so `Fit`, `Bounds`, hover, selection, and hit candidates all keep working.
+
+## Hosts
+
+There is nothing per-host to wire. The browser, the VS Code webview, and the Copilot Canvas all
+embed the **same** broker-hosted inspector (`/inspector/{agentId}/`), so the substrate, the
+fallthrough, and the Device tab reach all three at once. That is the shared-inspector architecture
+paying for itself: a device picker or a capability flag implemented three times would be three
+chances to disagree.
 
 ## Degradation
 
@@ -206,13 +228,18 @@ device list and share one idea of which app is on which device.
 ### CLI
 
 ```bash
+maui devflow devices setup             # what the device layer needs on this machine
 maui devflow devices list              # devices, each paired with the app inside it
 maui devflow devices list --json
 maui devflow devices boot <device-id>
 maui devflow devices shutdown <device-id>
 ```
 
-`list` distinguishes its two empty states, because they need different actions from the reader:
+`setup` diagnoses rather than downloads — silently fetching and executing a binary is not something
+a diagnostic command should do — and gives each state a *different* instruction, because
+"not installed" and "installed but unusable" look identical to a user and need opposite responses.
+
+`list` distinguishes its two empty states, for the same reason:
 
 ```
 No device host is installed or running.            # install/start the host

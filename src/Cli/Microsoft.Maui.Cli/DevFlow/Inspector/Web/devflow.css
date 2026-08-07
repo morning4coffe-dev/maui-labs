@@ -371,6 +371,15 @@ input.df-field[type="checkbox"] { width: auto; flex: 0 0 auto; }
 /* ── Screenshot viewport (fit-to-container scaling via #df-stage) ── */
 #df-viewport-wrap { flex: 1 1 auto; min-width: 0; overflow: auto; position: relative; display: flex; align-items: safe center; justify-content: safe center; }
 #df-stage { position: relative; flex: none; }
+/* The stage becomes the device screen when a device layer is present. The app window is inset
+   within it, so the surrounding area is real estate the app does not own — OS chrome, the soft
+   keyboard, system dialogs — and clicking it goes to the device. */
+#df-stage.df-device-stage {
+  background: var(--df-surface-2);
+  box-shadow: inset 0 0 0 1px var(--df-border);
+  overflow: hidden;
+}
+#df-stage.df-device-stage #app-viewport { box-shadow: 0 0 0 1px var(--df-border-subtle); }
 #app-viewport { position: absolute; top: 0; left: 0; transform-origin: top left; }
 #screenshot { display: block; pointer-events: none; user-select: none; }
 body.df-mode-inspect #app-viewport { cursor: crosshair; }

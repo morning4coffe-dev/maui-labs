@@ -17,7 +17,7 @@ namespace Microsoft.Maui.Cli.DevFlow.Inspector;
 /// Generates an interactive HTML page representing the native app's visual tree
 /// and proxies interaction commands to the DevFlow agent.
 /// </summary>
-public sealed class InspectorServer : IDisposable
+public sealed partial class InspectorServer : IDisposable
 {
     private TcpListener? _listener;
     private CancellationTokenSource? _cts;
@@ -793,105 +793,8 @@ public sealed class InspectorServer : IDisposable
 
             return request.Method switch
             {
-                "GET" => request.Path switch
-                {
-                    "/" or "" => await HandleRootAsync(),
-                    "/api/state" => await HandleStateAsync(),
-                    "/api/eventSupport" => await HandleEventSupportAsync(),
-                    "/api/checkpoint/status" => HandleResumeCheckpointStatus(),
-                    "/api/flows/replay/evidence" => HandleReplayEvidenceDownload(),
-                    "/screenshot.png" => await HandleScreenshotAsync(request.Query.GetValueOrDefault("frame")),
-                    "/devflow.js" => HandleEmbeddedFile("devflow.js", "application/javascript"),
-                    "/inspector-api.js" => HandleEmbeddedFile("inspector-api.js", "application/javascript"),
-                    "/inspector-dialog.js" => HandleEmbeddedFile("inspector-dialog.js", "application/javascript"),
-                    "/inspector-data-context.js" => HandleEmbeddedFile("inspector-data-context.js", "application/javascript"),
-                    "/inspector-diagnostics.js" => HandleEmbeddedFile("inspector-diagnostics.js", "application/javascript"),
-                    "/inspector-evidence.js" => HandleEmbeddedFile("inspector-evidence.js", "application/javascript"),
-                    "/inspector-study.js" => HandleEmbeddedFile("inspector-study.js", "application/javascript"),
-                    "/inspector-agent-requests.js" => HandleEmbeddedFile("inspector-agent-requests.js", "application/javascript"),
-                    "/inspector-host-bridge.js" => HandleEmbeddedFile("inspector-host-bridge.js", "application/javascript"),
-                    "/inspector-workbench.js" => HandleEmbeddedFile("inspector-workbench.js", "application/javascript"),
-                    "/inspector-plan.js" => HandleEmbeddedFile("inspector-plan.js", "application/javascript"),
-                    "/inspector-steps.js" => HandleEmbeddedFile("inspector-steps.js", "application/javascript"),
-                    "/inspector-run.js" => HandleEmbeddedFile("inspector-run.js", "application/javascript"),
-                    "/inspector-trace.js" => HandleEmbeddedFile("inspector-trace.js", "application/javascript"),
-                    "/inspector-repair.js" => HandleEmbeddedFile("inspector-repair.js", "application/javascript"),
-                    "/inspector-improve.js" => HandleEmbeddedFile("inspector-improve.js", "application/javascript"),
-                    "/inspector-source.js" => HandleEmbeddedFile("inspector-source.js", "application/javascript"),
-                    "/inspector-properties.js" => HandleEmbeddedFile("inspector-properties.js", "application/javascript"),
-                    "/inspector-tree.js" => HandleEmbeddedFile("inspector-tree.js", "application/javascript"),
-                    "/devflow.css" => HandleEmbeddedFile("devflow.css", "text/css"),
-                    "/inspector-workbench.css" => HandleEmbeddedFile("inspector-workbench.css", "text/css"),
-                    _ => (404, "text/plain", Encoding.UTF8.GetBytes("Not Found"))
-                },
-                "POST" => request.Path switch
-                {
-                    "/api/tap" => await HandleProxyTapAsync(request.Body),
-                    "/api/scroll" => await HandleProxyScrollAsync(request.Body),
-                    "/api/gesture" => await HandleProxyGestureAsync(request.Body),
-                    "/api/back" => await HandleProxyBackAsync(),
-                    "/api/fill" => await HandleProxyFillAsync(request.Body),
-                    "/api/key" => await HandleProxyKeyAsync(request.Body),
-                    "/api/hitTest" => await HandleProxyHitTestAsync(request.Body),
-                    "/api/getProperties" => await HandleProxyGetPropertiesAsync(request.Body),
-                    "/api/getProperty" => await HandleProxyGetPropertyAsync(request.Body),
-                    "/api/setProperty" => await HandleProxySetPropertyAsync(request.Body),
-                    "/api/persistProperty" => await HandlePersistPropertyAsync(request.Body),
-                    "/api/navigate" => await HandleProxyNavigateAsync(request.Body),
-                    "/api/checkpoint" => await HandleCheckpointAsync(request.Body),
-                    "/api/checkpoint/save" => await HandleResumeCheckpointAsync("save"),
-                    "/api/checkpoint/restore" => await HandleResumeCheckpointAsync("restore"),
-                    "/api/checkpoint/clear" => HandleResumeCheckpointClear(),
-                    "/api/source" => await HandleSourceAsync(request.Body),
-                    "/api/flows/record/start" => await HandleFlowRecordStartAsync(request.Body),
-                    "/api/flows/record/step" => await HandleFlowRecordStepAsync(request.Body),
-                    "/api/flows/record/stop" => await HandleFlowRecordStopAsync(request.Body),
-                    "/api/flows/record/cancel" => await HandleFlowRecordCancelAsync(request.Body),
-                    "/api/flows/record/status" => await HandleFlowRecordStatusAsync(request.Body),
-                    "/api/flows/files/list" => await HandleFlowFilesListAsync(),
-                    "/api/flows/files/load" => await HandleFlowFileLoadAsync(request.Body),
-                    "/api/plans/list" => await HandlePlanListAsync(),
-                    "/api/plans/load" => await HandlePlanLoadAsync(request.Body),
-                    "/api/plans/validate" => await HandlePlanValidateAsync(request.Body),
-                    "/api/plans/save" => await HandlePlanSaveAsync(request.Body),
-                    "/api/flows/validate" => await HandleFlowValidateAsync(request.Body),
-                    "/api/flows/diff" => await HandleFlowDiffAsync(request.Body),
-                    "/api/flows/commit" => await HandleFlowCommitAsync(request.Body),
-                    "/api/flows/selector/verify" => await HandleSelectorVerifyAsync(request.Body),
-                    "/api/flows/assert/verify" => await HandleAssertionVerifyAsync(request.Body),
-                    "/api/flows/replay" => await HandleFlowReplayAsync(
-                        request.Body,
-                        leaseId,
-                        holderKind,
-                        holderLabel),
-                    "/api/logs" => await HandleLogsAsync(request.Body),
-                    "/api/network" => await HandleNetworkAsync(request.Body),
-                    "/api/network/detail" => await HandleNetworkDetailAsync(request.Body),
-                    "/api/problems" => await HandleProblemsAsync(request.Body),
-                    "/api/diagnostics/layout" => await HandleLayoutDiagnosticsAsync(request.Body),
-                    "/api/performance/start" => await HandlePerformanceStartAsync(
-                        request.Body,
-                        leaseId,
-                        holderKind,
-                        holderLabel),
-                    "/api/performance/snapshot" => await HandlePerformanceSnapshotAsync(),
-                    "/api/performance/stop" => await HandlePerformanceStopAsync(),
-                    "/api/evidence/preview" => await HandleEvidencePreviewAsync(request.Body),
-                    "/api/evidence/capture" => await HandleEvidenceCaptureAsync(request.Body),
-                    "/api/preferences" => await HandlePreferencesAsync(request.Body),
-                    "/api/device" => await HandleDeviceAsync(request.Body),
-                    "/api/sensors" => await HandleSensorsAsync(request.Body),
-                    "/api/geolocation" => await HandleGeolocationAsync(request.Body),
-                    "/api/files/roots" => await HandleFilesRootsAsync(request.Body),
-                    "/api/files/list" => await HandleFilesListAsync(request.Body),
-                    "/api/alerts" => await HandleAlertsAsync(),
-                    "/api/alerts/dismiss" => await HandleAlertDismissAsync(request.Body),
-                    "/api/cdp/webviews" => await HandleCdpWebViewsAsync(request.Body),
-                    "/api/cdp/source" => await HandleCdpSourceAsync(request.Body),
-                    "/api/cdp/eval" => await HandleCdpEvalAsync(request.Body),
-                    "/api/control" => await HandleControlAsync(request.Body, leaseId, holderKind, holderLabel),
-                    _ => (404, "text/plain", Encoding.UTF8.GetBytes("Not Found"))
-                },
+                "GET" => await HandleGetRouteAsync(request),
+                "POST" => await HandlePostRouteAsync(request, leaseId, holderKind, holderLabel),
                 _ => (405, "text/plain", Encoding.UTF8.GetBytes("Method Not Allowed"))
             };
         }
@@ -973,6 +876,114 @@ public sealed class InspectorServer : IDisposable
         });
 
         return (200, "application/json", Encoding.UTF8.GetBytes(json));
+    }
+
+    private async Task<(int, string, byte[])> HandleInspectSnapshotAsync()
+    {
+        var frame = await CreateFrameAsync();
+        if (frame.Tree.Count == 0 && frame.Png.Length == 0)
+        {
+            return JsonResponse(503, new
+            {
+                ok = false,
+                error = new
+                {
+                    code = "agent-unavailable",
+                    message = "The DevFlow agent is unavailable.",
+                    retriable = true
+                }
+            });
+        }
+
+        return JsonResponse(200, InspectorSnapshotService.Create(
+            frame.Id,
+            frame.CreatedUtc,
+            $"screenshot.png?frame={Uri.EscapeDataString(frame.Id)}",
+            frame.Tree,
+            frame.Width,
+            frame.Height,
+            frame.RootOffsetX,
+            frame.RootOffsetY,
+            _agentId,
+            _appName,
+            _platform));
+    }
+
+    private async Task<(int, string, byte[])> HandleInspectQueryAsync(string? body)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = new { code = "invalid-argument", message = "A query body is required.", retriable = false }
+            });
+        }
+
+        var type = ReadStringField(body, "type");
+        var automationId = ReadStringField(body, "automationId");
+        var text = ReadStringField(body, "text");
+        var selector = ReadStringField(body, "selector");
+        if (new[] { type, automationId, text, selector }.All(string.IsNullOrWhiteSpace))
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = new
+                {
+                    code = "invalid-argument",
+                    message = "Provide type, automationId, text, or selector.",
+                    retriable = false
+                }
+            });
+        }
+        if (new[] { type, automationId, text, selector }.Any(value => value?.Length > 1024))
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = new { code = "invalid-argument", message = "Query values cannot exceed 1024 characters.", retriable = false }
+            });
+        }
+        if (!string.IsNullOrWhiteSpace(selector) &&
+            new[] { type, automationId, text }.Any(value => !string.IsNullOrWhiteSpace(value)))
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = new
+                {
+                    code = "invalid-argument",
+                    message = "selector cannot be combined with type, automationId, or text.",
+                    retriable = false
+                }
+            });
+        }
+
+        List<ElementInfo> candidates;
+        try
+        {
+            candidates = !string.IsNullOrWhiteSpace(selector)
+                ? await _client.QueryCssAsync(selector)
+                : await _client.QueryAsync(type, automationId, text);
+        }
+        catch (InvalidOperationException)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = new { code = "invalid-argument", message = "The selector is invalid.", retriable = false }
+            });
+        }
+
+        var frame = await CreateFrameAsync();
+        return JsonResponse(200, new InspectorQueryResponse
+        {
+            Projection = "activeVisual",
+            SnapshotId = frame.Id,
+            Revision = frame.Id,
+            Elements = InspectorSnapshotService.FilterActiveMatches(frame.Tree, candidates)
+        });
     }
 
     private async Task<(int, string, byte[])> HandleEventSupportAsync()
@@ -1106,7 +1117,7 @@ public sealed class InspectorServer : IDisposable
                 var tree = await _client.GetTreeAsync();
                 var rootPageId = FindRootPageId(tree);
                 var (rootOffsetX, rootOffsetY) = GetRootPageOffset(tree, rootPageId);
-                var frameTree = SelectFrameTree(tree, rootPageId);
+                var frameTree = PageFilter.ProjectActiveVisualInPlace(SelectFrameTree(tree, rootPageId));
                 var screenshot = await GetCachedScreenshotAsync(rootPageId) ?? Array.Empty<byte>();
                 var (width, height) = screenshot.Length > 0 ? GetPngDimensions(screenshot) : (0, 0);
                 if (width <= 0 || height <= 0)
@@ -1339,13 +1350,72 @@ public sealed class InspectorServer : IDisposable
         using var doc = JsonDocument.Parse(body);
         var root = doc.RootElement;
 
-        var deltaX = root.TryGetProperty("deltaX", out var dxProp) ? dxProp.GetDouble() : 0;
-        var deltaY = root.TryGetProperty("deltaY", out var dyProp) ? dyProp.GetDouble() : 0;
+        var deltaX = 0d;
+        var deltaY = 0d;
+        if (root.TryGetProperty("deltaX", out var dxProperty) &&
+            (dxProperty.ValueKind != JsonValueKind.Number || !dxProperty.TryGetDouble(out deltaX)))
+        {
+            return BadRequest("deltaX must be a number");
+        }
+        if (root.TryGetProperty("deltaY", out var dyProperty) &&
+            (dyProperty.ValueKind != JsonValueKind.Number || !dyProperty.TryGetDouble(out deltaY)))
+        {
+            return BadRequest("deltaY must be a number");
+        }
+        var requestedElementId = root.TryGetProperty("elementId", out var elementIdProperty) &&
+            elementIdProperty.ValueKind == JsonValueKind.String
+            ? elementIdProperty.GetString()
+            : null;
+        int? itemIndex = null;
+        if (root.TryGetProperty("itemIndex", out var itemIndexProperty))
+        {
+            if (itemIndexProperty.ValueKind != JsonValueKind.Number ||
+                !itemIndexProperty.TryGetInt32(out var parsedItemIndex))
+            {
+                return BadRequest("itemIndex must be an integer");
+            }
+            itemIndex = parsedItemIndex;
+        }
+        var scrollToPosition = root.TryGetProperty("scrollToPosition", out var positionProperty) &&
+            positionProperty.ValueKind == JsonValueKind.String
+            ? positionProperty.GetString()
+            : null;
+        var animated = !root.TryGetProperty("animated", out var animatedProperty) ||
+            animatedProperty.ValueKind != JsonValueKind.False;
+        var hasX = root.TryGetProperty("x", out var xProperty);
+        var hasY = root.TryGetProperty("y", out var yProperty);
+        var validationError = ValidateInspectScrollArguments(
+            requestedElementId,
+            itemIndex,
+            scrollToPosition,
+            hasX,
+            hasY,
+            deltaX,
+            deltaY);
+        if (validationError is not null)
+            return BadRequest(validationError);
+
+        if (!string.IsNullOrWhiteSpace(requestedElementId) || itemIndex.HasValue || !string.IsNullOrWhiteSpace(scrollToPosition))
+        {
+            var success = await _client.ScrollAsync(
+                requestedElementId,
+                deltaX,
+                deltaY,
+                animated,
+                itemIndex: itemIndex,
+                scrollToPosition: scrollToPosition);
+            InvalidateScreenshotCache();
+            return success
+                ? (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true}"))
+                : (500, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false}"));
+        }
 
         // Coordinates are already in window space (translated client-side from the rendered frame).
-        if (root.TryGetProperty("x", out var xProp) && root.TryGetProperty("y", out var yProp))
+        if (hasX && hasY)
         {
-            var hitResult = await _client.HitTestAsync(xProp.GetDouble(), yProp.GetDouble());
+            if (xProperty.ValueKind != JsonValueKind.Number || yProperty.ValueKind != JsonValueKind.Number)
+                return BadRequest("x and y must be numbers");
+            var hitResult = await _client.HitTestAsync(xProperty.GetDouble(), yProperty.GetDouble());
             if (TryParseHitTestElements(hitResult, out var hitDoc, out var elements))
             {
                 using (hitDoc)
@@ -1364,6 +1434,7 @@ public sealed class InspectorServer : IDisposable
                                 return (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true}"));
                             }
                         }
+
                     }
                 }
             }
@@ -1377,6 +1448,38 @@ public sealed class InspectorServer : IDisposable
                 ? (200, "application/json", Encoding.UTF8.GetBytes("{\"ok\":true}"))
                 : (500, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false}"));
         }
+    }
+
+    internal static string? ValidateInspectScrollArguments(
+        string? elementId,
+        int? itemIndex,
+        string? scrollToPosition,
+        bool hasX,
+        bool hasY,
+        double deltaX,
+        double deltaY)
+    {
+        if (hasX != hasY)
+            return "x and y must be provided together";
+        if (hasX && (!string.IsNullOrWhiteSpace(elementId) ||
+            itemIndex.HasValue ||
+            !string.IsNullOrWhiteSpace(scrollToPosition)))
+        {
+            return "coordinate scrolling cannot be combined with element or item scrolling";
+        }
+        if (itemIndex is < 0 or > 1_000_000)
+            return "itemIndex must be between 0 and 1000000";
+        if (!string.IsNullOrWhiteSpace(scrollToPosition) &&
+            scrollToPosition.ToLowerInvariant() is not ("start" or "center" or "end" or "makevisible"))
+        {
+            return "scrollToPosition must be Start, Center, End, or MakeVisible";
+        }
+        if (!double.IsFinite(deltaX) || !double.IsFinite(deltaY) ||
+            Math.Abs(deltaX) > 1_000_000 || Math.Abs(deltaY) > 1_000_000)
+        {
+            return "scroll deltas are outside the supported range";
+        }
+        return null;
     }
 
     private async Task<(int, string, byte[])> HandleProxyGestureAsync(string? body)

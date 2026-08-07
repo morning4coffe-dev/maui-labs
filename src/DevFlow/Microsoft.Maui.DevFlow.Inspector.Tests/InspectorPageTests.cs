@@ -869,7 +869,7 @@ public class InspectorPageTests : IAsyncLifetime
             resultsTabBox.X + resultsTabBox.Width <= tabListBox.X + tabListBox.Width + 1,
             "The focused Results tab should scroll fully into view.");
         await _page.Locator("#df-workbench-panel-trace .df-trace-import summary").ClickAsync();
-        await Expect(_page.Locator("#df-workbench-panel-trace")).ToContainTextAsync("does not support a bounded native trace picker");
+        await Expect(_page.Locator("#df-workbench-panel-trace")).ToContainTextAsync("This host cannot pick trace artifacts. The Inspector will use its own file picker instead.");
         await Expect(_page.Locator("#df-workbench-panel-trace")).ToContainTextAsync("Choose result file");
     }
 
@@ -1441,7 +1441,8 @@ public class InspectorPageTests : IAsyncLifetime
         await _page.GotoAsync(BaseUrl);
         await Expect(_page.Locator(".devflow-element").First).ToBeAttachedAsync();
 
-        Assert.Equal("wide", await _page.Locator("body").GetAttributeAsync("data-host-layout"));
+        Assert.Equal("wide", await _page.Locator("body").GetAttributeAsync("data-layout-width"));
+        Assert.Equal("tall", await _page.Locator("body").GetAttributeAsync("data-layout-height"));
         await Expect(_page.Locator("#df-toolbar-secondary")).ToBeVisibleAsync();
         await _page.Locator(".df-tree-node").Last.ClickAsync();
         await Expect(_page.Locator("#df-props-pane")).ToBeVisibleAsync();
@@ -1450,7 +1451,7 @@ public class InspectorPageTests : IAsyncLifetime
 
         await _page.SetViewportSizeAsync(1200, 820);
         await _page.WaitForTimeoutAsync(100);
-        Assert.Equal("compact", await _page.Locator("body").GetAttributeAsync("data-host-layout"));
+        Assert.Equal("compact", await _page.Locator("body").GetAttributeAsync("data-layout-width"));
         await _page.Locator(".df-tree-node").Last.ClickAsync();
         await Expect(_page.Locator("#df-props-pane")).ToBeVisibleAsync();
         await Expect(_page.Locator("#df-tree-pane")).ToBeVisibleAsync();
@@ -1465,8 +1466,66 @@ public class InspectorPageTests : IAsyncLifetime
 
         await _page.SetViewportSizeAsync(700, 450);
         await _page.WaitForTimeoutAsync(100);
-        Assert.Equal("short", await _page.Locator("body").GetAttributeAsync("data-host-layout"));
+        Assert.Equal("narrow", await _page.Locator("body").GetAttributeAsync("data-layout-width"));
+        Assert.Equal("short", await _page.Locator("body").GetAttributeAsync("data-layout-height"));
         Assert.True(await _page.Locator("body").EvaluateAsync<bool>("body => body.classList.contains('df-tree-hidden')"));
+    }
+
+    /// <summary>
+    /// Width and height are independent axes. A wide but short window has ample horizontal room, so
+    /// it must keep its tree docked and give up only vertical chrome.
+    /// </summary>
+    [LiveInspectorFact]
+    public async Task ShortViewportKeepsTreeDockedWhenThereIsHorizontalRoom()
+    {
+        await _page.SetViewportSizeAsync(1920, 500);
+        await _page.GotoAsync(BaseUrl);
+        await Expect(_page.Locator(".devflow-element").First).ToBeAttachedAsync();
+
+        Assert.Equal("wide", await _page.Locator("body").GetAttributeAsync("data-layout-width"));
+        Assert.Equal("short", await _page.Locator("body").GetAttributeAsync("data-layout-height"));
+        Assert.False(
+            await _page.Locator("body").EvaluateAsync<bool>("body => body.classList.contains('df-tree-hidden')"),
+            "A wide-but-short viewport has room for a docked tree and must not collapse it to a drawer.");
+        await Expect(_page.Locator("#df-tree-pane")).ToBeVisibleAsync();
+    }
+
+    /// <summary>
+    /// Layout is a pure function of geometry. The same viewport must produce the same layout no
+    /// matter which surface is embedding the Inspector.
+    /// </summary>
+    [LiveInspectorFact]
+    public async Task LayoutIsIdenticalAcrossHostIdentitiesAtTheSameGeometry()
+    {
+        await _page.SetViewportSizeAsync(800, 820);
+        await _page.GotoAsync(BaseUrl);
+        await Expect(_page.Locator(".devflow-element").First).ToBeAttachedAsync();
+
+        var baseline = await _page.Locator("body").GetAttributeAsync("data-layout-width");
+        Assert.Equal("compact", baseline);
+
+        foreach (var (hostId, surface) in new[]
+        {
+            ("vscode", "editor"),
+            ("canvas", "side-panel"),
+            ("browser", "browser"),
+        })
+        {
+            await _page.EvaluateAsync(
+                @"([hostId, surface]) => window.postMessage({
+                    type: 'devflow:host',
+                    v: 1,
+                    bridgeId: null,
+                    hostId,
+                    hostLabel: hostId,
+                    capabilities: [],
+                    profile: { surface },
+                }, '*')",
+                new[] { hostId, surface });
+            await _page.WaitForTimeoutAsync(60);
+
+            Assert.Equal(baseline, await _page.Locator("body").GetAttributeAsync("data-layout-width"));
+        }
     }
 
     [LiveInspectorFact]
@@ -1571,7 +1630,7 @@ public class InspectorPageTests : IAsyncLifetime
     {
         await _page.SetViewportSizeAsync(260, 820);
         await _page.GotoAsync(BaseUrl);
-        await Expect(_page.Locator("body")).ToHaveAttributeAsync("data-host-layout", "narrow");
+        await Expect(_page.Locator("body")).ToHaveAttributeAsync("data-layout-width", "narrow");
 
         foreach (var (selector, label) in new[]
         {
@@ -3530,7 +3589,7 @@ public class InspectorPageTests : IAsyncLifetime
                     type: 'devflow:host',
                     v: 1,
                     bridgeId: 'test-bridge',
-                    hostKind: 'test-host',
+                    hostId: 'test-host',
                     capabilities: ['copilotContext', 'workflowFilePicker']
                   }, '*');
                 } else if (d.type === 'devflow:attachCopilot') {
@@ -3647,7 +3706,7 @@ public class InspectorPageTests : IAsyncLifetime
                     type: 'devflow:host',
                     v: 1,
                     bridgeId: 'test-bridge',
-                    hostKind: 'test-host',
+                    hostId: 'test-host',
                     capabilities: ['attachData']
                   }, '*');
                 } else if (d.type === 'devflow:attachData') {

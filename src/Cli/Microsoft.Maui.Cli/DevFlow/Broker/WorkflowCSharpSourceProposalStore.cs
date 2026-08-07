@@ -598,9 +598,9 @@ internal sealed class WorkflowCSharpSourceProposalStore
             error = "This host cannot perform an explicit IDE-mediated C# source apply. Preview or download the patch instead.";
             return false;
         }
-        if (capability.HostKind.Contains("canvas", StringComparison.OrdinalIgnoreCase))
+        if (!InspectorHostIdentity.CanApplySourceNatively(capability.HostKind))
         {
-            error = "Canvas reports C# source apply unsupported; use VS Code or another native IDE host.";
+            error = InspectorHostIdentity.DescribeApplyDenial(capability.HostKind, "C# source");
             return false;
         }
         return true;

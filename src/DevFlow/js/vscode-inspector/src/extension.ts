@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import * as path from "path";
 import { createHash, randomBytes } from "crypto";
+import { createInspectorHostManifest } from "@maui-devflow/client";
 import type { AgentRegistration } from "@maui-devflow/client";
 
 /**
@@ -92,6 +93,12 @@ interface PanelBridgeState {
 }
 const panelStates = new WeakMap<vscode.WebviewPanel, PanelBridgeState>();
 let activePanelState: PanelBridgeState | null = null;
+const VSCODE_HOST_CAPABILITIES = [
+  "copilot", "copilotContext", "workflowFilePicker", "attachData", "openSource",
+  "saveRecording", "selection", "saveTestBundle", "loadTestBundle", "pickTrace",
+  "requestTestProposal", "openSourceDiff", "applySourceProposal",
+  "applyCSharpSourceProposal", "getCSharpSourceSelection",
+] as const;
 
 function registerSelectionTool(context: vscode.ExtensionContext, getState: () => PanelBridgeState | null): void {
   // A Language Model Tool lets Copilot (agent mode) resolve "the selected element" / "fix the selected
@@ -1264,6 +1271,12 @@ function renderHost(inspectorUrl: string, title: string, nonce: string, bridgeId
   // both. The single relay <script> is the only script and is pinned to `nonce`.
   const frameSrc = jsString(`${inspectorUrl}#devflowBridge=${bridgeId}`);
   const bridgeLiteral = jsString(bridgeId);
+  const hostManifestLiteral = jsJson(createInspectorHostManifest({
+    hostId: "vscode",
+    hostLabel: "VS Code Inspector",
+    interactionSessionId: bridgeId,
+    capabilities: VSCODE_HOST_CAPABILITIES,
+  }));
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1285,8 +1298,8 @@ function renderHost(inspectorUrl: string, title: string, nonce: string, bridgeId
       const vscode = acquireVsCodeApi();
       const frame = document.getElementById('frame');
       const bridgeId = ${bridgeLiteral};
-      // Capabilities this host contributes to the shared inspector.
-      const capabilities = ['copilot', 'copilotContext', 'workflowFilePicker', 'attachData', 'openSource', 'saveRecording', 'selection', 'saveTestBundle', 'loadTestBundle', 'pickTrace', 'requestTestProposal', 'openSourceDiff', 'applySourceProposal', 'applyCSharpSourceProposal', 'getCSharpSourceSelection'];
+      const hostManifest = ${hostManifestLiteral};
+      const capabilities = hostManifest.capabilities;
       // Map the shared inspector's semantic theme tokens onto VS Code's theme colors so the panel
       // adopts the user's active color theme (light / dark / high-contrast). getComputedStyle resolves
       // each --vscode-* var to a concrete color; the inspector re-validates every value before use.
@@ -1387,7 +1400,11 @@ function renderHost(inspectorUrl: string, title: string, nonce: string, bridgeId
       function announce() {
         try {
           if (frame.contentWindow) {
-            frame.contentWindow.postMessage({ type: 'devflow:host', v: 1, bridgeId: bridgeId, capabilities: capabilities, hostKind: 'vscode', hostLabel: 'VS Code Inspector', theme: buildTheme(), profile: buildProfile() }, '*');
+            frame.contentWindow.postMessage(Object.assign({}, hostManifest, {
+              bridgeId: bridgeId,
+              theme: buildTheme(),
+              profile: buildProfile()
+            }), '*');
           }
         } catch (e) { /* cross-origin during teardown */ }
       }
@@ -1441,6 +1458,10 @@ function jsString(s: string): string {
   // Safe string literal for inlining into the <script>: JSON-encode, then neutralize `<` so a value
   // can never terminate the script element.
   return JSON.stringify(s).replace(/</g, "\\u003c");
+}
+
+function jsJson(value: unknown): string {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 export function deactivate(): void {

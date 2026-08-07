@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Maui.Cli.DevFlow.Android;
+using Microsoft.Maui.Cli.DevFlow.Inspector;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.Cli.DevFlow.Skills;
 using Microsoft.Maui.Cli.Providers.Apple;
@@ -366,7 +367,12 @@ public class DevFlowCommands
         var treeDepthOption = new Option<int>("--depth") { Description = "Max tree depth (0=unlimited)", DefaultValueFactory = _ => 0 };
         var treeFieldsOption = new Option<string?>("--fields") { Description = "Comma-separated fields to include (e.g. id,type,text,automationId,bounds)" };
         var treeFormatOption = new Option<string?>("--format") { Description = "Output format: compact (id,type,text,automationId,bounds only)" };
-        var mauiTreeCmd = new Command("tree", "Dump visual tree") { treeDepthOption, treeFieldsOption, treeFormatOption, windowOption };
+        var treeProjectionOption = new Option<string>("--projection")
+        {
+            Description = "Tree projection: activeVisual (same as Inspector hosts) or raw (low-level agent tree)",
+            DefaultValueFactory = _ => "activeVisual"
+        };
+        var mauiTreeCmd = new Command("tree", "Dump visual tree") { treeDepthOption, treeFieldsOption, treeFormatOption, treeProjectionOption, windowOption };
         mauiTreeCmd.SetAction(async (ctx, ct) =>
         {
             var host = ctx.GetValue(agentHostOption)!;
@@ -377,7 +383,8 @@ public class DevFlowCommands
             var window = ctx.GetValue(windowOption);
             var fields = ctx.GetValue(treeFieldsOption);
             var format = ctx.GetValue(treeFormatOption);
-            await MauiTreeAsync(host, port, output.ResolveJsonMode(json, noJson), depth, window, fields, format);
+            var projection = ctx.GetValue(treeProjectionOption)!;
+            await MauiTreeAsync(host, port, output.ResolveJsonMode(json, noJson), depth, window, fields, format, projection);
         });
         mauiCommand.Add(mauiTreeCmd);
 
@@ -2935,7 +2942,7 @@ public class DevFlowCommands
         }
         if (andTree)
         {
-            await MauiTreeAsync(host, port, json, andTreeDepth, null, null, null);
+            await MauiTreeAsync(host, port, json, andTreeDepth, null, null, null, "activeVisual");
         }
     }
 
@@ -3194,12 +3201,40 @@ public class DevFlowCommands
         });
     }
 
-    private static async Task MauiTreeAsync(string host, int port, bool json, int depth, int? window, string? fields, string? format)
+    private static async Task MauiTreeAsync(
+        string host,
+        int port,
+        bool json,
+        int depth,
+        int? window,
+        string? fields,
+        string? format,
+        string projection)
     {
         try
         {
-            using var client = await CreateAgentClientAsync(host, port);
-            var tree = await client.GetTreeAsync(depth, window);
+            List<ElementInfo>? tree;
+            if (projection.Equals("activeVisual", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("activeVisual projection requires the local DevFlow broker. Use --projection raw for a remote host.");
+                if (window is not null)
+                    throw new InvalidOperationException("activeVisual projection does not accept --window. Use --projection raw for a window-specific tree.");
+                tree = await InspectorSnapshotClient.GetActiveVisualTreeAsync(port);
+                if (tree is null)
+                    throw new InvalidOperationException("No canonical Inspector tree is available for the selected agent.");
+                InspectorSnapshotService.TrimDepth(tree, depth);
+            }
+            else if (projection.Equals("raw", StringComparison.OrdinalIgnoreCase))
+            {
+                using var client = await CreateAgentClientAsync(host, port);
+                tree = await client.GetTreeAsync(depth, window);
+            }
+            else
+            {
+                throw new InvalidOperationException("--projection must be activeVisual or raw.");
+            }
+
             if (json)
             {
                 var projected = ProjectElements(tree, fields, format);

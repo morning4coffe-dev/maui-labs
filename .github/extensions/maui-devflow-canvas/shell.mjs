@@ -12,8 +12,13 @@
 // never reaches the broker over HTTP; every message in both directions is gated by it + event.source.
 
 import { randomBytes } from "node:crypto";
+import { createInspectorHostManifest } from "@maui-devflow/client";
 
 const UI_FONT_STACK = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif';
+const CANVAS_HOST_CAPABILITIES = Object.freeze([
+  "saveRecording", "selection", "copilot", "copilotContext", "attachData",
+  "saveTestBundle", "requestTestProposal",
+]);
 
 export function renderShell(inspectorUrl, appName, bridgeId) {
   const title = escapeHtml(appName || "MAUI app");
@@ -23,6 +28,12 @@ export function renderShell(inspectorUrl, appName, bridgeId) {
   const frameSrc = jsString(`${inspectorUrl}#devflowBridge=${bridge}`);
   const bridgeLiteral = jsString(bridge);
   const frameOriginLiteral = jsString(frameOrigin);
+  const hostManifestLiteral = jsJson(createInspectorHostManifest({
+    hostId: "canvas",
+    hostLabel: "GitHub Copilot Canvas",
+    interactionSessionId: bridge,
+    capabilities: bridge ? CANVAS_HOST_CAPABILITIES : [],
+  }));
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -46,10 +57,8 @@ export function renderShell(inspectorUrl, appName, bridgeId) {
       const frame = document.getElementById('frame');
       const bridgeId = ${bridgeLiteral};
       const frameOrigin = ${frameOriginLiteral};
-      // Capabilities the canvas contributes: save recordings, receive the human's selection (so the
-      // agent can answer about "the selected element"), save bounded flow+plan bundles, and push that
-      // selection to Copilot as context.
-      const capabilities = bridgeId ? ['saveRecording', 'selection', 'copilot', 'copilotContext', 'attachData', 'saveTestBundle', 'requestTestProposal'] : [];
+      const hostManifest = ${hostManifestLiteral};
+      const capabilities = hostManifest.capabilities;
       // Relay a control action to the canvas server (which updates the agent-facing selection store).
       function postControl(payload, cb) {
         try {
@@ -183,7 +192,11 @@ export function renderShell(inspectorUrl, appName, bridgeId) {
       function announce() {
         try {
           if (frame.contentWindow && bridgeId) {
-            frame.contentWindow.postMessage({ type: 'devflow:host', v: 1, bridgeId: bridgeId, capabilities: capabilities, hostKind: 'copilot-canvas-ui', hostLabel: 'GitHub Copilot Canvas', theme: buildTheme(), profile: buildProfile() }, frameOrigin);
+            frame.contentWindow.postMessage(Object.assign({}, hostManifest, {
+              bridgeId: bridgeId,
+              theme: buildTheme(),
+              profile: buildProfile()
+            }), frameOrigin);
           }
         } catch (e) { /* cross-origin during teardown */ }
       }
@@ -391,6 +404,10 @@ function escapeHtml(s) {
 function jsString(s) {
   // Safe string literal for inlining into the <script>: JSON-encode, then neutralize `<`.
   return JSON.stringify(String(s)).replace(/</g, "\\u003c");
+}
+
+function jsJson(value) {
+  return JSON.stringify(value).replace(/</g, "\\u003c");
 }
 
 function scriptNonce() {

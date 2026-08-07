@@ -296,7 +296,11 @@ function indexRoots(roots) {
 
 export class LiveStore {
   constructor(deviceOpts = {}) {
-    this.device = new DevflowDevice(deviceOpts);
+    const { inspectSnapshot, inspectQuery, inspectAction, ...transportOptions } = deviceOpts;
+    this.device = new DevflowDevice(transportOptions);
+    this._inspectSnapshot = typeof inspectSnapshot === "function" ? inspectSnapshot : null;
+    this._inspectQuery = typeof inspectQuery === "function" ? inspectQuery : null;
+    this._inspectAction = typeof inspectAction === "function" ? inspectAction : null;
     this.subscribers = new Set();
     this.timeline = [];
     this.state = {
@@ -311,6 +315,10 @@ export class LiveStore {
       shotSeq: 0,
       busy: false,
       lastError: null,
+      projection: "agentFallback",
+      projectionWarning: null,
+      snapshotId: null,
+      revision: null,
       updatedAt: nowISO(),
     };
     this._index = new Map();
@@ -375,6 +383,10 @@ export class LiveStore {
       rev: this._rev,
       busy: this.state.busy,
       lastError: this.state.lastError,
+      projection: this.state.projection,
+      projectionWarning: this.state.projectionWarning,
+      snapshotId: this.state.snapshotId,
+      revision: this.state.revision,
       timeline: this.timeline.slice(-40),
       recording: !!this._recordingStatus?.recording,
       recorder: this._recordingStatus
@@ -406,7 +418,7 @@ export class LiveStore {
       // Resolve the connection once so the parallel calls below don't each port-scan.
       await this.device._ensureConnection().catch(() => {});
 
-      const treeP = this.device.getRoots(0);
+      const treeP = this._getTree();
       const infoP = info ? this.device.refreshInfo() : Promise.resolve(this.device.info());
       const themeP = info ? this.device.themeGet() : Promise.resolve(null);
       const shotP = shot ? this._grabShot() : Promise.resolve(null);
@@ -424,7 +436,11 @@ export class LiveStore {
       if (this.state.info.theme) this._lastTheme = this.state.info.theme;
 
       if (t.ok) {
-        this._applyRoots(t.roots);
+        this._applyRoots(t.roots, { canonical: t.projection === "activeVisual" });
+        this.state.projection = t.projection || "agentFallback";
+        this.state.projectionWarning = t.warning || null;
+        this.state.snapshotId = t.snapshotId || null;
+        this.state.revision = t.revision || null;
         this.state.lastError = null;
       } else {
         this.state.lastError = t.error || "tree unavailable";
@@ -437,10 +453,45 @@ export class LiveStore {
     return this.snapshot();
   }
 
-  // Turn raw agent roots into the rendered/indexed tree and reconcile selection.
+  async _getTree() {
+    if (this._inspectSnapshot) {
+      try {
+        const snapshot = await this._inspectSnapshot();
+        if (snapshot?.ok && snapshot.projection === "activeVisual" && Array.isArray(snapshot.roots)) {
+          return {
+            ok: true,
+            roots: snapshot.roots,
+            window: snapshot.viewport
+              ? {
+                  x: 0,
+                  y: 0,
+                  width: Number(snapshot.viewport.width) || 0,
+                  height: Number(snapshot.viewport.height) || 0,
+                }
+              : null,
+            projection: "activeVisual",
+            snapshotId: snapshot.snapshotId,
+            revision: snapshot.revision,
+          };
+        }
+        const warning = snapshot?.error?.message || snapshot?.error || "canonical Inspector snapshot unavailable";
+        const fallback = await this.device.getRoots(0);
+        return fallback.ok ? { ...fallback, projection: "agentFallback", warning } : fallback;
+      } catch (error) {
+        const fallback = await this.device.getRoots(0);
+        return fallback.ok
+          ? { ...fallback, projection: "agentFallback", warning: String(error?.message || error) }
+          : fallback;
+      }
+    }
+    const fallback = await this.device.getRoots(0);
+    return fallback.ok ? { ...fallback, projection: "agentFallback" } : fallback;
+  }
+
+  // Turn canonical Inspector roots or raw agent roots into an indexed tree and reconcile selection.
   // Shared by refresh() and the live-sync poll tick. Also refreshes the tree hash.
-  _applyRoots(rawRoots) {
-    const roots = renderedRoots(rawRoots, this.state.info.window);
+  _applyRoots(rawRoots, { canonical = false } = {}) {
+    const roots = canonical ? rawRoots : renderedRoots(rawRoots, this.state.info.window);
     this.state.roots = roots;
     const { index, order } = indexRoots(roots);
     this._index = index;
@@ -613,7 +664,7 @@ export class LiveStore {
     if (this.state.busy || this._polling) return;
     this._polling = true;
     try {
-      const [t, theme] = await Promise.all([this.device.getRoots(0), this.device.themeGet()]);
+      const [t, theme] = await Promise.all([this._getTree(), this.device.themeGet()]);
       if (!t.ok) {
         if (this.state.connected) {
           this.state.connected = false;
@@ -624,9 +675,10 @@ export class LiveStore {
       }
       if (t.window) this.state.info = { ...this.state.info, window: t.window };
       const themeVal = theme && theme.ok ? theme.data?.effectiveTheme || theme.data?.theme || null : this._lastTheme;
-      // Compute hash on the RENDERED tree so it matches what _applyRoots stores.
-      const rendered = renderedRoots(t.roots, this.state.info.window);
-      const hash = this._hashRoots(rendered);
+      const projected = t.projection === "activeVisual"
+        ? t.roots
+        : renderedRoots(t.roots, this.state.info.window);
+      const hash = this._hashRoots(projected);
       const treeChanged = hash !== this._treeHash;
       const themeChanged = themeVal && themeVal !== this._lastTheme;
 
@@ -637,7 +689,13 @@ export class LiveStore {
         this._lastTheme = themeVal;
         this.state.info = { ...this.state.info, theme: themeVal };
       }
-      if (treeChanged) this._applyRoots(t.roots);
+      if (treeChanged) {
+        this._applyRoots(t.roots, { canonical: t.projection === "activeVisual" });
+        this.state.projection = t.projection || "agentFallback";
+        this.state.projectionWarning = t.warning || null;
+        this.state.snapshotId = t.snapshotId || null;
+        this.state.revision = t.revision || null;
+      }
 
       if (themeChanged) {
         // A theme flip MUST refresh the image (bypass the throttle), then settle to
@@ -674,11 +732,72 @@ export class LiveStore {
   }
 
   async query(sel) {
+    if (this._inspectQuery) {
+      try {
+        const result = await this._inspectQuery(sel);
+        if (result?.ok && Array.isArray(result.elements))
+          return { ok: true, elements: result.elements };
+        if (result?.error)
+          return { ok: false, error: result.error?.message || String(result.error), elements: [] };
+      } catch {
+        // The direct agent query below is the explicit recovery path when the broker is unavailable.
+      }
+    }
     return this.device.query(sel);
   }
 
   async getProperty(id, name) {
+    if (this._inspectAction) {
+      const result = await this._inspectAction("/api/getProperty", { elementId: id, name });
+      if (result?.ok) return { ok: true, value: result.value };
+      if (result?.attempted !== false)
+        return { ok: false, error: result?.error?.message || String(result?.error || "read failed") };
+    }
     return this.device.getProperty(id, name);
+  }
+
+  async _runMutation(path, body, directFallback) {
+    if (this._inspectAction) {
+      const result = await this._inspectAction(path, body);
+      if (result?.ok) return { ok: true, value: result.value };
+      if (result?.attempted !== false) {
+        return {
+          ok: false,
+          error: result?.error?.message || String(result?.error || "Inspector mutation failed"),
+          code: result?.error?.code,
+        };
+      }
+    }
+    // The direct client may retry only a lease-held rejection, which occurs before the agent
+    // dispatches the action. It never retries a transport-ambiguous mutation completion.
+    return directFallback();
+  }
+
+  async _resolveMutationTarget(sel) {
+    if (sel == null) return { error: "no target given — pass id, automationId, or text" };
+    if (typeof sel !== "object") return { id: String(sel) };
+    if (sel.id != null) return { id: String(sel.id) };
+    if (!sel.automationId && !sel.text)
+      return { error: "no target given — pass id, automationId, or text" };
+
+    const result = await this.query({ automationId: sel.automationId, text: sel.text });
+    if (!result.ok) return { error: result.error || "target query failed" };
+    const visible = (result.elements || []).filter((element) =>
+      element?.id != null &&
+      element?.isVisible !== false &&
+      element?.state?.displayed !== false &&
+      element?.isEnabled !== false &&
+      element?.state?.enabled !== false &&
+      Number(element?.opacity ?? 1) !== 0);
+    if (visible.length === 1) return { id: String(visible[0].id) };
+    const label = sel.automationId
+      ? `automationId "${sel.automationId}"`
+      : `text "${sel.text}"`;
+    return {
+      error: visible.length === 0
+        ? `no visible element matches ${label}`
+        : `${label} is ambiguous: ${visible.length} visible elements match. Re-issue with an explicit id.`,
+    };
   }
 
   // ── Selection ───────────────────────────────────────────────────────────────
@@ -948,7 +1067,10 @@ export class LiveStore {
   //    round-trip since a UI action doesn't change device metadata. ───────────────
   async setProperty(id, name, value) {
     const beforeHash = this._treeHash;
-    const r = await this.device.setProperty(id, name, value);
+    const r = await this._runMutation(
+      "/api/setProperty",
+      { elementId: id, name, value },
+      () => this.device.setProperty(id, name, value));
     this._log("set-property", { id, name, value, error: r.ok ? undefined : r.error }, r.ok);
     await this.refresh({ info: false });
     await this._recordAction({ action: this._classifySetProp(id, name), target: { id: String(id) }, name, value, beforeHash, ok: r.ok });
@@ -957,7 +1079,13 @@ export class LiveStore {
 
   async tap(sel) {
     const beforeHash = this._treeHash;
-    const r = await this.device.tap(sel);
+    const target = await this._resolveMutationTarget(sel);
+    const r = target.error
+      ? { ok: false, error: target.error }
+      : await this._runMutation(
+          "/api/tap",
+          { elementId: target.id },
+          () => this.device.tap({ id: target.id }));
     this._log("tap", { sel, error: r.ok ? undefined : r.error }, r.ok);
     await this.refresh({ info: false });
     await this._recordAction({ action: "tap", target: this._selMeta(sel), beforeHash, ok: r.ok });
@@ -966,7 +1094,13 @@ export class LiveStore {
 
   async fill(sel, text) {
     const beforeHash = this._treeHash;
-    const r = await this.device.fill(sel, text);
+    const target = await this._resolveMutationTarget(sel);
+    const r = target.error
+      ? { ok: false, error: target.error }
+      : await this._runMutation(
+          "/api/fill",
+          { elementId: target.id, text },
+          () => this.device.fill({ id: target.id }, text));
     this._log("fill", { sel, text, error: r.ok ? undefined : r.error }, r.ok);
     await this.refresh({ info: false });
     await this._recordAction({ action: "fill", target: this._selMeta(sel), value: text, beforeHash, ok: r.ok });
@@ -975,7 +1109,19 @@ export class LiveStore {
 
   async scroll(opts) {
     const beforeHash = this._treeHash;
-    const r = await this.device.scroll(opts);
+    const r = await this._runMutation(
+      "/api/scroll",
+      {
+        elementId: opts?.element,
+        deltaX: Number(opts?.dx) || 0,
+        deltaY: Number(opts?.dy) || 0,
+        itemIndex: opts?.itemIndex,
+        scrollToPosition: opts?.position,
+        animated: opts?.animated,
+        x: opts?.x,
+        y: opts?.y,
+      },
+      () => this.device.scroll(opts));
     this._log("scroll", { ...opts, error: r.ok ? undefined : r.error }, r.ok);
     await this.refresh({ info: false });
     await this._recordAction({ action: "scroll", target: opts?.element != null ? { id: String(opts.element) } : null, args: { ...opts }, beforeHash, ok: r.ok });
@@ -984,7 +1130,10 @@ export class LiveStore {
 
   async navigate(route) {
     const beforeHash = this._treeHash;
-    const r = await this.device.navigate(route);
+    const r = await this._runMutation(
+      "/api/navigate",
+      { route },
+      () => this.device.navigate(route));
     this._log("navigate", { route, error: r.ok ? undefined : r.error }, r.ok);
     await this.refresh({ info: false });
     await this._recordAction({ action: "navigate", value: route, args: { route }, beforeHash, ok: r.ok });
@@ -993,7 +1142,10 @@ export class LiveStore {
 
   async back() {
     const beforeHash = this._treeHash;
-    const r = await this.device.back();
+    const r = await this._runMutation(
+      "/api/back",
+      {},
+      () => this.device.back());
     this._log("back", { error: r.ok ? undefined : r.error }, r.ok);
     await this.refresh({ info: false });
     await this._recordAction({ action: "back", beforeHash, ok: r.ok });
@@ -1087,13 +1239,16 @@ export class LiveStore {
   // ── Apply-and-verify: set a property, then read it back to confirm ──────────
   async applyAndVerify(id, name, value) {
     const beforeHash = this._treeHash;
-    const set = await this.device.setProperty(id, name, value);
+    const set = await this._runMutation(
+      "/api/setProperty",
+      { elementId: id, name, value },
+      () => this.device.setProperty(id, name, value));
     if (!set.ok) {
       this._log("apply-verify", { id, name, value, error: set.error }, false);
       await this.refresh({ info: false });
       return { ok: false, stage: "set", error: set.error };
     }
-    const read = await this.device.getProperty(id, name);
+    const read = await this.getProperty(id, name);
     const actual = read.ok ? read.value : undefined;
     const verified =
       read.ok && String(actual).trim() === String(value).trim();

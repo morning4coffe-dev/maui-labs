@@ -180,7 +180,7 @@ test("source proposal panel keeps XAML/C# review and flow repair separate", () =
 });
 
 test("workbench assets are embedded, routed, and responsive", () => {
-  const server = read("../InspectorServer.cs");
+  const server = read("../InspectorServer.Routes.cs");
   const css = read("inspector-workbench.css");
 
   for (const asset of [
@@ -191,9 +191,11 @@ test("workbench assets are embedded, routed, and responsive", () => {
     assert.match(server, new RegExp(`/${asset.replace(".", "\\.")}`));
   }
   assert.match(css, /clamp\(300px, var\(--df-workbench-height, 46vh\)/);
-  assert.match(css, /data-host-layout="compact"/);
-  assert.match(css, /data-host-layout="narrow"/);
-  assert.match(css, /data-host-layout="short"/);
+  // Layout is keyed on geometry, split into independent width and height axes.
+  assert.match(css, /data-layout-width="compact"/);
+  assert.match(css, /data-layout-width="narrow"/);
+  assert.match(css, /data-layout-height="short"/);
+  assert.doesNotMatch(css, /data-host-layout/);
   assert.match(css, /forced-colors: active/);
   assert.match(css, /\.df-agent-action/);
 });
@@ -251,16 +253,21 @@ test("agent request inbox permits narrowing only and never treats chat as approv
   assert.doesNotMatch(source, /approvalGrantId/);
 });
 
-test("host bridge exposes optional workbench capability names", () => {
+test("host bridge registry covers every negotiated capability", () => {
   const bridge = read("inspector-host-bridge.js");
 
   for (const capability of [
-    "saveTestBundle", "loadTestBundle", "pickTrace", "attachTestContext", "requestTestProposal", "openSourceDiff", "applySourceProposal", "applyCSharpSourceProposal", "getCSharpSourceSelection",
+    "saveTestBundle", "loadTestBundle", "pickTrace", "requestTestProposal", "openSourceDiff",
+    "applySourceProposal", "applyCSharpSourceProposal", "getCSharpSourceSelection",
+    // The formerly separate legacy vocabulary now lives in the same registry.
+    "selection", "copilot", "copilotContext", "attachData", "openSource", "saveRecording",
+    "workflowFilePicker",
   ]) {
-    assert.match(bridge, new RegExp(`['"]${capability}['"]`));
+    assert.match(bridge, new RegExp(`\\b${capability}: Object\\.freeze\\(`));
   }
+  // A capability no host implements must not survive as user-facing copy.
+  assert.doesNotMatch(bridge, /attachTestContext/);
   assert.match(bridge, /capability-missing/);
-  assert.match(bridge, /bounded native trace picker/);
   assert.match(bridge, /testProposalApprovalResult/);
   assert.match(bridge, /grantId/);
 });
@@ -577,7 +584,10 @@ test("authoring panels retain explicit recording, validation, diff, and commit c
   assert.match(devflow, /downloadRecordingDraft/);
   assert.match(devflow, /Save the test before running it\. Your recorded draft is still here\./);
   assert.match(bridge, /loadTestBundle/);
-  assert.match(bridge, /download fallback/i);
+  // Embedded surfaces sandbox the iframe without `allow-downloads`, so the bridge must never
+  // promise a download it cannot deliver.
+  assert.match(bridge, /Downloads are blocked in this embedded surface/);
+  assert.doesNotMatch(bridge, /The browser will offer a download fallback/);
 });
 
 test("modal focus and Goal recovery include editable controls and focus restoration", () => {
@@ -617,8 +627,9 @@ test("toolbar keeps toggle semantics when actions move into More", () => {
 
 test("VS Code host advertises implemented capabilities and refreshes after broker restarts", () => {
   const extension = readVscodeHost();
-  const capabilities = extension.match(/const capabilities = \[([^\]]+)\];/)?.[1] || "";
+  const capabilities = extension.match(/const VSCODE_HOST_CAPABILITIES = \[([^\]]+)\]/)?.[1] || "";
 
+  assert.notEqual(capabilities, "");
   assert.doesNotMatch(capabilities, /attachTestContext/);
   assert.match(capabilities, /requestTestProposal/);
   assert.doesNotMatch(extension, /devflow:attachTestContext/);

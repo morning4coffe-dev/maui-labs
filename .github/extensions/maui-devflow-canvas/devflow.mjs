@@ -93,7 +93,7 @@ export class DevflowDevice {
       // The canvas historically auto-started the broker; keep that unless overridden.
       bootstrapBroker: opts.bootstrapBroker ?? "once",
       mutationLeaseId: opts.mutationLeaseId,
-      mutationLeaseHolderKind: "copilot-canvas",
+      mutationLeaseHolderKind: "canvas",
       mutationLeaseLabel: "GitHub Copilot Canvas",
     });
     this._eventHandle = null;

@@ -21,7 +21,11 @@ import { Recorder } from "./recorder.mjs";
 import { renderShell, renderDisconnected } from "./shell.mjs";
 import { readJsonBody, selectInspectorAgent } from "./http.mjs";
 import { dispatchAgentRequest } from "./agent-request.mjs";
-import { readBrokerState } from "@maui-devflow/client";
+import {
+  isInspectorQueryResult,
+  isInspectorSnapshot,
+  readBrokerState,
+} from "@maui-devflow/client";
 
 // Device targeting is optional — the CLI auto-discovers the agent via the broker. Override
 // via env if you run multiple emulators/apps at once.
@@ -62,7 +66,33 @@ let sharedSession = null;
 function ensure(instanceId, input = {}) {
   let st = instances.get(instanceId);
   if (!st) {
-    const store = new LiveStore(deviceOpts({ ...input, mutationLeaseId: instanceId }));
+    const bridgeId = randomToken();
+    const store = new LiveStore({
+      ...deviceOpts({ ...input, mutationLeaseId: bridgeId }),
+      inspectSnapshot: async () => {
+        const result = await getInspectorJson(st, "/api/inspect/snapshot");
+        return isInspectorSnapshot(result)
+          ? result
+          : result?.ok === false
+            ? result
+            : {
+                ok: false,
+                error: { code: "invalid-response", message: "The Inspector snapshot contract was invalid.", retriable: true },
+              };
+      },
+      inspectQuery: async (query) => {
+        const result = await postInspectorJson(st, "/api/inspect/query", query);
+        return isInspectorQueryResult(result)
+          ? result
+          : result?.ok === false
+            ? result
+            : {
+                ok: false,
+                error: { code: "invalid-response", message: "The Inspector query contract was invalid.", retriable: true },
+              };
+      },
+      inspectAction: (path, body) => postInspectorJson(st, path, body),
+    });
     const recorder = new Recorder();
     st = {
       store,
@@ -71,7 +101,7 @@ function ensure(instanceId, input = {}) {
       port: 0,
       url: null,
       sse: new Set(),
-      bridgeId: randomToken(),
+      bridgeId,
       startupHints: inspectorStartupHints(input),
     };
     store.subscribe((snapshot) => broadcast(st, snapshot));
@@ -379,7 +409,13 @@ function withInspectorStartupHints(inspectorUrl, hints) {
 
 async function postInspectorJson(st, path, body, timeoutMs = 30000) {
   const inspectorUrl = await resolveInspectorUrl(st);
-  if (!inspectorUrl) return { ok: false, error: "The shared DevFlow Inspector is unavailable." };
+  if (!inspectorUrl) {
+    return {
+      ok: false,
+      attempted: false,
+      error: { code: "broker-unavailable", message: "The shared DevFlow Inspector is unavailable.", retriable: true },
+    };
+  }
 
   const endpoint = new URL(path.replace(/^\/+/, ""), inspectorUrl);
   const controller = new AbortController();
@@ -387,7 +423,13 @@ async function postInspectorJson(st, path, body, timeoutMs = 30000) {
   try {
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "X-DevFlow-Lease": st.bridgeId,
+        "X-DevFlow-Writer": st.bridgeId,
+        "X-DevFlow-Holder": "canvas",
+        "X-DevFlow-Label": "GitHub Copilot Canvas",
+      },
       body: JSON.stringify(body || {}),
       signal: controller.signal,
     });
@@ -395,13 +437,73 @@ async function postInspectorJson(st, path, body, timeoutMs = 30000) {
     if (!response.ok) {
       return {
         ok: false,
-        error: result?.error || `The shared DevFlow Inspector rejected the request (HTTP ${response.status}).`,
+        attempted: true,
+        error: result?.error || {
+          code: response.status === 409 ? "lease-held" : "inspector-http",
+          message: `The shared DevFlow Inspector rejected the request (HTTP ${response.status}).`,
+          retriable: response.status >= 500,
+        },
         status: response.status,
       };
     }
+
     return result && typeof result === "object" ? result : { ok: false, error: "The shared DevFlow Inspector returned an invalid response." };
   } catch (e) {
-    return { ok: false, error: e?.name === "AbortError" ? "The shared DevFlow Inspector request timed out." : String(e?.message || e) };
+    return {
+      ok: false,
+      attempted: true,
+      error: {
+        code: e?.name === "AbortError" ? "timeout" : "broker-unavailable",
+        message: e?.name === "AbortError"
+          ? "The shared DevFlow Inspector request timed out."
+          : String(e?.message || e),
+        retriable: true,
+      },
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function getInspectorJson(st, path, timeoutMs = 10000) {
+  const inspectorUrl = await resolveInspectorUrl(st);
+  if (!inspectorUrl) {
+    return {
+      ok: false,
+      error: { code: "broker-unavailable", message: "The shared DevFlow Inspector is unavailable.", retriable: true },
+    };
+  }
+
+  const endpoint = new URL(path.replace(/^\/+/, ""), inspectorUrl);
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const response = await fetch(endpoint, { signal: controller.signal });
+    const result = await response.json().catch(() => null);
+    if (!response.ok) {
+      return {
+        ok: false,
+        error: result?.error || {
+          code: "inspector-http",
+          message: `The shared DevFlow Inspector rejected the request (HTTP ${response.status}).`,
+          retriable: response.status >= 500,
+        },
+      };
+    }
+    return result && typeof result === "object"
+      ? result
+      : { ok: false, error: { code: "invalid-response", message: "The shared DevFlow Inspector returned invalid JSON.", retriable: true } };
+  } catch (error) {
+    return {
+      ok: false,
+      error: {
+        code: error?.name === "AbortError" ? "timeout" : "broker-unavailable",
+        message: error?.name === "AbortError"
+          ? "The shared DevFlow Inspector request timed out."
+          : String(error?.message || error),
+        retriable: true,
+      },
+    };
   } finally {
     clearTimeout(timer);
   }

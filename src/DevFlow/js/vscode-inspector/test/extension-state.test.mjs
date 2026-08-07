@@ -81,5 +81,13 @@ test('request-gated bridge actions are enumerated', () => {
   assert.equal(requiresBridgeRequestId('devflow:openSource'), true);
   assert.match(source, /case "devflow:requestTestProposal":/);
   assert.match(source, /isPartialQuery: false/);
-  assert.match(source, /'requestTestProposal'/);
+  assert.match(source, /["']requestTestProposal["']/);
+});
+
+test('host bridge advertises a versioned capability manifest', () => {
+  assert.match(source, /createInspectorHostManifest/);
+  assert.match(source, /hostId: "vscode"/);
+  assert.match(source, /interactionSessionId: bridgeId/);
+  assert.match(source, /capabilities: VSCODE_HOST_CAPABILITIES/);
+  assert.match(source, /profile = \{ surface: 'editor' \}/);
 });

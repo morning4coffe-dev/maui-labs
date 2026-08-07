@@ -320,6 +320,34 @@ public sealed class XamlSourceProposalTests : IDisposable
             new WorkflowXamlSourceHostCapability { HostKind = "canvas" });
         Assert.False(denied.Ok);
         Assert.Equal("host-apply-unsupported", denied.Code);
+
+        // Source apply is a positive allowlist: an unrecognised host identity is never trusted,
+        // even if it claims every capability. A denylist would let a renamed or spoofed surface
+        // inherit apply rights it was never granted.
+        var unknownHost = store.AwaitHostApply(
+            built.Proposal!.ProposalId,
+            binding,
+            new WorkflowXamlSourceHostCapability
+            {
+                HostKind = "some-new-surface",
+                CanApplySource = true,
+                CanOpenNativeDiff = true,
+                IsExplicitLocalHostAction = true,
+            });
+        Assert.False(unknownHost.Ok);
+        Assert.Equal("host-apply-unsupported", unknownHost.Code);
+
+        var browserHost = store.AwaitHostApply(
+            built.Proposal!.ProposalId,
+            binding,
+            new WorkflowXamlSourceHostCapability
+            {
+                HostKind = "browser",
+                CanApplySource = true,
+                IsExplicitLocalHostAction = true,
+            });
+        Assert.False(browserHost.Ok);
+
         var host = new WorkflowXamlSourceHostCapability
         {
             HostKind = "vscode",

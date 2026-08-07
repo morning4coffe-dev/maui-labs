@@ -11,6 +11,44 @@ The MAUI DevFlow Inspector host integrations embed that existing page in:
 The broker-hosted page remains the **DevFlow Web Inspector**. **MAUI DevFlow Inspector** is the
 public name for the host integrations added around it; all hosts embed the same page.
 
+## Architecture contract
+
+Inspector surfaces share one broker-produced `activeVisual` snapshot. Runtime platform adapters
+remain authoritative for native facts and action execution, while browser, VS Code, and Canvas
+hosts contribute only presentation and workspace integrations such as theming, source navigation,
+file selection, and Copilot context.
+
+The host bridge negotiates a versioned manifest containing a host identity, presentation profile,
+and capability descriptors. Shared Inspector behavior is selected from capabilities and profile
+facts rather than host-specific branches. The standalone browser is an explicit `browser` profile
+with clipboard, download, and file-input fallbacks.
+
+VS Code and Canvas construct that manifest through the shared `@maui-devflow/client` host-protocol
+contract. The same package owns runtime guards for the typed Inspector snapshot and query response,
+so host shells do not maintain separate wire-shape assumptions.
+
+`GET /inspector/{agent-id}/api/inspect/snapshot` exposes the canonical point-in-time snapshot used
+as the convergence boundary for additional CLI, MCP, driver, and Canvas integrations. Element IDs
+belong to that snapshot revision; mutating operations must still resolve against the live agent and
+honor the global mutation lease.
+
+Canvas consumes that snapshot and the corresponding canonical query endpoint for its agent-facing
+tree. Its core tap, fill, scroll, navigation, back, and property mutations are routed through the
+same Inspector endpoints as the embedded human UI. The host bridge supplies one interaction-session
+identity, so human and agent actions in the same Canvas instance share mutation-lease ownership.
+Canvas uses its direct agent client only when the broker is unavailable before a mutation is
+dispatched; an attempted mutation with an unknown completion is never retried through another path.
+
+The `maui_tree` MCP tool uses the same `activeVisual` projection by default. Low-level diagnostics
+can request `projection: "raw"` explicitly; window-specific tree reads also remain available only
+through that raw projection. `maui devflow ui tree` follows the same default and exposes
+`--projection raw` for the direct agent tree.
+
+The Inspector HTTP dispatcher is separated from the server implementation in
+`InspectorServer.Routes.cs`; static assets, GET routes, and POST routes are catalogued there, while
+snapshot projection/contracts live in `InspectorSnapshotService` and broker consumption lives in
+`InspectorSnapshotClient`.
+
 ## Start the inspector
 
 Add and start the DevFlow agent in a Debug build, launch the app, then:
@@ -403,21 +441,56 @@ authenticated host bridge for source navigation, recording persistence, and Copi
 
 ## Host-adaptive layout
 
-The shared inspector keeps one interaction model while adapting its chrome to the host viewport:
+Layout is a pure function of the geometry the Inspector was given. Host identity and declared
+placement never select a layout, so two surfaces of the same size behave identically.
 
-- **Wide browser/editor:** tree, screenshot, and properties are docked as three panes.
-- **Compact editor:** the tree remains available while properties open as a drawer, preserving
-  screenshot width.
-- **Narrow Canvas/editor:** the screenshot is primary; tree and properties become coordinated
-  full-height drawers with a scrim.
-- **Short host:** drawers and overlay Data/timeline sheets protect the screenshot's vertical budget.
+Width and height are independent axes, published as `data-layout-width` and `data-layout-height` on
+`<body>` and `<html>`:
+
+| | `narrow` (<720px) | `compact` (<1400px) | `wide` (>=1400px) |
+|---|---|---|---|
+| **`tall`** | tree and properties are coordinated full-height drawers with a scrim; screenshot primary | tree docked, properties open as a drawer, preserving screenshot width | tree, screenshot, and properties docked as three panes |
+| **`short`** (<560px) | as above, plus overlay Data/timeline sheets | as above, plus overlay sheets | three docked panes, plus overlay sheets |
+
+Because the axes are independent, a wide-but-short window keeps its tree docked and gives up only
+vertical chrome. A third derived attribute, `data-layout-chrome` (`docked` or `overlay`), marks when
+either axis is tight enough that the Data dock and workflow timeline must float as sheets rather
+than consume the screenshot's budget.
 
 The toolbar keeps interaction mode, tree, fit, and recording visible. Secondary actions remain
 inline for as long as they fit; only the non-fitting actions move into the **More** menu. More can
 open over an active Data or properties surface, and Copilot choices open as a nested submenu.
 Host bridges also supply their color palette, font metadata, contrast mode, and reduced-motion
-preference. VS Code placement is configurable with
+preference — these change appearance, never structure. VS Code placement is configurable with
 `mauiDevflow.openLocation` (`auto`, `beside`, or `active`).
+
+## Host operations and availability
+
+The page talks to an embedding host through exactly one bridge
+(`Web/inspector-host-bridge.js`), which owns the only `message` listener, the host manifest, and the
+single capability vocabulary. `HOST_OPERATIONS` is the registry: each operation declares its wire
+message, whether it is a `request` (the host confirms) or a one-way `notify` (the host acts, and the
+page must never claim it completed), and what the Inspector can do itself when the host cannot.
+
+Call sites never test host identity. They ask how an operation resolves in this surface:
+
+| Resolution | Meaning |
+|---|---|
+| `pending` | the handshake has not completed; controls show a bounded busy state |
+| `available` | the host will perform it |
+| `alternative` | the Inspector will do something clearly different, under its own label |
+| `unavailable` | neither can do it, with the reason stated in the UI |
+
+Results are `completed`, `cancelled`, `failed`, or `indeterminate`. **A fallback is chosen before
+dispatch, never after an ambiguous result** — otherwise a timed-out save could be applied twice.
+
+Both embedded hosts sandbox the iframe without `allow-downloads`, so download-backed fallbacks
+resolve to `unavailable` there and say so, rather than silently doing nothing. Only a standalone
+browser tab reports `canDownload()`.
+
+Host identity is a closed set — `browser`, `vscode`, `canvas` — used for presence copy and for the
+broker's source-apply policy, which matches those values exactly through a positive allowlist so an
+unrecognised surface fails closed.
 
 ## Coordinated frames and coordinates
 

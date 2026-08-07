@@ -251,7 +251,9 @@ export function createInspectorWorkbench(options = {}) {
   const timeline = doc.getElementById('df-timeline');
   const resizeHandle = root.querySelector('#df-workbench-resize');
   const closeButton = root.querySelector('#df-workbench-close');
-  const getLayout = typeof options.getLayout === 'function' ? options.getLayout : () => 'wide';
+  const getLayout = typeof options.getLayout === 'function'
+    ? options.getLayout
+    : () => ({ width: 'wide', height: 'tall', overlay: false });
   const setInspectorStatus = typeof options.setStatus === 'function' ? options.setStatus : () => {};
   const copyText = typeof options.copyText === 'function'
     ? options.copyText
@@ -289,7 +291,8 @@ export function createInspectorWorkbench(options = {}) {
   }
 
   function isModal() {
-    return ['narrow', 'short'].includes(getLayout());
+    const layout = getLayout();
+    return layout.width === 'narrow' || layout.height === 'short';
   }
 
   function updateSheetOffset() {
@@ -888,7 +891,7 @@ export function createInspectorWorkbench(options = {}) {
   }
 
   function resizeTo(clientY) {
-    if (!resizeStart || getLayout() !== 'wide') return;
+    if (!resizeStart || getLayout().width !== 'wide') return;
     const max = Math.max(240, Math.floor(win.innerHeight * 0.8));
     const next = Math.max(240, Math.min(max, resizeStart.height + resizeStart.y - clientY));
     root.style.setProperty('--df-workbench-height', `${Math.round(next)}px`);
@@ -902,7 +905,7 @@ export function createInspectorWorkbench(options = {}) {
     tab.addEventListener('keydown', onTabKeyDown);
   }
   resizeHandle?.addEventListener('pointerdown', (event) => {
-    if (getLayout() !== 'wide') return;
+    if (getLayout().width !== 'wide') return;
     event.preventDefault();
     resizeStart = { y: event.clientY, height: root.getBoundingClientRect().height };
     resizeHandle.setPointerCapture?.(event.pointerId);
@@ -910,7 +913,7 @@ export function createInspectorWorkbench(options = {}) {
   resizeHandle?.addEventListener('pointermove', (event) => resizeTo(event.clientY));
   resizeHandle?.addEventListener('pointerup', () => { resizeStart = null; });
   resizeHandle?.addEventListener('keydown', (event) => {
-    if (getLayout() !== 'wide') return;
+    if (getLayout().width !== 'wide') return;
     const current = root.getBoundingClientRect().height;
     let next = null;
     if (event.key === 'ArrowUp') next = current + 24;

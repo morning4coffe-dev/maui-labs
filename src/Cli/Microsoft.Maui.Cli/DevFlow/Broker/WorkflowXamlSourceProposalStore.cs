@@ -610,9 +610,9 @@ internal sealed class WorkflowXamlSourceProposalStore
             error = "This host cannot perform an explicit local source apply. Preview or download the patch instead.";
             return false;
         }
-        if (capability.HostKind.Contains("canvas", StringComparison.OrdinalIgnoreCase))
+        if (!InspectorHostIdentity.CanApplySourceNatively(capability.HostKind))
         {
-            error = "Canvas reports source apply unsupported; use a native local host.";
+            error = InspectorHostIdentity.DescribeApplyDenial(capability.HostKind, "XAML source");
             return false;
         }
         return true;

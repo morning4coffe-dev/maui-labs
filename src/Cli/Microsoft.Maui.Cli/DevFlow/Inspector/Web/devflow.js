@@ -36,7 +36,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   const inspectorToken = (document.querySelector('meta[name="devflow-inspector-token"]') || {}).content || '';
   const inspectorApi = createInspectorApi(basePath, inspectorToken);
   const apiPost = inspectorApi.post;
-  const testWorkbenchHostBridge = createInspectorHostBridge(window);
+  const hostBridge = createInspectorHostBridge(window);
   let testWorkbench = null;
   let agentRequestController = null;
   function metaContent(name) {
@@ -52,13 +52,15 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   });
   // A per-tab writer token identifies this session for the single-writer lock. A global fetch
   // wrapper stamps it on every same-origin /api/ call and flips to read-only on a writer 409.
-  const writerToken = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('w' + Math.random().toString(36).slice(2) + Date.now());
+  let writerToken = (window.crypto && crypto.randomUUID) ? crypto.randomUUID() : ('w' + Math.random().toString(36).slice(2) + Date.now());
   let leaseHolderKind = 'web';
   let leaseHolderLabel = 'Browser Inspector';
   let isWriter = false;
   let leaseHeldByOther = false;
   let otherLeaseLabel = null;
   let otherLeaseExpiresInMs = null;
+  let hostInteractionAdopted = false;
+  let interactionAdoptionGeneration = 0;
   let connected = true;   // a live app is reachable (derived from /api/state); gates the drive-actions
   const _origFetch = window.fetch.bind(window);
   window.fetch = async (url, opts) => {
@@ -95,6 +97,35 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       }).catch(() => {});
     } catch {}
   });
+
+  async function adoptHostInteractionSession(sessionId) {
+    if (typeof sessionId !== 'string' || !sessionId || sessionId === writerToken) return;
+    const generation = ++interactionAdoptionGeneration;
+    hostInteractionAdopted = true;
+    const previousToken = writerToken;
+    const releasePrevious = isWriter;
+    writerToken = sessionId;
+    isWriter = false;
+    if (releasePrevious) {
+      try {
+        await _origFetch(`${basePath}/api/control`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-DevFlow-Lease': previousToken,
+            'X-DevFlow-Writer': previousToken,
+            'X-DevFlow-Holder': leaseHolderKind,
+            'X-DevFlow-Label': leaseHolderLabel,
+          },
+          body: JSON.stringify({ action: 'release' }),
+        });
+      } catch {
+        // The previous lease expires automatically; continue adopting the host session.
+      }
+    }
+    if (generation === interactionAdoptionGeneration)
+      await control('claim');
+  }
 
   let gesturePoints = [];
   let isGesturing = false;
@@ -898,8 +929,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   let toolbarLayoutFrame = 0;
   const treePanel = document.getElementById('df-tree');
   const paneScrim = document.getElementById('df-pane-scrim');
-  let hostKind = 'browser';
-  let hostLayout = 'wide';
+  let hostIdentity = 'browser';
+  let hostLayoutWidth = 'wide';
+  let hostLayoutHeight = 'tall';
   let dockReturnFocus = null;
 
   function isFocusableVisible(element) {
@@ -911,22 +943,36 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     if (target) target.focus({ preventScroll: true });
   }
 
-  function classifyHostLayout() {
+  // Layout is a pure function of the geometry the Inspector was given. Host identity and declared
+  // placement never select a layout, so two surfaces of the same size behave identically.
+  // Width and height are independent axes: a wide-but-short window keeps its tree docked and only
+  // gives up vertical chrome.
+  function classifyLayoutWidth() {
     const width = document.documentElement.clientWidth || window.innerWidth || 1;
-    const height = document.documentElement.clientHeight || window.innerHeight || 1;
-    if (height < 560) return 'short';
-    if (hostKind === 'canvas' && width < 860) return 'narrow';
     if (width < 720) return 'narrow';
     if (width < 1400) return 'compact';
     return 'wide';
   }
 
-  function isTransientPaneLayout() {
-    return hostLayout === 'compact' || hostLayout === 'narrow' || hostLayout === 'short';
+  function classifyLayoutHeight() {
+    const height = document.documentElement.clientHeight || window.innerHeight || 1;
+    return height < 560 ? 'short' : 'tall';
   }
 
+  // The properties pane becomes a transient drawer as soon as horizontal room is tight.
+  function isTransientPaneLayout() {
+    return hostLayoutWidth === 'compact' || hostLayoutWidth === 'narrow';
+  }
+
+  // The tree only becomes a drawer when there is genuinely no horizontal room for it.
   function isTreeDrawerLayout() {
-    return hostLayout === 'narrow' || hostLayout === 'short';
+    return hostLayoutWidth === 'narrow';
+  }
+
+  // Data dock and workflow timeline float as overlay sheets whenever either axis is tight, so they
+  // never eat the screenshot's remaining budget.
+  function isOverlayChrome() {
+    return hostLayoutWidth !== 'wide' || hostLayoutHeight === 'short';
   }
 
   function setTreeVisible(visible, restore = false, preserveWorkbench = false) {
@@ -1056,19 +1102,27 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     const showScrim =
       (isTreeDrawerLayout() && treeOpen) ||
       (isTransientPaneLayout() && propsOpen) ||
-      (hostLayout !== 'wide' && dockOpen);
+      (isOverlayChrome() && dockOpen);
     document.body.classList.toggle('df-props-open', propsOpen);
     if (paneScrim) paneScrim.classList.toggle('df-hidden', !showScrim);
   }
 
   function updateHostLayout() {
-    const next = classifyHostLayout();
-    if (next !== hostLayout || !document.body.dataset.hostLayout) {
-      hostLayout = next;
-      document.body.dataset.hostLayout = next;
-      document.documentElement.dataset.hostLayout = next;
+    const nextWidth = classifyLayoutWidth();
+    const nextHeight = classifyLayoutHeight();
+    if (nextWidth !== hostLayoutWidth ||
+        nextHeight !== hostLayoutHeight ||
+        !document.body.dataset.layoutWidth) {
+      hostLayoutWidth = nextWidth;
+      hostLayoutHeight = nextHeight;
+      const chrome = isOverlayChrome() ? 'overlay' : 'docked';
+      for (const root of [document.body, document.documentElement]) {
+        root.dataset.layoutWidth = nextWidth;
+        root.dataset.layoutHeight = nextHeight;
+        root.dataset.layoutChrome = chrome;
+      }
       setMoreOpen(false);
-      setTreeVisible(next === 'wide' || next === 'compact', false, true);
+      setTreeVisible(!isTreeDrawerLayout(), false, true);
       scheduleToolbarLayout();
     }
     syncPaneChrome();
@@ -1085,6 +1139,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   function applyHostProfile(profile) {
     if (!profile || typeof profile !== 'object') return;
     const root = document.documentElement;
+    // Declared placement is provenance only. It is never allowed to select a layout: two surfaces
+    // of the same size must behave identically.
     if (typeof profile.surface === 'string' && /^[a-z-]{2,32}$/.test(profile.surface))
       root.dataset.hostSurface = profile.surface;
     root.dataset.hostContrast = profile.contrast === 'high' ? 'high' : 'normal';
@@ -1800,8 +1856,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   }
 
   async function chooseWorkflowFile() {
-    if (hostHas('workflowFilePicker')) {
-      const result = await requestHost('devflow:pickWorkflow', {}, 300000);
+    if (hostBridge.has('workflowFilePicker')) {
+      const result = await hostBridge.request('workflowFilePicker', {});
       if (result && result.ok && typeof result.markdown === 'string') {
         const loaded = setLoadedWorkflow(result.markdown, result.name || 'workflow.md', 'file', result.steps);
         if (!loaded?.ok) return;
@@ -1962,13 +2018,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   }
 
   updateFlowButtons();
-  // ── Host bridge: send-to-Copilot + open-XAML-source over a nonce-authenticated
-  // iframe->host channel. The host (VS Code webview / canvas shell) advertises capabilities; a plain
-  // browser tab has no host and uses clipboard fallbacks. The bridge nonce arrives in the URL
-  // fragment (never sent to the broker) and gates every message in both directions. ──
-  const framed = window.parent && window.parent !== window;
-  const bridgeId = (location.hash.match(/devflowBridge=([A-Za-z0-9_-]+)/) || [])[1] || null;
-  let hostCaps = null;
+  // ── Host bridge ──────────────────────────────────────────────────────────────────────────────
+  // Every host conversation goes through the one bridge in inspector-host-bridge.js. This page has
+  // no second listener and no capability vocabulary of its own: it asks the bridge how an operation
+  // resolves in this surface, then either dispatches it or runs the Inspector's own equivalent.
   const copilotBtn = document.getElementById('df-send-copilot');
   const copilotMenu = document.getElementById('df-copilot-menu');
   const copilotMenuItems = copilotMenu
@@ -1978,27 +2031,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   const attachDataBtn = document.getElementById('df-attach-data');
   let dockSnapshot = null;
   let dockActiveTab = null;
-  const pendingHostRequests = new Map();
-  let hostRequestSequence = 0;
 
-  function postToHost(type, data) {
-    if (!framed || !bridgeId) return false;
-    window.parent.postMessage(Object.assign({ v: 1, bridgeId, type }, data || {}), '*');
-    return true;
+  function leaseKindForHost(hostId) {
+    const value = String(hostId || '').toLowerCase();
+    if (value === 'canvas') return 'canvas';
+    if (value === 'vscode') return 'vscode';
+    if (value === 'browser') return 'browser';
+    return 'embedded-host';
   }
-  function requestHost(type, data, timeoutMs) {
-    if (!framed || !bridgeId) return Promise.resolve({ ok: false, error: 'No compatible host is available.' });
-    const requestId = `h${Date.now().toString(36)}-${(++hostRequestSequence).toString(36)}`;
-    return new Promise((resolve) => {
-      const timer = setTimeout(() => {
-        pendingHostRequests.delete(requestId);
-        resolve({ ok: false, error: 'The host did not confirm the context attachment.' });
-      }, timeoutMs || 10000);
-      pendingHostRequests.set(requestId, { resolve, timer });
-      postToHost(type, Object.assign({ requestId }, data || {}));
-    });
-  }
-  function hostHas(cap) { return !!hostCaps && hostCaps.indexOf(cap) !== -1; }
 
   // Compact, durable element context shared with the host (Copilot). Everything the agent needs to
   // resolve "the selected element" without a screenshot.
@@ -2021,50 +2061,32 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   function postSelectionToHost(el) {
     _selHostPending = elementInfo(el);
     if (_selHostTimer) clearTimeout(_selHostTimer);
-    _selHostTimer = setTimeout(() => { _selHostTimer = null; postToHost('devflow:selectionChanged', { element: _selHostPending }); }, 120);
+    _selHostTimer = setTimeout(() => {
+      _selHostTimer = null;
+      hostBridge.notify('selection', { element: _selHostPending });
+    }, 120);
   }
 
-  // Reliable handshake: announce readiness (with the bridge nonce) and retry until the host acks
-  // with its capabilities. The host also re-announces on iframe load, so either order works.
-  let hsTries = 0, hsTimer = null;
-  function announceReady() {
-    if (hostCaps || !framed || !bridgeId) return;
-    postToHost('devflow:ready', { version: 1 });
-    if (++hsTries < 12) hsTimer = setTimeout(announceReady, 300);
-  }
-  window.addEventListener('message', (e) => {
-    if (e.source !== window.parent) return;              // only our embedding host
-    const d = e.data;
-    if (!d || d.bridgeId !== bridgeId) return;            // authenticated by the per-session bridge nonce
-    if (d.type === 'devflow:hostResult') {
-      const pending = typeof d.requestId === 'string' ? pendingHostRequests.get(d.requestId) : null;
-      if (!pending) return;
-      clearTimeout(pending.timer);
-      pendingHostRequests.delete(d.requestId);
-      pending.resolve(Object.assign({}, d, {
-        ok: d.ok === true,
-        message: typeof d.message === 'string' ? d.message : null,
-        error: typeof d.error === 'string' ? d.error : null,
-      }));
-    } else if (d.type === 'devflow:host') {
-      hostCaps = Array.isArray(d.capabilities) ? d.capabilities : [];
-      if (typeof d.hostKind === 'string' && d.hostKind) {
-        leaseHolderKind = d.hostKind;
-        hostKind = d.hostKind.includes('canvas') ? 'canvas' : (d.hostKind.includes('vscode') ? 'vscode' : d.hostKind);
-        document.body.dataset.hostKind = hostKind;
-        document.documentElement.dataset.hostKind = hostKind;
-      }
-      if (typeof d.hostLabel === 'string' && d.hostLabel) leaseHolderLabel = d.hostLabel;
-      if (d.profile) applyHostProfile(d.profile);
-      updateHostLayout();
-      if (hsTimer) { clearTimeout(hsTimer); hsTimer = null; }
+  hostBridge.onHostMessage((event) => {
+    if (event.type === 'host') {
+      const manifest = event.manifest;
+      hostIdentity = manifest.hostId;
+      leaseHolderKind = leaseKindForHost(manifest.hostId);
+      leaseHolderLabel = manifest.hostLabel;
+      document.body.dataset.hostKind = hostIdentity;
+      document.documentElement.dataset.hostKind = hostIdentity;
+      applyHostProfile(manifest.profile);
+      adoptHostInteractionSession(manifest.interactionSessionId);
       updateHostButtons();
-      if (d.theme) applyTheme(d.theme);                  // host may bundle its theme with the capability ack
-    } else if (d.type === 'devflow:theme') {
-      if (d.profile) applyHostProfile(d.profile);
-      applyTheme(d);                                     // host reports/updates its color scheme + palette
+      if (event.theme) applyTheme(event.theme);   // host may bundle its theme with the capability ack
+      return;
+    }
+    if (event.type === 'theme') {
+      if (event.profile) applyHostProfile(event.profile);
+      applyTheme(event.theme);                     // host reports/updates its color scheme + palette
     }
   });
+
 
   function selectedElement() { return selectedId ? elById(selectedId) : null; }
 
@@ -2110,7 +2132,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       });
       const j = r.ok ? await r.json().catch(() => null) : null;
       if (!j || !j.ok || !j.file) { setStatus('No source available for this element.'); return; }
-      if (hostHas('openSource') && postToHost('devflow:openSource', {
+      if (hostBridge.notify('openSource', {
         file: j.file,
         line: j.line || 1,
         column: j.column || 1,
@@ -2182,15 +2204,15 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         setStatus('The selected Copilot context is not available yet.');
         return;
       }
-      if (hostHas('copilotContext')) {
+      if (hostBridge.has('copilotContext')) {
         setStatus(`Adding ${kind === 'combined' ? 'selection and workflow' : kind} context to Copilot…`);
-        const result = await requestHost('devflow:attachCopilot', { context: kind, payload }, 10000);
+        const result = await hostBridge.request('copilotContext', { context: kind, payload });
         setStatus(result && result.ok
           ? (result.message || 'Added Inspector context to Copilot.')
           : ((result && result.error) || 'The host could not add Inspector context to Copilot.'));
         return;
       }
-      if (kind === 'selection' && hostHas('copilot') && postToHost('devflow:sendToCopilot', { payload })) {
+      if (kind === 'selection' && hostBridge.notify('copilot', { payload })) {
         setStatus('Sent selected-element context to Copilot.');
         return;
       }
@@ -2298,7 +2320,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       closeCopilotMenu(true);
     }
   });
-  if (framed && bridgeId) announceReady();
+  hostBridge.start();
   updateHostButtons();
 
   // ── Data dock: Logs / Network / Preferences / Device / Sensors / Files ──
@@ -2392,9 +2414,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       setStatus('Load a supported Data tab before adding it to Copilot.');
       return;
     }
-    if (hostHas('attachData')) {
+    if (hostBridge.has('attachData')) {
       setStatus(`Adding ${dockSnapshot.title} to Copilot…`);
-      const result = await requestHost('devflow:attachData', { snapshot: dockSnapshot }, 12000);
+      const result = await hostBridge.request('attachData', { snapshot: dockSnapshot });
       setStatus(result.ok
         ? (result.message || `Added ${dockSnapshot.title} to Copilot.`)
         : (result.error || `Could not add ${dockSnapshot.title} to Copilot.`));
@@ -3977,7 +3999,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           const response = await postAuthoring('/api/plans/load', { name });
           applyAuthoringResponse(response, true);
           if (response.supported === false) {
-            const hostResult = await testWorkbenchHostBridge.request('loadTestBundle', {});
+            const hostResult = await hostBridge.request('loadTestBundle', {});
             const bundle = hostResult?.value;
             if (hostResult?.ok && bundle?.markdown) {
               syncAuthoringFlow(bundle.markdown, bundle.name || name, 'file');
@@ -4158,7 +4180,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
               setStatus('Could not bind a digest for host persistence; downloaded flow and plan instead.');
               return;
             }
-            const hostResult = await testWorkbenchHostBridge.request('saveTestBundle', { bundle });
+            const hostResult = await hostBridge.request('saveTestBundle', { bundle });
             if (hostResult?.ok) {
               authoringDraft.flowDirty = false;
               authoringDraft.planDirty = false;
@@ -4317,7 +4339,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           return;
         }
         const name = safeAuthoringName(authoringDraft.flowName || lastMarkdownName || 'recording.md');
-        if (hostHas('saveRecording') && postToHost('devflow:recordingComplete', {
+        if (hostBridge.notify('saveRecording', {
           name: name.replace(/\.md$/i, ''),
           steps: authoringDraft.recordingDraftStepCount,
           markdown: authoringDraft.markdown,
@@ -5174,8 +5196,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       async pickTrace() {
         if (state.importing) return;
         let picked = null;
-        if (testWorkbenchHostBridge.has('pickTrace')) {
-          const host = await testWorkbenchHostBridge.request('pickTrace', {}, 60000);
+        if (hostBridge.has('pickTrace')) {
+          const host = await hostBridge.request('pickTrace', {}, 60000);
           if (!host?.ok) {
             workbenchAnnouncement(host?.error || 'The host did not provide a trace artifact.', true);
             return;
@@ -5659,13 +5681,15 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
 
     function capability() {
-      const canApplySource = testWorkbenchHostBridge.has('applySourceProposal');
-      const canApplyCSharpSource = testWorkbenchHostBridge.has('applyCSharpSourceProposal');
-      const canProvideCSharpSource = testWorkbenchHostBridge.has('getCSharpSourceSelection');
+      const canApplySource = hostBridge.has('applySourceProposal');
+      const canApplyCSharpSource = hostBridge.has('applyCSharpSourceProposal');
+      const canProvideCSharpSource = hostBridge.has('getCSharpSourceSelection');
       return {
-        hostKind: testWorkbenchHostBridge.hostKind?.() || 'browser',
-        canOpenNativeDiff: testWorkbenchHostBridge.has('openSourceDiff'),
-        canDownloadPatch: true,
+        hostKind: hostBridge.hostId(),
+        canOpenNativeDiff: hostBridge.has('openSourceDiff'),
+        // Embedded hosts sandbox the iframe without `allow-downloads`, so a patch download there
+        // would silently do nothing. Only a standalone browser tab can actually deliver the file.
+        canDownloadPatch: hostBridge.canDownload(),
         canApplySource,
         canApplyCSharpSource,
         canProvideCSharpSource,
@@ -5718,11 +5742,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         };
         return true;
       }
-      if (!testWorkbenchHostBridge.has('getCSharpSourceSelection')) {
+      if (!hostBridge.has('getCSharpSourceSelection')) {
         state.error = 'C# source analysis requires a mapped C# runtime declaration or the active C# selection from a native IDE host. Canvas does not provide that capability.';
         return false;
       }
-      const host = await testWorkbenchHostBridge.request('getCSharpSourceSelection', {}, 10000);
+      const host = await hostBridge.request('getCSharpSourceSelection', {}, 10000);
       const location = host?.value;
       if (!host?.ok || !location ||
           typeof location.sourceFile !== 'string' ||
@@ -5868,7 +5892,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       async openNativeDiff() {
         const proposal = state.proposal?.proposal || state.proposal || state.preview;
         if (!proposal?.diff) return;
-        const host = await testWorkbenchHostBridge.request('openSourceDiff', {
+        const host = await hostBridge.request('openSourceDiff', {
           proposalId: proposal.proposalId,
           fileRelativePath: proposal.operation?.fileRelativePath,
           diff: proposal.diff,
@@ -5951,7 +5975,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           }
           state.proposal = begun.body.proposal;
           const activeProposal = state.proposal?.proposal || state.proposal;
-          const host = await testWorkbenchHostBridge.request('applyCSharpSourceProposal', {
+          const host = await hostBridge.request('applyCSharpSourceProposal', {
             proposalId: id,
             fileRelativePath: activeProposal?.operation?.fileRelativePath,
             sourceHash: activeProposal?.operation?.sourceHash,
@@ -5982,7 +6006,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           return;
         }
 
-        const host = await testWorkbenchHostBridge.request('applySourceProposal', {
+        const host = await hostBridge.request('applySourceProposal', {
           proposalId: id,
           fileRelativePath: proposal?.operation?.fileRelativePath,
           patchDigest: proposal?.patchDigest,
@@ -6063,7 +6087,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           }
           state.proposal = begun.body.proposal;
           const activeProposal = state.proposal?.proposal || state.proposal;
-          const host = await testWorkbenchHostBridge.request('applyCSharpSourceProposal', {
+          const host = await hostBridge.request('applyCSharpSourceProposal', {
             proposalId: id,
             fileRelativePath: activeProposal?.operation?.fileRelativePath,
             sourceHash: activeProposal?.operation?.sourceHash,
@@ -6423,7 +6447,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       },
       async openSource(source) {
         const anchor = String(source || '').slice(0, 360);
-        const result = await testWorkbenchHostBridge.request('openSourceDiff', {
+        const result = await hostBridge.request('openSourceDiff', {
           sourceAnchor: anchor,
           intent: 'Open read-only selector-health source anchor',
         });
@@ -6444,7 +6468,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   testWorkbench = createInspectorWorkbench({
     root: document.getElementById('df-workbench'),
     toggleButton: document.getElementById('df-toggle-workbench'),
-    hostBridge: testWorkbenchHostBridge,
+    hostBridge: hostBridge,
     authoring: authoringController,
     run: runController,
     trace: traceController,
@@ -6452,7 +6476,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     source: sourceProposalController,
     improve: improveController,
     study: studyController,
-    getLayout: () => hostLayout,
+    getLayout: () => ({
+      width: hostLayoutWidth,
+      height: hostLayoutHeight,
+      overlay: isOverlayChrome(),
+    }),
     setStatus,
     copyText,
     onOpen: () => {
@@ -6645,7 +6673,15 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
     await control('claim', true);
   });
-  control('claim');   // optimistically claim the writer lease on load
+  if (hostBridge.isEmbedded()) {
+    // Give an authenticated embedded host time to supply its shared interaction-session identity.
+    // This avoids briefly claiming a random lease that would contend with the host's agent actions.
+    setTimeout(() => {
+      if (!hostInteractionAdopted) control('claim');
+    }, 1000);
+  } else {
+    control('claim');
+  }
   setInterval(() => { if (!document.hidden) control(isWriter ? 'heartbeat' : 'status'); }, 4000);
   // On refocus, immediately reconcile writer presence instead of waiting up to 4s for the next tick —
   // a backgrounded tab pauses its heartbeat, so its lease may have expired or been claimed elsewhere.
@@ -6751,8 +6787,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     if (isTreeDrawerLayout() && !document.body.classList.contains('df-tree-hidden')) setTreeVisible(false, true);
   });
 
-  document.body.dataset.hostKind = hostKind;
-  document.documentElement.dataset.hostKind = hostKind;
+  document.body.dataset.hostKind = hostIdentity;
+  document.documentElement.dataset.hostKind = hostIdentity;
+  applyHostProfile({ surface: 'browser' });
   updateHostLayout();
   scheduleToolbarLayout();
   elementTree.build();

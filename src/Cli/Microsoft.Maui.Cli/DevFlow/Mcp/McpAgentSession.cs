@@ -3,6 +3,7 @@ using Microsoft.Maui.Cli.DevFlow.Android;
 using Microsoft.Maui.DevFlow.Driver;
 using Microsoft.Maui.DevFlow.Testing;
 using ModelContextProtocol;
+using Microsoft.Maui.Cli.DevFlow.Inspector;
 
 namespace Microsoft.Maui.Cli.DevFlow.Mcp;
 
@@ -75,8 +76,16 @@ public class McpAgentSession
 			? agents?.FirstOrDefault(candidate => candidate.Port == selectedPort.Value)
 			: agents is null ? null : BrokerClient.ResolveAgent(agents);
 		if (agent is null)
-			throw new McpException("Select exactly one connected agent with agentPort before using resume checkpoints.");
+			throw new McpException("Select exactly one connected agent with agentPort before using this tool.");
 		return agent;
+	}
+
+	/// <summary>Reads the canonical broker-produced activeVisual tree for the selected agent.</summary>
+	public async Task<List<ElementInfo>?> GetInspectorTreeAsync(int? agentPort = null)
+	{
+		var brokerPort = await GetBrokerPortAsync();
+		var agent = await GetSelectedBrokerAgentAsync(agentPort);
+		return await InspectorSnapshotClient.GetActiveVisualTreeAsync(brokerPort, agent.Id);
 	}
 
 	/// <summary>

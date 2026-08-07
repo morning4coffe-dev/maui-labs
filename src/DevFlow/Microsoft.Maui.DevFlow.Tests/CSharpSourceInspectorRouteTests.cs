@@ -158,9 +158,9 @@ public sealed class CSharpSourceInspectorRouteTests
 
             var canvas = new
             {
-                hostKind = "copilot-canvas-ui",
+                hostKind = "canvas",
                 canOpenNativeDiff = false,
-                canDownloadPatch = true,
+                canDownloadPatch = false,
                 canApplyCSharpSource = false,
                 isExplicitLocalHostAction = false,
             };

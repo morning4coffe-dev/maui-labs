@@ -6,8 +6,8 @@ namespace Microsoft.Maui.DevFlow.Tests;
 
 /// <summary>
 /// MAUI Shell keeps every tab/flyout page mounted and visible, so a tree pull contains all pages at
-/// once. HtmlRenderer must drop the inactive ones (via PageFilter) so the inspector doesn't stack a
-/// stale page's elements over the live one after navigation.
+/// once. The canonical activeVisual projection must drop inactive pages before any Inspector
+/// surface renders or serializes the tree.
 /// </summary>
 public class InspectorPageFilterTests
 {
@@ -49,7 +49,8 @@ public class InspectorPageFilterTests
                 children: El("sc", "ShellContent", 0, 100, 400, 800, children: LaidOutPage("p1", "HomePage"))),
         };
 
-        var html = HtmlRenderer.RenderElements(tree);
+        var projected = PageFilter.ProjectActiveVisualInPlace(tree);
+        var html = HtmlRenderer.RenderElements(projected);
 
         Assert.Contains("data-id=\"p1\"", html);
         Assert.Contains("data-id=\"p1-l1\"", html);
@@ -68,7 +69,8 @@ public class InspectorPageFilterTests
                 ]),
         };
 
-        var html = HtmlRenderer.RenderElements(tree);
+        var projected = PageFilter.ProjectActiveVisualInPlace(tree);
+        var html = HtmlRenderer.RenderElements(projected);
 
         // Active page (and its wrapper) stay.
         Assert.Contains("data-id=\"active\"", html);
@@ -78,6 +80,7 @@ public class InspectorPageFilterTests
         Assert.DoesNotContain("data-id=\"inactive\"", html);
         Assert.DoesNotContain("data-id=\"inactive-l1\"", html);
         Assert.DoesNotContain("data-id=\"sc-inactive\"", html);
+        Assert.DoesNotContain(projected[0].Children!, child => child.Id == "sc-inactive");
     }
 
     [Fact]
@@ -95,7 +98,8 @@ public class InspectorPageFilterTests
                 ]),
         };
 
-        var html = HtmlRenderer.RenderElements(tree);
+        var projected = PageFilter.ProjectActiveVisualInPlace(tree);
+        var html = HtmlRenderer.RenderElements(projected);
 
         Assert.Contains("data-id=\"pA\"", html);
         Assert.Contains("data-id=\"pB\"", html);
@@ -117,11 +121,174 @@ public class InspectorPageFilterTests
                 ]),
         };
 
-        var html = HtmlRenderer.RenderElements(tree);
+        var projected = PageFilter.ProjectActiveVisualInPlace(tree);
+        var html = HtmlRenderer.RenderElements(projected);
 
         // The selected "insights" Tab names InsightsPage → keep it, drop the other page.
         Assert.Contains("data-id=\"insights\"", html);
         Assert.DoesNotContain("data-id=\"subs\"", html);
+    }
+
+    [Fact]
+    public void ProjectActiveVisualInPlace_MutatesOnlyTheProvidedFrameTree()
+    {
+        var inactive = CollapsedPage("inactive", "InsightsPage");
+        var active = LaidOutPage("active", "SubscriptionsPage");
+        var tree = new List<ElementInfo>
+        {
+            El("shell", "Shell", 0, 0, 400, 900,
+                children:
+                [
+                    El("active-wrapper", "ShellContent", 0, 100, 400, 800, children: active),
+                    El("inactive-wrapper", "ShellContent", 0, 100, 400, 800, children: inactive),
+                ]),
+        };
+
+        var projected = PageFilter.ProjectActiveVisualInPlace(tree);
+
+        Assert.Same(tree, projected);
+        Assert.DoesNotContain(projected[0].Children!, child => child.Id == "inactive-wrapper");
+        Assert.Equal("inactive", inactive.Id);
+        Assert.NotNull(inactive.Children);
+    }
+
+    [Fact]
+    public void InspectSnapshotPayload_UsesRevisionedActiveVisualContractWithoutTransportDetails()
+    {
+        var roots = new List<ElementInfo>
+        {
+            El("root", "ContentPage", 0, 0, 400, 800),
+        };
+
+        var payload = InspectorSnapshotService.Create(
+            "snapshot-1",
+            DateTime.UnixEpoch,
+            "screenshot.png?frame=snapshot-1",
+            roots,
+            400,
+            800,
+            0,
+            20,
+            "agent-1",
+            "Sample",
+            "windows");
+        using var json = System.Text.Json.JsonDocument.Parse(
+            System.Text.Json.JsonSerializer.Serialize(payload, new System.Text.Json.JsonSerializerOptions
+            {
+                PropertyNamingPolicy = System.Text.Json.JsonNamingPolicy.CamelCase
+            }));
+        var root = json.RootElement;
+
+        Assert.Equal("activeVisual", root.GetProperty("projection").GetString());
+        Assert.Equal("snapshot-1", root.GetProperty("revision").GetString());
+        Assert.Equal("agent-1", root.GetProperty("target").GetProperty("agentId").GetString());
+        Assert.False(root.GetProperty("target").TryGetProperty("port", out _));
+        Assert.False(root.GetProperty("target").TryGetProperty("agentInstanceId", out _));
+        Assert.Equal(20, root.GetProperty("viewport").GetProperty("rootOffsetY").GetDouble());
+        Assert.Equal("root", root.GetProperty("roots")[0].GetProperty("id").GetString());
+    }
+
+    [Fact]
+    public void FilterActiveMatches_RemovesCandidatesOutsideTheCanonicalProjection()
+    {
+        var active = new List<ElementInfo>
+        {
+            El("root", "ContentPage", 0, 0, 400, 800,
+                children: El("active", "Button", 20, 20, 100, 40)),
+        };
+        var candidates = new[]
+        {
+            El("active", "Button", 20, 20, 100, 40),
+            El("inactive", "Button", 20, 80, 100, 40),
+        };
+
+        var matches = InspectorSnapshotService.FilterActiveMatches(active, candidates);
+
+        Assert.Single(matches);
+        Assert.Equal("active", matches[0].Id);
+    }
+
+    [Fact]
+    public void InspectorQueryResponse_DeclaresItsCanonicalProjection()
+    {
+        var response = new InspectorQueryResponse
+        {
+            Projection = "activeVisual",
+            SnapshotId = "snapshot-1",
+            Revision = "snapshot-1",
+            Elements = [],
+        };
+
+        Assert.Equal("activeVisual", response.Projection);
+        Assert.Equal(response.SnapshotId, response.Revision);
+    }
+
+    [Fact]
+    public void TrimDepth_CapsCanonicalSnapshotsWithoutChangingTheRoot()
+    {
+        var roots = new List<ElementInfo>
+        {
+            El("root", "ContentPage", 0, 0, 400, 800,
+                children: El("layout", "Grid", 0, 0, 400, 800,
+                    children: El("button", "Button", 20, 20, 100, 40))),
+        };
+
+        InspectorSnapshotService.TrimDepth(roots, 2);
+
+        Assert.Equal("root", roots[0].Id);
+        Assert.Single(roots[0].Children!);
+        Assert.Null(roots[0].Children![0].Children);
+    }
+
+    [Theory]
+    [InlineData(null, null, null, true, false, 0, 0, "x and y")]
+    [InlineData("list", null, null, true, true, 0, 10, "coordinate scrolling")]
+    [InlineData(null, -1, null, false, false, 0, 0, "itemIndex")]
+    [InlineData(null, null, "middle", false, false, 0, 0, "scrollToPosition")]
+    [InlineData(null, null, null, false, false, 1000001, 0, "deltas")]
+    public void ValidateInspectScrollArguments_InvalidModes_ReturnActionableError(
+        string? elementId,
+        int? itemIndex,
+        string? position,
+        bool hasX,
+        bool hasY,
+        double deltaX,
+        double deltaY,
+        string expected)
+    {
+        var error = InspectorServer.ValidateInspectScrollArguments(
+            elementId,
+            itemIndex,
+            position,
+            hasX,
+            hasY,
+            deltaX,
+            deltaY);
+
+        Assert.Contains(expected, error);
+    }
+
+    [Theory]
+    [InlineData("list", 4, "Center", false, false, 0, 0)]
+    [InlineData(null, null, null, true, true, 0, 120)]
+    [InlineData(null, null, null, false, false, 0, -240)]
+    public void ValidateInspectScrollArguments_ValidModes_AreAccepted(
+        string? elementId,
+        int? itemIndex,
+        string? position,
+        bool hasX,
+        bool hasY,
+        double deltaX,
+        double deltaY)
+    {
+        Assert.Null(InspectorServer.ValidateInspectScrollArguments(
+            elementId,
+            itemIndex,
+            position,
+            hasX,
+            hasY,
+            deltaX,
+            deltaY));
     }
 
     [Fact]

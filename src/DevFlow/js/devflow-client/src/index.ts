@@ -31,6 +31,25 @@ import type {
   ThemeResult,
 } from "./types.js";
 
+export {
+  INSPECTOR_HOST_PROTOCOL,
+  createInspectorHostManifest,
+} from "./host-protocol.js";
+export type {
+  InspectorHostCapabilityDescriptor,
+  InspectorHostManifest,
+} from "./host-protocol.js";
+export {
+  isInspectorQueryResult,
+  isInspectorSnapshot,
+} from "./inspect-contracts.js";
+export type {
+  InspectorQueryResult,
+  InspectorSnapshot,
+  InspectorSnapshotTarget,
+  InspectorSnapshotViewport,
+} from "./inspect-contracts.js";
+
 export interface ScreenshotOptions {
   window?: number;
   elementId?: string;

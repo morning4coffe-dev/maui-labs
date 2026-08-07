@@ -28,6 +28,10 @@ test("Disconnected shell rotates its script nonce", () => {
 test("Canvas shell relays test saves and direct agent requests without adding replay semantics", () => {
   const html = renderShell("http://localhost:19223/inspector/app/?embed=token", "App", "bridge-secret");
 
+  assert.match(html, /"protocol":\{"version":2,"minimumVersion":1,"maximumVersion":2\}/);
+  assert.match(html, /"hostId":"canvas"/);
+  assert.match(html, /"interactionSessionId":"bridge-secret"/);
+  assert.match(html, /"capabilityDescriptors":\[/);
   assert.match(html, /'saveTestBundle'/);
   assert.match(html, /action: 'saveTestBundle', bundle: d\.bundle/);
   assert.match(html, /'requestTestProposal'/);

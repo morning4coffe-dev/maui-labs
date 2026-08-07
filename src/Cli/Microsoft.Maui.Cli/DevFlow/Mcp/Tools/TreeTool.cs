@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using ModelContextProtocol.Server;
 using Microsoft.Maui.Cli.DevFlow.Mcp;
+using Microsoft.Maui.Cli.DevFlow.Inspector;
 using Microsoft.Maui.DevFlow.Driver;
 
 namespace Microsoft.Maui.Cli.DevFlow.Mcp.Tools;
@@ -15,12 +16,32 @@ public sealed class TreeTool
 		[Description("Window index for multi-window apps (default: 0)")] int? window = null,
 		[Description("Max tree depth to return (default: 50)")] int depth = 50,
 		[Description("Filter to a specific element type, e.g. 'Label', 'Button', 'Entry'")] string? filter = null,
-		[Description("Return only the subtree rooted at this element ID")] string? elementId = null)
+		[Description("Return only the subtree rooted at this element ID")] string? elementId = null,
+		[Description("Tree projection: activeVisual (default, same tree as Inspector hosts) or raw (low-level agent tree)")] string projection = "activeVisual")
 	{
-		using var agent = await session.GetAgentClientAsync(agentPort);
-		var tree = await agent.GetTreeAsync(depth, window);
+		List<ElementInfo>? tree;
+		if (string.Equals(projection, "activeVisual", StringComparison.OrdinalIgnoreCase))
+		{
+			if (window is not null)
+				return "The activeVisual Inspector projection does not accept a window index. Use projection='raw' for a window-specific agent tree.";
+			tree = await session.GetInspectorTreeAsync(agentPort);
+			if (tree is not null)
+				InspectorSnapshotService.TrimDepth(tree, depth);
+		}
+		else if (string.Equals(projection, "raw", StringComparison.OrdinalIgnoreCase))
+		{
+			using var agent = await session.GetAgentClientAsync(agentPort);
+			tree = await agent.GetTreeAsync(depth, window);
+		}
+		else
+		{
+			return "projection must be 'activeVisual' or 'raw'.";
+		}
+
 		if (tree == null || tree.Count == 0)
-			return "No visual tree available. Is the agent connected and the app running?";
+			return projection.Equals("activeVisual", StringComparison.OrdinalIgnoreCase)
+				? "No canonical Inspector tree is available. Is the broker running and the app connected?"
+				: "No visual tree available. Is the agent connected and the app running?";
 
 		IEnumerable<ElementInfo> result = tree;
 

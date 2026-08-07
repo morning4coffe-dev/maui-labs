@@ -21,6 +21,32 @@ namespace Microsoft.Maui.Cli.DevFlow.Inspector;
 /// </summary>
 internal static class PageFilter
 {
+    /// <summary>
+    /// Produces the canonical active visual-tree projection used by Inspector surfaces.
+    /// The input belongs to the current frame and may be pruned in place.
+    /// </summary>
+    public static List<ElementInfo> ProjectActiveVisualInPlace(List<ElementInfo> roots)
+    {
+        var drop = InactivePageIds(roots);
+        if (drop.Count == 0)
+            return roots;
+
+        static void PruneChildren(ElementInfo element, HashSet<string> dropIds)
+        {
+            if (element.Children is not { Count: > 0 } children)
+                return;
+
+            children.RemoveAll(child => dropIds.Contains(child.Id));
+            foreach (var child in children)
+                PruneChildren(child, dropIds);
+        }
+
+        roots.RemoveAll(root => drop.Contains(root.Id));
+        foreach (var root in roots)
+            PruneChildren(root, drop);
+        return roots;
+    }
+
     public static HashSet<string> InactivePageIds(List<ElementInfo>? roots)
     {
         var drop = new HashSet<string>(StringComparer.Ordinal);

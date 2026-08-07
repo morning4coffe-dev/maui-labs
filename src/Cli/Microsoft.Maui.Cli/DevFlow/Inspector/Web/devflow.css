@@ -535,22 +535,21 @@ body.df-dock-collapsed #df-dock-collapse .df-ic { transform: rotate(-90deg); }
    wide | compact | narrow | short. The app aspect is used only for fit scaling. */
 
 /* Wide browser/editor: classic three-pane layout and the full action bar. */
-body[data-host-layout="wide"] #df-tree-pane { flex-basis: clamp(210px, 22vw, 300px); }
-body[data-host-layout="wide"] #df-props-pane { flex-basis: clamp(250px, 26vw, 340px); }
+body[data-layout-width="wide"] #df-tree-pane { flex-basis: clamp(210px, 22vw, 300px); }
+body[data-layout-width="wide"] #df-props-pane { flex-basis: clamp(250px, 26vw, 340px); }
 
 /* Constrained hosts use a single-row primary toolbar plus an anchored overflow menu. */
-body:not([data-host-layout="wide"]) #df-toolbar {
+body[data-layout-chrome="overlay"] #df-toolbar {
   gap: 4px;
   padding: 5px 6px;
 }
-body:not([data-host-layout="wide"]) #df-toolbar > .df-sep { display: none; }
-body[data-host-layout="narrow"] #df-toolbar .df-btn-label,
-body[data-host-layout="short"] #df-toolbar .df-btn-label { display: none; }
-body:not([data-host-layout="wide"]) .df-mode-btn,
-body:not([data-host-layout="wide"]) .df-tool-btn { padding: 4px 8px; }
+body[data-layout-chrome="overlay"] #df-toolbar > .df-sep { display: none; }
+body[data-layout-width="narrow"] #df-toolbar .df-btn-label { display: none; }
+body[data-layout-chrome="overlay"] .df-mode-btn,
+body[data-layout-chrome="overlay"] .df-tool-btn { padding: 4px 8px; }
 @media (max-width: 360px) {
-  body:not([data-host-layout="wide"]) .df-presence { flex: 0 0 auto; padding-inline: 6px; }
-  body:not([data-host-layout="wide"]) .df-presence-label {
+  body[data-layout-chrome="overlay"] .df-presence { flex: 0 0 auto; padding-inline: 6px; }
+  body[data-layout-chrome="overlay"] .df-presence-label {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -563,11 +562,11 @@ body:not([data-host-layout="wide"]) .df-tool-btn { padding: 4px 8px; }
   }
 }
 @media (max-width: 300px) {
-  body:not([data-host-layout="wide"]) #df-toolbar { gap: 2px; padding-inline: 3px; }
-  body:not([data-host-layout="wide"]) #df-toolbar .df-mode-btn,
-  body:not([data-host-layout="wide"]) #df-toolbar > .df-tool-btn { padding: 3px 6px; }
+  body[data-layout-chrome="overlay"] #df-toolbar { gap: 2px; padding-inline: 3px; }
+  body[data-layout-chrome="overlay"] #df-toolbar .df-mode-btn,
+  body[data-layout-chrome="overlay"] #df-toolbar > .df-tool-btn { padding: 3px 6px; }
   .df-toolbar-overflow .df-tool-btn { padding: 4px 8px; }
-  body:not([data-host-layout="wide"]) .df-presence.df-readonly {
+  body[data-layout-chrome="overlay"] .df-presence.df-readonly {
     position: absolute;
     width: 1px;
     height: 1px;
@@ -581,8 +580,8 @@ body:not([data-host-layout="wide"]) .df-tool-btn { padding: 4px 8px; }
 }
 
 /* Compact editor: keep the tree docked, preserve screenshot width with a properties drawer. */
-body[data-host-layout="compact"] #df-tree-pane { flex: 0 0 clamp(190px, 25vw, 240px); }
-body[data-host-layout="compact"] #df-props-pane:not(.df-hidden) {
+body[data-layout-width="compact"] #df-tree-pane { flex: 0 0 clamp(190px, 25vw, 240px); }
+body[data-layout-width="compact"] #df-props-pane:not(.df-hidden) {
   position: absolute;
   z-index: 46;
   top: 0;
@@ -592,13 +591,13 @@ body[data-host-layout="compact"] #df-props-pane:not(.df-hidden) {
   min-width: 280px;
   box-shadow: var(--df-shadow);
 }
-body[data-host-layout="compact"] .df-pane-scrim {
+body[data-layout-width="compact"] .df-pane-scrim {
   left: clamp(190px, 25vw, 240px);
 }
 
-/* Narrow and short hosts make both side panes transient drawers, leaving the screenshot primary. */
-body[data-host-layout="narrow"] #df-tree-pane,
-body[data-host-layout="short"] #df-tree-pane {
+/* Narrow hosts make both side panes transient drawers, leaving the screenshot primary. A short but
+   wide host keeps its panes docked and only gives up vertical chrome. */
+body[data-layout-width="narrow"] #df-tree-pane {
   position: absolute;
   z-index: 45;
   top: 0;
@@ -609,8 +608,7 @@ body[data-host-layout="short"] #df-tree-pane {
   border-right: 1px solid var(--df-border);
   box-shadow: var(--df-shadow);
 }
-body[data-host-layout="narrow"] #df-props-pane:not(.df-hidden),
-body[data-host-layout="short"] #df-props-pane:not(.df-hidden) {
+body[data-layout-width="narrow"] #df-props-pane:not(.df-hidden) {
   position: absolute;
   z-index: 46;
   top: 0;
@@ -622,18 +620,16 @@ body[data-host-layout="short"] #df-props-pane:not(.df-hidden) {
   box-shadow: var(--df-shadow);
 }
 @media (max-width: 520px) {
-  body[data-host-layout="narrow"] #df-tree-pane,
-  body[data-host-layout="short"] #df-tree-pane,
-  body[data-host-layout="narrow"] #df-props-pane:not(.df-hidden),
-  body[data-host-layout="short"] #df-props-pane:not(.df-hidden) {
+  body[data-layout-width="narrow"] #df-tree-pane,
+  body[data-layout-width="narrow"] #df-props-pane:not(.df-hidden) {
     width: 100%;
     max-width: none;
   }
 }
-body[data-host-layout="short"] #df-view-pane { min-height: 0; }
+body[data-layout-height="short"] #df-view-pane { min-height: 0; }
 
 /* Data and timeline become overlay sheets in constrained hosts, protecting screenshot space. */
-body:not([data-host-layout="wide"]) #df-dock {
+body[data-layout-chrome="overlay"] #df-dock {
   position: absolute;
   left: 0;
   right: 0;
@@ -643,12 +639,12 @@ body:not([data-host-layout="wide"]) #df-dock {
   max-height: calc(100% - 72px);
   box-shadow: 0 -4px 18px rgba(0,0,0,0.28);
 }
-body:not([data-host-layout="wide"]) .df-dock-meta { display: none; }
-body[data-host-layout="short"] #df-dock {
+body[data-layout-chrome="overlay"] .df-dock-meta { display: none; }
+body[data-layout-height="short"] #df-dock {
   height: min(50vh, 240px);
   max-height: calc(100% - 54px);
 }
-body:not([data-host-layout="wide"]) #df-timeline {
+body[data-layout-chrome="overlay"] #df-timeline {
   position: absolute;
   left: 8px;
   right: 8px;
@@ -659,13 +655,12 @@ body:not([data-host-layout="wide"]) #df-timeline {
   box-shadow: var(--df-shadow);
   flex-wrap: wrap;
 }
-body:not([data-host-layout="wide"]) #df-timeline .df-tl-steps { order: 10; flex: 1 0 100%; }
-body:not([data-host-layout="wide"]) #df-timeline .df-workflow-select { flex: 1 1 150px; width: auto; }
-body[data-host-layout="compact"] #df-timeline { left: clamp(198px, calc(25vw + 8px), 248px); }
-body:not([data-host-layout="wide"]).df-props-open #df-timeline,
-body[data-host-layout="narrow"]:not(.df-tree-hidden) #df-timeline,
-body[data-host-layout="short"]:not(.df-tree-hidden) #df-timeline { display: none; }
-body:not([data-host-layout="wide"]).df-dock-open #df-timeline { display: none; }
+body[data-layout-chrome="overlay"] #df-timeline .df-tl-steps { order: 10; flex: 1 0 100%; }
+body[data-layout-chrome="overlay"] #df-timeline .df-workflow-select { flex: 1 1 150px; width: auto; }
+body[data-layout-width="compact"] #df-timeline { left: clamp(198px, calc(25vw + 8px), 248px); }
+body[data-layout-chrome="overlay"].df-props-open #df-timeline,
+body[data-layout-width="narrow"]:not(.df-tree-hidden) #df-timeline { display: none; }
+body[data-layout-chrome="overlay"].df-dock-open #df-timeline { display: none; }
 
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {

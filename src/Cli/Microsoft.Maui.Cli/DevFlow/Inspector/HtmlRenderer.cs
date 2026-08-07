@@ -81,12 +81,9 @@ public static class HtmlRenderer
     public static string RenderElements(List<ElementInfo> tree, double elementScale = 1, double rootOffsetX = 0, double rootOffsetY = 0)
     {
         var sb = new StringBuilder();
-        // Drop inactive Shell tab/flyout pages (mounted but not on screen) so the overlay + visual
-        // tree reflect only the displayed page instead of stacking every page's elements.
-        var dropIds = PageFilter.InactivePageIds(tree);
         foreach (var element in tree)
         {
-            RenderElementsFlat(sb, element, elementScale, rootOffsetX, rootOffsetY, parentRenderedId: null, dropIds);
+            RenderElementsFlat(sb, element, elementScale, rootOffsetX, rootOffsetY, parentRenderedId: null);
         }
         return sb.ToString();
     }
@@ -120,13 +117,8 @@ public static class HtmlRenderer
     /// client rebuild the visual hierarchy from the flat div list via data-parentId without
     /// orphaning children of a skipped parent.
     /// </summary>
-    private static void RenderElementsFlat(StringBuilder sb, ElementInfo element, double scale, double rootOffsetX, double rootOffsetY, string? parentRenderedId, HashSet<string> dropIds)
+    private static void RenderElementsFlat(StringBuilder sb, ElementInfo element, double scale, double rootOffsetX, double rootOffsetY, string? parentRenderedId)
     {
-        // Skip an inactive Shell page (or its exclusive wrapper) and its entire subtree — it's mounted
-        // but not on screen, so rendering it would stack a stale page's elements over the live one.
-        if (element.Id is { Length: > 0 } id && dropIds.Contains(id))
-            return;
-
         var rendered = RenderSingleElement(sb, element, scale, rootOffsetX, rootOffsetY, parentRenderedId);
         // Children attach to this element if it rendered a div, otherwise to the nearest
         // rendered ancestor (so a bounds-less container doesn't break the tree).
@@ -135,7 +127,7 @@ public static class HtmlRenderer
         {
             foreach (var child in element.Children)
             {
-                RenderElementsFlat(sb, child, scale, rootOffsetX, rootOffsetY, childParentId, dropIds);
+                RenderElementsFlat(sb, child, scale, rootOffsetX, rootOffsetY, childParentId);
             }
         }
     }

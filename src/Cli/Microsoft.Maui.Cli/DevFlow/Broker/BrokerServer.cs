@@ -642,13 +642,23 @@ public class BrokerServer : IDisposable
                     break;
                 }
 
-                // A device tap mutates the same screen maui_tap does, so it honours the same
-                // lease. The key is the paired agent's when an app is running, so app-level and
-                // device-level input contend rather than each believing it has exclusive control.
+                // "validate" carries the caller's own lease id, which is what makes this an
+                // authorization rather than a presence check: probing without one reports "held by
+                // other" even to the session that holds it, refusing exactly the caller that
+                // should be allowed.
+                //
+                // The gate is !HeldByOther rather than Allowed, because Allowed means strictly
+                // "you hold it" — and an unclaimed device, which is the normal state before an app
+                // launches, has no holder at all. Nobody holding it must not mean nobody may drive.
                 var agents = _agents.Values.Select(c => c.Registration).ToArray();
                 var leaseKey = await _devices.ResolveLeaseKeyAsync(deviceId, agents);
                 var lease = _mutationLeases.Control(
-                    leaseKey, "status", leaseId: null, holderKind: null, label: null, force: false);
+                    leaseKey,
+                    "validate",
+                    context.Request.QueryString["leaseId"],
+                    context.Request.QueryString["holderKind"],
+                    context.Request.QueryString["label"],
+                    force: false);
 
                 if (lease.HeldByOther)
                 {

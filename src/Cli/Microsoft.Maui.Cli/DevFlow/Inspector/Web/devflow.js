@@ -222,6 +222,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
 
   function setDeviceContext(ctx) {
     deviceContext = ctx && ctx.deviceId ? ctx : null;
+    // Deliberately NOT cleared when a refresh fails: the device outlives the app, and the last
+    // known context is what makes the app's death survivable rather than terminal.
+    try {
+      document.body.classList.toggle('df-device-live', hasDeviceLayer());
+    } catch (e) { /* pre-body call during init */ }
   }
 
   function hasDeviceLayer() {

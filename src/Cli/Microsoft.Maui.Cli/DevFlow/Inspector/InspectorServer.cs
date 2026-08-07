@@ -855,16 +855,36 @@ public sealed partial class InspectorServer : IDisposable
     /// Returns JSON state for AJAX polling: screenshot (as timestamped URL) + element divs HTML.
     /// This avoids full page reload flash.
     /// </summary>
+    private object? _deviceContext;
+    private DateTime _deviceContextAt = DateTime.MinValue;
+    private static readonly TimeSpan DeviceContextLifetime = TimeSpan.FromSeconds(10);
+
     /// <summary>
     /// The device this app is running inside, plus where its window sits on that device's screen.
     /// <para>
-    /// Returns <c>null</c> whenever any part is unknown — no broker, no pairing, or an agent that
-    /// cannot report its window origin. A partial answer would be worse than none: without the
-    /// origin a device tap lands offset by the status bar height, which looks plausible and is
-    /// wrong, so the client is told nothing rather than something it might act on.
+    /// Returns <c>null</c> whenever any part is unknown — no broker, no pairing, a device that
+    /// cannot tap, or an agent that cannot report its window origin. A partial answer would be
+    /// worse than none: without the origin a device tap lands offset by the status bar height,
+    /// which looks plausible and is wrong, so the client is told nothing rather than something it
+    /// might act on.
+    /// </para>
+    /// <para>
+    /// Cached, because <c>/api/state</c> is requested after every tap, scroll and gesture as well
+    /// as on a poll, and this is the only part of that response that would otherwise touch the
+    /// in-app agent on a frame cache hit. The value it carries changes only on rotation or resize.
     /// </para>
     /// </summary>
     private async Task<object?> BuildDeviceContextAsync()
+    {
+        if (DateTime.UtcNow - _deviceContextAt < DeviceContextLifetime)
+            return _deviceContext;
+
+        _deviceContext = await ResolveDeviceContextAsync();
+        _deviceContextAt = DateTime.UtcNow;
+        return _deviceContext;
+    }
+
+    private async Task<object?> ResolveDeviceContextAsync()
     {
         try
         {
@@ -872,8 +892,16 @@ public sealed partial class InspectorServer : IDisposable
             if (brokerPort is null)
                 return null;
 
-            var deviceId = await Broker.BrokerClient.ResolveDeviceForAgentAsync(brokerPort.Value, _agentId);
+            var device = await Broker.BrokerClient.ResolveDeviceNodeForAgentAsync(brokerPort.Value, _agentId);
+            var deviceId = device?["id"]?.GetValue<string>();
             if (string.IsNullOrWhiteSpace(deviceId))
+                return null;
+
+            // Honour what the device actually reports. Claiming tap on a device that cannot do it
+            // would let the client consume a click and then fail, which is worse than never
+            // offering the fallthrough.
+            var canTap = device?["capabilities"]?["tap"]?.GetValue<bool>() ?? false;
+            if (!canTap)
                 return null;
 
             var status = await _client.GetStatusAsync();
@@ -1330,7 +1358,11 @@ public sealed partial class InspectorServer : IDisposable
     /// for the same mutation lease as an app-level tap on the same screen.
     /// </para>
     /// </summary>
-    private async Task<(int, string, byte[])> HandleDeviceTapAsync(IReadOnlyDictionary<string, string> query)
+    private async Task<(int, string, byte[])> HandleDeviceTapAsync(
+        IReadOnlyDictionary<string, string> query,
+        string leaseId,
+        string holderKind,
+        string holderLabel)
     {
         if (!TryParseInvariant(query.GetValueOrDefault("x"), out var x)
             || !TryParseInvariant(query.GetValueOrDefault("y"), out var y))
@@ -1353,7 +1385,8 @@ public sealed partial class InspectorServer : IDisposable
                 Encoding.UTF8.GetBytes("{\"success\":false,\"reason\":\"This app is not paired with a device, so device input is unavailable.\"}"));
         }
 
-        var result = await Broker.BrokerClient.ControlDeviceAsync(brokerPort.Value, deviceId, "tap", x, y);
+        var result = await Broker.BrokerClient.ControlDeviceAsync(
+            brokerPort.Value, deviceId, "tap", x, y, leaseId, holderKind, holderLabel);
         var payload = System.Text.Json.JsonSerializer.Serialize(new System.Text.Json.Nodes.JsonObject
         {
             ["success"] = result.Success,
@@ -6675,6 +6708,7 @@ public sealed partial class InspectorServer : IDisposable
         return path switch
         {
             "/api/tap" or "/api/scroll" or "/api/gesture" or "/api/back" or "/api/fill" or "/api/key"
+                or "/api/device/tap"
                 or "/api/setProperty" or "/api/persistProperty" or "/api/navigate" or "/api/cdp/eval"
                 or "/api/alerts/dismiss" or "/api/flows/record/start" or "/api/flows/record/step"
                 or "/api/flows/replay" or "/api/control" or "/api/checkpoint/restore" => true,
@@ -7205,6 +7239,7 @@ public sealed partial class InspectorServer : IDisposable
     internal static bool IsMutation(string path) => path switch
     {
         "/api/tap" or "/api/scroll" or "/api/gesture" or "/api/back" or "/api/fill" or "/api/key"
+            or "/api/device/tap"
             or "/api/setProperty" or "/api/persistProperty" or "/api/navigate" or "/api/cdp/eval"
             or "/api/alerts/dismiss"
             or "/api/checkpoint/restore"

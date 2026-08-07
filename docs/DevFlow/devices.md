@@ -143,6 +143,12 @@ failed, so the highest-fidelity layer that can service the click is chosen autom
 The last row is what turns the disconnected overlay from a dead end into something usable: the
 agent dies with the app, but the device does not, so a click can still dismiss a crash dialog.
 
+> **Status.** The crash-survival row works today. The *outside the app window* row is implemented
+> but not yet reachable: the Inspector currently renders only the app window, so there is no pixel
+> a user can click that maps outside it. It becomes reachable with the substrate swap — rendering
+> the device screen around the inset app window — which is not built yet. The predicate and its
+> arithmetic are in place and tested so the swap does not have to revisit them.
+
 Everything about the second coordinate space lives beside `toAppCoords` in `devflow.js` rather than
 being recomputed per handler — six handlers each doing their own arithmetic is exactly how an
 overlay ends up correct in portrait and subtly wrong in landscape.

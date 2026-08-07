@@ -85,15 +85,17 @@ public class PlatformAgentService : DevFlowAgentService
             if (window?.Handler?.PlatformView is global::Android.App.Activity activity)
             {
                 var decor = activity.Window?.DecorView;
-                var content = activity.FindViewById(global::Android.Resource.Id.Content);
                 var density = activity.Resources?.DisplayMetrics?.Density ?? 1.0;
-                if (content is null || density <= 0)
+                if (decor is null || density <= 0)
                     return null;
 
-                // The content view excludes the status and navigation bars, which is exactly the
-                // inset an overlay has to account for. Locations are in pixels, so convert.
+                // The DECOR view, not the content view. App-space coordinates on Android are
+                // window-relative (the visual tree walker uses GetLocationInWindow), whose origin
+                // is the decor view — so they already include the status bar inset. Measuring the
+                // content view here would add that inset a second time and land every device tap
+                // one status bar too low.
                 var location = new int[2];
-                content.GetLocationOnScreen(location);
+                decor.GetLocationOnScreen(location);
                 return (location[0] / density, location[1] / density);
             }
             return null;

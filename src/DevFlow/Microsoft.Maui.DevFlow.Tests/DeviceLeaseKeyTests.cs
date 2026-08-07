@@ -81,9 +81,15 @@ public class DeviceLeaseKeyTests
     [Fact]
     public async Task FallsBackToADeviceScopedKey_ForAnUnknownDevice()
     {
+        // Distinct from the no-app case: here an app IS running and paired, but the caller asked
+        // about a different device, so the agent's key must not be borrowed for it.
         var registry = new DeviceRegistry(new OneDeviceSurface(Device()));
+        var agents = new[]
+        {
+            new AgentRegistration { Id = "agent-42", Port = 9223, DeviceId = "platform=ios;udid=A1B2" },
+        };
 
-        var key = await registry.ResolveLeaseKeyAsync("ios:UNKNOWN", []);
+        var key = await registry.ResolveLeaseKeyAsync("ios:UNKNOWN", agents);
 
         Assert.Equal("device:ios:UNKNOWN", key);
     }
@@ -96,16 +102,35 @@ public class DeviceLeaseKeyTests
     }
 
     [Fact]
-    public void ASharedKeyMeansASharedLease()
+    public void TheHolderIsAdmitted_AndEveryoneElseIsRefused()
     {
-        // Verifies the consequence rather than the plumbing: one holder on the shared key blocks
-        // the other surface.
+        // The behaviour that matters, and the one an earlier version of this test missed: probing
+        // without a lease id reports "held by other" even to the session that holds it, so a
+        // presence check would refuse exactly the caller that should be allowed. Only passing the
+        // caller's own lease id distinguishes them.
+        var leases = new MutationLeaseRegistry();
+        leases.Control("agent-42", "claim", "lease-holder", "inspector", "Inspector", force: false);
+
+        var holder = leases.Control("agent-42", "validate", "lease-holder", null, null, force: false);
+        var other = leases.Control("agent-42", "validate", "lease-other", null, null, force: false);
+        var anonymous = leases.Control("agent-42", "validate", null, null, null, force: false);
+
+        Assert.False(holder.HeldByOther);
+        Assert.True(other.HeldByOther);
+        Assert.True(anonymous.HeldByOther);
+    }
+
+    [Fact]
+    public void AnUnclaimedKeyAdmitsTheFirstCaller()
+    {
+        // Before an app launches nobody has claimed the device key. "Nobody holds it" must not be
+        // read as "nobody may drive it", or device control would be impossible in exactly the
+        // situation it exists for.
         var leases = new MutationLeaseRegistry();
 
-        var claimed = leases.Control("agent-42", "claim", "lease-1", "inspector", "Inspector", force: false);
-        var observed = leases.Control("agent-42", "status", leaseId: null, holderKind: null, label: null, force: false);
+        var first = leases.Control(
+            DeviceRegistry.DeviceLeaseKey("ios:A1B2"), "validate", "lease-1", null, null, force: false);
 
-        Assert.True(claimed.YouHold);
-        Assert.True(observed.HeldByOther);
+        Assert.False(first.HeldByOther);
     }
 }

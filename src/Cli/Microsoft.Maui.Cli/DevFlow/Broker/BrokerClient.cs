@@ -97,16 +97,32 @@ public static class BrokerClient
         string deviceId,
         string action,
         double? x = null,
-        double? y = null)
+        double? y = null,
+        string? leaseId = null,
+        string? holderKind = null,
+        string? holderLabel = null)
     {
         try
         {
             var url = $"http://localhost:{brokerPort}/api/devices/{Uri.EscapeDataString(deviceId)}/{action}";
+            var query = new List<string>();
             if (x is not null && y is not null)
             {
                 var invariant = System.Globalization.CultureInfo.InvariantCulture;
-                url += $"?x={x.Value.ToString(invariant)}&y={y.Value.ToString(invariant)}";
+                query.Add($"x={x.Value.ToString(invariant)}");
+                query.Add($"y={y.Value.ToString(invariant)}");
             }
+            // The caller's lease travels with the request so the broker can verify the caller IS
+            // the holder, rather than only that somebody is.
+            if (!string.IsNullOrWhiteSpace(leaseId))
+                query.Add($"leaseId={Uri.EscapeDataString(leaseId)}");
+            if (!string.IsNullOrWhiteSpace(holderKind))
+                query.Add($"holderKind={Uri.EscapeDataString(holderKind)}");
+            if (!string.IsNullOrWhiteSpace(holderLabel))
+                query.Add($"label={Uri.EscapeDataString(holderLabel)}");
+
+            if (query.Count > 0)
+                url += "?" + string.Join("&", query);
 
             using var response = await _http.PostAsync(url, content: null);
             var body = await response.Content.ReadAsStringAsync();
@@ -124,10 +140,10 @@ public static class BrokerClient
     }
 
     /// <summary>
-    /// Resolves the device id an agent is running inside, or <c>null</c> when it is not paired
-    /// with one. Reads through the broker so there is a single view of pairing.
+    /// Resolves the device an agent is running inside, returning the full device node so callers
+    /// can read its capabilities. <c>null</c> when it is not paired with one.
     /// </summary>
-    public static async Task<string?> ResolveDeviceForAgentAsync(int brokerPort, string? agentId)
+    public static async Task<System.Text.Json.Nodes.JsonNode?> ResolveDeviceNodeForAgentAsync(int brokerPort, string? agentId)
     {
         if (string.IsNullOrWhiteSpace(agentId))
             return null;
@@ -145,7 +161,7 @@ public static class BrokerClient
             foreach (var device in devices)
             {
                 if (string.Equals(device?["agentId"]?.GetValue<string>(), agentId, StringComparison.Ordinal))
-                    return device?["id"]?.GetValue<string>();
+                    return device;
             }
         }
         catch (System.Text.Json.JsonException)
@@ -155,6 +171,13 @@ public static class BrokerClient
 
         return null;
     }
+
+    /// <summary>
+    /// Resolves the device id an agent is running inside, or <c>null</c> when it is not paired
+    /// with one. Reads through the broker so there is a single view of pairing.
+    /// </summary>
+    public static async Task<string?> ResolveDeviceForAgentAsync(int brokerPort, string? agentId) =>
+        (await ResolveDeviceNodeForAgentAsync(brokerPort, agentId))?["id"]?.GetValue<string>();
 
     public static AgentRegistration[]? ListAgents(int brokerPort)    {
         try

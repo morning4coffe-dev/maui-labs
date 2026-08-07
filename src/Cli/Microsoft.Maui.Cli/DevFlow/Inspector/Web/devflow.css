@@ -252,6 +252,24 @@ body.df-disconnected #df-viewport-wrap {
   pointer-events: none;
 }
 
+/* When a device layer is present the app dying does not mean the screen is gone: the device is
+   still there and still driveable, which is how a crash dialog gets dismissed or the app
+   relaunched. Keep the viewport live, and drop the greyed-out treatment that says "nothing here
+   works" — because something does. */
+body.df-disconnected.df-device-live #df-viewport-wrap {
+  opacity: .72;
+  filter: none;
+  pointer-events: auto;
+}
+
+body.df-disconnected.df-device-live #df-disconnected-overlay {
+  pointer-events: none;
+}
+
+body.df-disconnected.df-device-live #df-disconnected-overlay .df-connection-card {
+  pointer-events: auto;
+}
+
 /* ── Properties pane (docked, themed; populated by JS) ── */
 #df-props-pane { flex: 0 0 clamp(230px, 27vw, 340px); border-left: 1px solid var(--df-border-subtle); background: var(--df-bg); }
 #df-props { flex: 1 1 auto; overflow: auto; padding: 6px 0; }

@@ -15,8 +15,15 @@ public interface IDeviceSurface
     /// <summary>Whether a device host is present and answering. Cheap and safe to call often.</summary>
     Task<DeviceHostHealth> GetHealthAsync(CancellationToken cancellationToken = default);
 
-    /// <summary>All virtual devices known to the host. Empty when no host is installed.</summary>
-    Task<IReadOnlyList<DeviceTarget>> ListAsync(CancellationToken cancellationToken = default);
+    /// <summary>
+    /// All virtual devices known to the host.
+    /// <para>
+    /// Returns <c>null</c> when the devices could not be enumerated at all, which is deliberately
+    /// distinct from an empty list meaning "enumerated, none present". Collapsing the two would
+    /// make a transport failure look like the user having deleted their last emulator.
+    /// </para>
+    /// </summary>
+    Task<IReadOnlyList<DeviceTarget>?> ListAsync(CancellationToken cancellationToken = default);
 
     /// <summary>One device by its provider-qualified id, or <c>null</c> when it is unknown.</summary>
     Task<DeviceTarget?> GetAsync(string deviceId, CancellationToken cancellationToken = default);

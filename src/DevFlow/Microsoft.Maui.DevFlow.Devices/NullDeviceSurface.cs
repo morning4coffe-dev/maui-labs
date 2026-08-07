@@ -23,8 +23,10 @@ public sealed class NullDeviceSurface : IDeviceSurface
     public Task<DeviceHostHealth> GetHealthAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult(_health);
 
-    public Task<IReadOnlyList<DeviceTarget>> ListAsync(CancellationToken cancellationToken = default) =>
-        Task.FromResult<IReadOnlyList<DeviceTarget>>([]);
+    public Task<IReadOnlyList<DeviceTarget>?> ListAsync(CancellationToken cancellationToken = default) =>
+        // Enumeration succeeded and found nothing, which is the truth when there is no device
+        // layer at all — not a failure to enumerate.
+        Task.FromResult<IReadOnlyList<DeviceTarget>?>([]);
 
     public Task<DeviceTarget?> GetAsync(string deviceId, CancellationToken cancellationToken = default) =>
         Task.FromResult<DeviceTarget?>(null);

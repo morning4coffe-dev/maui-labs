@@ -130,7 +130,9 @@ public class DeviceSurfaceDegradationTests : IDisposable
         var health = await surface.GetHealthAsync();
 
         Assert.False(health.Available);
-        Assert.Empty(await surface.ListAsync());
+        // Null, not empty: with no host we could not enumerate at all, which is different from
+        // having enumerated and found nothing.
+        Assert.Null(await surface.ListAsync());
         Assert.Null(await surface.GetAsync("ios:A1B2"));
     }
 
@@ -158,7 +160,9 @@ public class DeviceSurfaceDegradationTests : IDisposable
 
         Assert.False(health.Available);
         Assert.NotNull(health.Reason);
-        Assert.Empty(await surface.ListAsync());
+        // A dead host means enumeration failed, so callers can keep serving their last good list
+        // rather than showing the user an empty one.
+        Assert.Null(await surface.ListAsync());
         Assert.Null(await surface.ScreenshotAsync("ios:A1B2"));
     }
 

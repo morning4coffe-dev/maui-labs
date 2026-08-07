@@ -72,14 +72,14 @@ public sealed class MobileCanvasDeviceSurface : IDeviceSurface, IDisposable
         }
     }
 
-    public async Task<IReadOnlyList<DeviceTarget>> ListAsync(CancellationToken cancellationToken = default)
+    public async Task<IReadOnlyList<DeviceTarget>?> ListAsync(CancellationToken cancellationToken = default)
     {
-        var devices = await GetJsonAsync(
+        // A null result distinguishes "could not enumerate" from "enumerated, none present".
+        // Callers cache the latter and fall back on the former.
+        return await GetJsonAsync(
             "/devices",
             MobileCanvasJsonContext.Default.DeviceTargetArray,
             cancellationToken).ConfigureAwait(false);
-
-        return devices ?? [];
     }
 
     public async Task<DeviceTarget?> GetAsync(string deviceId, CancellationToken cancellationToken = default)

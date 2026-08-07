@@ -123,6 +123,18 @@ public static class DevicePreconditionApplier
         if (preconditions.IsEmpty)
             return new DevicePreconditionResult(true, applied);
 
+        // Validate everything knowable without I/O first. Refusing after having already denied a
+        // permission and taken the device offline would leave it half-prepared, which is exactly
+        // what the fail-fast contract promises not to do.
+        if (preconditions.Battery is { } requested && requested is < 0 or > 100)
+        {
+            return new DevicePreconditionResult(
+                false,
+                applied,
+                $"A battery level must be between 0 and 100, but {requested} was requested. "
+                + "The run was stopped before the device was touched.");
+        }
+
         if (!device.IsBooted)
         {
             return new DevicePreconditionResult(
@@ -174,9 +186,6 @@ public static class DevicePreconditionApplier
 
         if (preconditions.Battery is { } battery)
         {
-            if (battery is < 0 or > 100)
-                return Refused($"battery {battery}", "A battery level must be between 0 and 100.", applied);
-
             var result = await surface
                 .SetBatteryAsync(device.Id, battery, cancellationToken)
                 .ConfigureAwait(false);

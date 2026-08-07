@@ -47,8 +47,8 @@ platform=android;serial=emulator-5554;avd=Pixel_8_API_35
 | Platform | Signal | Strength |
 |---|---|---|
 | iOS / Mac Catalyst simulator | `SIMULATOR_UDID`, injected into the process environment by the simulator runtime | **Exact** — it is the UDID `simctl` uses |
-| Android emulator | `ro.serialno` | **Exact** — it is the serial `adb` uses |
-| Android emulator | `ro.boot.qemu.avd_name` | **Weak** — user-chosen, unique only within one machine's AVD set |
+| Android emulator | `ro.boot.qemu.avd_name` | **Primary** — the name `avdmanager` knows |
+| Android emulator | `ro.serialno` | **Secondary** — *not* the adb serial; adb addresses an emulator as `emulator-<consolePort>`, derived from the console port, so these agree only on some configurations |
 | Windows / macOS desktop | none | No virtual device exists; nothing pairs |
 
 The broker joins that identity against the devices the device layer discovered. Two rules keep a

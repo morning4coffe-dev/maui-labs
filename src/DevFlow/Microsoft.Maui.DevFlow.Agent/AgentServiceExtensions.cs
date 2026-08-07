@@ -288,20 +288,18 @@ public static class AgentServiceExtensions
 #if ANDROID
             var parts = new List<string> { "platform=android" };
 
-            // ro.serialno is what adb reports for this device, so it joins exactly against the
-            // device layer's native id.
-            var serial = global::Android.OS.Build.Serial;
-            if (!string.IsNullOrWhiteSpace(serial) && !serial.Equals("unknown", StringComparison.OrdinalIgnoreCase))
-                parts.Add($"serial={serial}");
-
-            // The AVD name disambiguates when the serial is unavailable, which happens on newer
-            // API levels where Build.Serial is permission-gated. It is reported verbatim: the
-            // property already holds the name avdmanager knows, and rewriting separators here
-            // would break the match rather than help it.
+            // The AVD name is the primary Android join key. adb addresses an emulator as
+            // "emulator-<consolePort>", which is derived from the console port and is NOT
+            // ro.serialno — so the serial below is a secondary signal that matches only on the
+            // configurations where the two happen to agree.
             var avd = GetAndroidSystemProperty("ro.boot.qemu.avd_name")
                 ?? GetAndroidSystemProperty("ro.kernel.qemu.avd_name");
             if (!string.IsNullOrWhiteSpace(avd))
-                parts.Add($"avd={avd}");
+                parts.Add($"avd={Sanitize(avd)}");
+
+            var serial = global::Android.OS.Build.Serial;
+            if (!string.IsNullOrWhiteSpace(serial) && !serial.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+                parts.Add($"serial={Sanitize(serial)}");
 
             return parts.Count > 1 ? string.Join(";", parts) : null;
 #else
@@ -320,14 +318,26 @@ public static class AgentServiceExtensions
 
 #if ANDROID
     /// <summary>
+    /// Strips the wire format's own separators from a value.
+    /// <para>
+    /// The identity is <c>key=value;key=value</c>, so a value containing <c>;</c> or <c>=</c>
+    /// would split into fields that parse as something else. AVD names should not contain either,
+    /// but a value read from a system property is not ours to trust.
+    /// </para>
+    /// </summary>
+    private static string Sanitize(string value) =>
+        value.Replace(";", "").Replace("=", "").Trim();
+
+    /// <summary>
     /// Reads an Android system property. The emulator exposes its AVD name this way, and there is
     /// no managed API for it.
     /// </summary>
     private static string? GetAndroidSystemProperty(string key)
     {
+        global::Java.Lang.Process? process = null;
         try
         {
-            using var process = new global::Java.Lang.ProcessBuilder("/system/bin/getprop", key).Start();
+            process = new global::Java.Lang.ProcessBuilder("/system/bin/getprop", key).Start();
             using var reader = new StreamReader(process!.InputStream!);
             var value = reader.ReadToEnd()?.Trim();
             return string.IsNullOrWhiteSpace(value) ? null : value;
@@ -335,6 +345,13 @@ public static class AgentServiceExtensions
         catch
         {
             return null;
+        }
+        finally
+        {
+            // The subprocess holds a file descriptor until it is reaped; leaking one per property
+            // read would accumulate over an app's lifetime.
+            try { process?.Destroy(); } catch { }
+            process?.Dispose();
         }
     }
 #endif

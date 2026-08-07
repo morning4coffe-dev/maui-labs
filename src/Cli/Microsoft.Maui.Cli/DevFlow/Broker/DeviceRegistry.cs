@@ -33,65 +33,89 @@ public sealed class DeviceRegistry
 {
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromSeconds(3);
 
-    private readonly IDeviceSurface _surface;
+    private readonly IDeviceSurface? _fixedSurface;
     private readonly TimeProvider _time;
     private readonly SemaphoreSlim _gate = new(1, 1);
+    private readonly MobileCanvasDeviceSurface _mobileCanvas = new();
 
     private IReadOnlyList<DeviceTarget> _cached = [];
     private DateTimeOffset _cachedAt = DateTimeOffset.MinValue;
-    private bool _everSucceeded;
+
+    /// <summary>
+    /// Bumped whenever device state is deliberately changed. A refresh that started before a
+    /// mutation must not publish its now-stale result, so it compares the generation it captured
+    /// against the current one before committing to the cache.
+    /// </summary>
+    private long _generation;
 
     public DeviceRegistry(IDeviceSurface? surface = null, TimeProvider? timeProvider = null)
     {
-        _surface = surface ?? CreateDefaultSurface();
+        _fixedSurface = surface;
         _time = timeProvider ?? TimeProvider.System;
     }
 
     /// <summary>
-    /// Chooses a device backend. Discovery is file-based, so this never launches anything: a
-    /// broker that starts on a machine with no device host must not spawn a daemon to find out.
+    /// The device backend, resolved per call.
+    /// <para>
+    /// The broker is long-lived and the device host is a separate product that starts, idles out,
+    /// and restarts independently. Choosing a backend once at construction would pin the broker to
+    /// "no device layer" for its entire lifetime whenever it happened to start first — which is
+    /// the ordinary sequence, since almost any <c>maui devflow</c> command starts the broker.
+    /// </para>
+    /// <para>
+    /// The Mobile Canvas surface already re-reads the host's state file on every call and reports
+    /// <see cref="DeviceHostAvailability.Absent"/> when there is none, so it is safe to use
+    /// unconditionally.
+    /// </para>
     /// </summary>
-    private static IDeviceSurface CreateDefaultSurface() =>
-        MobileCanvasHost.IsPresent()
-            ? new MobileCanvasDeviceSurface()
-            : new NullDeviceSurface();
+    private IDeviceSurface Surface => _fixedSurface ?? _mobileCanvas;
 
     /// <summary>Whether a device host is present and answering.</summary>
     public Task<DeviceHostHealth> GetHealthAsync(CancellationToken cancellationToken = default) =>
-        _surface.GetHealthAsync(cancellationToken);
+        Surface.GetHealthAsync(cancellationToken);
 
     /// <summary>
     /// All known devices, cached briefly.
     /// <para>
-    /// A transient enumeration failure returns the previous result rather than an empty list:
-    /// devices blinking out of the Inspector because a host was momentarily busy is a worse
-    /// experience than briefly stale state.
+    /// A failure to enumerate returns the previous result rather than an empty list: devices
+    /// blinking out of the Inspector because a host was momentarily busy is a worse experience
+    /// than briefly stale state. A successful enumeration that finds nothing is cached normally,
+    /// so shutting down the last emulator is reflected rather than masked.
     /// </para>
     /// </summary>
     public async Task<IReadOnlyList<DeviceTarget>> ListAsync(
         bool forceRefresh = false,
         CancellationToken cancellationToken = default)
     {
-        if (!forceRefresh && _time.GetUtcNow() - _cachedAt < CacheLifetime)
+        if (!forceRefresh && !IsStale())
             return _cached;
 
         await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             // Another caller may have refreshed while we waited for the gate.
-            if (!forceRefresh && _time.GetUtcNow() - _cachedAt < CacheLifetime)
+            if (!forceRefresh && !IsStale())
                 return _cached;
 
-            var devices = await _surface.ListAsync(cancellationToken).ConfigureAwait(false);
+            var generation = Interlocked.Read(ref _generation);
+            var devices = await Surface.ListAsync(cancellationToken).ConfigureAwait(false);
 
-            if (devices.Count == 0 && _everSucceeded && _cached.Count > 0)
+            // Null means enumeration failed. Serve the last good answer and retry on the next
+            // call, but stamp the timestamp anyway so a persistently broken host does not turn
+            // every request into a fresh attempt.
+            if (devices is null)
+            {
+                _cachedAt = _time.GetUtcNow();
                 return _cached;
+            }
+
+            // A boot or shutdown landed while this refresh was in flight, so what we just read is
+            // already stale. Publishing it would hide the change for a full cache lifetime.
+            if (Interlocked.Read(ref _generation) != generation)
+                return devices;
 
             _cached = devices;
             _cachedAt = _time.GetUtcNow();
-            if (devices.Count > 0)
-                _everSucceeded = true;
-
             return devices;
         }
         finally
@@ -99,6 +123,8 @@ public sealed class DeviceRegistry
             _gate.Release();
         }
     }
+
+    private bool IsStale() => _time.GetUtcNow() - _cachedAt >= CacheLifetime;
 
     /// <summary>
     /// Pairs every known device with the agent running inside it.
@@ -196,17 +222,25 @@ public sealed class DeviceRegistry
 
     /// <summary>Captures a device screenshot, or <c>null</c> when unavailable.</summary>
     public Task<byte[]?> ScreenshotAsync(string deviceId, CancellationToken cancellationToken = default) =>
-        _surface.ScreenshotAsync(deviceId, cancellationToken);
+        Surface.ScreenshotAsync(deviceId, cancellationToken);
 
     /// <summary>
     /// Runs an operation that changes device state and invalidates the cache, so the next read
     /// reflects a boot or shutdown rather than the state from before it.
+    /// <para>
+    /// The generation is bumped as well as the timestamp: a refresh already in flight would
+    /// otherwise commit its pre-mutation result with a fresh timestamp and hide the change for a
+    /// full cache lifetime, even from the caller that just received success.
+    /// </para>
     /// </summary>
     private async Task<DeviceOperationResult> Mutate(Func<IDeviceSurface, Task<DeviceOperationResult>> operation)
     {
-        var result = await operation(_surface).ConfigureAwait(false);
+        var result = await operation(Surface).ConfigureAwait(false);
         if (result.Success)
+        {
+            Interlocked.Increment(ref _generation);
             _cachedAt = DateTimeOffset.MinValue;
+        }
 
         return result;
     }

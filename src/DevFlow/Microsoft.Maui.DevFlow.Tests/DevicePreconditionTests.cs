@@ -37,8 +37,8 @@ public class DevicePreconditionTests
 
         public Task<DeviceHostHealth> GetHealthAsync(CancellationToken ct = default) =>
             Task.FromResult(new DeviceHostHealth { Availability = DeviceHostAvailability.Available });
-        public Task<IReadOnlyList<DeviceTarget>> ListAsync(CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<DeviceTarget>>([]);
+        public Task<IReadOnlyList<DeviceTarget>?> ListAsync(CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<DeviceTarget>?>([]);
         public Task<DeviceTarget?> GetAsync(string id, CancellationToken ct = default) =>
             Task.FromResult<DeviceTarget?>(null);
         public Task<DeviceOperationResult> BootAsync(string id, CancellationToken ct = default) => Record("boot");
@@ -162,15 +162,24 @@ public class DevicePreconditionTests
     [Theory]
     [InlineData(-1)]
     [InlineData(101)]
-    public async Task Refuses_AnOutOfRangeBatteryLevel(int battery)
+    public async Task Refuses_AnOutOfRangeBatteryLevel_BeforeTouchingTheDevice(int battery)
     {
+        // A preceding precondition is included deliberately: without it this test would pass even
+        // if validation ran after permissions and network had already been applied, leaving the
+        // device half-prepared while reporting a refusal.
         var surface = new RecordingSurface();
+        var preconditions = new DevicePreconditions
+        {
+            Permissions = new Dictionary<string, string> { ["camera"] = "granted" },
+            Network = "offline",
+            Battery = battery,
+        };
 
-        var result = await DevicePreconditionApplier.ApplyAsync(
-            surface, BootedDevice(), new DevicePreconditions { Battery = battery });
+        var result = await DevicePreconditionApplier.ApplyAsync(surface, BootedDevice(), preconditions);
 
         Assert.False(result.Success);
         Assert.Empty(surface.Calls);
+        Assert.Empty(result.Applied);
     }
 
     [Fact]

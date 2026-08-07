@@ -17,8 +17,8 @@ public class DoctorDeviceCheckTests
     private sealed class FixedHealthSurface(DeviceHostHealth health) : IDeviceSurface
     {
         public Task<DeviceHostHealth> GetHealthAsync(CancellationToken ct = default) => Task.FromResult(health);
-        public Task<IReadOnlyList<DeviceTarget>> ListAsync(CancellationToken ct = default) =>
-            Task.FromResult<IReadOnlyList<DeviceTarget>>([]);
+        public Task<IReadOnlyList<DeviceTarget>?> ListAsync(CancellationToken ct = default) =>
+            Task.FromResult<IReadOnlyList<DeviceTarget>?>([]);
         public Task<DeviceTarget?> GetAsync(string id, CancellationToken ct = default) => Task.FromResult<DeviceTarget?>(null);
         public Task<DeviceOperationResult> BootAsync(string id, CancellationToken ct = default) => Task.FromResult(DeviceOperationResult.NoHost());
         public Task<DeviceOperationResult> ShutdownAsync(string id, CancellationToken ct = default) => Task.FromResult(DeviceOperationResult.NoHost());

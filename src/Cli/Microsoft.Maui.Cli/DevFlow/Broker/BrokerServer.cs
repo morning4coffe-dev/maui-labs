@@ -382,6 +382,7 @@ public class BrokerServer : IDisposable
                 Platform = registration.Platform,
                 AppName = registration.AppName,
                 PackageId = registration.PackageId,
+                DeviceId = registration.DeviceId,
                 Port = assignedPort,
                 Version = registration.Version,
                 SessionId = registration.SessionId,

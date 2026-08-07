@@ -29,6 +29,7 @@ public class BrokerRegistration : IDisposable
     private readonly string _appName;
     private readonly string? _sessionId;
     private readonly string? _packageId;
+    private readonly string? _deviceId;
     private string _agentId;
     private string? _instanceId;
     private int _brokerPort;
@@ -104,6 +105,25 @@ public class BrokerRegistration : IDisposable
         string? packageId,
         int brokerPort = DefaultBrokerPort,
         ILogger? logger = null)
+        : this(project, tfm, platform, appName, sessionId, packageId, deviceId: null, brokerPort, logger)
+    {
+    }
+
+    /// <param name="deviceId">
+    /// Identity of the virtual device this app is running on, in
+    /// <see cref="DeviceIdentityProvider"/>'s wire form. Lets the broker pair the app with the
+    /// device around it. Null when the app is not on a recognisable virtual device.
+    /// </param>
+    public BrokerRegistration(
+        string project,
+        string tfm,
+        string platform,
+        string appName,
+        string? sessionId,
+        string? packageId,
+        string? deviceId,
+        int brokerPort = DefaultBrokerPort,
+        ILogger? logger = null)
     {
         _project = project;
         _tfm = tfm;
@@ -111,6 +131,7 @@ public class BrokerRegistration : IDisposable
         _appName = appName;
         _sessionId = sessionId;
         _packageId = packageId;
+        _deviceId = deviceId ?? DeviceIdentityProvider.Resolve();
         _brokerPort = brokerPort;
         _logger = logger;
         _agentId = ComputeId(packageId ?? project, tfm, sessionId, Environment.ProcessId);
@@ -457,6 +478,7 @@ public class BrokerRegistration : IDisposable
         platform = _platform,
         appName = _appName,
         packageId = _packageId,
+        deviceId = _deviceId,
         currentPort = CurrentPort,
         version = typeof(BrokerRegistration).Assembly
             .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion,

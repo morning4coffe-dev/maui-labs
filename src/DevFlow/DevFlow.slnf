@@ -9,6 +9,7 @@
       "src\\DevFlow\\Microsoft.Maui.DevFlow.Blazor\\Microsoft.Maui.DevFlow.Blazor.csproj",
       "src\\DevFlow\\Microsoft.Maui.DevFlow.Blazor.Gtk\\Microsoft.Maui.DevFlow.Blazor.Gtk.csproj",
       "src\\DevFlow\\Microsoft.Maui.DevFlow.Driver\\Microsoft.Maui.DevFlow.Driver.csproj",
+      "src\\DevFlow\\Microsoft.Maui.DevFlow.Devices\\Microsoft.Maui.DevFlow.Devices.csproj",
       "src\\DevFlow\\Microsoft.Maui.DevFlow.Logging\\Microsoft.Maui.DevFlow.Logging.csproj",
       "src\\DevFlow\\Microsoft.Maui.DevFlow.Testing\\Microsoft.Maui.DevFlow.Testing.csproj",
       "src\\DevFlow\\Microsoft.Maui.DevFlow.TestAgent.Core\\Microsoft.Maui.DevFlow.TestAgent.Core.csproj",

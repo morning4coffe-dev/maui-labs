@@ -216,6 +216,7 @@ public class ProtocolSpecTests
             "maui-xaml-source-proposal-v1.json",
             "maui-csharp-source-proposal-v1.json",
             "maui-test-agent-protocol-v1.json",
+            "device-surface-v1.json",
         };
 
         foreach (var schemaName in schemaNames)

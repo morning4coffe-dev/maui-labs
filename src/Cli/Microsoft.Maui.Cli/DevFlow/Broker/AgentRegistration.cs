@@ -35,6 +35,13 @@ public record AgentRegistration
     [JsonPropertyName("packageId")]
     public string? PackageId { get; init; }
 
+    /// <summary>
+    /// Identity of the virtual device this app reported running on, used to pair the agent with
+    /// the device around it. Null for desktop apps and unrecognised hosts.
+    /// </summary>
+    [JsonPropertyName("deviceId")]
+    public string? DeviceId { get; init; }
+
     [JsonPropertyName("port")]
     public int Port { get; init; }
 
@@ -129,6 +136,9 @@ internal record RegistrationMessage
 
     [JsonPropertyName("packageId")]
     public string? PackageId { get; init; }
+
+    [JsonPropertyName("deviceId")]
+    public string? DeviceId { get; init; }
 
     [JsonPropertyName("currentPort")]
     public int? CurrentPort { get; init; }

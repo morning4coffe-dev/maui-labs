@@ -63,7 +63,8 @@ public static class AgentServiceExtensions
                     : "Unknown";
                 appName = System.Reflection.Assembly.GetEntryAssembly()?.GetName().Name ?? "unknown";
             }
-            brokerReg = new BrokerRegistration(project, tfm, platform, appName, sessionId, packageId);
+            brokerReg = new BrokerRegistration(
+                project, tfm, platform, appName, sessionId, packageId, ResolveDeviceIdentity());
             // If the user set a custom port, tell the broker upfront so it registers
             // with that port instead of assigning one from the pool.
             if (hasCustomPort)
@@ -264,6 +265,79 @@ public static class AgentServiceExtensions
 
         Console.WriteLine("[Microsoft.Maui.DevFlow] Application.Current was still null after late-bind retries; continuing in app-less mode");
     }
+
+    /// <summary>
+    /// Resolves the identity of the virtual device this app is running on, so the broker can pair
+    /// the app agent with the device around it.
+    /// <para>
+    /// This lives in the platform-specific package because the strongest signals need platform
+    /// APIs. Each platform contributes what its own tooling addresses devices by, so the value
+    /// can be matched exactly rather than guessed:
+    /// </para>
+    /// <list type="bullet">
+    /// <item>Android — the serial adb uses, plus the AVD name as a weaker fallback.</item>
+    /// <item>iOS and Mac Catalyst — the simulator UDID, read from the environment by the core
+    /// resolver since the simulator runtime injects it.</item>
+    /// <item>Windows and macOS — nothing; a desktop app has no virtual device around it.</item>
+    /// </list>
+    /// </summary>
+    private static string? ResolveDeviceIdentity()
+    {
+        try
+        {
+#if ANDROID
+            var parts = new List<string> { "platform=android" };
+
+            // ro.serialno is what adb reports for this device, so it joins exactly against the
+            // device layer's native id.
+            var serial = global::Android.OS.Build.Serial;
+            if (!string.IsNullOrWhiteSpace(serial) && !serial.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+                parts.Add($"serial={serial}");
+
+            // The AVD name disambiguates when the serial is unavailable, which happens on newer
+            // API levels where Build.Serial is permission-gated. It is reported verbatim: the
+            // property already holds the name avdmanager knows, and rewriting separators here
+            // would break the match rather than help it.
+            var avd = GetAndroidSystemProperty("ro.boot.qemu.avd_name")
+                ?? GetAndroidSystemProperty("ro.kernel.qemu.avd_name");
+            if (!string.IsNullOrWhiteSpace(avd))
+                parts.Add($"avd={avd}");
+
+            return parts.Count > 1 ? string.Join(";", parts) : null;
+#else
+            // Everything else is either handled by the environment-based core resolver (the iOS
+            // simulator injects SIMULATOR_UDID) or has no virtual device at all.
+            return DeviceIdentityProvider.Resolve();
+#endif
+        }
+        catch
+        {
+            // Pairing is an enhancement. An app must still register and be inspectable when we
+            // cannot work out what it is running on.
+            return null;
+        }
+    }
+
+#if ANDROID
+    /// <summary>
+    /// Reads an Android system property. The emulator exposes its AVD name this way, and there is
+    /// no managed API for it.
+    /// </summary>
+    private static string? GetAndroidSystemProperty(string key)
+    {
+        try
+        {
+            using var process = new global::Java.Lang.ProcessBuilder("/system/bin/getprop", key).Start();
+            using var reader = new StreamReader(process!.InputStream!);
+            var value = reader.ReadToEnd()?.Trim();
+            return string.IsNullOrWhiteSpace(value) ? null : value;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+#endif
 
     /// <summary>
     /// Reads Microsoft.Maui.DevFlow metadata from AssemblyMetadataAttributes injected by the .targets file.

@@ -1,0 +1,154 @@
+# The device layer
+
+DevFlow observes a running app from **inside** it: the in-app agent walks the MAUI visual tree,
+reads properties, and drives semantic input. That vantage point is precise but bounded — everything
+it knows arrives through a process living inside the app, so it goes blind whenever the app is not
+both running and frontmost:
+
+- the app **crashed**, and the agent died with it
+- a **system dialog** (permissions, share sheet, photo picker) is on top and is not in the MAUI tree
+- the **soft keyboard** is covering a control, invisibly to layout diagnostics
+- the app **has not launched yet**, so there is nothing to attach to
+
+The device layer is a second, independent vantage point that survives all four. It observes and
+controls the device *around* the app: lifecycle, live frames, physical input, and environment.
+
+> The device layer is **optional**. On a machine with no device host, and for every desktop MAUI
+> app, it reports every capability as unavailable and DevFlow behaves exactly as it did before.
+> That is a guarantee, not a best effort — see [Degradation](#degradation).
+
+## Contracts
+
+| Contract | Document |
+|---|---|
+| Device surface | [`schemas/device-surface-v1.json`](spec/schemas/device-surface-v1.json) |
+
+> **Not to be confused with [`schemas/device.json`](spec/schemas/device.json).** That contract is
+> the device as the *app* sees it — `DeviceInfo`, battery, connectivity, sensors, permissions — read
+> through the in-app agent and surfaced in the Inspector's Device data tab. This contract is the
+> device as the *host* sees it: lifecycle, display geometry, and control. They describe the same
+> physical device from the two vantage points, and are deliberately separate documents because
+> they have different owners, different availability, and different trust.
+
+## Pairing an app to its device
+
+Without pairing, a user picks an app and a device separately and nothing connects them — the device
+layer would be a second tool rather than part of DevFlow. Pairing is what makes one selection mean
+both.
+
+A running app reports what it can observe about its own host in the broker registration's
+`deviceId` field, in a compact wire form:
+
+```
+platform=ios;udid=1E2D3C4B-5A69
+platform=android;serial=emulator-5554;avd=Pixel_8_API_35
+```
+
+| Platform | Signal | Strength |
+|---|---|---|
+| iOS / Mac Catalyst simulator | `SIMULATOR_UDID`, injected into the process environment by the simulator runtime | **Exact** — it is the UDID `simctl` uses |
+| Android emulator | `ro.serialno` | **Exact** — it is the serial `adb` uses |
+| Android emulator | `ro.boot.qemu.avd_name` | **Weak** — user-chosen, unique only within one machine's AVD set |
+| Windows / macOS desktop | none | No virtual device exists; nothing pairs |
+
+The broker joins that identity against the devices the device layer discovered. Two rules keep a
+wrong pairing from being worse than no pairing:
+
+1. **Exact beats weak.** A serial or UDID match always wins over a name match.
+2. **Ambiguity refuses.** If two devices match equally well, the result is *no pairing*. Silently
+   choosing the wrong device would apply every subsequent coordinate to the wrong screen — a
+   failure that looks plausible rather than raising anything.
+
+Resolution is best-effort throughout: a platform API that throws, or a host we do not recognise,
+degrades to no pairing and never prevents the app from registering.
+
+## Coordinate spaces
+
+Drawing the MAUI tree overlay on a device frame crosses four coordinate spaces. Every boundary is a
+place to be silently and plausibly wrong, so the whole chain lives in one type,
+`DeviceCoordinateSpace`, rather than being recomputed by each caller.
+
+```
+frame pixels          what the client decoded from the video stream or screenshot
+  ÷ streamScale       the client asks the encoder to scale down to its panel size
+device pixels         DisplayGeometry.pixelWidth × pixelHeight
+  ÷ displayScale      DisplayGeometry.scale — reported, never assumed
+device points         DisplayGeometry.pointWidth × pointHeight
+  − app window origin the app window's rectangle within the screen
+app logical units     the space MAUI element bounds live in
+```
+
+The transform deliberately **stops at app logical units**. Subtracting the visual tree's root
+offset is the existing renderer's job and is not duplicated.
+
+### Why each factor is carried rather than assumed
+
+- **`streamScale`** — a client rendering into a narrow side panel asks the encoder not to spend
+  bandwidth on a full 3× framebuffer. Frame pixels are therefore not device pixels.
+- **`displayScale`** — reported by the device rather than derived from a device-model lookup, so a
+  backend can correct it.
+- **app window origin** — the app does not own the whole screen. On a phone it is inset by the
+  status and navigation bars. This is the one value the device layer cannot infer on its own.
+- **app logical size, separately from window point size** — normally equal, but carried apart so a
+  platform whose logical units differ from display points does not skew the overlay.
+
+### Rotation
+
+`frameQuarterTurns` records the clockwise quarter-turns applied to the device screen to produce the
+frame. **Zero is the default and the common case**: both simulator screenshots and the emulator
+video stream already arrive in the device's current orientation, so the reported geometry is
+already correct.
+
+It is modelled explicitly anyway, because a backend that delivers frames in the display's *natural*
+orientation would otherwise produce an overlay that is correct in portrait and transposed in
+landscape — which ships, because nobody tests landscape first.
+
+Note that `DisplayGeometry.orientation` and `frameQuarterTurns` are **different things**: the first
+describes what the display is presenting, the second describes what was done to the frame. They are
+kept apart so a backend change cannot silently redefine either.
+
+### Falling outside the app window
+
+`DeviceToApp` returns `null` when a point lies outside the app window. That is not an error — it is
+the signal that an interaction must fall through to the device layer instead of being mis-sent to
+the app agent. A tap on a permission dialog, the soft keyboard, or the navigation bar is a device
+tap; a tap on a MAUI element is a semantic tap that records a durable selector.
+
+## Degradation
+
+The device layer is optional at every level, and absence is always an ordinary, describable state
+rather than an error:
+
+| Situation | Behaviour |
+|---|---|
+| No device host installed | `NullDeviceSurface`: every capability false, every operation refused with a reason |
+| Host installed but not running | Stale state file is detected; reported as "not responding" |
+| Host state file malformed or a schema we do not recognise | Treated as no host |
+| Device exists but lacks a capability | Refused with a reason naming the capability |
+| Desktop MAUI app | No device identity, no pairing, no change in behaviour |
+
+Discovery is **file-based and never launches anything as a side effect of looking**. A DevFlow
+session that only wants to know whether device control is possible must not start a background
+daemon to find out.
+
+## Implementation
+
+| Type | Responsibility |
+|---|---|
+| `IDeviceSurface` | The device layer's contract. Never throws for an unsupported operation |
+| `NullDeviceSurface` | The honest no-op used when there is no device layer |
+| `MobileCanvasDeviceSurface` | Adapter over a locally installed device host |
+| `MobileCanvasHost` | File-based discovery of that host |
+| `DeviceCoordinateSpace` | The full coordinate chain, with round-trip guarantees |
+| `DeviceIdentity` / `DeviceIdentityMatcher` | Pairing an app agent to its device |
+| `DeviceIdentityProvider` | Agent-side self-reporting (Agent.Core, with platform overrides) |
+
+## Testing
+
+```bash
+dotnet test src/DevFlow/Microsoft.Maui.DevFlow.Tests/ --filter "FullyQualifiedName~Device"
+```
+
+The coordinate tests pin the round trip across every orientation, density and stream scale, and
+additionally pin specific corners. A round-trip test alone is not sufficient: an inverse-consistent
+but *mirrored* transform round-trips perfectly and is still wrong.

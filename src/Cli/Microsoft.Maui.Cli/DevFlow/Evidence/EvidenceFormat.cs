@@ -13,7 +13,14 @@ internal static class EvidenceFormat
     /// <summary>Schema discriminator written to (and required from) <c>manifest.json</c>.</summary>
     public const string SchemaId = "maui-devflow-evidence";
 
-    /// <summary>Bundle format version. Bump when entry names or required manifest fields change.</summary>
+    /// <summary>
+    /// Bundle format version. Bump when entry names or required manifest fields change.
+    /// <para>
+    /// The reader requires an exact match, so a bump rejects every previously captured bundle.
+    /// Additive optional entries therefore do not bump it: keeping old evidence readable matters
+    /// more than signalling an addition that older tools would reject anyway.
+    /// </para>
+    /// </summary>
     public const int Version = 1;
 
     public const string FileExtension = ".mauitrace";

@@ -32,6 +32,37 @@ public interface IDeviceSurface
 
     /// <summary>Captures a PNG screenshot, or <c>null</c> when the device cannot produce one.</summary>
     Task<byte[]?> ScreenshotAsync(string deviceId, CancellationToken cancellationToken = default);
+
+    // ── Environment ────────────────────────────────────────────────────────────────────────────
+    // These have default implementations so a backend can adopt them incrementally and a new
+    // operation never breaks an existing surface. Refusing by default is the safe direction: a
+    // caller that treats "unsupported" as "done" would run in the wrong environment, so the
+    // precondition applier stops on a refusal rather than continuing.
+
+    /// <summary>Grants or denies an app permission. State is <c>granted</c> or <c>denied</c>.</summary>
+    Task<DeviceOperationResult> SetPermissionAsync(
+        string deviceId, string permission, string state, CancellationToken cancellationToken = default)
+        => Task.FromResult(DeviceOperationResult.Unsupported("changing permissions"));
+
+    /// <summary>Sets or, when <paramref name="location"/> is null, clears the simulated location.</summary>
+    Task<DeviceOperationResult> SetLocationAsync(
+        string deviceId, DeviceLocation? location, CancellationToken cancellationToken = default)
+        => Task.FromResult(DeviceOperationResult.Unsupported("simulating location"));
+
+    /// <summary>Sets the network condition, such as <c>online</c> or <c>offline</c>.</summary>
+    Task<DeviceOperationResult> SetNetworkAsync(
+        string deviceId, string condition, CancellationToken cancellationToken = default)
+        => Task.FromResult(DeviceOperationResult.Unsupported("changing network conditions"));
+
+    /// <summary>Sets the battery level as a percentage from 0 to 100.</summary>
+    Task<DeviceOperationResult> SetBatteryAsync(
+        string deviceId, int percentage, CancellationToken cancellationToken = default)
+        => Task.FromResult(DeviceOperationResult.Unsupported("setting the battery level"));
+
+    /// <summary>Rotates the display to one of <see cref="DeviceOrientations"/>.</summary>
+    Task<DeviceOperationResult> RotateAsync(
+        string deviceId, string orientation, CancellationToken cancellationToken = default)
+        => Task.FromResult(DeviceOperationResult.Unsupported("rotation"));
 }
 
 /// <summary>

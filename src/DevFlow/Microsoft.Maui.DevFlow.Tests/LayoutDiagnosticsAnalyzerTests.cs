@@ -272,7 +272,7 @@ public class LayoutDiagnosticsAnalyzerTests
         Assert.Contains("Element Text/Value content", report.Coverage.NeverCaptured);
         Assert.Equal(LayoutDiagnosticsFormat.SchemaVersion, report.SchemaVersion);
         Assert.Equal(LayoutDiagnosticsFormat.RuleSetVersion, report.RuleSetVersion);
-        Assert.Equal(LayoutDiagnosticRules.All.Count, report.Coverage.Rules.Count);
+        Assert.Equal(LayoutDiagnosticRules.Managed.Count, report.Coverage.Rules.Count);
     }
 
     [Fact]
@@ -297,6 +297,116 @@ public class LayoutDiagnosticsAnalyzerTests
         Assert.Contains("\"frame\"", json, StringComparison.Ordinal);
     }
 
+    [Fact]
+    public void RichRequest_AddsSnapshotMetadataAndAppliesSuppression()
+    {
+        var target = Element("target", frame: Rect(0, 0, 0, 20));
+        target.AutomationId = "Target";
+        target.Interactive = true;
+        target.SourceFile = @"Views\MainPage.xaml";
+        target.SourceLine = 42;
+        var request = new LayoutInspectionRequest
+        {
+            Rules = [LayoutDiagnosticRules.VisibleZeroArea],
+            Suppressions =
+            [
+                new LayoutSuppression
+                {
+                    RuleId = LayoutDiagnosticRules.VisibleZeroArea,
+                    AutomationId = "Target",
+                    Reason = "Intentional collapsed host",
+                }
+            ],
+        };
+
+        var report = Analyze([target], request: request);
+
+        var finding = Assert.Single(report.Findings);
+        Assert.True(finding.Suppressed);
+        Assert.Equal("Intentional collapsed host", finding.SuppressionReason);
+        Assert.Equal(LayoutSeverity.Serious, finding.Severity);
+        Assert.Equal(LayoutActionability.Fix, finding.Actionability);
+        Assert.NotEmpty(finding.SuppressionKey);
+        Assert.NotNull(finding.Evidence?.FullRegion);
+        Assert.Equal(1, report.Summary.Suppressed);
+        Assert.Equal(0, report.Summary.Violations);
+        Assert.Equal(LayoutDiagnosticsFormat.SchemaVersion, report.SchemaVersion);
+        Assert.NotEmpty(report.Snapshot.Id);
+        Assert.NotEmpty(report.Snapshot.TreeRevision);
+        Assert.NotEmpty(report.Snapshot.DiagnosticsRevision);
+        Assert.Equal(1, report.Snapshot.NodeCount);
+    }
+
+    [Fact]
+    public void RichRequest_FiltersFindingsWithoutTurningThemIntoPasses()
+    {
+        var target = Element("target", frame: Rect(0, 0, 120, 20));
+        target.DesiredSize = new LayoutSize { Width = 300, Height = 20 };
+        var request = new LayoutInspectionRequest
+        {
+            Rules = [LayoutDiagnosticRules.DesiredSizeConstrained],
+            MinimumSeverity = LayoutSeverity.Serious,
+        };
+
+        var report = Analyze([target], request: request);
+
+        Assert.Empty(report.Findings);
+        Assert.Equal(0, report.Summary.Observations);
+        Assert.Equal(0, report.Summary.Passes);
+    }
+
+    [Fact]
+    public void RichRequest_CanIncludeAggregatePassAccounting()
+    {
+        var request = new LayoutInspectionRequest
+        {
+            Rules = [LayoutDiagnosticRules.VisibleZeroArea],
+            IncludePasses = true,
+        };
+
+        var report = Analyze(
+            [Element("target", frame: Rect(0, 0, 20, 20))],
+            request: request);
+
+        var finding = Assert.Single(report.Findings);
+        Assert.Equal(LayoutOutcomes.Pass, finding.Outcome);
+        Assert.Equal(LayoutSeverity.Info, finding.Severity);
+        Assert.Equal(LayoutActionability.Informational, finding.Actionability);
+        Assert.Equal(1, report.Summary.Passes);
+        Assert.Contains("coverage", finding.Explanation, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
+    public void RichRequest_NormalizesRuleIdsCaseInsensitively()
+    {
+        var report = Analyze(
+            [Element("target", frame: Rect(0, 0, 0, 20))],
+            request: new LayoutInspectionRequest
+            {
+                Rules = [LayoutDiagnosticRules.VisibleZeroArea.ToUpperInvariant()],
+            });
+
+        Assert.Equal(
+            LayoutDiagnosticRules.VisibleZeroArea,
+            Assert.Single(report.Findings).RuleId);
+    }
+
+    [Fact]
+    public void RuleCatalog_ListsTheFullContractAndTruthfulManagedSupport()
+    {
+        var catalog = LayoutDiagnosticsAnalyzer.CreateRuleCatalog();
+
+        Assert.Equal(LayoutDiagnosticRules.All.Count, catalog.Rules.Count);
+        Assert.Equal(
+            LayoutRuleSupport.Unavailable,
+            Assert.Single(catalog.Rules, rule =>
+                rule.RuleId == LayoutDiagnosticRules.ElementClipped).Support);
+        Assert.Equal(
+            LayoutRuleSupport.Partial,
+            Assert.Single(catalog.Rules, rule =>
+                rule.RuleId == LayoutDiagnosticRules.VisibleZeroArea).Support);
+    }
+
     // ── helpers ──────────────────────────────────────────────────────────────────────────────
 
     private static int OutcomeRank(string outcome) => outcome switch
@@ -308,7 +418,8 @@ public class LayoutDiagnosticsAnalyzerTests
 
     private static LayoutDiagnosticsReport Analyze(
         IReadOnlyList<LayoutElementSnapshot> snapshots,
-        LayoutRect? window = null)
+        LayoutRect? window = null,
+        LayoutInspectionRequest? request = null)
     {
         var scope = new LayoutDiagnosticsScope
         {
@@ -316,7 +427,7 @@ public class LayoutDiagnosticsAnalyzerTests
             ElementsExamined = snapshots.Count,
             WindowBounds = window,
         };
-        return LayoutDiagnosticsAnalyzer.Analyze(snapshots, scope, "Windows", CapturedUtc);
+        return LayoutDiagnosticsAnalyzer.Analyze(snapshots, scope, "Windows", CapturedUtc, request);
     }
 
     private static LayoutElementSnapshot Element(

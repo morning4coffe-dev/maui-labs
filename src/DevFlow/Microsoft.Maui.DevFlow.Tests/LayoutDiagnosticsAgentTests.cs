@@ -9,6 +9,7 @@ using Microsoft.Maui.DevFlow.Agent.Core.LayoutDiagnostics;
 using Microsoft.Maui.DevFlow.Driver;
 using Microsoft.Maui.Dispatching;
 using CoreLayoutFormat = Microsoft.Maui.DevFlow.Agent.Core.LayoutDiagnostics.LayoutDiagnosticsFormat;
+using CoreLayoutRules = Microsoft.Maui.DevFlow.Agent.Core.LayoutDiagnostics.LayoutDiagnosticRules;
 
 namespace Microsoft.Maui.DevFlow.Tests;
 
@@ -30,7 +31,7 @@ public class LayoutDiagnosticsAgentTests
         Assert.Equal(CoreLayoutFormat.SchemaVersion, report!.SchemaVersion);
         Assert.Equal(CoreLayoutFormat.RuleSetVersion, report.RuleSetVersion);
         Assert.True(report.Scope.ElementsExamined > 0);
-        Assert.Equal(LayoutDiagnosticRules.All.Count, report.Coverage.Rules.Count);
+        Assert.Equal(CoreLayoutRules.Managed.Count, report.Coverage.Rules.Count);
         Assert.NotEmpty(report.Coverage.Limitations);
         Assert.Contains("Element Text/Value content", report.Coverage.NeverCaptured);
     }
@@ -132,6 +133,59 @@ public class LayoutDiagnosticsAgentTests
     }
 
     [Fact]
+    public async Task Endpoint_AcceptsTheRichVersionedRequest()
+    {
+        using var harness = await LayoutHarness.CreateAsync(new Label { AutomationId = "Title" });
+
+        var report = await harness.Client.AnalyzeLayoutAsync(
+            new Microsoft.Maui.DevFlow.Driver.LayoutInspectionRequest
+            {
+                Scope = new Microsoft.Maui.DevFlow.Driver.LayoutInspectionScope
+                {
+                    RootElementId = "Title",
+                },
+                Rules = [Microsoft.Maui.DevFlow.Driver.LayoutDiagnosticRules.VisibleZeroArea],
+                IncludePasses = true,
+            });
+
+        Assert.NotNull(report);
+        Assert.Equal(CoreLayoutFormat.SchemaVersion, report!.SchemaVersion);
+        Assert.Equal("Title", report.Scope.RootElementId);
+        Assert.Single(report.Coverage.Rules);
+        Assert.NotEmpty(report.Snapshot.Id);
+        Assert.NotEmpty(report.Snapshot.TreeRevision);
+    }
+
+    [Fact]
+    public async Task RuleCatalog_AdvertisesTheFullContract()
+    {
+        using var harness = await LayoutHarness.CreateAsync(new Label { AutomationId = "Title" });
+
+        var catalog = await harness.Client.GetLayoutDiagnosticRulesAsync();
+
+        Assert.NotNull(catalog);
+        Assert.Equal(CoreLayoutRules.All.Count, catalog!.Rules.Count);
+        Assert.Contains(catalog.Profiles, profile => profile == "agent");
+    }
+
+    [Fact]
+    public async Task RichRequest_ReturnsTypedValidationErrors()
+    {
+        using var harness = await LayoutHarness.CreateAsync(new Label { AutomationId = "Title" });
+
+        var error = await Assert.ThrowsAsync<LayoutDiagnosticsException>(() =>
+            harness.Client.AnalyzeLayoutAsync(
+                new Microsoft.Maui.DevFlow.Driver.LayoutInspectionRequest
+                {
+                    Rules = ["layout.not-a-rule"],
+                }));
+
+        Assert.Equal(400, error.StatusCode);
+        Assert.Equal("layout-diagnostics-validation", error.ErrorType);
+        Assert.Contains("Unknown", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task Capabilities_AdvertiseLayoutDiagnosticsWithItsLimitations()
     {
         using var harness = await LayoutHarness.CreateAsync(new Label { AutomationId = "Title" });
@@ -140,6 +194,7 @@ public class LayoutDiagnosticsAgentTests
         var layout = capabilities.GetProperty("capabilities").GetProperty("diagnostics.layout");
 
         Assert.True(layout.GetProperty("supported").GetBoolean());
+        Assert.Equal(2, layout.GetProperty("version").GetInt32());
         Assert.Equal(CoreLayoutFormat.SchemaVersion, layout.GetProperty("schemaVersion").GetString());
         Assert.Equal(CoreLayoutFormat.MaxElements, layout.GetProperty("maxElements").GetInt32());
         Assert.NotEmpty(layout.GetProperty("rules").EnumerateArray());

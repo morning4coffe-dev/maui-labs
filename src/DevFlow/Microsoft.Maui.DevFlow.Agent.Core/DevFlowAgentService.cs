@@ -683,6 +683,7 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
         _server.MapGet("/api/v1/ui/elements/{id}/properties/{name}", HandleProperty);
         _server.MapPut("/api/v1/ui/elements/{id}/properties/{name}", HandleSetProperty);
         _server.MapGet("/api/v1/diagnostics/problems", HandleDiagnosticProblems);
+        _server.MapGet("/api/v1/ui/diagnostics/layout/rules", HandleLayoutDiagnosticRules);
         _server.MapGet("/api/v1/ui/diagnostics/layout", HandleLayoutDiagnosticsGet);
         _server.MapPost("/api/v1/ui/diagnostics/layout", HandleLayoutDiagnosticsPost, requiresMutationLease: false);
         _server.MapDelete(
@@ -973,7 +974,9 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                 ? new[] { "binding-failures", "dedupe", "source", "element-correlation", "clear" }
                 : Array.Empty<string>()
         };
-        capabilities["diagnostics.layout"] = BuildLayoutDiagnosticsCapability();
+        var layoutDiagnostics = BuildLayoutDiagnosticsCapability();
+        capabilities["diagnostics.layout"] = layoutDiagnostics;
+        capabilities["ui.layoutDiagnostics"] = layoutDiagnostics;
 
         if (GetCdpWebViewsSnapshot().Length > 0)
             capabilities["webview"] = new { version = 1, features = new[] { "evaluate", "contexts", "source", "dom", "dom-query", "network", "console", "screenshot" } };

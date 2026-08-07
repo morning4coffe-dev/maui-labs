@@ -16,7 +16,7 @@ public partial class DevFlowAgentService
 
     private Task<HttpResponse> HandleLayoutDiagnosticsGet(HttpRequest request)
     {
-        var layoutRequest = new LayoutDiagnosticsRequest
+        var layoutRequest = new LayoutInspectionRequest
         {
             ElementId = request.QueryParams.TryGetValue("elementId", out var elementId) && !string.IsNullOrWhiteSpace(elementId)
                 ? elementId
@@ -25,33 +25,55 @@ public partial class DevFlowAgentService
             MaxElements = request.QueryParams.TryGetValue("maxElements", out var max) && int.TryParse(max, out var parsed)
                 ? parsed
                 : null,
+            Rules = [.. LayoutDiagnosticRules.Managed],
+            MinimumSeverity = LayoutSeverity.Info,
         };
         return RunLayoutDiagnosticsAsync(layoutRequest);
     }
 
     private Task<HttpResponse> HandleLayoutDiagnosticsPost(HttpRequest request)
     {
-        var layoutRequest = request.BodyAs<LayoutDiagnosticsRequest>() ?? new LayoutDiagnosticsRequest();
+        var layoutRequest = request.BodyAs<LayoutInspectionRequest>() ?? new LayoutInspectionRequest();
+        layoutRequest.Scope ??= new LayoutInspectionScope();
+        layoutRequest.Stability ??= new LayoutStabilityOptions();
+        layoutRequest.Occlusion ??= new LayoutOcclusionOptions();
+        layoutRequest.Privacy ??= new LayoutPrivacyOptions();
+        layoutRequest.Suppressions ??= [];
         layoutRequest.Window ??= ParseWindowIndex(request);
         return RunLayoutDiagnosticsAsync(layoutRequest);
     }
 
-    private async Task<HttpResponse> RunLayoutDiagnosticsAsync(LayoutDiagnosticsRequest request)
+    private Task<HttpResponse> HandleLayoutDiagnosticRules(HttpRequest request)
+        => Task.FromResult(HttpResponse.Json(LayoutDiagnosticsAnalyzer.CreateRuleCatalog()));
+
+    private async Task<HttpResponse> RunLayoutDiagnosticsAsync(LayoutInspectionRequest request)
     {
         if (_app == null)
             return HttpResponse.Error("Agent not bound to app");
+
+        var validation = ValidateLayoutRequest(request);
+        if (validation is not null)
+        {
+            return HttpResponse.Error(
+                validation,
+                statusCode: 400,
+                reason: "layout-diagnostics-validation");
+        }
 
         var maxElements = Math.Clamp(
             request.MaxElements ?? LayoutDiagnosticsFormat.DefaultMaxElements,
             1,
             LayoutDiagnosticsFormat.MaxElements);
-        var rootElementId = string.IsNullOrWhiteSpace(request.ElementId) ? null : request.ElementId!.Trim();
+        var requestedRoot = request.Scope.RootElementId ?? request.ElementId;
+        var rootElementId = string.IsNullOrWhiteSpace(requestedRoot) ? null : requestedRoot.Trim();
+        var window = request.Scope.Window ?? request.Window;
 
         // Serialize scans so two concurrent callers cannot interleave walker state.
         await _layoutDiagnosticsGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            var report = await DispatchAsync(() => CaptureLayoutDiagnostics(rootElementId, request.Window, maxElements));
+            var report = await DispatchAsync(() =>
+                CaptureLayoutDiagnostics(request, rootElementId, window, maxElements));
             return report is null
                 ? HttpResponse.NotFound($"Element '{rootElementId}' not found")
                 : HttpResponse.Json(report);
@@ -63,7 +85,11 @@ public partial class DevFlowAgentService
     }
 
     /// <summary>Runs entirely on the UI thread: one walk, one projection, one analysis.</summary>
-    private LayoutDiagnosticsReport? CaptureLayoutDiagnostics(string? rootElementId, int? window, int maxElements)
+    private LayoutDiagnosticsReport? CaptureLayoutDiagnostics(
+        LayoutInspectionRequest request,
+        string? rootElementId,
+        int? window,
+        int maxElements)
     {
         var app = _app;
         if (app == null)
@@ -72,16 +98,19 @@ public partial class DevFlowAgentService
         _treeWalker.CaptureWalkElements = true;
         try
         {
+            var maxDepth = request.Scope.IncludeDescendants
+                ? request.Scope.MaxDepth
+                : 1;
             var roots = rootElementId is null
                 ? _treeWalker.WalkTree(
                     app,
-                    maxDepth: 0,
+                    maxDepth,
                     windowIndex: window,
                     maxElements: maxElements)
                 : _treeWalker.WalkSubtree(
                     app,
                     rootElementId,
-                    maxDepth: 0,
+                    maxDepth,
                     maxElements: maxElements,
                     windowIndex: window);
             var collected = LayoutSnapshotCollector.Collect(
@@ -107,7 +136,8 @@ public partial class DevFlowAgentService
                 collected.Snapshots,
                 scope,
                 PlatformName,
-                DateTime.UtcNow);
+                DateTime.UtcNow,
+                request);
         }
         finally
         {
@@ -115,6 +145,65 @@ public partial class DevFlowAgentService
             _treeWalker.CaptureWalkElements = false;
             _treeWalker.ClearWalkElements();
         }
+    }
+
+    private static string? ValidateLayoutRequest(LayoutInspectionRequest request)
+    {
+        if (!string.Equals(
+                request.SchemaVersion,
+                LayoutDiagnosticsFormat.SchemaVersion,
+                StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(request.SchemaVersion, "1.0", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"schemaVersion must be '{LayoutDiagnosticsFormat.SchemaVersion}'.";
+        }
+
+        if (!new[] { "agent", "strict", "exhaustive", "ci" }
+            .Contains(request.Profile, StringComparer.OrdinalIgnoreCase))
+            return "profile must be agent, strict, exhaustive, or ci.";
+        if (!LayoutSeverity.All.Contains(request.MinimumSeverity, StringComparer.OrdinalIgnoreCase))
+            return "minimumSeverity must be info, minor, moderate, serious, or critical.";
+        if (request.Rules is { Count: > 0 })
+        {
+            var unknown = request.Rules.FirstOrDefault(rule =>
+                !LayoutDiagnosticRules.All.Contains(rule, StringComparer.OrdinalIgnoreCase));
+            if (unknown is not null)
+                return $"Unknown layout diagnostic rule '{unknown}'.";
+        }
+        if (request.Scope.MaxDepth < 0)
+            return "scope.maxDepth must be zero or greater.";
+        if (request.MaxElements is < 1 or > LayoutDiagnosticsFormat.MaxElements)
+            return $"maxElements must be between 1 and {LayoutDiagnosticsFormat.MaxElements}.";
+        if (!new[] { "wait", "immediate" }
+            .Contains(request.Stability.Mode, StringComparer.OrdinalIgnoreCase))
+            return "stability.mode must be wait or immediate.";
+        if (request.Stability.StableFrames is < 1 or > 10)
+            return "stability.stableFrames must be between 1 and 10.";
+        if (request.Stability.QuietPeriodMs is < 0 or > 10_000)
+            return "stability.quietPeriodMs must be between 0 and 10000.";
+        if (request.Stability.TimeoutMs is < 1 or > 60_000)
+            return "stability.timeoutMs must be between 1 and 60000.";
+        if (!new[] { "none", "interactiveTargets", "all" }
+            .Contains(request.Occlusion.Mode, StringComparer.OrdinalIgnoreCase))
+            return "occlusion.mode must be none, interactiveTargets, or all.";
+        if (request.Occlusion.MaxSamplesPerElement is < 1 or > 1000)
+            return "occlusion.maxSamplesPerElement must be between 1 and 1000.";
+        if (!double.IsFinite(request.Occlusion.CoverageError) ||
+            request.Occlusion.CoverageError <= 0 ||
+            request.Occlusion.CoverageError >= 1)
+        {
+            return "occlusion.coverageError must be greater than 0 and less than 1.";
+        }
+        if (!double.IsFinite(request.Occlusion.MinimumOverlapRatio) ||
+            request.Occlusion.MinimumOverlapRatio < 0 ||
+            request.Occlusion.MinimumOverlapRatio > 1)
+        {
+            return "occlusion.minimumOverlapRatio must be between 0 and 1.";
+        }
+        if (!new[] { "none", "length", "full" }
+            .Contains(request.Privacy.Text, StringComparer.OrdinalIgnoreCase))
+            return "privacy.text must be none, length, or full.";
+        return null;
     }
 
     /// <summary>
@@ -150,12 +239,18 @@ public partial class DevFlowAgentService
     /// <summary>Capability descriptor advertised under <c>diagnostics.layout</c>.</summary>
     private static object BuildLayoutDiagnosticsCapability() => new
     {
-        version = 1,
+        version = 2,
         supported = true,
         schemaVersion = LayoutDiagnosticsFormat.SchemaVersion,
         ruleSetVersion = LayoutDiagnosticsFormat.RuleSetVersion,
         maxElements = LayoutDiagnosticsFormat.MaxElements,
-        features = new[] { "on-demand", "scoped-root", "window-scope", "coverage", "source-location" },
+        profiles = new[] { "agent", "strict", "exhaustive", "ci" },
+        features = new[]
+        {
+            "on-demand", "scoped-root", "window-scope", "coverage", "source-location",
+            "rule-filter", "severity-filter", "evidence-control", "pass-accounting",
+            "privacy-control", "suppressions", "rule-catalog"
+        },
         rules = LayoutDiagnosticRules.All,
         neverCaptured = LayoutDiagnosticsFormat.NeverCaptured,
         limitations = new[]

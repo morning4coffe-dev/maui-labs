@@ -1,4 +1,6 @@
 using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 
 namespace Microsoft.Maui.DevFlow.Agent.Core.LayoutDiagnostics;
 
@@ -33,43 +35,107 @@ public static class LayoutDiagnosticsAnalyzer
         IReadOnlyList<LayoutElementSnapshot> snapshots,
         LayoutDiagnosticsScope scope,
         string platform,
-        DateTime capturedUtc)
+        DateTime capturedUtc,
+        LayoutInspectionRequest? request = null)
     {
         ArgumentNullException.ThrowIfNull(snapshots);
         ArgumentNullException.ThrowIfNull(scope);
+        request ??= new LayoutInspectionRequest
+        {
+            Rules = [.. LayoutDiagnosticRules.Managed],
+            MinimumSeverity = LayoutSeverity.Info,
+        };
 
         var byId = new Dictionary<string, LayoutElementSnapshot>(snapshots.Count, StringComparer.Ordinal);
         foreach (var snapshot in snapshots)
             byId.TryAdd(snapshot.Id, snapshot);
 
+        var enabledRules = ResolveEnabledRules(request);
         var findings = new List<LayoutFinding>();
         var coverage = new Dictionary<string, LayoutRuleCoverage>(StringComparer.Ordinal);
-        foreach (var ruleId in LayoutDiagnosticRules.All)
+        foreach (var ruleId in enabledRules)
             coverage[ruleId] = new LayoutRuleCoverage { RuleId = ruleId };
 
         foreach (var snapshot in snapshots)
         {
-            EvaluateVisibleZeroArea(snapshot, coverage, findings);
-            EvaluateConstraints(snapshot, coverage, findings);
-            EvaluateOutsideWindow(snapshot, scope.WindowBounds, coverage, findings);
-            EvaluateDesiredSize(snapshot, coverage, findings);
-            EvaluateChildOutsideParent(snapshot, byId, coverage, findings);
+            if (enabledRules.Contains(LayoutDiagnosticRules.VisibleZeroArea))
+                EvaluateVisibleZeroArea(snapshot, coverage, findings);
+            if (enabledRules.Contains(LayoutDiagnosticRules.ConstraintViolation))
+                EvaluateConstraints(snapshot, coverage, findings);
+            if (enabledRules.Contains(LayoutDiagnosticRules.OutsideWindow))
+                EvaluateOutsideWindow(snapshot, scope.WindowBounds, coverage, findings);
+            if (enabledRules.Contains(LayoutDiagnosticRules.DesiredSizeConstrained))
+                EvaluateDesiredSize(snapshot, coverage, findings);
+            if (enabledRules.Contains(LayoutDiagnosticRules.ChildOutsideParent))
+                EvaluateChildOutsideParent(snapshot, byId, coverage, findings);
         }
 
-        foreach (var ruleId in LayoutDiagnosticRules.All)
+        foreach (var ruleId in enabledRules)
             AppendIncompleteFinding(coverage[ruleId], findings);
 
+        var passCounts = coverage.Values.ToDictionary(
+            rule => rule.RuleId,
+            rule => Math.Max(
+                0,
+                rule.Evaluated -
+                findings.Count(finding =>
+                    finding.RuleId == rule.RuleId &&
+                    finding.Outcome is LayoutOutcomes.Violation or LayoutOutcomes.Observation)),
+            StringComparer.Ordinal);
+        var passCount = passCounts.Values.Sum();
+        if (request.IncludePasses)
+        {
+            foreach (var (ruleId, count) in passCounts.Where(item => item.Value > 0))
+            {
+                findings.Add(new LayoutFinding
+                {
+                    Id = BuildId(ruleId, "scope", "pass"),
+                    RuleId = ruleId,
+                    Subtype = "aggregate",
+                    Outcome = LayoutOutcomes.Pass,
+                    Severity = LayoutSeverity.Info,
+                    Confidence = coverage[ruleId].Confidence,
+                    Actionability = LayoutActionability.Informational,
+                    Message = $"{count} evaluated element(s) did not produce a finding for {ruleId}.",
+                    Explanation =
+                        "This pass count applies only to the elements the rule could evaluate; read coverage and incomplete findings before treating the scope as clean.",
+                });
+            }
+        }
+        EnrichAndFilterFindings(findings, request);
         findings.Sort(CompareFindings);
 
+        var capturedAt = capturedUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
+        var normalizedPlatform = string.IsNullOrWhiteSpace(platform) ? "unknown" : platform;
         var report = new LayoutDiagnosticsReport
         {
-            CapturedUtc = capturedUtc.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture),
-            Platform = string.IsNullOrWhiteSpace(platform) ? "unknown" : platform,
+            CapturedUtc = capturedAt,
+            Platform = normalizedPlatform,
             Scope = scope,
             Findings = findings,
+            Snapshot = new LayoutSnapshotInfo
+            {
+                Id = Guid.NewGuid().ToString("N"),
+                CapturedAt = capturedAt,
+                Platform = normalizedPlatform,
+                TreeRevision = ComputeTreeRevision(snapshots),
+                Stable = false,
+                StabilityReason = "single-frame-managed-snapshot",
+                NodeCount = snapshots.Count,
+                Windows = scope.WindowBounds is null
+                    ? []
+                    :
+                    [
+                        new LayoutWindowInfo
+                        {
+                            Id = scope.Window is { } window ? $"window-{window}" : "window-0",
+                            Bounds = scope.WindowBounds,
+                        }
+                    ],
+            },
         };
 
-        foreach (var ruleId in LayoutDiagnosticRules.All)
+        foreach (var ruleId in enabledRules)
         {
             var rule = coverage[ruleId];
             rule.Support = rule.Evaluated == 0
@@ -98,15 +164,52 @@ public static class LayoutDiagnosticsAnalyzer
 
         foreach (var finding in findings)
         {
+            if (finding.Suppressed)
+            {
+                report.Summary.Suppressed++;
+                continue;
+            }
+
             switch (finding.Outcome)
             {
                 case LayoutOutcomes.Violation: report.Summary.Violations++; break;
                 case LayoutOutcomes.Incomplete: report.Summary.Incomplete++; break;
+                case LayoutOutcomes.Pass: break;
+                case LayoutOutcomes.NotApplicable: report.Summary.NotApplicable++; break;
                 default: report.Summary.Observations++; break;
             }
         }
 
+        report.Summary.Passes += passCount;
+        report.Summary.NotApplicable += report.Coverage.Rules.Count(rule =>
+            rule.Evaluated == 0 && rule.Skipped == 0);
+        report.Snapshot.DiagnosticsRevision = ComputeDiagnosticsRevision(report);
+
         return report;
+    }
+
+    public static LayoutRuleCatalog CreateRuleCatalog()
+    {
+        var catalog = new LayoutRuleCatalog();
+        foreach (var ruleId in LayoutDiagnosticRules.All)
+        {
+            var rule = new LayoutRuleCoverage
+            {
+                RuleId = ruleId,
+                Support = LayoutDiagnosticRules.Managed.Contains(ruleId)
+                    ? LayoutRuleSupport.Partial
+                    : LayoutRuleSupport.Unavailable,
+                Confidence = ConfidenceFor(ruleId),
+            };
+            AddRuleLimitations(rule);
+            if (!LayoutDiagnosticRules.Managed.Contains(ruleId))
+            {
+                rule.Limitations.Add(
+                    "This rule requires native or WebView evidence that is not available from the managed baseline collector.");
+            }
+            catalog.Rules.Add(rule);
+        }
+        return catalog;
     }
 
     // ── rules ────────────────────────────────────────────────────────────────────────────────
@@ -444,6 +547,269 @@ public static class LayoutDiagnosticsAnalyzer
         });
     }
 
+    // ── rich contract projection ─────────────────────────────────────────────────────────────
+
+    private static HashSet<string> ResolveEnabledRules(LayoutInspectionRequest request)
+    {
+        var requested = request.Rules is { Count: > 0 }
+            ? request.Rules
+            : LayoutDiagnosticRules.Managed;
+        return LayoutDiagnosticRules.All
+            .Where(rule => requested.Contains(rule, StringComparer.OrdinalIgnoreCase))
+            .ToHashSet(StringComparer.Ordinal);
+    }
+
+    private static void EnrichAndFilterFindings(
+        List<LayoutFinding> findings,
+        LayoutInspectionRequest request)
+    {
+        foreach (var finding in findings)
+        {
+            ApplyFindingMetadata(finding);
+            finding.SuppressionKey = BuildSuppressionKey(finding);
+            var suppression = finding.Outcome is LayoutOutcomes.Pass or LayoutOutcomes.NotApplicable
+                ? null
+                : request.Suppressions.FirstOrDefault(candidate =>
+                    LayoutSuppressionMatches(candidate, finding));
+            if (suppression is not null)
+            {
+                finding.Suppressed = true;
+                finding.SuppressionReason = suppression.Reason;
+            }
+
+            if (finding.Evidence is { } evidence)
+            {
+                evidence.FullRegion ??= RegionFrom(
+                    evidence.WindowBounds ?? evidence.Frame,
+                    "managedBounds");
+                evidence.VisibleRegion ??= evidence.FullRegion;
+                if (evidence.Limitations.Count == 0 && finding.Limitations.Count > 0)
+                    evidence.Limitations.AddRange(finding.Limitations);
+            }
+        }
+
+        var minimumSeverity = SeverityRank(request.MinimumSeverity);
+        findings.RemoveAll(finding =>
+            finding.Outcome is LayoutOutcomes.Violation or LayoutOutcomes.Observation &&
+            SeverityRank(finding.Severity) < minimumSeverity);
+
+        if (!request.IncludeEvidence)
+        {
+            foreach (var finding in findings)
+                finding.Evidence = null;
+        }
+    }
+
+    private static void ApplyFindingMetadata(LayoutFinding finding)
+    {
+        if (finding.Outcome is LayoutOutcomes.Pass or LayoutOutcomes.NotApplicable)
+        {
+            finding.Severity = LayoutSeverity.Info;
+            finding.Actionability = LayoutActionability.Informational;
+            return;
+        }
+
+        switch (finding.RuleId)
+        {
+            case LayoutDiagnosticRules.VisibleZeroArea:
+                finding.Subtype ??= "arranged-area";
+                finding.Severity = finding.Element?.Interactive == true
+                    ? LayoutSeverity.Serious
+                    : LayoutSeverity.Moderate;
+                finding.Actionability = LayoutActionability.Fix;
+                finding.FixCategories = ["increase-host-space", "adjust-layout-constraints"];
+                break;
+            case LayoutDiagnosticRules.ConstraintViolation:
+                finding.Subtype ??= finding.Evidence?.Constraint;
+                finding.Severity = LayoutSeverity.Serious;
+                finding.Actionability = LayoutActionability.Fix;
+                finding.FixCategories = ["adjust-layout-constraints"];
+                break;
+            case LayoutDiagnosticRules.OutsideWindow:
+                finding.Subtype ??= "window-edge";
+                finding.Severity = LayoutSeverity.Moderate;
+                finding.Actionability = LayoutActionability.Review;
+                finding.FixCategories = ["adjust-layout-constraints", "enable-scroll"];
+                break;
+            case LayoutDiagnosticRules.DesiredSizeConstrained:
+                finding.Subtype ??= "measure-arrange-pressure";
+                finding.Severity = LayoutSeverity.Minor;
+                finding.Actionability = LayoutActionability.Review;
+                finding.FixCategories = ["increase-host-space", "adjust-layout-constraints"];
+                break;
+            case LayoutDiagnosticRules.ChildOutsideParent:
+                finding.Subtype ??= "parent-bounds";
+                finding.Severity = LayoutSeverity.Minor;
+                finding.Actionability = LayoutActionability.Review;
+                finding.FixCategories = ["review-overflow", "enable-scroll"];
+                if (finding.Parent is not null && finding.RelatedElements.Count == 0)
+                {
+                    finding.RelatedElements.Add(new LayoutRelatedElement
+                    {
+                        Relation = "parent",
+                        Element = finding.Parent,
+                    });
+                }
+                break;
+        }
+
+        if (finding.Outcome == LayoutOutcomes.Incomplete)
+        {
+            finding.Severity = LayoutSeverity.Info;
+            finding.Actionability = LayoutActionability.Informational;
+        }
+    }
+
+    private static LayoutRegionInfo? RegionFrom(LayoutRect? rect, string precision)
+    {
+        if (rect is null)
+            return null;
+        var width = Math.Max(0, rect.Width);
+        var height = Math.Max(0, rect.Height);
+        return new LayoutRegionInfo
+        {
+            Bounds = rect,
+            Area = width * height,
+            Precision = precision,
+            Points = width <= 0 || height <= 0
+                ? []
+                :
+                [
+                    new LayoutPointInfo { X = rect.X, Y = rect.Y },
+                    new LayoutPointInfo { X = rect.Right, Y = rect.Y },
+                    new LayoutPointInfo { X = rect.Right, Y = rect.Bottom },
+                    new LayoutPointInfo { X = rect.X, Y = rect.Bottom },
+                ],
+        };
+    }
+
+    private static bool LayoutSuppressionMatches(
+        LayoutSuppression suppression,
+        LayoutFinding finding)
+    {
+        var element = finding.Element;
+        if (suppression.RuleId is not null &&
+            !suppression.RuleId.Equals(finding.RuleId, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (suppression.Fingerprint is not null &&
+            !suppression.Fingerprint.Equals(finding.SuppressionKey, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (suppression.ElementId is not null &&
+            !suppression.ElementId.Equals(element?.Id, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (suppression.AutomationId is not null &&
+            !suppression.AutomationId.Equals(element?.AutomationId, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (suppression.ElementType is not null &&
+            !suppression.ElementType.Equals(element?.Type, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (suppression.SourceFile is not null &&
+            !SourcePathMatches(suppression.SourceFile, element?.SourceFile))
+            return false;
+        if (suppression.SourceLineStart is { } start)
+        {
+            var line = element?.SourceLine;
+            var end = suppression.SourceLineEnd ?? start;
+            if (line is null || line < start || line > end)
+                return false;
+        }
+        if (suppression.RelatedElementId is not null &&
+            !finding.RelatedElements.Any(related =>
+                suppression.RelatedElementId.Equals(
+                    related.Element.Id,
+                    StringComparison.OrdinalIgnoreCase)))
+            return false;
+        if (suppression.RelatedAutomationId is not null &&
+            !finding.RelatedElements.Any(related =>
+                suppression.RelatedAutomationId.Equals(
+                    related.Element.AutomationId,
+                    StringComparison.OrdinalIgnoreCase)))
+            return false;
+        return true;
+    }
+
+    private static bool SourcePathMatches(string expected, string? actual)
+    {
+        if (string.IsNullOrWhiteSpace(actual))
+            return false;
+        var normalizedExpected = expected.Replace('\\', '/').Trim();
+        var normalizedActual = actual.Replace('\\', '/').Trim();
+        return normalizedActual.Equals(normalizedExpected, StringComparison.OrdinalIgnoreCase) ||
+            normalizedActual.EndsWith('/' + normalizedExpected, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildSuppressionKey(LayoutFinding finding)
+    {
+        var element = finding.Element;
+        var related = string.Join(
+            ",",
+            finding.RelatedElements
+                .OrderBy(item => item.Relation, StringComparer.Ordinal)
+                .ThenBy(item => item.Element.Id, StringComparer.Ordinal)
+                .Select(item => $"{item.Relation}:{item.Element.AutomationId ?? item.Element.Id}"));
+        var identity = string.Join(
+            "|",
+            finding.RuleId,
+            finding.Subtype,
+            element?.SourceFile?.Replace('\\', '/'),
+            element?.SourceLine,
+            element?.AutomationId,
+            element?.Type,
+            related);
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(identity)))[..24]
+            .ToLowerInvariant();
+    }
+
+    private static string ComputeTreeRevision(IReadOnlyList<LayoutElementSnapshot> snapshots)
+    {
+        var canonical = string.Join(
+            "\n",
+            snapshots.Select(snapshot => string.Join(
+                "|",
+                snapshot.Id,
+                snapshot.ParentId,
+                snapshot.Type,
+                FormatRect(snapshot.WindowBounds ?? snapshot.Frame),
+                snapshot.IsVisible,
+                snapshot.IsRealized)));
+        return HashRevision(canonical);
+    }
+
+    private static string ComputeDiagnosticsRevision(LayoutDiagnosticsReport report)
+    {
+        var canonical = string.Join(
+            "\n",
+            report.Findings.Select(finding => string.Join(
+                "|",
+                finding.Id,
+                finding.Outcome,
+                finding.Severity,
+                finding.Confidence,
+                finding.Suppressed,
+                finding.SuppressionKey)));
+        return HashRevision(canonical);
+    }
+
+    private static string FormatRect(LayoutRect? rect)
+        => rect is null
+            ? ""
+            : string.Create(
+                CultureInfo.InvariantCulture,
+                $"{rect.X:0.###},{rect.Y:0.###},{rect.Width:0.###},{rect.Height:0.###}");
+
+    private static string HashRevision(string value)
+        => Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value)))[..24]
+            .ToLowerInvariant();
+
+    private static int SeverityRank(string? severity) => severity?.ToLowerInvariant() switch
+    {
+        LayoutSeverity.Critical => 4,
+        LayoutSeverity.Serious => 3,
+        LayoutSeverity.Moderate => 2,
+        LayoutSeverity.Minor => 1,
+        _ => 0,
+    };
+
     // ── coverage / incomplete reporting ──────────────────────────────────────────────────────
 
     private static void AppendIncompleteFinding(LayoutRuleCoverage rule, List<LayoutFinding> findings)
@@ -476,6 +842,27 @@ public static class LayoutDiagnosticsAnalyzer
     {
         switch (rule.RuleId)
         {
+            case LayoutDiagnosticRules.ElementClipped:
+                rule.Limitations.Add("Requires native clip-chain and transformed-region evidence.");
+                break;
+            case LayoutDiagnosticRules.ContentOverflow:
+                rule.Limitations.Add("Requires authoritative content and viewport regions from the native control or WebView.");
+                break;
+            case LayoutDiagnosticRules.TextNotFullyRendered:
+                rule.Limitations.Add("Requires native text layout metrics; managed desired size alone cannot prove truncation.");
+                break;
+            case LayoutDiagnosticRules.InteractionOccluded:
+                rule.Limitations.Add("Requires native hit-test sampling against the rendered surface.");
+                break;
+            case LayoutDiagnosticRules.VisualOccluded:
+                rule.Limitations.Add("Requires native paint-order, opacity, and overlap evidence.");
+                break;
+            case LayoutDiagnosticRules.GeometricOverlap:
+                rule.Limitations.Add("Requires transformed window regions for both elements.");
+                break;
+            case LayoutDiagnosticRules.AccessibilityVisibilityMismatch:
+                rule.Limitations.Add("Requires platform accessibility or automation visibility.");
+                break;
             case LayoutDiagnosticRules.VisibleZeroArea:
                 rule.Limitations.Add("Only realized elements are evaluated; an element without a handler is skipped, not passed.");
                 break;
@@ -499,6 +886,13 @@ public static class LayoutDiagnosticsAnalyzer
 
     private static string ConfidenceFor(string ruleId) => ruleId switch
     {
+        LayoutDiagnosticRules.ElementClipped => LayoutConfidence.Medium,
+        LayoutDiagnosticRules.ContentOverflow => LayoutConfidence.Medium,
+        LayoutDiagnosticRules.TextNotFullyRendered => LayoutConfidence.Medium,
+        LayoutDiagnosticRules.InteractionOccluded => LayoutConfidence.Medium,
+        LayoutDiagnosticRules.VisualOccluded => LayoutConfidence.Medium,
+        LayoutDiagnosticRules.GeometricOverlap => LayoutConfidence.Medium,
+        LayoutDiagnosticRules.AccessibilityVisibilityMismatch => LayoutConfidence.Medium,
         LayoutDiagnosticRules.VisibleZeroArea => LayoutConfidence.High,
         LayoutDiagnosticRules.ConstraintViolation => LayoutConfidence.High,
         LayoutDiagnosticRules.OutsideWindow => LayoutConfidence.Medium,
@@ -538,8 +932,11 @@ public static class LayoutDiagnosticsAnalyzer
     private static LayoutElementReference Reference(LayoutElementSnapshot snapshot) => new()
     {
         Id = snapshot.Id,
+        ParentId = snapshot.ParentId,
         Type = snapshot.Type,
         AutomationId = snapshot.AutomationId,
+        Role = snapshot.Role,
+        Interactive = snapshot.Interactive,
         SourceFile = snapshot.SourceFile,
         SourceLine = snapshot.SourceLine,
         SourceColumn = snapshot.SourceColumn,

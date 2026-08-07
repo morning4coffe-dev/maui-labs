@@ -303,22 +303,31 @@ maui devflow diagnostics performance --duration 5 --sample-interval 250
 maui devflow diagnostics performance --attach   # summarize the session already running
 ```
 
-**Layout diagnostics** (`GET|POST /api/v1/ui/diagnostics/layout`, capability `diagnostics.layout`)
-reads *managed MAUI layout state only*, in a single UI-thread tree walk. It reports five rules:
+**Layout diagnostics** (`GET|POST /api/v1/ui/diagnostics/layout`, rule catalog
+`GET /api/v1/ui/diagnostics/layout/rules`, capabilities `diagnostics.layout` and
+`ui.layoutDiagnostics`) uses a versioned schema v2 contract shared by the CLI, Driver, MCP tools,
+evidence, and Inspector. The compatibility GET performs the managed baseline scan in one UI-thread
+tree walk:
 
 | Rule | Outcome | Confidence |
 |------|---------|------------|
 | `layout.visible-zero-area` | violation | high |
 | `layout.constraint-violation` | violation | high |
-| `layout.outside-window` | observation | medium |
+| `layout.element-outside-window` | observation | medium |
 | `layout.desired-size-constrained` | observation | medium |
 | `layout.child-outside-parent` | observation | low |
 
-It deliberately does **not** claim clipping, occlusion, text truncation, or accessibility
-mismatches — none of those can be proven without authoritative platform data the agent does not
-read. Geometry it could not read is reported as `incomplete`, never as a pass, and every report
-carries a `coverage` section plus explicit `limitations`. Element text, values, and property
-dictionaries are never captured.
+The v2 POST request additionally accepts profiles, a selected rule set, minimum severity,
+pass accounting, evidence controls, stability and occlusion options, privacy controls, and
+suppressions. Its rule catalog also includes clipping, content overflow, text rendering,
+geometric overlap, visual/interaction occlusion, and accessibility visibility. Those rules
+currently advertise `unavailable` support from the managed baseline instead of producing a false
+clean result; native and Blazor collectors will progressively make them available.
+
+Geometry the active collector cannot read is reported as `incomplete`, never as a pass, and every
+report carries per-rule `coverage`, explicit `limitations`, stable suppression fingerprints,
+source-aware element references, and immutable snapshot/revision metadata. Element text, values,
+and property dictionaries remain excluded by default.
 
 **Performance triage** starts a new profiler session only when none is active; otherwise callers
 must attach read-only to the existing session, and only the creator may stop it. Stopping captures

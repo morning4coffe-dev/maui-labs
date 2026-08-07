@@ -1399,6 +1399,83 @@ public class AgentClient : IDisposable
     }
 
     /// <summary>
+    /// Runs the versioned layout diagnostics contract with profile, filtering, evidence, privacy,
+    /// stability, and suppression options.
+    /// </summary>
+    public Task<LayoutInspectionResult?> AnalyzeLayoutAsync(LayoutInspectionRequest request)
+        => AnalyzeLayoutAsync(request, CancellationToken.None);
+
+    public async Task<LayoutInspectionResult?> AnalyzeLayoutAsync(
+        LayoutInspectionRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        try
+        {
+            using var response = await SendWithTransientRetriesAsync(HttpMethod.Post, async () =>
+            {
+                using var content = new StringContent(
+                    DriverJson.SerializeUntyped(request),
+                    Encoding.UTF8,
+                    "application/json");
+                return await _http.PostAsync(
+                    $"{_baseUrl}{UiApi}/diagnostics/layout",
+                    content,
+                    cancellationToken);
+            });
+            var responseBody = await response.Content.ReadAsStringAsync(cancellationToken);
+            if (response.IsSuccessStatusCode)
+                return DriverJson.Deserialize<LayoutInspectionResult>(responseBody);
+            if (response.StatusCode is HttpStatusCode.NotFound or HttpStatusCode.NotImplemented)
+                return null;
+
+            var message =
+                $"Layout diagnostics request failed with HTTP {(int)response.StatusCode}.";
+            string? errorType = null;
+            try
+            {
+                var error = DriverJson.ParseElement(responseBody);
+                if (error.TryGetProperty("error", out var errorMessage))
+                    message = errorMessage.GetString() ?? message;
+                if (error.TryGetProperty("reason", out var reason))
+                    errorType = reason.GetString();
+            }
+            catch (JsonException)
+            {
+            }
+
+            throw new LayoutDiagnosticsException(
+                (int)response.StatusCode,
+                message,
+                errorType,
+                retryable: response.StatusCode is HttpStatusCode.TooManyRequests or
+                    HttpStatusCode.ServiceUnavailable ||
+                    (int)response.StatusCode >= 500);
+        }
+        catch (LayoutDiagnosticsException)
+        {
+            throw;
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex) when (IsExpectedClientException(ex))
+        {
+            throw new LayoutDiagnosticsException(
+                0,
+                $"Unable to complete the layout diagnostics request: {ex.Message}",
+                "layout-diagnostics-unavailable",
+                retryable: true,
+                innerException: ex);
+        }
+    }
+
+    /// <summary>Gets the layout diagnostic rules and current support levels advertised by the agent.</summary>
+    public Task<LayoutRuleCatalog?> GetLayoutDiagnosticRulesAsync()
+        => GetAsync<LayoutRuleCatalog>($"{UiApi}/diagnostics/layout/rules");
+
+    /// <summary>
     /// Collects a performance triage summary from the agent's current profiler session.
     /// </summary>
     /// <remarks>

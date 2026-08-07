@@ -102,6 +102,12 @@ internal static class LayoutSnapshotCollector
             ParentId = parentId ?? node.ParentId,
             Type = node.Type,
             AutomationId = node.AutomationId,
+            Role = node.Role,
+            Interactive = effectivelyVisible && node.IsEnabled &&
+                node.Traits?.Any(trait =>
+                    trait.Equals("interactive", StringComparison.OrdinalIgnoreCase) ||
+                    trait.Equals("editable", StringComparison.OrdinalIgnoreCase) ||
+                    trait.Equals("scrollable", StringComparison.OrdinalIgnoreCase)) == true,
             SourceFile = node.SourceFile,
             SourceLine = node.SourceLine,
             SourceColumn = node.SourceColumn,

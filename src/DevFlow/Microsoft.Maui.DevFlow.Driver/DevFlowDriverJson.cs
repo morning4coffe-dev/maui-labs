@@ -37,7 +37,10 @@ namespace Microsoft.Maui.DevFlow.Driver;
 [JsonSerializable(typeof(ElementPropertyDescriptorSet))]
 [JsonSerializable(typeof(PropertyMutationResponse))]
 [JsonSerializable(typeof(DiagnosticProblemBatch))]
+[JsonSerializable(typeof(LayoutInspectionRequest))]
+[JsonSerializable(typeof(LayoutInspectionResult))]
 [JsonSerializable(typeof(LayoutDiagnosticsReport))]
+[JsonSerializable(typeof(LayoutRuleCatalog))]
 [JsonSerializable(typeof(PerformanceSummary))]
 [JsonSerializable(typeof(AgentClient.ProfilerSessionStatusEnvelope))]
 internal sealed partial class DevFlowDriverJsonContext : JsonSerializerContext;

@@ -25,6 +25,7 @@ namespace Microsoft.Maui.Cli.DevFlow;
 [JsonSerializable(typeof(List<AgentRegistration>))]
 [JsonSerializable(typeof(AgentRegistration[]))]
 [JsonSerializable(typeof(BrokerState))]
+[JsonSerializable(typeof(DeviceControlResult))]
 [JsonSerializable(typeof(RegistrationMessage))]
 [JsonSerializable(typeof(RouteCheckpoint))]
 [JsonSerializable(typeof(RouteRestoreResult))]

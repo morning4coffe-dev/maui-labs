@@ -1412,7 +1412,9 @@ public class AgentClient : IDisposable
         ArgumentNullException.ThrowIfNull(request);
         try
         {
-            using var response = await SendWithTransientRetriesAsync(HttpMethod.Post, async () =>
+            // The endpoint uses POST for a structured query body but is read-only. Use the read
+            // retry path so diagnostics never claims the app mutation lease.
+            using var response = await SendWithTransientRetriesAsync(async () =>
             {
                 using var content = new StringContent(
                     DriverJson.SerializeUntyped(request),

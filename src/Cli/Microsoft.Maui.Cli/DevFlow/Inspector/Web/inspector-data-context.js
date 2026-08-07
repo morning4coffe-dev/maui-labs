@@ -4,9 +4,10 @@ const MAX_STRING_CHARS = 2000;
 const MAX_STRING_SCAN_CHARS = MAX_STRING_CHARS * 4;
 const MAX_TITLE_BYTES = 512;
 const MAX_APP_NAME_BYTES = 512;
-const SUPPORTED_SCOPES = new Set(['problems', 'logs', 'network', 'preferences', 'device', 'sensors', 'files', 'alerts']);
+const SUPPORTED_SCOPES = new Set(['problems', 'layout', 'logs', 'network', 'preferences', 'device', 'sensors', 'files', 'alerts']);
 const FOLLOW_UP_TOOLS = Object.freeze({
   problems: ['maui_problems'],
+  layout: ['maui_layout_diagnostics', 'maui_element', 'maui_tree'],
   logs: ['maui_logs'],
   network: ['maui_network', 'maui_network_detail'],
   preferences: ['maui_preferences_list', 'maui_preferences_get'],

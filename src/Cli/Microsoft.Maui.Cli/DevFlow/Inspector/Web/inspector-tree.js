@@ -8,7 +8,10 @@ export function createElementTreeController(options) {
     onHover,
   } = options;
   const collapsedIds = new Set();
+  let diagnosticsById = new Map();
   let lastSignature = '';
+
+  const severityRank = Object.freeze({ info: 0, minor: 1, moderate: 2, serious: 3, critical: 4 });
 
   function collectElements() {
     const map = new Map();
@@ -180,6 +183,16 @@ export function createElementTreeController(options) {
       source.title = 'XAML source available';
       label.appendChild(source);
     }
+    const diagnostic = diagnosticsById.get(id);
+    if (diagnostic) {
+      const badge = document.createElement('span');
+      badge.className = `df-tree-diagnostic df-tree-diagnostic-${diagnostic.severity}`;
+      badge.textContent = String(diagnostic.count);
+      badge.title = `${diagnostic.count} layout finding${diagnostic.count === 1 ? '' : 's'} · ${diagnostic.severity}`;
+      badge.setAttribute('role', 'img');
+      badge.setAttribute('aria-label', badge.title);
+      label.appendChild(badge);
+    }
 
     row.append(twisty, label);
     wrapper.appendChild(row);
@@ -259,5 +272,24 @@ export function createElementTreeController(options) {
     row.scrollIntoView({ block: 'nearest' });
   }
 
-  return Object.freeze({ build, reveal, syncStructure, updateSelection });
+  function setDiagnostics(findings) {
+    const next = new Map();
+    for (const finding of Array.isArray(findings) ? findings : []) {
+      const id = finding && (finding.elementId || finding.element?.id);
+      if (!id || finding.outcome === 'pass' || finding.suppressed === true) continue;
+      const severity = finding.severity || 'info';
+      const current = next.get(id);
+      if (!current) {
+        next.set(id, { count: 1, severity });
+      } else {
+        current.count++;
+        if ((severityRank[severity] || 0) > (severityRank[current.severity] || 0))
+          current.severity = severity;
+      }
+    }
+    diagnosticsById = next;
+    build();
+  }
+
+  return Object.freeze({ build, reveal, setDiagnostics, syncStructure, updateSelection });
 }

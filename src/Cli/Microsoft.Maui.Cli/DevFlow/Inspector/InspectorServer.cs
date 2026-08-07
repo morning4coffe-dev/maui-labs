@@ -6928,21 +6928,47 @@ public sealed partial class InspectorServer : IDisposable
 
     private async Task<(int, string, byte[])> HandleLayoutDiagnosticsAsync(string? body)
     {
-        var elementId = ReadStringField(body, "elementId");
-        var maxElements = ReadIntField(body, "maxElements", 2000, 1, 5000);
+        LayoutInspectionRequest request;
         try
         {
-            var report = await _client.GetLayoutDiagnosticsAsync(
-                string.IsNullOrWhiteSpace(elementId) ? null : elementId,
-                window: null,
-                maxElements: maxElements);
+            request = string.IsNullOrWhiteSpace(body)
+                ? new LayoutInspectionRequest()
+                : CliJson.Deserialize<LayoutInspectionRequest>(body!) ??
+                    throw new JsonException("The request body was empty.");
+        }
+        catch (JsonException ex)
+        {
+            return JsonResponse(400, new
+            {
+                ok = false,
+                error = $"Invalid layout diagnostics request: {ex.Message}",
+                type = "InvalidArgument",
+            });
+        }
+
+        request.Scope ??= new LayoutInspectionScope();
+        request.Stability ??= new LayoutStabilityOptions();
+        request.Occlusion ??= new LayoutOcclusionOptions();
+        request.Privacy ??= new LayoutPrivacyOptions();
+        request.Suppressions ??= [];
+        request.MaxElements ??= 2000;
+
+        try
+        {
+            var report = await _client.AnalyzeLayoutAsync(request, _lifetimeCts.Token);
             return report is null
                 ? Ok("{\"ok\":false,\"error\":\"Layout diagnostics are not supported by the connected agent.\"}")
                 : Ok(JsonSerializer.Serialize(new { ok = true, report }, CamelCase));
         }
-        catch
+        catch (LayoutDiagnosticsException ex)
         {
-            return Ok("{\"ok\":false,\"error\":\"layout diagnostics unavailable\"}");
+            return JsonResponse(ex.StatusCode is >= 400 and <= 599 ? ex.StatusCode : 502, new
+            {
+                ok = false,
+                error = ex.Message,
+                type = ex.ErrorType ?? "LayoutDiagnosticsError",
+                retryable = ex.Retryable,
+            });
         }
     }
 

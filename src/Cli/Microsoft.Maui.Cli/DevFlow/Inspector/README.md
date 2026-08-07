@@ -12,6 +12,7 @@ The broker serves the Inspector as embedded static assets from `Web/`.
 | `inspector-tree.js` | Visual-tree rendering, expansion state, selection, and keyboard navigation. |
 | `inspector-properties.js` | Property descriptors, typed editors, live updates, and XAML persistence controls. |
 | `inspector-data-context.js` | Pure Data snapshot bounding and secret redaction. It must remain DOM-independent so its security contract can be tested directly. |
+| `inspector-diagnostics.js` | Pure Layout/Performance presentation, filtering, and the bounded text-safe Layout payload sent through the Copilot bridge. |
 | `inspector-evidence.js` | Evidence bundle preview, confirmation dialog, and download. Its plan formatting and download-name helpers are pure so they can be tested directly. |
 
 Feature modules receive dependencies through factory options or function arguments. They must not import `devflow.js` or mutate unrelated global state. Keep cross-feature coordination in `devflow.js`; move cohesive rendering/state logic into a module when it can expose a narrow API.

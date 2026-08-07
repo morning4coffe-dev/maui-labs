@@ -101,6 +101,8 @@ export function createPropertyGridController(options) {
     syncPaneChrome,
     setStatus,
     onRuntimeChange,
+    getDiagnostics,
+    onSelectDiagnostic,
     onOpen,
     onClose,
   } = options;
@@ -130,6 +132,35 @@ export function createPropertyGridController(options) {
     if (wasOpen && onClose) onClose();
   }
 
+  function appendDiagnostics(elementId) {
+    const findings = typeof getDiagnostics === 'function' ? getDiagnostics(elementId) : [];
+    if (!Array.isArray(findings) || findings.length === 0) return false;
+
+    const section = document.createElement('section');
+    section.className = 'df-prop-diagnostics';
+    const heading = document.createElement('h3');
+    heading.textContent = `Layout findings (${findings.length})`;
+    section.append(heading);
+    for (const finding of findings) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = `df-prop-diagnostic df-diag-${finding.outcome || 'observation'}`;
+      const title = document.createElement('span');
+      title.className = 'df-prop-diagnostic-title';
+      title.textContent = `${finding.severity || 'info'} · ${finding.ruleId || 'layout finding'}`;
+      const message = document.createElement('span');
+      message.className = 'df-prop-diagnostic-message';
+      message.textContent = finding.message || '';
+      row.append(title, message);
+      row.addEventListener('click', () => {
+        if (typeof onSelectDiagnostic === 'function') onSelectDiagnostic(finding);
+      });
+      section.append(row);
+    }
+    body.append(section);
+    return true;
+  }
+
   async function open(targetElement) {
     const elementId = targetElement.getAttribute('data-id');
     if (!elementId) return;
@@ -156,8 +187,16 @@ export function createPropertyGridController(options) {
     }
     if (currentLoad !== loadToken) return;
 
+    const hasDiagnostics = appendDiagnostics(elementId);
     if (described && descriptors.length === 0) {
-      body.replaceChildren(document.createTextNode('No editable properties reported by this control.'));
+      if (!hasDiagnostics)
+        body.append(document.createTextNode('No editable properties reported by this control.'));
+      else {
+        const empty = document.createElement('div');
+        empty.className = 'df-prop-no-results';
+        empty.textContent = 'No editable properties reported by this control.';
+        body.append(empty);
+      }
       updateWriterState();
       return;
     }

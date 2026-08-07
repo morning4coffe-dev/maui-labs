@@ -17,7 +17,12 @@ const OUTCOME_LABELS = Object.freeze({
   violation: 'Violation',
   observation: 'Observation',
   incomplete: 'Incomplete',
+  pass: 'Pass',
+  notApplicable: 'Not applicable',
 });
+
+const SEVERITY_RANKS = Object.freeze({ info: 0, minor: 1, moderate: 2, serious: 3, critical: 4 });
+const CONFIDENCE_RANKS = Object.freeze({ low: 0, medium: 1, high: 2, exact: 3 });
 
 function outcomeLabel(outcome) {
   return OUTCOME_LABELS[outcome] || 'Finding';
@@ -34,16 +39,125 @@ function shortFileName(path) {
   return index >= 0 ? normalized.slice(index + 1) : normalized;
 }
 
+function finiteNumber(value) {
+  if (value === null || value === undefined || value === '') return null;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function bounds(region) {
+  const value = region && region.bounds;
+  if (!value) return null;
+  const x = finiteNumber(value.x);
+  const y = finiteNumber(value.y);
+  const width = finiteNumber(value.width);
+  const height = finiteNumber(value.height);
+  return [x, y, width, height].every((item) => item !== null) ? { x, y, width, height } : null;
+}
+
+function region(value) {
+  const safeBounds = bounds(value);
+  if (!safeBounds) return null;
+  return {
+    bounds: safeBounds,
+    points: (Array.isArray(value.points) ? value.points : [])
+      .map((point) => ({ x: finiteNumber(point && point.x), y: finiteNumber(point && point.y) }))
+      .filter((point) => point.x !== null && point.y !== null),
+    precision: text(value.precision, 'unknown'),
+  };
+}
+
+function safeElement(element) {
+  if (!element || !element.id) return null;
+  return {
+    id: String(element.id),
+    parentId: element.parentId ? String(element.parentId) : null,
+    type: text(element.type, 'Element'),
+    automationId: element.automationId ? String(element.automationId) : null,
+    role: element.role ? String(element.role) : null,
+    interactive: element.interactive === true,
+    sourceFile: element.sourceFile ? String(element.sourceFile) : null,
+    sourceLine: Number.isInteger(finiteNumber(element.sourceLine)) ? Number(element.sourceLine) : null,
+    sourceColumn: Number.isInteger(finiteNumber(element.sourceColumn)) ? Number(element.sourceColumn) : null,
+  };
+}
+
+function safeEvidence(evidence) {
+  if (!evidence || typeof evidence !== 'object') return null;
+  const textEvidence = evidence.text && typeof evidence.text === 'object'
+    ? {
+        kind: evidence.text.kind ? String(evidence.text.kind) : null,
+        isTruncated: typeof evidence.text.isTruncated === 'boolean' ? evidence.text.isTruncated : null,
+        textLength: finiteNumber(evidence.text.textLength),
+        renderedLineCount: finiteNumber(evidence.text.renderedLineCount),
+        maximumLines: finiteNumber(evidence.text.maximumLines),
+        ellipsisCount: finiteNumber(evidence.text.ellipsisCount),
+        measurementSource: text(evidence.text.measurementSource, 'unknown'),
+      }
+    : null;
+  return {
+    fullRegion: region(evidence.fullRegion),
+    visibleRegion: region(evidence.visibleRegion),
+    contentRegion: region(evidence.contentRegion),
+    lostAreaRatio: finiteNumber(evidence.lostAreaRatio),
+    clipChain: (Array.isArray(evidence.clipChain) ? evidence.clipChain : []).map((clip) => ({
+      clipperElementId: clip && clip.clipperElementId ? String(clip.clipperElementId) : null,
+      kind: text(clip && clip.kind, 'unknown-platform-clip'),
+      precision: text(clip && clip.precision, 'unknown'),
+      lostAreaRatio: finiteNumber(clip && clip.lostAreaRatio),
+      region: region(clip && clip.region),
+    })),
+    text: textEvidence,
+    overlap: evidence.overlap && typeof evidence.overlap === 'object'
+      ? {
+          intersectionRegion: region(evidence.overlap.intersectionRegion),
+          overlapAreaRatio: finiteNumber(evidence.overlap.overlapAreaRatio),
+          blockedAreaLowerBound: finiteNumber(evidence.overlap.blockedAreaLowerBound),
+          blockedAreaUpperBound: finiteNumber(evidence.overlap.blockedAreaUpperBound),
+          sampleCount: Number(evidence.overlap.sampleCount) || 0,
+        }
+      : null,
+    limitations: Array.isArray(evidence.limitations) ? evidence.limitations.map(String) : [],
+  };
+}
+
+export function filterLayoutFindings(findings, filters = {}) {
+  const outcome = filters.outcome || 'all';
+  const minimumSeverity = filters.minimumSeverity || 'info';
+  const minimumConfidence = filters.minimumConfidence || 'low';
+  const rule = String(filters.rule || '').trim().toLowerCase();
+  const includeSuppressed = filters.includeSuppressed !== false;
+
+  return (Array.isArray(findings) ? findings : []).filter((finding) => {
+    if (!includeSuppressed && finding && finding.suppressed === true) return false;
+    const findingOutcome = text(finding && finding.outcome, 'observation');
+    if (outcome === 'actionable' && findingOutcome !== 'violation' && findingOutcome !== 'incomplete') return false;
+    if (outcome === 'violations' && findingOutcome !== 'violation') return false;
+    if (outcome === 'incomplete' && findingOutcome !== 'incomplete') return false;
+    if (outcome === 'passes' && findingOutcome !== 'pass') return false;
+    if ((SEVERITY_RANKS[text(finding && finding.severity, 'info')] || 0) <
+        (SEVERITY_RANKS[minimumSeverity] || 0)) return false;
+    if ((CONFIDENCE_RANKS[text(finding && finding.confidence, 'low')] || 0) <
+        (CONFIDENCE_RANKS[minimumConfidence] || 0)) return false;
+    if (rule && !text(finding && finding.ruleId).toLowerCase().includes(rule)) return false;
+    return true;
+  });
+}
+
 /** Builds the view model the Layout tab renders. Pure: no DOM, no network. */
-export function formatLayoutReport(report) {
+export function formatLayoutReport(report, filters = null) {
   const summary = (report && report.summary) || {};
   const scope = (report && report.scope) || {};
   const coverage = (report && report.coverage) || {};
-  const findings = Array.isArray(report && report.findings) ? report.findings : [];
+  const allFindings = Array.isArray(report && report.findings) ? report.findings : [];
+  const findings = filters ? filterLayoutFindings(allFindings, filters) : allFindings;
 
   const violations = Number(summary.violations) || 0;
   const observations = Number(summary.observations) || 0;
   const incomplete = Number(summary.incomplete) || 0;
+  const passes = Number(summary.passes) || 0;
+  const notApplicable = Number(summary.notApplicable) || 0;
+  const suppressed = Number(summary.suppressed) || 0;
 
   const headline = violations > 0
     ? `${violations} violation${violations === 1 ? '' : 's'}`
@@ -53,7 +167,10 @@ export function formatLayoutReport(report) {
     headline,
     `${observations} observation${observations === 1 ? '' : 's'}`,
     `${incomplete} incomplete`,
-  ];
+    passes ? `${passes} pass${passes === 1 ? '' : 'es'}` : null,
+    notApplicable ? `${notApplicable} not applicable` : null,
+    suppressed ? `${suppressed} suppressed` : null,
+  ].filter(Boolean);
 
   const scopeText = [
     `${Number(scope.elementsExamined) || 0} element${(Number(scope.elementsExamined) || 0) === 1 ? '' : 's'} examined`,
@@ -70,6 +187,15 @@ export function formatLayoutReport(report) {
     scope: scopeText,
     coverage: `Coverage: ${text(coverage.overall, 'unavailable')}`,
     version: `schema v${text(report && report.schemaVersion, '?')} · rules v${text(report && report.ruleSetVersion, '?')}`,
+    snapshot: {
+      id: text(report && report.snapshot && report.snapshot.id),
+      capturedAt: text(report && report.snapshot && report.snapshot.capturedAt, text(report && report.capturedUtc)),
+      platform: text(report && report.snapshot && report.snapshot.platform, text(report && report.platform, 'unknown')),
+      treeRevision: text(report && report.snapshot && report.snapshot.treeRevision),
+      diagnosticsRevision: text(report && report.snapshot && report.snapshot.diagnosticsRevision),
+      stable: report && report.snapshot ? report.snapshot.stable === true : null,
+      stabilityReason: text(report && report.snapshot && report.snapshot.stabilityReason),
+    },
     rules: (Array.isArray(coverage.rules) ? coverage.rules : []).map((rule) => ({
       ruleId: text(rule.ruleId),
       support: text(rule.support, 'unavailable'),
@@ -80,10 +206,24 @@ export function formatLayoutReport(report) {
       ruleId: text(finding.ruleId),
       outcome: text(finding.outcome, 'observation'),
       outcomeLabel: outcomeLabel(finding.outcome),
+      subtype: finding.subtype ? String(finding.subtype) : null,
+      severity: text(finding.severity, 'info'),
       confidence: text(finding.confidence, 'medium'),
+      actionability: text(finding.actionability, 'review'),
       message: text(finding.message),
       explanation: text(finding.explanation),
+      element: safeElement(finding.element),
       elementId: finding.element && finding.element.id ? String(finding.element.id) : null,
+      relatedElements: (Array.isArray(finding.relatedElements) ? finding.relatedElements : [])
+        .map((related) => ({
+          relation: text(related && related.relation, 'related'),
+          element: safeElement(related && related.element),
+        }))
+        .filter((related) => related.element),
+      fixCategories: Array.isArray(finding.fixCategories) ? finding.fixCategories.map(String) : [],
+      evidence: safeEvidence(finding.evidence),
+      suppressed: finding.suppressed === true,
+      suppressionReason: finding.suppressionReason ? String(finding.suppressionReason) : null,
       context: [
         finding.element ? finding.element.type : null,
         finding.element && finding.element.automationId ? `#${finding.element.automationId}` : null,
@@ -93,9 +233,58 @@ export function formatLayoutReport(report) {
       ].filter(Boolean).join(' · '),
       limitations: Array.isArray(finding.limitations) ? finding.limitations.map(String) : [],
     })),
+    totalFindings: allFindings.length,
+    matchingFindings: findings.length,
     findingsTruncated: truncated,
     limitations: Array.isArray(coverage.limitations) ? coverage.limitations.map(String) : [],
     neverCaptured: Array.isArray(coverage.neverCaptured) ? coverage.neverCaptured.map(String) : [],
+  };
+}
+
+/** Builds the bounded, text-safe payload offered through the Inspector's Copilot bridge. */
+export function createLayoutDataPayload(report, selectedFindingId = null) {
+  const allFindings = Array.isArray(report && report.findings) ? report.findings : [];
+  const selected = selectedFindingId
+    ? allFindings.find((finding) => String(finding && finding.id) === selectedFindingId)
+    : null;
+  const view = formatLayoutReport(selected
+    ? { ...report, findings: [selected] }
+    : report);
+  const findings = selectedFindingId
+    ? view.findings
+    : view.findings.slice(0, 100);
+  return {
+    schemaVersion: text(report && report.schemaVersion),
+    ruleSetVersion: text(report && report.ruleSetVersion),
+    snapshot: view.snapshot,
+    summary: report && report.summary ? report.summary : {},
+    scope: report && report.scope ? report.scope : {},
+    coverage: {
+      overall: report && report.coverage ? text(report.coverage.overall, 'unavailable') : 'unavailable',
+      rules: view.rules,
+      limitations: view.limitations,
+      neverCaptured: view.neverCaptured,
+    },
+    selectedFindingId: selectedFindingId || null,
+    findings: findings.map((finding) => ({
+      id: finding.id,
+      ruleId: finding.ruleId,
+      subtype: finding.subtype,
+      outcome: finding.outcome,
+      severity: finding.severity,
+      confidence: finding.confidence,
+      actionability: finding.actionability,
+      element: finding.element,
+      relatedElements: finding.relatedElements,
+      message: finding.message,
+      explanation: finding.explanation,
+      fixCategories: finding.fixCategories,
+      evidence: finding.evidence,
+      suppressed: finding.suppressed,
+      suppressionReason: finding.suppressionReason,
+      limitations: finding.limitations,
+    })),
+    truncated: !selectedFindingId && allFindings.length > findings.length,
   };
 }
 

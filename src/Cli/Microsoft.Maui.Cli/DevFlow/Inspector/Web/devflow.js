@@ -3,7 +3,7 @@
 import { createInspectorApi } from './inspector-api.js';
 import { confirmModal } from './inspector-dialog.js';
 import { createDataSnapshot, isSecretContextKey, supportsDataContextScope } from './inspector-data-context.js';
-import { formatLayoutReport, formatPerformanceSummary } from './inspector-diagnostics.js';
+import { createLayoutDataPayload, formatLayoutReport, formatPerformanceSummary } from './inspector-diagnostics.js';
 import { createEvidenceController } from './inspector-evidence.js';
 import { createAgentRequestController } from './inspector-agent-requests.js';
 import { createInspectorHostBridge } from './inspector-host-bridge.js';
@@ -17,6 +17,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
 
   const viewport = document.getElementById('app-viewport');
   const screenshot = document.getElementById('screenshot');
+  const layoutOverlays = document.getElementById('df-layout-overlays');
   // Fit-to-container scaling (responsive). #app-viewport holds the app at its fixed logical size;
   // #df-stage is sized to the scaled box and #app-viewport carries the CSS scale transform.
   const stage = document.getElementById('df-stage');
@@ -1106,12 +1107,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         propsReturnFocus = active;
       if (!isTransientPaneLayout()) return;
       if (isTreeDrawerLayout()) setTreeVisible(false);
-      closeDock();
+      closeDock(false, true);
       testWorkbench?.close();
     },
     syncPaneChrome,
     setStatus,
     labelFor: elementLabel,
+    getDiagnostics: (elementId) => layoutFindingsForElement(elementId),
+    onSelectDiagnostic: (finding) => selectLayoutFinding(finding),
     onOpen: () => {
       if (isTreeDrawerLayout() && propsReturnFocus && propsReturnFocus.classList.contains('df-tree-node'))
         propsPaneEl.focus({ preventScroll: true });
@@ -1567,6 +1570,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   function selectElement(id) {
     viewport.querySelectorAll('.devflow-element.df-selected').forEach((el) => el.classList.remove('df-selected'));
     selectedId = id || null;
+    const layoutScopeControl = document.getElementById('df-layout-selected-scope');
+    if (layoutScopeControl) {
+      layoutScopeControl.disabled = !selectedId;
+      if (!selectedId) {
+        layoutScopeControl.checked = false;
+        layoutOptions.selectedScope = false;
+      }
+    }
     if (!id) {
       propertyGrid.close();
       elementTree.updateSelection();
@@ -3197,18 +3208,157 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   }
 
   // ── Layout diagnostics tab ──
-  // Explicit one-shot scan. No auto-scan on tab open beyond the first load, no polling, and no
-  // screenshot refresh: a diagnostic must never change what the user is looking at. Layout results
-  // are NOT offered as Copilot data context (see clearDockSnapshot below) — they are not in the
-  // bounded, redacted set of data-context scopes.
+  let latestLayoutReport = null;
+  let selectedLayoutFindingId = null;
+  let layoutScanBusy = false;
+  const layoutRuleSet = [
+    'layout.element-clipped',
+    'layout.element-outside-window',
+    'layout.content-overflow',
+    'layout.text-not-fully-rendered',
+    'layout.interaction-occluded',
+    'layout.visual-occluded',
+    'layout.geometric-overlap',
+    'layout.accessibility-visibility-mismatch',
+    'layout.visible-zero-area',
+    'layout.constraint-violation',
+    'layout.desired-size-constrained',
+    'layout.child-outside-parent',
+  ];
+  const layoutOptions = {
+    profile: 'agent',
+    selectedScope: false,
+    outcome: 'actionable',
+    minimumSeverity: 'info',
+    minimumConfidence: 'low',
+    rule: '',
+    includeSuppressed: false,
+  };
+
+  function clearLayoutOverlays() {
+    layoutOverlays?.replaceChildren();
+  }
+
+  function layoutRegionPoints(region) {
+    if (!region) return [];
+    if (Array.isArray(region.points) && region.points.length >= 3) return region.points;
+    const bounds = region.bounds;
+    if (!bounds) return [];
+    return [
+      { x: bounds.x, y: bounds.y },
+      { x: bounds.x + bounds.width, y: bounds.y },
+      { x: bounds.x + bounds.width, y: bounds.y + bounds.height },
+      { x: bounds.x, y: bounds.y + bounds.height },
+    ];
+  }
+
+  function appendLayoutRegion(svg, region, className) {
+    const points = layoutRegionPoints(region);
+    if (!svg || points.length < 3) return;
+    const polygon = document.createElementNS('http://www.w3.org/2000/svg', 'polygon');
+    polygon.setAttribute('class', `df-layout-region ${className}`);
+    polygon.setAttribute('points', points
+      .map((point) => `${point.x - rootOffsetX},${point.y - rootOffsetY}`)
+      .join(' '));
+    svg.appendChild(polygon);
+  }
+
+  function renderLayoutOverlays(finding) {
+    clearLayoutOverlays();
+    if (!layoutOverlays || !finding || !finding.evidence) return;
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    svg.setAttribute('viewBox', `0 0 ${parseFloat(viewport.dataset.width) || 1} ${parseFloat(viewport.dataset.height) || 1}`);
+    svg.setAttribute('preserveAspectRatio', 'none');
+    appendLayoutRegion(svg, finding.evidence.fullRegion, 'df-layout-region-full');
+    appendLayoutRegion(svg, finding.evidence.visibleRegion, 'df-layout-region-visible');
+    appendLayoutRegion(svg, finding.evidence.contentRegion, 'df-layout-region-content');
+    for (const clip of finding.evidence.clipChain || [])
+      appendLayoutRegion(svg, clip.region, 'df-layout-region-clip');
+    appendLayoutRegion(svg, finding.evidence.overlap?.intersectionRegion, 'df-layout-region-overlap');
+    if (svg.childNodes.length) layoutOverlays.appendChild(svg);
+  }
+
+  function layoutSelect(label, value, choices, onChange) {
+    const wrapper = elh('label', null, elh('span', { text: label }));
+    const select = elh('select', { 'aria-label': label });
+    for (const [optionValue, optionLabel] of choices) {
+      const option = elh('option', { value: optionValue, text: optionLabel });
+      option.selected = optionValue === value;
+      select.append(option);
+    }
+    select.addEventListener('change', () => onChange(select.value));
+    wrapper.append(select);
+    return wrapper;
+  }
+
+  function layoutFindingsForElement(elementId) {
+    if (!latestLayoutReport || !elementId) return [];
+    return formatLayoutReport(latestLayoutReport, {
+      outcome: 'all',
+      minimumSeverity: 'info',
+      minimumConfidence: 'low',
+      includeSuppressed: true,
+    }).findings.filter((finding) => finding.elementId === elementId);
+  }
+
+  function selectLayoutFinding(finding) {
+    selectedLayoutFindingId = finding.id;
+    for (const row of dockBodyEl.querySelectorAll('[data-layout-finding-id]'))
+      row.classList.toggle('df-selected', row.dataset.layoutFindingId === finding.id);
+    renderLayoutOverlays(finding);
+    if (!finding.elementId) return;
+    const target = elById(finding.elementId);
+    if (!target) {
+      setStatus('The affected element is no longer present in the current frame. Rescan Layout.');
+      return;
+    }
+    selectElement(finding.elementId);
+    propertyGrid.open(target);
+  }
+
+  function setLayoutCopilotSnapshot(report, findingId) {
+    const payload = createLayoutDataPayload(report, findingId);
+    const title = findingId ? 'Selected layout finding' : 'Layout diagnostics';
+    recordDockSnapshot(
+      'layout',
+      title,
+      payload,
+      payload.findings.length,
+      {
+        snapshotId: payload.snapshot.id || null,
+        treeRevision: payload.snapshot.treeRevision || null,
+        selectedFindingId: findingId || null,
+      });
+  }
+
   function renderLayoutDiagnostics(j) {
-    clearDockSnapshot();
     if (!j || j.ok === false || !j.report) {
+      latestLayoutReport = null;
+      selectedLayoutFindingId = null;
+      clearLayoutOverlays();
+      elementTree.setDiagnostics([]);
+      clearDockSnapshot();
       dockEmpty((j && j.error) || 'Layout diagnostics are unavailable for this agent.');
       return;
     }
 
-    const view = formatLayoutReport(j.report);
+    const reportChanged = latestLayoutReport !== j.report;
+    latestLayoutReport = j.report;
+    if (reportChanged)
+      elementTree.setDiagnostics(Array.isArray(j.report.findings) ? j.report.findings : []);
+    if (selectedLayoutFindingId &&
+        !(Array.isArray(j.report.findings) &&
+          j.report.findings.some((finding) => finding && finding.id === selectedLayoutFindingId))) {
+      selectedLayoutFindingId = null;
+      clearLayoutOverlays();
+    }
+    const view = formatLayoutReport(j.report, {
+      outcome: layoutOptions.outcome,
+      minimumSeverity: layoutOptions.minimumSeverity,
+      minimumConfidence: layoutOptions.minimumConfidence,
+      rule: layoutOptions.rule,
+      includeSuppressed: layoutOptions.includeSuppressed,
+    });
     const fragment = document.createDocumentFragment();
 
     const header = elh('div', { class: 'df-diag-header' });
@@ -3216,6 +3366,75 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       elh('div', { class: 'df-section-title', text: view.title }),
       elh('div', { class: 'df-diag-meta', text: `${view.summary} · ${view.scope}` }),
       elh('div', { class: 'df-diag-meta', text: `${view.coverage} · ${view.version}` }));
+    if (view.snapshot.capturedAt) {
+      header.append(elh('div', {
+        class: 'df-diag-meta',
+        text: `${view.snapshot.platform} · captured ${view.snapshot.capturedAt}` +
+          (view.snapshot.stable === false ? ` · stability: ${view.snapshot.stabilityReason || 'not established'}` : ''),
+      }));
+    }
+
+    const controls = elh('div', { class: 'df-diag-controls' });
+    controls.append(
+      layoutSelect('Profile', layoutOptions.profile, [
+        ['agent', 'Agent'],
+        ['strict', 'Strict'],
+        ['exhaustive', 'Exhaustive'],
+        ['ci', 'CI'],
+      ], (value) => { layoutOptions.profile = value; }),
+      layoutSelect('Outcome', layoutOptions.outcome, [
+        ['actionable', 'Actionable'],
+        ['all', 'All findings'],
+        ['violations', 'Violations'],
+        ['incomplete', 'Incomplete'],
+        ['passes', 'Passes'],
+      ], (value) => { layoutOptions.outcome = value; renderLayoutDiagnostics({ ok: true, report: latestLayoutReport }); }),
+      layoutSelect('Severity', layoutOptions.minimumSeverity, [
+        ['info', 'Info+'],
+        ['minor', 'Minor+'],
+        ['moderate', 'Moderate+'],
+        ['serious', 'Serious+'],
+        ['critical', 'Critical'],
+      ], (value) => { layoutOptions.minimumSeverity = value; renderLayoutDiagnostics({ ok: true, report: latestLayoutReport }); }),
+      layoutSelect('Confidence', layoutOptions.minimumConfidence, [
+        ['low', 'Low+'],
+        ['medium', 'Medium+'],
+        ['high', 'High+'],
+        ['exact', 'Exact'],
+      ], (value) => { layoutOptions.minimumConfidence = value; renderLayoutDiagnostics({ ok: true, report: latestLayoutReport }); }));
+
+    const rule = elh('input', {
+      type: 'search',
+      value: layoutOptions.rule,
+      placeholder: 'Filter rule',
+      'aria-label': 'Filter layout rule',
+    });
+    rule.addEventListener('change', () => {
+      layoutOptions.rule = rule.value;
+      renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+    });
+    const selectedScope = elh('input', { id: 'df-layout-selected-scope', type: 'checkbox' });
+    selectedScope.checked = layoutOptions.selectedScope;
+    selectedScope.disabled = !selectedId;
+    selectedScope.addEventListener('change', () => { layoutOptions.selectedScope = selectedScope.checked; });
+    const suppressed = elh('input', { type: 'checkbox' });
+    suppressed.checked = layoutOptions.includeSuppressed;
+    suppressed.addEventListener('change', () => {
+      layoutOptions.includeSuppressed = suppressed.checked;
+      renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+    });
+    const rescan = elh('button', {
+      type: 'button',
+      text: layoutScanBusy ? 'Scanning…' : 'Rescan',
+    });
+    rescan.disabled = layoutScanBusy;
+    rescan.addEventListener('click', () => runLayoutScan(dockViewGeneration));
+    controls.append(
+      rule,
+      elh('label', null, selectedScope, elh('span', { text: 'Selected subtree' })),
+      elh('label', null, suppressed, elh('span', { text: 'Suppressed' })),
+      rescan);
+    header.append(controls);
     fragment.append(header);
 
     if (view.rules.length) {
@@ -3232,34 +3451,91 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
 
     if (!view.findings.length) {
-      fragment.append(elh('div', { class: 'df-empty', text: 'No findings. Read the coverage table above — unevaluated elements are incomplete, not passing.' }));
+      fragment.append(elh('div', {
+        class: 'df-empty',
+        text: view.totalFindings
+          ? 'No findings match the active filters.'
+          : 'No findings. Read the coverage table above — unevaluated elements are incomplete, not passing.',
+      }));
     }
     for (const finding of view.findings) {
-      const row = elh('button', { class: `df-diag-finding df-diag-${finding.outcome}`, type: 'button' });
+      const row = elh('div', {
+        class: `df-diag-finding df-diag-${finding.outcome}` +
+          (finding.suppressed ? ' df-suppressed' : '') +
+          (finding.id === selectedLayoutFindingId ? ' df-selected' : ''),
+        role: 'button',
+        tabindex: '0',
+      });
+      row.dataset.layoutFindingId = finding.id;
       const heading = elh('div', { class: 'df-problem-heading' });
       heading.append(
         elh('span', { class: 'df-problem-code', text: `${finding.outcomeLabel} · ${finding.ruleId}` }),
-        elh('span', { class: 'df-problem-count', text: finding.confidence }));
+        elh('span', { class: 'df-problem-count', text: `${finding.severity} · ${finding.confidence}` }));
       row.append(heading, elh('div', { class: 'df-problem-message', text: finding.message }));
       if (finding.context) row.append(elh('div', { class: 'df-problem-context', text: finding.context }));
       row.append(elh('div', { class: 'df-diag-explanation', text: finding.explanation }));
+      const tags = elh('div', { class: 'df-diag-tags' });
+      tags.append(
+        elh('span', { class: 'df-diag-tag', text: finding.actionability }),
+        ...finding.fixCategories.map((category) => elh('span', { class: 'df-diag-tag', text: category })));
+      if (finding.suppressed)
+        tags.append(elh('span', { class: 'df-diag-tag', text: finding.suppressionReason || 'suppressed' }));
+      row.append(tags);
       for (const limitation of finding.limitations)
         row.append(elh('div', { class: 'df-diag-limitation', text: `! ${limitation}` }));
 
-      if (finding.elementId) {
-        row.title = 'Select the affected element';
-        row.addEventListener('click', () => {
-          const target = elById(finding.elementId);
-          if (!target) {
-            setStatus('The affected element is no longer present in the current frame.');
-            return;
-          }
-          selectElement(finding.elementId);
-          propertyGrid.open(target);
-        });
-      } else {
-        row.disabled = true;
+      if (finding.relatedElements.length) {
+        const related = elh('div', { class: 'df-diag-related' });
+        for (const item of finding.relatedElements) {
+          const button = elh('button', {
+            type: 'button',
+            text: `${item.relation}: ${item.element.automationId || item.element.id}`,
+          });
+          button.addEventListener('click', (event) => {
+            event.stopPropagation();
+            const target = elById(item.element.id);
+            if (!target) {
+              setStatus('The related element is no longer present in the current frame.');
+              return;
+            }
+            selectElement(item.element.id);
+            propertyGrid.open(target);
+          });
+          related.append(button);
+        }
+        row.append(related);
       }
+
+      const actions = elh('div', { class: 'df-diag-actions' });
+      if (finding.elementId && finding.element?.sourceFile) {
+        const source = elh('button', { type: 'button', text: 'Source' });
+        source.addEventListener('click', async (event) => {
+          event.stopPropagation();
+          selectLayoutFinding(finding);
+          await openSource();
+        });
+        actions.append(source);
+      }
+      const copilot = elh('button', { type: 'button', text: 'Add to Copilot' });
+      copilot.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        setLayoutCopilotSnapshot(j.report, finding.id);
+        await attachDockDataToCopilot();
+      });
+      const copy = elh('button', { type: 'button', text: 'Copy payload' });
+      copy.addEventListener('click', async (event) => {
+        event.stopPropagation();
+        const ok = await copyText(JSON.stringify(createLayoutDataPayload(j.report, finding.id), null, 2));
+        setStatus(ok ? 'Copied the selected layout finding.' : 'Could not copy the layout finding.');
+      });
+      actions.append(copilot, copy);
+      row.append(actions);
+      row.addEventListener('click', () => selectLayoutFinding(finding));
+      row.addEventListener('keydown', (event) => {
+        if (event.key !== 'Enter' && event.key !== ' ') return;
+        event.preventDefault();
+        selectLayoutFinding(finding);
+      });
       fragment.append(row);
     }
 
@@ -3276,6 +3552,46 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     fragment.append(limits);
 
     dockBodyEl.replaceChildren(fragment);
+    setLayoutCopilotSnapshot(j.report, selectedLayoutFindingId);
+  }
+
+  async function runLayoutScan(generation) {
+    if (layoutScanBusy) return;
+    const scopedElementId = layoutOptions.selectedScope ? selectedId : null;
+    if (layoutOptions.selectedScope && !scopedElementId) {
+      setStatus('Select an element before scanning its subtree.');
+      return;
+    }
+
+    layoutScanBusy = true;
+    clearLayoutOverlays();
+    dockEmpty('Scanning layout…');
+    let result = null;
+    try {
+      result = await apiPost('/api/diagnostics/layout', {
+        schemaVersion: '2.0',
+        profile: layoutOptions.profile,
+        rules: layoutRuleSet,
+        scope: {
+          rootElementId: scopedElementId,
+          includeDescendants: true,
+          includeNativeElements: true,
+          includeBlazorElements: true,
+          maxDepth: 0,
+        },
+        minimumSeverity: 'info',
+        includeEvidence: true,
+        includePasses: true,
+        stability: { mode: 'wait', stableFrames: 2, quietPeriodMs: 100, timeoutMs: 2500 },
+        occlusion: { mode: 'interactiveTargets', maxSamplesPerElement: 81, coverageError: 0.05, minimumOverlapRatio: 0.02 },
+        privacy: { text: 'none' },
+        maxElements: 2000,
+      });
+    } finally {
+      layoutScanBusy = false;
+    }
+    if (dockLoadIsCurrent('layout', generation))
+      renderLayoutDiagnostics(result);
   }
 
   // ── Performance triage tab ──
@@ -3390,10 +3706,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       const j = await apiPost('/api/problems', { limit: 200 });
       if (dockLoadIsCurrent('problems', generation)) renderProblems(j);
     },
-    layout: async (generation) => {
-      const j = await apiPost('/api/diagnostics/layout', { maxElements: 2000 });
-      if (dockLoadIsCurrent('layout', generation)) renderLayoutDiagnostics(j);
-    },
+    layout: async (generation) => runLayoutScan(generation),
     performance: async (generation) => {
       const j = await apiPost('/api/performance/snapshot', {});
       if (dockLoadIsCurrent('performance', generation)) renderPerformance(j);
@@ -3549,6 +3862,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   async function loadTab(name) {
     const generation = ++dockViewGeneration;
     dockActiveTab = name;
+    if (name !== 'layout') clearLayoutOverlays();
     networkDetailId = null;
     clearDockSnapshot();
     for (const b of dockTabsEl.querySelectorAll('.df-dock-tab')) {
@@ -3596,7 +3910,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     if (!dockLoaded) { dockLoaded = true; loadTab(dockActiveTab); }
     syncPaneChrome();
   }
-  function closeDock(restore = false) {
+  function closeDock(restore = false, preserveLayoutOverlay = false) {
+    if (!preserveLayoutOverlay) clearLayoutOverlays();
     dockEl.classList.add('df-hidden');
     document.body.classList.remove('df-dock-open', 'df-dock-collapsed');
     if (toggleDockBtn) {

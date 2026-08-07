@@ -273,6 +273,20 @@ body.df-disconnected.df-device-live #df-disconnected-overlay .df-connection-card
 /* ── Properties pane (docked, themed; populated by JS) ── */
 #df-props-pane { flex: 0 0 clamp(230px, 27vw, 340px); border-left: 1px solid var(--df-border-subtle); background: var(--df-bg); }
 #df-props { flex: 1 1 auto; overflow: auto; padding: 6px 0; }
+.df-prop-diagnostics { margin: 0 10px 8px; border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-sm); overflow: hidden; background: var(--df-surface); }
+.df-prop-diagnostics h3 { margin: 0; padding: 6px 8px; color: var(--df-type);
+  font-size: 11px; border-bottom: 1px solid var(--df-border-subtle); }
+.df-prop-diagnostic { display: block; width: 100%; padding: 6px 8px; border: 0;
+  border-bottom: 1px solid var(--df-border-subtle); border-left: 3px solid var(--df-muted);
+  background: transparent; color: var(--df-fg); text-align: left; cursor: pointer; }
+.df-prop-diagnostic:last-child { border-bottom: 0; }
+.df-prop-diagnostic:hover { background: var(--df-hover-row); }
+.df-prop-diagnostic.df-diag-violation { border-left-color: var(--df-error); }
+.df-prop-diagnostic.df-diag-observation { border-left-color: var(--df-warn); }
+.df-prop-diagnostic.df-diag-pass { border-left-color: var(--df-success); }
+.df-prop-diagnostic-title { display: block; color: var(--df-muted); font: 600 10px var(--df-mono); }
+.df-prop-diagnostic-message { display: block; margin-top: 2px; font-size: 11px; line-height: 1.3; }
 .df-field.df-prop-filter { width: calc(100% - 20px); margin: 0 10px 6px; }
 .df-prop-no-results { color: var(--df-muted); padding: 12px 10px; font-size: 12px; }
 .df-prop-no-results[hidden] { display: none; }
@@ -313,7 +327,11 @@ body.df-disconnected.df-device-live #df-disconnected-overlay .df-connection-card
 .df-diag-header { padding: 8px 10px; border-bottom: 1px solid var(--df-border-subtle); }
 .df-diag-meta { color: var(--df-muted); font-size: 11px; margin-top: 3px; overflow-wrap: anywhere; }
 .df-diag-subtitle { color: var(--df-type); font-weight: 600; font-size: 11px; margin: 8px 10px 3px; }
-.df-diag-controls { display: flex; gap: 6px; margin-top: 8px; }
+.df-diag-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 8px; }
+.df-diag-controls label { display: inline-flex; align-items: center; gap: 4px; color: var(--df-muted); font: 11px var(--df-font); }
+.df-diag-controls select, .df-diag-controls input[type="search"] { min-width: 110px; max-width: 180px;
+  padding: 3px 6px; border: 1px solid var(--df-border); border-radius: var(--df-radius-sm);
+  background: var(--df-surface-2); color: var(--df-fg); font: 11px var(--df-font); }
 .df-diag-controls button { padding: 3px 10px; background: var(--df-surface-2); color: var(--df-fg);
   border: 1px solid var(--df-border); border-radius: var(--df-radius-sm); cursor: pointer; font-size: 11px; }
 .df-diag-controls button:hover:not(:disabled) { background: var(--df-hover); border-color: var(--df-focus); }
@@ -325,13 +343,23 @@ body.df-disconnected.df-device-live #df-disconnected-overlay .df-connection-card
   background: transparent; color: var(--df-fg); text-align: left; cursor: pointer; }
 .df-diag-finding:hover:not(:disabled) { background: var(--df-hover-row); }
 .df-diag-finding:disabled { cursor: default; opacity: 1; }
+.df-diag-finding.df-selected { background: var(--df-hover-row); box-shadow: inset 0 0 0 1px var(--df-focus); }
+.df-diag-finding.df-suppressed { opacity: .65; }
 .df-diag-violation { border-left-color: var(--df-error); }
 .df-diag-observation { border-left-color: var(--df-warn); }
 .df-diag-incomplete { border-left-color: var(--df-muted); }
+.df-diag-pass { border-left-color: var(--df-success); }
 .df-diag-explanation { margin-top: 4px; color: var(--df-muted); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
 .df-diag-limitation { margin-top: 3px; color: var(--df-muted); font-size: 11px; line-height: 1.3; overflow-wrap: anywhere; }
 .df-diag-warning { margin: 6px 10px; color: var(--df-warn); font-size: 11px; line-height: 1.35; overflow-wrap: anywhere; }
 .df-diag-footer { padding: 4px 0 12px; }
+.df-diag-tags, .df-diag-related, .df-diag-actions { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 5px; }
+.df-diag-tag { padding: 1px 5px; border: 1px solid var(--df-border-subtle); border-radius: 10px;
+  color: var(--df-muted); font: 10px var(--df-font); }
+.df-diag-related button, .df-diag-actions button { padding: 2px 7px; border: 1px solid var(--df-border);
+  border-radius: var(--df-radius-sm); background: var(--df-surface-2); color: var(--df-fg);
+  font: 11px var(--df-font); cursor: pointer; }
+.df-diag-related button:hover, .df-diag-actions button:hover { border-color: var(--df-focus); background: var(--df-hover); }
 .df-prop-source { flex: 0 0 auto; width: 25px; height: 25px; display: inline-flex; align-items: center; justify-content: center;
   grid-column: 2; grid-row: 1;
   padding: 0; color: var(--df-source); background: var(--df-surface-2); border: 1px solid var(--df-border);
@@ -356,6 +384,11 @@ input.df-field[type="checkbox"] { width: auto; flex: 0 0 auto; }
 .df-tree-node.df-selected { background: var(--df-selected); color: var(--df-selected-fg); }
 .df-tree-node.df-selected .df-tree-type, .df-tree-node.df-selected .df-tree-name, .df-tree-node.df-selected .df-tree-icon { color: inherit; }
 .df-tree-icon { display: inline-flex; align-items: center; margin-right: 4px; color: var(--df-muted); vertical-align: -2px; }
+.df-tree-diagnostic { display: inline-flex; align-items: center; justify-content: center; min-width: 16px;
+  height: 16px; margin-left: 5px; padding: 0 4px; border-radius: 8px; background: var(--df-muted);
+  color: var(--df-bg); font: 600 9px var(--df-font); }
+.df-tree-diagnostic-moderate, .df-tree-diagnostic-serious { background: var(--df-warn); color: #000; }
+.df-tree-diagnostic-critical { background: var(--df-error); color: #fff; }
 .df-tree-twisty { flex: 0 0 14px; width: 14px; display: inline-flex; align-items: center; justify-content: center; opacity: 0.6; }
 .df-tree-twisty .df-ic-xs { transition: transform 0.12s ease; }
 .df-tree-twisty.df-open .df-ic-xs { transform: rotate(90deg); }
@@ -411,6 +444,16 @@ body.df-mode-inspect #app-viewport { cursor: crosshair; }
 body.df-mode-inspect .devflow-element.df-hover { background: transparent; }
 .devflow-element.df-selected { outline: 2px solid var(--df-outline-select); background: var(--df-tint-select); }
 body.df-show-all .devflow-element { outline: 1px solid var(--df-outline-all); }
+
+#df-layout-overlays { position: absolute; inset: 0; z-index: 4; pointer-events: none; overflow: visible; }
+#df-layout-overlays svg { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
+.df-layout-region { vector-effect: non-scaling-stroke; stroke-width: 2; fill-opacity: .08; }
+.df-layout-region-full { stroke: var(--df-focus); fill: var(--df-focus); stroke-dasharray: 5 3; }
+.df-layout-region-visible { stroke: var(--df-success); fill: var(--df-success); }
+.df-layout-region-content { stroke: var(--df-name); fill: transparent; stroke-dasharray: 2 3; }
+.df-layout-region-clip { stroke: var(--df-warn); fill: var(--df-warn); stroke-dasharray: 4 3; }
+.df-layout-region-overlap { stroke: var(--df-error); fill: var(--df-error); }
+.devflow-element.df-selected { z-index: 6; }
 
 /* ── Hover badge ── */
 #df-badge {

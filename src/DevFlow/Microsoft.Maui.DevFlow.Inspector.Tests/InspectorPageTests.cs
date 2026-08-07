@@ -214,6 +214,7 @@ public class InspectorPageTests : IAsyncLifetime
             ("inspector-api.js", "export function createInspectorApi"),
             ("inspector-dialog.js", "export function confirmModal"),
             ("inspector-data-context.js", "export function createDataSnapshot"),
+            ("inspector-diagnostics.js", "export function createLayoutDataPayload"),
             ("inspector-evidence.js", "export function createEvidenceController"),
             ("inspector-study.js", "export function createPrototypeStudyJournal"),
             ("inspector-host-bridge.js", "export function createInspectorHostBridge"),

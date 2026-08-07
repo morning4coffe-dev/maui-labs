@@ -83,6 +83,7 @@ test("data snapshots stay within the host envelope limit", () => {
 
 test("scope and secret-key helpers expose the supported contract", () => {
   assert.equal(supportsDataContextScope("network"), true);
+  assert.equal(supportsDataContextScope("layout"), true);
   assert.equal(supportsDataContextScope("alerts"), true);
   assert.equal(supportsDataContextScope("secureStorage"), false);
   assert.equal(isSecretContextKey("apiToken"), true);

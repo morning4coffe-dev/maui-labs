@@ -76,15 +76,34 @@ public class InspectorDiagnosticsRouteTests
         {
             using var http = CreateTokenClient(inspector);
             var response = await http.PostAsync($"http://127.0.0.1:{port}/api/diagnostics/layout",
-                Json("{\"maxElements\":50}"));
-            using var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                Json("""
+                    {
+                      "schemaVersion": "2.0",
+                      "profile": "strict",
+                      "rules": ["layout.visible-zero-area"],
+                      "scope": { "rootElementId": "e1" },
+                      "maxElements": 50
+                    }
+                    """));
+            var rawBody = await response.Content.ReadAsStringAsync();
+            Assert.True(response.IsSuccessStatusCode, rawBody);
+            using var body = JsonDocument.Parse(rawBody);
 
             Assert.Equal(HttpStatusCode.OK, response.StatusCode);
             Assert.True(body.RootElement.GetProperty("ok").GetBoolean());
             var report = body.RootElement.GetProperty("report");
             Assert.Equal(1, report.GetProperty("summary").GetProperty("violations").GetInt32());
             Assert.NotEmpty(report.GetProperty("coverage").GetProperty("limitations").EnumerateArray());
-            Assert.Contains("maxElements=50", agent.LastLayoutQuery, StringComparison.Ordinal);
+            Assert.Equal("/api/v1/ui/diagnostics/layout", agent.LastLayoutQuery);
+            using var forwarded = JsonDocument.Parse(agent.LastLayoutBody);
+            Assert.Equal(50, forwarded.RootElement.GetProperty("maxElements").GetInt32());
+            Assert.Equal("strict", forwarded.RootElement.GetProperty("profile").GetString());
+            Assert.Equal(
+                "e1",
+                forwarded.RootElement.GetProperty("scope").GetProperty("rootElementId").GetString());
+            Assert.Equal(
+                "layout.visible-zero-area",
+                forwarded.RootElement.GetProperty("rules")[0].GetString());
         }
         finally
         {
@@ -280,6 +299,7 @@ public class InspectorDiagnosticsRouteTests
         private readonly CancellationTokenSource _cts = new();
         private readonly Task _loop;
         private string _lastLayoutQuery = "";
+        private string _lastLayoutBody = "";
         private string _lastProfilerStopPath = "";
         private string _lastProfilerStopLease = "";
 
@@ -294,6 +314,7 @@ public class InspectorDiagnosticsRouteTests
         public bool FailProfilerStop { get; set; }
         public bool FailProfilerStatus { get; set; }
         public string LastLayoutQuery => Volatile.Read(ref _lastLayoutQuery);
+        public string LastLayoutBody => Volatile.Read(ref _lastLayoutBody);
         public string LastProfilerStopPath => Volatile.Read(ref _lastProfilerStopPath);
         public string LastProfilerStopLease => Volatile.Read(ref _lastProfilerStopLease);
 
@@ -320,7 +341,10 @@ public class InspectorDiagnosticsRouteTests
                     var path = request.Path;
 
                     if (path.StartsWith("/api/v1/ui/diagnostics/layout", StringComparison.Ordinal))
+                    {
                         Volatile.Write(ref _lastLayoutQuery, path);
+                        Volatile.Write(ref _lastLayoutBody, request.Body ?? "");
+                    }
                     if (path.StartsWith("/api/v1/profiler/sessions/", StringComparison.Ordinal) &&
                         !path.Contains("/samples", StringComparison.Ordinal))
                     {
@@ -381,22 +405,50 @@ public class InspectorDiagnosticsRouteTests
             {"agent":{"version":"0.1.0","mode":"debug","readOnly":false},"device":{"platform":"Windows"},"app":{"name":"Sample"}}
             """;
 
-        private static async Task<(string? Path, string? LeaseId)> ReadRequest(
+        private static async Task<(string? Path, string? LeaseId, string? Body)> ReadRequest(
             NetworkStream stream,
             CancellationToken ct)
         {
             var buffer = new byte[8192];
-            var read = await stream.ReadAsync(buffer, ct);
-            if (read <= 0) return (null, null);
-            var text = Encoding.UTF8.GetString(buffer, 0, read);
-            var firstLine = text.Split("\r\n")[0].Split(' ');
-            var lease = text.Split("\r\n")
+            using var collected = new MemoryStream();
+            var headerEnd = -1;
+            while (headerEnd < 0)
+            {
+                var read = await stream.ReadAsync(buffer, ct);
+                if (read <= 0) return (null, null, null);
+                collected.Write(buffer, 0, read);
+                headerEnd = Encoding.UTF8.GetString(collected.GetBuffer(), 0, (int)collected.Length)
+                    .IndexOf("\r\n\r\n", StringComparison.Ordinal);
+            }
+
+            var headerText = Encoding.UTF8.GetString(collected.GetBuffer(), 0, headerEnd);
+            var contentLength = headerText.Split("\r\n")
+                .FirstOrDefault(line => line.StartsWith(
+                    "Content-Length:",
+                    StringComparison.OrdinalIgnoreCase))
+                ?.Split(':', 2)[1]
+                .Trim();
+            var bodyLength = int.TryParse(contentLength, out var parsedLength) ? parsedLength : 0;
+            var bodyStart = headerEnd + 4;
+            while (collected.Length - bodyStart < bodyLength)
+            {
+                var read = await stream.ReadAsync(buffer, ct);
+                if (read <= 0) break;
+                collected.Write(buffer, 0, read);
+            }
+
+            var text = Encoding.UTF8.GetString(collected.GetBuffer(), 0, (int)collected.Length);
+            var firstLine = headerText.Split("\r\n")[0].Split(' ');
+            var lease = headerText.Split("\r\n")
                 .FirstOrDefault(line => line.StartsWith(
                     "X-DevFlow-Lease:",
                     StringComparison.OrdinalIgnoreCase))
                 ?.Split(':', 2)[1]
                 .Trim();
-            return (firstLine.Length >= 2 ? firstLine[1] : null, lease);
+            var body = bodyLength > 0 && text.Length >= bodyStart
+                ? text.Substring(bodyStart, Math.Min(bodyLength, text.Length - bodyStart))
+                : null;
+            return (firstLine.Length >= 2 ? firstLine[1] : null, lease, body);
         }
 
         private static async Task WriteAsync(NetworkStream stream, byte[] body, CancellationToken ct)

@@ -8,6 +8,15 @@ namespace Microsoft.Maui.Cli.UnitTests;
 public class InspectorHtmlRendererTests
 {
     [Fact]
+    public void Render_IncludesDedicatedLayoutOverlayLayer()
+    {
+        var html = HtmlRenderer.Render([], hasScreenshot: false);
+
+        Assert.Contains("id=\"df-layout-overlays\"", html);
+        Assert.Contains("aria-hidden=\"true\"", html);
+    }
+
+    [Fact]
     public void RenderElements_EscapesHtmlInTextAttribute()
     {
         var tree = new List<ElementInfo>

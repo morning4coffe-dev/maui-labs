@@ -3,6 +3,8 @@ import test from "node:test";
 
 import {
   LAYOUT_FINDING_LIMIT,
+  createLayoutDataPayload,
+  filterLayoutFindings,
   formatLayoutReport,
   formatPerformanceSummary,
 } from "../../../Cli/Microsoft.Maui.Cli/DevFlow/Inspector/Web/inspector-diagnostics.js";
@@ -114,6 +116,70 @@ test("layout view tolerates a malformed report", () => {
   assert.equal(view.findings.length, 0);
   assert.equal(view.coverage, "Coverage: unavailable");
   assert.deepEqual(view.limitations, []);
+});
+
+test("layout filters combine outcome severity confidence rule and suppression state", () => {
+  const findings = [
+    { id: "a", ruleId: "layout.element-clipped", outcome: "violation", severity: "serious", confidence: "high" },
+    { id: "b", ruleId: "layout.content-overflow", outcome: "observation", severity: "minor", confidence: "medium" },
+    { id: "c", ruleId: "layout.element-clipped", outcome: "violation", severity: "critical", confidence: "exact", suppressed: true },
+  ];
+
+  const filtered = filterLayoutFindings(findings, {
+    outcome: "violations",
+    minimumSeverity: "serious",
+    minimumConfidence: "high",
+    rule: "clipped",
+    includeSuppressed: false,
+  });
+
+  assert.deepEqual(filtered.map((finding) => finding.id), ["a"]);
+});
+
+test("layout view exposes rich finding metadata and related elements", () => {
+  const view = formatLayoutReport({
+    ...layoutReport,
+    schemaVersion: "2.0",
+    snapshot: { id: "s1", treeRevision: "tree1", diagnosticsRevision: "diag1", stable: false },
+    findings: [{
+      ...layoutReport.findings[0],
+      severity: "serious",
+      actionability: "fix",
+      fixCategories: ["adjust-layout-constraints"],
+      relatedElements: [{
+        relation: "clipper",
+        element: { id: "host", type: "Grid", automationId: "Host" },
+      }],
+    }],
+  });
+
+  assert.equal(view.snapshot.treeRevision, "tree1");
+  assert.equal(view.findings[0].severity, "serious");
+  assert.equal(view.findings[0].actionability, "fix");
+  assert.equal(view.findings[0].relatedElements[0].relation, "clipper");
+});
+
+test("layout Copilot payload excludes captured text while retaining structural evidence", () => {
+  const payload = createLayoutDataPayload({
+    ...layoutReport,
+    findings: [{
+      ...layoutReport.findings[0],
+      evidence: {
+        fullRegion: { bounds: { x: 1, y: 2, width: 3, height: 4 }, points: [] },
+        text: {
+          kind: "label",
+          isTruncated: true,
+          textLength: 18,
+          text: "private visible text",
+          measurementSource: "native",
+        },
+      },
+    }],
+  }, "layout.visible-zero-area:e1:area");
+
+  assert.equal(payload.findings[0].evidence.text.textLength, 18);
+  assert.equal(Object.hasOwn(payload.findings[0].evidence.text, "text"), false);
+  assert.doesNotMatch(JSON.stringify(payload), /private visible text/);
 });
 
 const performanceSummary = {

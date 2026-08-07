@@ -70,7 +70,35 @@ public interface IDeviceSurface
     Task<DeviceOperationResult> RotateAsync(
         string deviceId, string orientation, CancellationToken cancellationToken = default)
         => Task.FromResult(DeviceOperationResult.Unsupported("rotation"));
+
+    /// <summary>Starts a bounded screen recording. The artifact path is returned by the stop call.</summary>
+    Task<DeviceOperationResult> StartRecordingAsync(
+        string deviceId, int timeoutSeconds = 180, CancellationToken cancellationToken = default)
+        => Task.FromResult(DeviceOperationResult.Unsupported("screen recording"));
+
+    /// <summary>Stops the active recording and returns the path of the finished file, if any.</summary>
+    Task<DeviceRecordingResult> StopRecordingAsync(
+        string deviceId, CancellationToken cancellationToken = default)
+        => Task.FromResult(new DeviceRecordingResult(false, null, "This device does not support screen recording."));
+
+    /// <summary>
+    /// Describes what currently owns the screen, when it is not the app under test.
+    /// <para>
+    /// Returns <c>null</c> when the app is frontmost or the device cannot tell. This is the signal
+    /// that turns a "not visible" failure into a cause: a permission dialog, a share sheet, or the
+    /// soft keyboard is invisible to the app's own visual tree.
+    /// </para>
+    /// </summary>
+    Task<string?> DescribeForegroundAsync(
+        string deviceId, string? appPackageId = null, CancellationToken cancellationToken = default)
+        => Task.FromResult<string?>(null);
 }
+
+/// <summary>The outcome of stopping a device recording.</summary>
+/// <param name="Success">Whether a recording was finished.</param>
+/// <param name="Path">Absolute path of the finished file.</param>
+/// <param name="Reason">Why no recording was produced.</param>
+public sealed record DeviceRecordingResult(bool Success, string? Path, string? Reason = null);
 
 /// <summary>
 /// The outcome of a device operation. Refusal is a normal, describable result rather than an

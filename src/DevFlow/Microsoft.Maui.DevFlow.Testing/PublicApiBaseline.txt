@@ -571,7 +571,9 @@ M:Microsoft.Maui.DevFlow.Testing.FlowTargetResolution.Failure(kind:System.String
 M:Microsoft.Maui.DevFlow.Testing.FlowTargetResolution.Success(element:Microsoft.Maui.DevFlow.Driver.ElementInfo,count:System.Int32,quality:System.String):Microsoft.Maui.DevFlow.Testing.FlowTargetResolution
 M:Microsoft.Maui.DevFlow.Testing.FlowTargetResolution.WithFailure(kind:System.String,error:System.String):Microsoft.Maui.DevFlow.Testing.FlowTargetResolution
 M:Microsoft.Maui.DevFlow.Testing.FlowValidator.Validate(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow):Microsoft.Maui.DevFlow.Testing.FlowValidation
+M:Microsoft.Maui.DevFlow.Testing.IFlowReplayEvidenceCapture.BeginRunAsync(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow,cancellationToken:System.Threading.CancellationToken):System.Threading.Tasks.Task`1[System.IAsyncDisposable]
 M:Microsoft.Maui.DevFlow.Testing.IFlowReplayEvidenceCapture.CaptureOnFailureAsync(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow,failedStep:Microsoft.Maui.DevFlow.Testing.FlowStep,result:Microsoft.Maui.DevFlow.Testing.FlowStepResult,cancellationToken:System.Threading.CancellationToken):System.Threading.Tasks.Task
+M:Microsoft.Maui.DevFlow.Testing.IFlowReplayEvidenceCapture.ExplainFailureAsync(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow,failedStep:Microsoft.Maui.DevFlow.Testing.FlowStep,result:Microsoft.Maui.DevFlow.Testing.FlowStepResult,cancellationToken:System.Threading.CancellationToken):System.Threading.Tasks.Task`1[System.String]
 M:Microsoft.Maui.DevFlow.Testing.IFlowRunEvidenceCapture.CaptureOnRunFailureAsync(context:Microsoft.Maui.DevFlow.Testing.MauiFlowRunEvidenceContext,cancellationToken:System.Threading.CancellationToken):System.Threading.Tasks.Task
 M:Microsoft.Maui.DevFlow.Testing.IMauiFlowDriver.BackAsync():System.Threading.Tasks.Task`1[System.Boolean]
 M:Microsoft.Maui.DevFlow.Testing.IMauiFlowDriver.FillAsync(elementId:System.String,text:System.String):System.Threading.Tasks.Task`1[System.Boolean]
@@ -806,6 +808,7 @@ P:Microsoft.Maui.DevFlow.Testing.FlowStepResult.Asserts[]:System.Collections.Gen
 P:Microsoft.Maui.DevFlow.Testing.FlowStepResult.AuthorityEpoch[]:System.Nullable`1[System.Int64]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowStepResult.CommandId[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowStepResult.Error[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.FlowStepResult.FailureCause[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowStepResult.FailureKind[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowStepResult.Label[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowStepResult.MatchCount[]:System.Nullable`1[System.Int32]{get:public;set:public}

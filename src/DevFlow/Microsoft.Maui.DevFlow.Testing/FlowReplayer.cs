@@ -23,6 +23,13 @@ public sealed class FlowStepResult
     public bool Ok { get; set; }
     public string? Error { get; set; }
     public string? FailureKind { get; set; }
+
+    /// <summary>
+    /// Why the step could not be actioned, when a host that can see outside the app supplied a
+    /// cause. Additive to <see cref="Error"/> rather than replacing it: the original failure is
+    /// what the step actually reported, and this is context around it.
+    /// </summary>
+    public string? FailureCause { get; set; }
     public int? MatchCount { get; set; }
     public string? SelectorQuality { get; set; }
     public string? CommandId { get; set; }
@@ -232,6 +239,19 @@ public sealed class FlowReplayer
             return report;
         }
 
+        // Observe the run as a whole, when a host can. This is what records a replay: the handle
+        // is disposed on every exit path below, so a recording cannot outlive the run that
+        // started it — including when a step throws.
+        IAsyncDisposable? runObservation = null;
+        if (_evidenceCapture is not null)
+        {
+            try { runObservation = await _evidenceCapture.BeginRunAsync(flow, ct); }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+            catch { /* observation is an enhancement; a run must not fail because of it */ }
+        }
+
+        try
+        {
         foreach (var step in flow.Steps ?? [])
         {
             ct.ThrowIfCancellationRequested();
@@ -288,6 +308,15 @@ public sealed class FlowReplayer
                 report.DivergencePoint ??= step.Seq;
                 if (_evidenceCapture is not null)
                 {
+                    // Ask for a cause before capturing evidence, so the captured artifact and the
+                    // reported reason describe the same moment.
+                    try
+                    {
+                        res.FailureCause = await _evidenceCapture.ExplainFailureAsync(flow, replayStep, res, ct);
+                    }
+                    catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
+                    catch { /* an explanation must never mask the replay failure */ }
+
                     try { await _evidenceCapture.CaptureOnFailureAsync(flow, replayStep, res, ct); }
                     catch (OperationCanceledException) when (ct.IsCancellationRequested) { throw; }
                     catch { /* evidence must never mask the replay failure */ }
@@ -297,6 +326,15 @@ public sealed class FlowReplayer
                     report.StoppedEarly = true;
                     break;
                 }
+            }
+        }
+        }
+        finally
+        {
+            if (runObservation is not null)
+            {
+                try { await runObservation.DisposeAsync(); }
+                catch { /* finishing a recording must not change the run's outcome */ }
             }
         }
 
@@ -598,8 +636,45 @@ public sealed class FlowReplayer
     }
 }
 
-/// <summary>Optional callback that callers can use to collect privacy-safe evidence after failure.</summary>
+/// <summary>
+/// Optional callback that callers can use to collect privacy-safe evidence after failure, and to
+/// observe a run as a whole.
+/// <para>
+/// The newer members have default implementations so an existing implementer keeps compiling and
+/// keeps working. They exist so a host that can see <em>outside</em> the app — the device layer —
+/// can contribute two things this assembly cannot obtain on its own: a recording of the run, and
+/// a reason a step could not be actioned.
+/// </para>
+/// </summary>
 public interface IFlowReplayEvidenceCapture
 {
     Task CaptureOnFailureAsync(MauiFlow flow, FlowStep failedStep, FlowStepResult result, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Called once before the first step. The returned handle is disposed when the run ends,
+    /// whether it passed, failed, or threw.
+    /// <para>
+    /// This is what lets a host record the run. Returning <c>null</c> — the default — means no
+    /// observation, which must stay the cheap path: replay has to work identically on a machine
+    /// with nothing to record it.
+    /// </para>
+    /// </summary>
+    Task<IAsyncDisposable?> BeginRunAsync(MauiFlow flow, CancellationToken cancellationToken)
+        => Task.FromResult<IAsyncDisposable?>(null);
+
+    /// <summary>
+    /// Called when a step fails, to turn a terminal fact into a cause.
+    /// <para>
+    /// This assembly can report that an element was "not visible"; it cannot know that a system
+    /// permission dialog is covering it, that the soft keyboard is over it, or that the app was
+    /// backgrounded — none of those are in the visual tree. A host with a view from outside the
+    /// app can, and the difference is a red test versus a fixed one.
+    /// </para>
+    /// <para>
+    /// Returns <c>null</c> when nothing can be added, which must leave the original failure
+    /// untouched: a wrong explanation is worse than none.
+    /// </para>
+    /// </summary>
+    Task<string?> ExplainFailureAsync(MauiFlow flow, FlowStep failedStep, FlowStepResult result, CancellationToken cancellationToken)
+        => Task.FromResult<string?>(null);
 }

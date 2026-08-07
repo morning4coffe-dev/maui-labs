@@ -352,6 +352,37 @@ H.264 arrives as an Annex-B byte stream that aligns to neither WebSocket message
 - Frames before the first keyframe are discarded: a decoder started mid-stream has no reference
   frames, so they would decode to garbage. This is why a stream takes a moment to appear.
 
+## Contributing to a replay
+
+The replay engine lives in `Microsoft.Maui.DevFlow.Testing`, a shipped package that deliberately
+does **not** reference the device layer — a project reference the other way would force a
+non-shipping assembly into a public package. Instead it declares a seam,
+`IFlowReplayEvidenceCapture`, and the CLI, which owns both sides, implements it via
+`DeviceFlowObserver`.
+
+Two things the engine cannot obtain on its own, because both require seeing outside the app:
+
+**A recording of the run.** `BeginRunAsync` returns a handle disposed when the run ends — whether
+it passed, failed, or threw — so a recording can never outlive the run that started it. A failed
+test that ships with video of its own failure is the most useful artifact a replay can produce,
+because the interesting moment has already passed by the time anyone reads the report. A device
+that cannot record is not a reason to refuse the run.
+
+**A cause for a failed step.** The engine can report that an element was "not visible"; only
+something outside the app can report that a permission dialog was covering it, that the soft
+keyboard was over it, or that the app was backgrounded — none of which are in the visual tree.
+`ExplainFailureAsync` fills `FlowStepResult.FailureCause`, additively, leaving the original `Error`
+exactly as the step reported it.
+
+The restraint matters as much as the capability. An explanation is offered **only** for failure
+kinds a foreign window could plausibly account for — not visible, not actionable, timeout, stale.
+A selector that matched nothing is an authoring problem, and blaming the environment for it would
+send the reader to investigate something that was fine while the real cause goes unexamined. When
+the app is frontmost, nothing is said at all.
+
+Both members are defaulted, so an implementer written before them keeps compiling and behaves
+identically.
+
 ## Implementation
 
 | Type | Responsibility |
@@ -364,6 +395,7 @@ H.264 arrives as an Annex-B byte stream that aligns to neither WebSocket message
 | `inspector-video.js` | Annex-B reassembly and WebCodecs decoding for the live stream |
 | `BrokerServer.Video.cs` | Authenticated one-directional video proxy |
 | `DeviceIdentity` / `DeviceIdentityMatcher` | Pairing an app agent to its device |
+| `DeviceFlowObserver` | Run recording and failure causes for a flow replay |
 | `DeviceIdentityProvider` | Agent-side self-reporting (Agent.Core, with platform overrides) |
 
 ## Testing

@@ -313,6 +313,16 @@ bearer token, and a browser cannot attach headers to a WebSocket — nor should 
 placed in a page, a URL, or a DOM a framed document could read. The broker holds it server-side and
 the page presents only the embed token, which also keeps the broker the single front door.
 
+**A WebSocket is not subject to the same-origin policy**, so the proxy enforces two gates before
+upgrading, and a page that fails either gets a 403:
+
+1. **Loopback origin** — proves the caller is on this machine.
+2. **The embed token** — proves it is an Inspector session, not merely some other local page. A dev
+   server or a docs site on localhost passes the first gate and must still be refused.
+
+Without both, any page a user visited could open a live feed of their device screen and the broker
+would helpfully authenticate it on their behalf.
+
 The proxy is **one-directional** on purpose: the video channel carries frames out and nothing in.
 Input travels the HTTP control path where the mutation lease arbitrates it. A socket that also
 accepted commands would be a second, unarbitrated way to drive the device.
@@ -332,8 +342,13 @@ H.264 arrives as an Annex-B byte stream that aligns to neither WebSocket message
   remainder including its start code** so the caller can prepend it to the next chunk. Returning
   the payload alone would make the reassembled buffer begin mid-unit and silently drop exactly the
   frames that straddle a message boundary.
-- Parameter sets (SPS/PPS) are accumulated and emitted with the picture that follows them. Feeding
-  an SPS as if it were a frame produces a decoder that configures and then never outputs anything.
+- Parameter sets are emitted with the picture that follows them, not alone — feeding an SPS as if
+  it were a frame yields a decoder that configures and never outputs anything.
+- A picture is closed by what **follows** it, not by the slice itself. A single picture may be
+  coded as several slice NALs — common on hardware encoders under a bandwidth cap — and submitting
+  each as its own picture feeds the decoder partial frames, which it rejects and never recovers
+  from. A new picture is detected by the slice header's `first_mb_in_slice` being zero. The cost is
+  one frame of latency, which is the right trade for a stream that works on every encoder.
 - Frames before the first keyframe are discarded: a decoder started mid-stream has no reference
   frames, so they would decode to garbage. This is why a stream takes a moment to appear.
 

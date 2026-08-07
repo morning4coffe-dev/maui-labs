@@ -22,6 +22,26 @@ public partial class BrokerServer
 
     private async Task HandleDeviceVideoWebSocket(HttpListenerContext context)
     {
+        // A WebSocket is NOT subject to the same-origin policy, so any page a user visits could
+        // otherwise open this socket and receive a live feed of their device screen — with the
+        // broker helpfully attaching the device host's bearer token on its behalf. Both gates are
+        // required: loopback origin proves the caller is local, and the embed token proves it is
+        // an Inspector session rather than any other local page.
+        var origin = context.Request.Headers["Origin"];
+        if (!Inspector.LocalOriginValidator.IsAllowed(origin, _port))
+        {
+            context.Response.StatusCode = 403;
+            context.Response.Close();
+            return;
+        }
+
+        if (!Inspector.InspectorServer.IsTrustedEmbed(_embedToken, context.Request.QueryString["embed"]))
+        {
+            context.Response.StatusCode = 403;
+            context.Response.Close();
+            return;
+        }
+
         var deviceId = context.Request.QueryString["deviceId"];
         if (string.IsNullOrWhiteSpace(deviceId))
         {
@@ -69,10 +89,18 @@ public partial class BrokerServer
                 }
                 catch { /* the client may already be gone */ }
             }
+            else
+            {
+                // The accept succeeded and the pump then failed. Abort rather than leaving an
+                // open socket holding its buffers until GC — streams restart on every device
+                // change and every stream failure, so these would accumulate over a session.
+                try { downstreamContext.WebSocket.Abort(); } catch { }
+            }
         }
         finally
         {
             upstream?.Dispose();
+            downstreamContext?.WebSocket.Dispose();
         }
     }
 

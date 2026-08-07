@@ -18,6 +18,7 @@ const NAL_START_SHORT = 3;
 
 /** H.264 NAL unit types we care about for framing decisions. */
 const NAL_IDR = 5;   // keyframe slice
+const NAL_NON_IDR = 1;
 const NAL_SPS = 7;
 const NAL_PPS = 8;
 
@@ -66,37 +67,63 @@ export function nalType(unit) {
 /**
  * Groups NAL units into access units — one decodable picture each.
  *
- * A decoder must be handed whole pictures. Parameter sets (SPS/PPS) belong with the keyframe that
- * follows them, so they are accumulated rather than emitted alone; feeding an SPS as if it were a
- * frame is a common way to produce a decoder that configures and then never outputs anything.
+ * A decoder must be handed whole pictures. Two ways to get this wrong, both of which surface as
+ * "the video is corrupt" rather than as a framing bug:
+ *
+ *   * Parameter sets (SPS/PPS) emitted alone. They belong with the keyframe that follows them;
+ *     feeding an SPS as if it were a picture yields a decoder that configures and then never
+ *     outputs anything.
+ *   * One chunk per SLICE. A single picture may be coded as several slice NALs — common on
+ *     hardware encoders under a bandwidth cap — and submitting each as its own picture feeds the
+ *     decoder partial frames, which it rejects. A new picture is detected by the slice header's
+ *     first_mb_in_slice being zero rather than by the NAL type alone.
  */
 export function groupAccessUnits(units) {
   const frames = [];
   let pending = [];
   let pendingIsKey = false;
+  let pendingHasSlice = false;
+
+  const flush = () => {
+    if (pending.length === 0) return;
+    frames.push({ nals: pending, key: pendingIsKey });
+    pending = [];
+    pendingIsKey = false;
+    pendingHasSlice = false;
+  };
 
   for (const unit of units) {
     const type = nalType(unit);
+    const isSlice = type === NAL_IDR || type === NAL_NON_IDR;
 
-    if (type === NAL_SPS || type === NAL_PPS) {
-      pending.push(unit);
-      continue;
-    }
+    if (isSlice) {
+      // A slice that starts at macroblock 0 begins a new picture. One that does not is another
+      // slice of the picture already being accumulated.
+      if (pendingHasSlice && startsNewPicture(unit)) flush();
 
-    if (type === NAL_IDR || type === 1) {
       pending.push(unit);
+      pendingHasSlice = true;
       if (type === NAL_IDR) pendingIsKey = true;
-      frames.push({ nals: pending, key: pendingIsKey });
-      pending = [];
-      pendingIsKey = false;
       continue;
     }
 
-    // Anything else (SEI, AUD, filler) rides along with the next picture.
+    // A parameter set or delimiter after a complete picture belongs to the NEXT one.
+    if (pendingHasSlice) flush();
     pending.push(unit);
   }
 
+  // Whatever is left may still be missing slices, so it is held back rather than emitted.
   return { frames, pending };
+}
+
+/**
+ * Whether a slice NAL starts a new picture, i.e. its first_mb_in_slice is 0.
+ *
+ * first_mb_in_slice is the first ue(v) field of the slice header, so a value of 0 is encoded as a
+ * single leading 1 bit — the top bit of the first RBSP byte.
+ */
+export function startsNewPicture(unit) {
+  return unit.length > 1 && (unit[1] & 0x80) !== 0;
 }
 
 /** Re-emits NAL units as a single Annex-B buffer with 4-byte start codes. */

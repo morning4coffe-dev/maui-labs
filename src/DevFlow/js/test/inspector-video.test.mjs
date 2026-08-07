@@ -14,6 +14,7 @@ const {
   nalType,
   toAnnexB,
   isVideoSupported,
+  startsNewPicture,
   DeviceVideoSurface,
 } = await import(videoModule);
 
@@ -82,10 +83,15 @@ test("a unit split across two messages reassembles intact", () => {
 test("groups parameter sets with the keyframe that follows them", () => {
   // Handing an SPS to the decoder as if it were a picture is a classic way to get a decoder that
   // configures and then never outputs anything.
+  //
+  // Note the trailing unit: a picture is closed by what FOLLOWS it, because a slice alone cannot
+  // prove no further slices of the same picture are coming. That costs one frame of latency on a
+  // live stream and is what makes multi-slice encoders work at all.
   const units = [
     Uint8Array.from(nal(7, 1)),
     Uint8Array.from(nal(8, 2)),
-    Uint8Array.from(nal(5, 3)),
+    Uint8Array.from([5, 0x80, 3]),
+    Uint8Array.from(nal(7, 4)),      // next picture's parameter set closes the first
   ];
 
   const { frames } = groupAccessUnits(units);
@@ -96,7 +102,10 @@ test("groups parameter sets with the keyframe that follows them", () => {
 });
 
 test("marks non-IDR slices as delta frames", () => {
-  const { frames } = groupAccessUnits([Uint8Array.from(nal(1, 1))]);
+  const { frames } = groupAccessUnits([
+    Uint8Array.from([1, 0x80, 1]),
+    Uint8Array.from([1, 0x80, 2]),
+  ]);
 
   assert.equal(frames.length, 1);
   assert.equal(frames[0].key, false);
@@ -114,6 +123,90 @@ test("re-emits Annex-B with 4-byte start codes", () => {
   const out = toAnnexB([Uint8Array.from(nal(5, 7)), Uint8Array.from(nal(1, 8))]);
 
   assert.deepEqual([...out], [0, 0, 0, 1, 5, 7, 0, 0, 0, 1, 1, 8]);
+});
+
+test("groups multiple slices of one picture into a single frame", () => {
+  // A picture may be coded as several slice NALs — common on hardware encoders under a bandwidth
+  // cap. Submitting each as its own picture feeds the decoder partial frames, it errors, and video
+  // dies permanently for the session. first_mb_in_slice, not the NAL type, marks a new picture.
+  const firstSlice = Uint8Array.from([5, 0x80, 1]);   // first_mb_in_slice = 0
+  const secondSlice = Uint8Array.from([5, 0x40, 2]);  // continuation of the same picture
+
+  const { frames } = groupAccessUnits([
+    Uint8Array.from(nal(7, 1)),
+    Uint8Array.from(nal(8, 2)),
+    firstSlice,
+    secondSlice,
+  ]);
+
+  assert.equal(frames.length, 0, "the picture is still pending until something follows it");
+
+  const { frames: closed } = groupAccessUnits([
+    Uint8Array.from(nal(7, 1)),
+    firstSlice,
+    secondSlice,
+    Uint8Array.from(nal(7, 1)),      // parameter set for the NEXT picture closes this one
+    Uint8Array.from([5, 0x80, 3]),
+  ]);
+
+  assert.equal(closed.length, 1);
+  assert.equal(closed[0].key, true);
+  assert.equal(closed[0].nals.length, 3, "SPS + both slices");
+});
+
+test("starts a new picture when a slice begins at macroblock zero", () => {
+  const first = Uint8Array.from([1, 0x80, 1]);
+  const second = Uint8Array.from([1, 0x80, 2]);
+
+  const { frames } = groupAccessUnits([first, second]);
+
+  assert.equal(frames.length, 1, "the first picture is closed by the second starting");
+});
+
+test("identifies a first_mb_in_slice of zero", () => {
+  assert.equal(startsNewPicture(Uint8Array.from([5, 0x80])), true);
+  assert.equal(startsNewPicture(Uint8Array.from([5, 0x40])), false);
+});
+
+test("decodes frames delivered through the socket, not just through the parser", () => {
+  // The wiring gap: every other decode test calls _consume directly, so a broken onmessage
+  // handler — a wrong event property, or the ArrayBuffer guard rejecting a Blob because
+  // binaryType was not honoured — would leave all of them passing while no frame ever decodes.
+  const decoded = [];
+  let created = null;
+
+  const scope = {
+    VideoDecoder: class {
+      constructor(init) { this.init = init; this.state = "unconfigured"; }
+      configure() { this.state = "configured"; }
+      decode(chunk) { decoded.push(chunk.type); }
+      close() { this.state = "closed"; }
+    },
+    EncodedVideoChunk: class { constructor(init) { Object.assign(this, init); } },
+    WebSocket: class {
+      constructor(url) { this.url = url; created = this; }
+      close() {}
+    },
+  };
+
+  const surface = new DeviceVideoSurface({
+    url: "ws://localhost/ws/video",
+    canvas: { getContext: () => ({ drawImage() {} }) },
+    scope,
+  });
+
+  assert.equal(surface.start(), true);
+  assert.equal(created.binaryType, "arraybuffer", "a Blob would fail the ArrayBuffer guard");
+
+  const frame = bytes(
+    START_LONG, nal(7, 1),
+    START_LONG, [5, 0x80, 9],
+    START_LONG, [1, 0x80, 7],     // closes the keyframe
+    START_LONG, [1, 0x80, 8],     // and gives the parser something to hold as pending
+  );
+  created.onmessage({ data: frame.buffer.slice(frame.byteOffset, frame.byteOffset + frame.byteLength) });
+
+  assert.deepEqual(decoded, ["key"]);
 });
 
 test("reports unsupported when WebCodecs is missing", () => {
@@ -171,8 +264,20 @@ test("discards frames until the first keyframe arrives", () => {
   });
   surface.start();
 
-  surface._consume(bytes(START_LONG, nal(1, 1), START_LONG, nal(1, 2), START_LONG, nal(5, 3), START_LONG, nal(1, 4)));
+  // Two delta frames arrive before any keyframe and are dropped. The keyframe itself is still
+  // pending at this point, because a picture is closed by what follows it.
+  surface._consume(bytes(
+    START_LONG, [1, 0x80, 1],
+    START_LONG, [1, 0x80, 2],
+    START_LONG, [5, 0x80, 3],
+    START_LONG, [1, 0x80, 4],
+  ));
 
-  // The two leading delta frames are dropped; decoding starts at the keyframe.
-  assert.deepEqual(decoded, ["key"]);
+  assert.deepEqual(decoded, [], "nothing decodes before a keyframe is complete");
+
+  // The next slices close the keyframe and then a delta, which is now decodable because the
+  // decoder finally has a reference frame.
+  surface._consume(bytes(START_LONG, [1, 0x80, 5], START_LONG, [1, 0x80, 6]));
+
+  assert.deepEqual(decoded, ["key", "delta"]);
 });

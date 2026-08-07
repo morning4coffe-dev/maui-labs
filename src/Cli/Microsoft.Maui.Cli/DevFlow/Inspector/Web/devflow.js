@@ -246,11 +246,17 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   //     second must not mean 50 visual-tree pulls a second, so nothing here schedules a refresh.
   let videoSurface = null;
   let videoCanvas = null;
+  let videoGeneration = 0;
 
   function deviceVideoUrl() {
     if (!deviceContext || !deviceContext.canStream || !deviceContext.brokerPort) return null;
+    // The embed token proves this is an Inspector session. Without it the broker refuses the
+    // upgrade, which is what stops any other local page from opening a feed of the device.
+    const embed = new URLSearchParams(location.search).get('embed');
+    if (!embed) return null;
+
     const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
-    const params = new URLSearchParams({ deviceId: deviceContext.deviceId, fps: '30' });
+    const params = new URLSearchParams({ deviceId: deviceContext.deviceId, fps: '30', embed });
     // Encode only what the panel can actually show. A narrow side panel should not pay to encode
     // a full 3x framebuffer.
     const box = deviceScreenBox();
@@ -265,34 +271,61 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     const url = deviceVideoUrl();
     if (!url || !stage) return;
 
+    // Device changes arrive on a poll, so two starts can overlap across the module fetch below.
+    // Without a generation guard the loser keeps a live socket and decoder painting into the same
+    // canvas, and its eventual failure would tear down the stream that actually won.
+    const generation = ++videoGeneration;
+
     try {
       const mod = await import(`${basePath}/inspector-video.js`);
+      if (generation !== videoGeneration) return;
       if (!mod.isVideoSupported(window)) return;   // screenshots remain, silently
 
       if (!videoCanvas) {
         videoCanvas = document.createElement('canvas');
         videoCanvas.id = 'df-device-video';
+        videoCanvas.hidden = true;
         stage.insertBefore(videoCanvas, stage.firstChild);
       }
 
-      videoSurface = new mod.DeviceVideoSurface({
+      const surface = new mod.DeviceVideoSurface({
         url,
         canvas: videoCanvas,
         scope: window,
-        onFrame: () => document.body.classList.add('df-video-live'),
-        onUnavailable: () => stopDeviceVideo(),
+        onFrame: () => {
+          if (generation !== videoGeneration) return;
+          // Revealed only once a frame exists, so a stream that never starts leaves the stage as
+          // it was rather than covering it in black.
+          if (videoCanvas) videoCanvas.hidden = false;
+          document.body.classList.add('df-video-live');
+        },
+        onUnavailable: () => {
+          if (generation !== videoGeneration) return;
+          stopDeviceVideo();
+        },
       });
-      videoSurface.start();
+
+      videoSurface = surface;
+      surface.start();
     } catch (e) {
       // Any failure here means the Inspector keeps doing exactly what it did before.
-      stopDeviceVideo();
+      if (generation === videoGeneration) stopDeviceVideo();
     }
   }
 
   function stopDeviceVideo() {
+    videoGeneration++;
     try { if (videoSurface) videoSurface.stop(); } catch (e) { /* already stopped */ }
     videoSurface = null;
     document.body.classList.remove('df-video-live');
+    // Hide AND clear: a hidden canvas still holds the last decoded frame, and revealing it later
+    // for a different device would briefly show the previous one.
+    if (videoCanvas) {
+      videoCanvas.hidden = true;
+      try {
+        videoCanvas.getContext('2d').clearRect(0, 0, videoCanvas.width, videoCanvas.height);
+      } catch (e) { /* no context yet */ }
+    }
   }
 
   function hasDeviceLayer() {

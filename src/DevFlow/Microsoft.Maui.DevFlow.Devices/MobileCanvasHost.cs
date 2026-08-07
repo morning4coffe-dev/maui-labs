@@ -4,21 +4,55 @@ using System.Text.Json.Serialization;
 namespace Microsoft.Maui.DevFlow.Devices;
 
 /// <summary>
+/// Versioning of the external device host's wire protocol.
+/// </summary>
+public static class MobileCanvasProtocol
+{
+    /// <summary>
+    /// The major version this build was written against. A host reporting a different major is
+    /// treated as incompatible rather than optimistically driven, because the failure mode of
+    /// guessing is silently wrong device control rather than a clean error.
+    /// </summary>
+    public const int SupportedMajorVersion = 1;
+
+    /// <summary>Whether a reported protocol version is one this build can talk to.</summary>
+    public static bool IsSupported(string? reported)
+    {
+        // An older host predates schema stamping; assume compatibility rather than refusing to
+        // work with it, since the routes we use are the long-standing ones.
+        if (string.IsNullOrWhiteSpace(reported))
+            return true;
+
+        var major = reported.Split('.', 2)[0];
+        return int.TryParse(major, out var value) && value == SupportedMajorVersion;
+    }
+}
+
+/// <summary>
 /// State written by an external Mobile Canvas host to <c>~/.mobile-canvas/host.json</c>.
 /// <para>
-/// Only the fields DevFlow actually needs are modelled. The file is owned by another product, so
-/// unknown fields must be tolerated and a shape change must degrade to "no host" rather than
-/// throwing into a caller that was only asking whether a device was available.
+/// Field names mirror that product's own contract exactly. Only what DevFlow needs is modelled,
+/// and unknown fields are tolerated: the file is owned by another product, so a shape change must
+/// degrade to "no usable host" rather than throwing into a caller that was only asking whether a
+/// device was available.
+/// </para>
+/// <para>
+/// Note that this file exists only while the host is <em>running</em> — it is removed on shutdown.
+/// Its absence therefore means "no host running", which is not the same as "not installed".
 /// </para>
 /// </summary>
 public sealed record MobileCanvasHostState
 {
+    [JsonPropertyName("schemaVersion")] public string? SchemaVersion { get; init; }
     [JsonPropertyName("port")] public int Port { get; init; }
-    [JsonPropertyName("pid")] public int Pid { get; init; }
+    [JsonPropertyName("processId")] public int ProcessId { get; init; }
     [JsonPropertyName("version")] public string? Version { get; init; }
 
-    /// <summary>Single-use secret exchanged for a session cookie by a local client.</summary>
-    [JsonPropertyName("bootstrapSecret")] public string? BootstrapSecret { get; init; }
+    /// <summary>
+    /// Bearer token a trusted local control client presents on every request. Distinct from the
+    /// single-use bootstrap secret the host issues to canvas panels, which is a different flow.
+    /// </summary>
+    [JsonPropertyName("controlToken")] public string? ControlToken { get; init; }
 
     [JsonIgnore]
     public bool IsUsable => Port is > 0 and <= 65535;

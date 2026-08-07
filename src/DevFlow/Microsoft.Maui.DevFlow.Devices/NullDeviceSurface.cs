@@ -18,7 +18,7 @@ public sealed class NullDeviceSurface : IDeviceSurface
     public NullDeviceSurface(string? reason = null) =>
         _health = reason is null
             ? DeviceHostHealth.Unavailable
-            : new DeviceHostHealth { Available = false, Reason = reason };
+            : new DeviceHostHealth { Availability = DeviceHostAvailability.Absent, Reason = reason };
 
     public Task<DeviceHostHealth> GetHealthAsync(CancellationToken cancellationToken = default) =>
         Task.FromResult(_health);

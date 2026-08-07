@@ -150,6 +150,7 @@ public static class McpServerHost
 				.WithTools<BatchTools>()
 				.WithTools<InvokeTools>()
 				.WithTools<ExtensionTools>()
+				.WithTools<DeviceTools>()
 				.WithTools<Flows.FlowTools>()
 				.WithTools<Flows.FlowRecordTools>();
 		}

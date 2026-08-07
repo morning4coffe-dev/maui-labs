@@ -9,6 +9,7 @@ using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
 using System.Web;
 using Microsoft.Maui.Cli.DevFlow.Inspector;
+using Microsoft.Maui.DevFlow.Devices;
 using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Broker;
@@ -32,6 +33,7 @@ public class BrokerServer : IDisposable
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _agentRouteGates = new(StringComparer.Ordinal);
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _agentStateGates = new(StringComparer.Ordinal);
     private readonly MutationLeaseRegistry _mutationLeases;
+    private readonly DeviceRegistry _devices = new();
     private readonly BrokerFlowCoordinator _flows;
     private readonly RouteCheckpointCoordinator _checkpoints;
     private readonly WorkflowRunCoordinator _workflowRuns;
@@ -244,6 +246,11 @@ public class BrokerServer : IDisposable
             if (path.StartsWith("/api/test-agent", StringComparison.OrdinalIgnoreCase))
             {
                 await HandleTestAgentRoute(context, method, path);
+                return;
+            }
+            if (path.StartsWith("/api/devices", StringComparison.OrdinalIgnoreCase))
+            {
+                await HandleDeviceRoute(context, method, path);
                 return;
             }
             if (path.StartsWith("/api/artifact-trust", StringComparison.OrdinalIgnoreCase))
@@ -525,6 +532,133 @@ public class BrokerServer : IDisposable
         var agents = _agents.Values.Select(c => c.Registration).ToArray();
         return CliJson.SerializeUntyped(agents, indented: true);
     }
+
+    /// <summary>
+    /// The device layer surface. Kept behind the broker so hosts have a single front door: a
+    /// second front door is what produces duplicate device pickers and two competing ideas of
+    /// which device is selected.
+    /// </summary>
+    private async Task HandleDeviceRoute(HttpListenerContext context, string method, string path)
+    {
+        var (statusCode, body) = await BuildDeviceResponse(context, method, path);
+
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = "application/json";
+        var bytes = Encoding.UTF8.GetBytes(body);
+        context.Response.ContentLength64 = bytes.Length;
+        await context.Response.OutputStream.WriteAsync(bytes);
+        context.Response.Close();
+    }
+
+    private async Task<(int, string)> BuildDeviceResponse(HttpListenerContext context, string method, string path)
+    {
+        var trimmed = path.TrimEnd('/');
+
+        if (trimmed.StartsWith("/api/devices/", StringComparison.OrdinalIgnoreCase))
+            return await BuildDeviceControlResponse(context, method, trimmed);
+
+        if (method == "GET" && trimmed.Equals("/api/devices", StringComparison.OrdinalIgnoreCase))
+        {
+            var health = await _devices.GetHealthAsync();
+            var agents = _agents.Values.Select(c => c.Registration).ToArray();
+            var paired = await _devices.ListPairedAsync(agents);
+
+            var list = new JsonArray();
+            foreach (var entry in paired)
+            {
+                list.Add(new JsonObject
+                {
+                    ["id"] = entry.Device.Id,
+                    ["platform"] = entry.Device.Platform,
+                    ["name"] = entry.Device.Name,
+                    ["nativeId"] = entry.Device.NativeId,
+                    ["state"] = entry.Device.State,
+                    ["isBooted"] = entry.Device.IsBooted,
+                    ["osVersion"] = entry.Device.OsVersion,
+                    ["agentId"] = entry.AgentId,
+                    ["agentPort"] = entry.AgentPort,
+                    ["pairing"] = entry.MatchConfidence.ToString().ToLowerInvariant(),
+                    ["capabilities"] = new JsonObject
+                    {
+                        ["tap"] = entry.Device.Capabilities.Tap,
+                        ["screenshot"] = entry.Device.Capabilities.Screenshot,
+                        ["liveStream"] = entry.Device.Capabilities.LiveStream,
+                        ["recording"] = entry.Device.Capabilities.Recording,
+                        ["boot"] = entry.Device.Capabilities.Boot,
+                        ["rotate"] = entry.Device.Capabilities.Rotate,
+                    },
+                });
+            }
+
+            // The host's availability travels with the list so a caller can tell "no devices"
+            // apart from "no device layer" — they need very different messages in the UI.
+            return (200, CliJson.SerializeUntyped(new JsonObject
+            {
+                ["available"] = health.Available,
+                ["reason"] = health.Reason,
+                ["devices"] = list,
+            }, indented: true));
+        }
+
+        return (404, CliJson.SerializeUntyped(new JsonObject { ["error"] = "Not found" }, indented: false));
+    }
+
+    /// <summary>
+    /// Device control: <c>POST /api/devices/{id}/{action}</c>.
+    /// <para>
+    /// A refusal is a 200 with <c>success:false</c> and a reason rather than an HTTP error,
+    /// because "this platform cannot do that" is an expected answer that callers must be able to
+    /// show a human, not an exceptional condition.
+    /// </para>
+    /// </summary>
+    private async Task<(int, string)> BuildDeviceControlResponse(HttpListenerContext context, string method, string trimmed)
+    {
+        if (method != "POST")
+            return (405, CliJson.SerializeUntyped(new JsonObject { ["error"] = "Method not allowed" }, indented: false));
+
+        var segments = trimmed["/api/devices/".Length..].Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length != 2)
+            return (404, CliJson.SerializeUntyped(new JsonObject { ["error"] = "Not found" }, indented: false));
+
+        var deviceId = Uri.UnescapeDataString(segments[0]);
+        var action = segments[1].ToLowerInvariant();
+
+        DeviceOperationResult result;
+        switch (action)
+        {
+            case "boot":
+                result = await _devices.BootAsync(deviceId);
+                break;
+            case "shutdown":
+                result = await _devices.ShutdownAsync(deviceId);
+                break;
+            case "tap":
+                var query = context.Request.QueryString;
+                var x = ParseDouble(query["x"]);
+                var y = ParseDouble(query["y"]);
+                result = x is null || y is null
+                    ? DeviceOperationResult.Failed("A tap requires x and y coordinates.")
+                    : await _devices.TapAsync(deviceId, new DevicePoint(x.Value, y.Value));
+                break;
+            default:
+                return (404, CliJson.SerializeUntyped(new JsonObject { ["error"] = $"Unknown device action '{action}'" }, indented: false));
+        }
+
+        return (200, CliJson.SerializeUntyped(new JsonObject
+        {
+            ["success"] = result.Success,
+            ["reason"] = result.Reason,
+        }, indented: false));
+    }
+
+    private static double? ParseDouble(string? value) =>
+        double.TryParse(
+            value,
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out var parsed)
+            ? parsed
+            : null;
 
     private (int, string) HandleShutdown()
     {

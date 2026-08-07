@@ -87,6 +87,15 @@ public record AgentRegistration
 }
 
 /// <summary>
+/// The outcome of a device operation routed through the broker.
+/// </summary>
+/// <param name="Success">Whether the operation was performed.</param>
+/// <param name="Reason">Why it was not, phrased for a human.</param>
+public record DeviceControlResult(
+    [property: JsonPropertyName("success")] bool Success,
+    [property: JsonPropertyName("reason")] string? Reason);
+
+/// <summary>
 /// Broker state file written to ~/.mauidevflow/broker.json
 /// </summary>
 public record BrokerState

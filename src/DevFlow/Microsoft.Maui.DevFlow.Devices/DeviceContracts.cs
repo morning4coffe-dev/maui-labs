@@ -146,18 +146,76 @@ public sealed record DeviceTarget
 }
 
 /// <summary>
+/// Why a device host is or is not usable.
+/// <para>
+/// These are kept distinct because collapsing them is actively harmful: an incompatible or
+/// unauthenticated host that reports as "absent" looks exactly like a machine with no device
+/// layer installed, so a real, fixable integration failure silently presents as a missing
+/// feature and nobody ever investigates it.
+/// </para>
+/// </summary>
+public enum DeviceHostAvailability
+{
+    /// <summary>No host is installed or running. The ordinary case on most machines.</summary>
+    Absent = 0,
+
+    /// <summary>A state file exists but the host did not answer. Usually a stale file.</summary>
+    NotResponding = 1,
+
+    /// <summary>The host answered but rejected our credentials.</summary>
+    Unauthorized = 2,
+
+    /// <summary>The host speaks a protocol version this build does not support.</summary>
+    Incompatible = 3,
+
+    /// <summary>The host is present, authenticated, and usable.</summary>
+    Available = 4,
+}
+
+/// <summary>
 /// Health of the external device host backing an <see cref="IDeviceSurface"/>.
 /// </summary>
 public sealed record DeviceHostHealth
 {
-    /// <summary>True when a device host was discovered and answered.</summary>
-    public bool Available { get; init; }
+    /// <summary>Why the host is or is not usable.</summary>
+    public DeviceHostAvailability Availability { get; init; } = DeviceHostAvailability.Absent;
 
-    /// <summary>Human-readable reason the host is unavailable, for surfacing in diagnostics.</summary>
+    /// <summary>True only when the host is fully usable.</summary>
+    public bool Available => Availability == DeviceHostAvailability.Available;
+
+    /// <summary>
+    /// What a human should do about it. Present for every state except <see cref="DeviceHostAvailability.Available"/>.
+    /// </summary>
     public string? Reason { get; init; }
 
     public string? Version { get; init; }
 
-    public static readonly DeviceHostHealth Unavailable =
-        new() { Available = false, Reason = "No device host is installed." };
+    /// <summary>The protocol version the host reported, when it got far enough to say.</summary>
+    public string? ProtocolVersion { get; init; }
+
+    public static readonly DeviceHostHealth Unavailable = new()
+    {
+        Availability = DeviceHostAvailability.Absent,
+        Reason = "No device host is installed or running.",
+    };
+
+    public static DeviceHostHealth NotResponding(string reason) =>
+        new() { Availability = DeviceHostAvailability.NotResponding, Reason = reason };
+
+    public static DeviceHostHealth Unauthorized() =>
+        new()
+        {
+            Availability = DeviceHostAvailability.Unauthorized,
+            Reason = "The device host rejected DevFlow's control token. It was most likely restarted; "
+                   + "retry, or restart the device host to reissue one.",
+        };
+
+    public static DeviceHostHealth Incompatible(string? reported) =>
+        new()
+        {
+            Availability = DeviceHostAvailability.Incompatible,
+            ProtocolVersion = reported,
+            Reason = $"The device host speaks protocol '{reported ?? "unknown"}', which this build of "
+                   + $"DevFlow does not support (it expects {MobileCanvasProtocol.SupportedMajorVersion}.x).",
+        };
 }

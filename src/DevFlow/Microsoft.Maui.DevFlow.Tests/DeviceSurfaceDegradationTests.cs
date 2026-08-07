@@ -74,19 +74,24 @@ public class DeviceSurfaceDegradationTests : IDisposable
     [Fact]
     public void HostDiscovery_FindsAnInstalledHost()
     {
-        WriteHostState("""{"port":54321,"pid":42,"version":"0.1.6"}""");
+        // Field names mirror the external host's own contract exactly. Getting these wrong is
+        // silent: every request 401s or 404s and the whole layer reports as simply absent.
+        WriteHostState("""{"schemaVersion":"1.0","port":54321,"processId":42,"version":"0.1.6","controlToken":"abc"}""");
 
         var state = MobileCanvasHost.TryRead();
 
         Assert.NotNull(state);
         Assert.Equal(54321, state!.Port);
+        Assert.Equal(42, state.ProcessId);
+        Assert.Equal("abc", state.ControlToken);
+        Assert.Equal("1.0", state.SchemaVersion);
         Assert.Equal("http://127.0.0.1:54321", state.BaseUrl);
     }
 
     [Fact]
     public void HostDiscovery_IgnoresAStateFileWithNoUsablePort()
     {
-        WriteHostState("""{"pid":42}""");
+        WriteHostState("""{"processId":42}""");
 
         Assert.Null(MobileCanvasHost.TryRead());
     }
@@ -145,7 +150,7 @@ public class DeviceSurfaceDegradationTests : IDisposable
     {
         // A stale host.json outlives a crashed host. That is a normal state and must produce a
         // description, not an exception.
-        var stale = new MobileCanvasHostState { Port = 1, Pid = 0 };
+        var stale = new MobileCanvasHostState { Port = 1, ProcessId = 0 };
         using var http = new HttpClient { Timeout = TimeSpan.FromMilliseconds(250) };
         using var surface = new MobileCanvasDeviceSurface(http, () => stale);
 

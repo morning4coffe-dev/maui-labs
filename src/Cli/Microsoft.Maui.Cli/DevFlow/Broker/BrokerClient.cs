@@ -64,8 +64,66 @@ public static class BrokerClient
         }
     }
 
-    public static AgentRegistration[]? ListAgents(int brokerPort)
+    /// <summary>
+    /// Lists the devices the broker knows about, each paired with the app agent running inside it.
+    /// <para>
+    /// Routed through the broker rather than a device host directly, so there is a single front
+    /// door and one shared idea of which devices exist.
+    /// </para>
+    /// </summary>
+    public static async Task<string?> ListDevicesAsync(int brokerPort)
     {
+        try
+        {
+            return await _http.GetStringAsync($"http://localhost:{brokerPort}/api/devices");
+        }
+        catch
+        {
+            // A broker that is not running is an ordinary state for a device query.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Runs a device operation through the broker.
+    /// <para>
+    /// A refusal comes back as a described result rather than an exception: on most machines
+    /// "no device host" or "this platform cannot do that" is the expected answer, and the caller
+    /// needs the reason to choose another approach.
+    /// </para>
+    /// </summary>
+    public static async Task<DeviceControlResult> ControlDeviceAsync(
+        int brokerPort,
+        string deviceId,
+        string action,
+        double? x = null,
+        double? y = null)
+    {
+        try
+        {
+            var url = $"http://localhost:{brokerPort}/api/devices/{Uri.EscapeDataString(deviceId)}/{action}";
+            if (x is not null && y is not null)
+            {
+                var invariant = System.Globalization.CultureInfo.InvariantCulture;
+                url += $"?x={x.Value.ToString(invariant)}&y={y.Value.ToString(invariant)}";
+            }
+
+            using var response = await _http.PostAsync(url, content: null);
+            var body = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+                return new DeviceControlResult(false, $"The broker refused {action} with {(int)response.StatusCode}.");
+
+            return CliJson.Deserialize<DeviceControlResult>(body)
+                ?? new DeviceControlResult(false, "The broker returned an unreadable response.");
+        }
+        catch
+        {
+            return new DeviceControlResult(false, "The DevFlow broker could not be reached.");
+        }
+    }
+
+    public static AgentRegistration[]? ListAgents(int brokerPort)    {
         try
         {
             var response = GetString($"http://localhost:{brokerPort}/api/agents");

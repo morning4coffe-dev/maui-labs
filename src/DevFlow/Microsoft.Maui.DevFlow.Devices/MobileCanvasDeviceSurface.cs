@@ -34,31 +34,48 @@ public sealed class MobileCanvasDeviceSurface : IDeviceSurface, IDisposable
         if (state is null)
             return DeviceHostHealth.Unavailable;
 
+        if (!MobileCanvasProtocol.IsSupported(state.SchemaVersion))
+            return DeviceHostHealth.Incompatible(state.SchemaVersion);
+
         try
         {
-            using var response = await _http
-                .GetAsync($"{state.BaseUrl}{ApiPrefix}/health", cancellationToken)
-                .ConfigureAwait(false);
+            using var request = CreateRequest(HttpMethod.Get, state, "/status");
+            using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
-            return response.IsSuccessStatusCode
-                ? new DeviceHostHealth { Available = true, Version = state.Version }
-                : new DeviceHostHealth
-                {
-                    Available = false,
-                    Reason = $"The device host answered with {(int)response.StatusCode}.",
-                };
+            if (response.StatusCode == System.Net.HttpStatusCode.Unauthorized
+                || response.StatusCode == System.Net.HttpStatusCode.Forbidden)
+            {
+                return DeviceHostHealth.Unauthorized();
+            }
+
+            if (response.StatusCode == System.Net.HttpStatusCode.NotFound)
+            {
+                // The route we depend on is gone, which means this host is not one we know how to
+                // drive. Saying so beats reporting an empty device list forever.
+                return DeviceHostHealth.Incompatible(state.SchemaVersion);
+            }
+
+            if (!response.IsSuccessStatusCode)
+                return DeviceHostHealth.NotResponding($"The device host answered with {(int)response.StatusCode}.");
+
+            return new DeviceHostHealth
+            {
+                Availability = DeviceHostAvailability.Available,
+                Version = state.Version,
+                ProtocolVersion = state.SchemaVersion,
+            };
         }
         catch (Exception ex) when (IsTransport(ex))
         {
             // A stale host.json outlives a crashed host; that is a normal state, not a fault.
-            return new DeviceHostHealth { Available = false, Reason = "The device host is not responding." };
+            return DeviceHostHealth.NotResponding("The device host is not responding.");
         }
     }
 
     public async Task<IReadOnlyList<DeviceTarget>> ListAsync(CancellationToken cancellationToken = default)
     {
         var devices = await GetJsonAsync(
-            $"{ApiPrefix}/devices",
+            "/devices",
             MobileCanvasJsonContext.Default.DeviceTargetArray,
             cancellationToken).ConfigureAwait(false);
 
@@ -71,7 +88,7 @@ public sealed class MobileCanvasDeviceSurface : IDeviceSurface, IDisposable
             return null;
 
         return await GetJsonAsync(
-            $"{ApiPrefix}/devices/{Uri.EscapeDataString(deviceId)}",
+            $"/devices/{Uri.EscapeDataString(deviceId)}",
             MobileCanvasJsonContext.Default.DeviceTarget,
             cancellationToken).ConfigureAwait(false);
     }
@@ -97,9 +114,8 @@ public sealed class MobileCanvasDeviceSurface : IDeviceSurface, IDisposable
 
         try
         {
-            using var response = await _http
-                .GetAsync($"{state.BaseUrl}{ApiPrefix}/devices/{Uri.EscapeDataString(deviceId)}/screenshot", cancellationToken)
-                .ConfigureAwait(false);
+            using var request = CreateRequest(HttpMethod.Get, state, $"/devices/{Uri.EscapeDataString(deviceId)}/screenshot");
+            using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
                 return null;
@@ -110,6 +126,26 @@ public sealed class MobileCanvasDeviceSurface : IDeviceSurface, IDisposable
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Builds a request carrying the host's control token.
+    /// <para>
+    /// The token is a bearer credential for a trusted local client, distinct from the single-use
+    /// bootstrap secret the host issues to canvas panels. Every call needs it, so it is applied
+    /// here rather than at each call site where one could be forgotten.
+    /// </para>
+    /// </summary>
+    private static HttpRequestMessage CreateRequest(HttpMethod method, MobileCanvasHostState state, string path)
+    {
+        var request = new HttpRequestMessage(method, $"{state.BaseUrl}{ApiPrefix}{path}");
+        if (!string.IsNullOrWhiteSpace(state.ControlToken))
+        {
+            request.Headers.Authorization =
+                new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", state.ControlToken);
+        }
+
+        return request;
     }
 
     private async Task<T?> GetJsonAsync<T>(
@@ -123,9 +159,8 @@ public sealed class MobileCanvasDeviceSurface : IDeviceSurface, IDisposable
 
         try
         {
-            using var response = await _http
-                .GetAsync($"{state.BaseUrl}{path}", cancellationToken)
-                .ConfigureAwait(false);
+            using var request = CreateRequest(HttpMethod.Get, state, path);
+            using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
 
             if (!response.IsSuccessStatusCode)
                 return default;
@@ -159,9 +194,15 @@ public sealed class MobileCanvasDeviceSurface : IDeviceSurface, IDisposable
 
         try
         {
-            using var response = await _http
-                .PostAsync($"{state.BaseUrl}{ApiPrefix}/devices/{Uri.EscapeDataString(deviceId)}/{action}", content, cancellationToken)
-                .ConfigureAwait(false);
+            using var request = CreateRequest(HttpMethod.Post, state, $"/devices/{Uri.EscapeDataString(deviceId)}/{action}");
+            request.Content = content;
+            using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+
+            if (response.StatusCode is System.Net.HttpStatusCode.Unauthorized or System.Net.HttpStatusCode.Forbidden)
+            {
+                return DeviceOperationResult.Failed(
+                    "The device host rejected DevFlow's control token. It was most likely restarted.");
+            }
 
             if (!response.IsSuccessStatusCode)
                 return DeviceOperationResult.Failed($"The device host refused {action} with {(int)response.StatusCode}.");

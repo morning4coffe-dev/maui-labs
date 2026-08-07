@@ -116,20 +116,48 @@ tap; a tap on a MAUI element is a semantic tap that records a durable selector.
 
 ## Degradation
 
-The device layer is optional at every level, and absence is always an ordinary, describable state
-rather than an error:
+The device layer is optional at every level. Absence is an ordinary state — but it is carefully
+distinguished from *failure*, because collapsing the two is actively harmful: an incompatible or
+unauthenticated host reporting as "absent" looks exactly like a machine with no device layer, so a
+real and fixable break silently presents as a missing feature that nobody investigates.
+
+| `DeviceHostAvailability` | Meaning | Typical cause |
+|---|---|---|
+| `Absent` | No host running | Not installed, or the daemon has idled out |
+| `NotResponding` | State file exists, host silent | Stale file after a crash |
+| `Unauthorized` | Host rejected our control token | Host restarted and reissued one |
+| `Incompatible` | Protocol major version we do not support | Host updated ahead of DevFlow |
+| `Available` | Usable | — |
 
 | Situation | Behaviour |
 |---|---|
-| No device host installed | `NullDeviceSurface`: every capability false, every operation refused with a reason |
-| Host installed but not running | Stale state file is detected; reported as "not responding" |
-| Host state file malformed or a schema we do not recognise | Treated as no host |
 | Device exists but lacks a capability | Refused with a reason naming the capability |
 | Desktop MAUI app | No device identity, no pairing, no change in behaviour |
 
 Discovery is **file-based and never launches anything as a side effect of looking**. A DevFlow
 session that only wants to know whether device control is possible must not start a background
 daemon to find out.
+
+> Note that the host's state file exists only while the host is **running** — it is removed on
+> shutdown. Its absence therefore means "no host running", which is not the same as "not
+> installed". Distinguishing those is the job of the managed-install path, not of discovery.
+
+## Talking to the host
+
+The wire boundary is pinned by contract tests against a stub speaking the real protocol, because
+the adapter's failure mode is silence — a wrong field name or a missing credential fails in a way
+indistinguishable from "not installed". Degradation tests cannot catch that; only a successful
+authenticated round trip proves the binding.
+
+- State file: `~/.mobile-canvas/host.json`, fields `schemaVersion`, `port`, `processId`,
+  `controlToken`, `version`.
+- Health: `GET /api/v1/status`.
+- Every request carries `Authorization: Bearer {controlToken}`. This is a trusted local control
+  credential, distinct from the single-use bootstrap secret the host issues to canvas panels.
+- The protocol **major** version is checked before any request is made. An unsupported major is
+  refused up front rather than optimistically driven, because guessing risks silently wrong device
+  control instead of a clean error. A host that reports no version predates schema stamping and is
+  assumed compatible.
 
 ## Implementation
 

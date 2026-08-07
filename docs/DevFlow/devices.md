@@ -276,6 +276,23 @@ coordinate does not.
 The device list carries the host's availability alongside the devices so a caller can tell "no
 devices" from "no device layer" without a second request.
 
+## Recording out-of-app interactions
+
+Flows record semantic steps against MAUI elements, which is what makes them durable. A first-run
+permission prompt, a share sheet, or the soft keyboard is not in the visual tree at all, so a flow
+that touched one could not be authored — the recording dead-ended.
+
+A **device step** closes that gap without weakening the rest. It rides as an additive
+`deviceSteps` extension field and carries both a coordinate and a description of the native view
+under it, so replay can match by text or id and fall back to coordinates only when it must. A step
+with neither is reported as `IsFragile`, reusing the vocabulary the flow recorder already applies to
+a selector without an `AutomationId`: it blocks nothing, it tells a reviewer which steps will break
+first when the UI moves.
+
+Prefer a **precondition** over a device step wherever one exists. A flow that grants the permission
+up front never sees the prompt, and a test that sets up its own environment is deterministic in a
+way that one tapping through a dialog is not.
+
 ## Implementation
 
 | Type | Responsibility |

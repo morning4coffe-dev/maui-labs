@@ -481,13 +481,9 @@ public class InspectorPageTests : IAsyncLifetime
             await _page.Locator("#df-workbench-panel-plan").TextContentAsync(),
             StringComparison.OrdinalIgnoreCase);
         await Expect(_page.Locator("#df-workbench-panel-plan")).ToContainTextAsync("Create your first test");
-        var agentGuide = _page.Locator("#df-workbench-panel-plan .df-agent-guide");
-        await Expect(agentGuide).ToContainTextAsync("Create this test with your agent");
-        Assert.False(await agentGuide.EvaluateAsync<bool>("details => details.open"));
-        await agentGuide.Locator("summary").ClickAsync();
-        await Expect(agentGuide.GetByRole(
+        await Expect(_page.Locator("#df-workbench-panel-plan").GetByRole(
             AriaRole.Button,
-            new() { Name = "Copy prompt for your agent", Exact = true })).ToBeVisibleAsync();
+            new() { Name = "Create this test with your agent", Exact = true })).ToBeVisibleAsync();
 
         await Expect(_page.Locator("#df-workbench-stage-record")).ToBeDisabledAsync();
         await Expect(_page.GetByRole(AriaRole.Button, new() { Name = "Record steps", Exact = true })).ToBeDisabledAsync();
@@ -505,13 +501,10 @@ public class InspectorPageTests : IAsyncLifetime
         await _page.WaitForTimeoutAsync(3_500);
         Assert.True(await goal.EvaluateAsync<bool>("element => element === document.activeElement"));
 
-        var guide = _page.Locator("#df-workbench-panel-plan .df-agent-guide");
-        var summary = guide.Locator("summary");
-        await summary.ClickAsync();
-        await summary.FocusAsync();
+        var agentAction = _page.Locator("#df-workbench-panel-plan .df-agent-action");
+        await agentAction.FocusAsync();
         await _page.WaitForTimeoutAsync(3_500);
-        Assert.True(await guide.EvaluateAsync<bool>("details => details.open"));
-        Assert.True(await summary.EvaluateAsync<bool>("element => element === document.activeElement"));
+        Assert.True(await agentAction.EvaluateAsync<bool>("element => element === document.activeElement"));
     }
 
     [LiveInspectorFact]
@@ -1017,14 +1010,12 @@ public class InspectorPageTests : IAsyncLifetime
         await _page.GotoAsync(BaseUrl);
         await OpenSavedTestAsync(name);
         await _page.Locator("#df-workbench-stage-results").ClickAsync();
-        var guide = _page.Locator("#df-workbench-panel-trace .df-agent-guide");
-        await guide.Locator("summary").ClickAsync();
-        await guide.GetByRole(
-            AriaRole.Button,
-            new() { Name = "Copy prompt for your agent", Exact = true }).ClickAsync();
+        var agentAction = _page.Locator("#df-workbench-panel-trace .df-agent-action");
+        await Expect(agentAction).ToHaveTextAsync("Diagnose this failure with your agent");
+        await agentAction.ClickAsync();
 
         await Expect(_page.Locator("#df-workbench-status")).ToContainTextAsync(
-            "Copied an exact, time-limited run handoff");
+            "Copied the agent request");
         var copied = await _page.EvaluateAsync<string>("() => window.__copiedDevFlowData");
         Assert.Contains("Call maui_test_failure exactly once", copied, StringComparison.Ordinal);
         Assert.Contains("run-copy-handoff", copied, StringComparison.Ordinal);
@@ -2622,9 +2613,9 @@ public class InspectorPageTests : IAsyncLifetime
         await _page.Locator("#df-workbench-tab-improve").ClickAsync();
         var improve = _page.Locator("#df-workbench-panel-improve");
         await Expect(improve.GetByRole(AriaRole.Button, new() { Name = "Scan test", Exact = true })).ToBeVisibleAsync();
-        var improveAgentGuide = improve.Locator(".df-agent-guide");
-        await Expect(improveAgentGuide).ToContainTextAsync("Improve this test with your agent");
-        Assert.False(await improveAgentGuide.EvaluateAsync<bool>("details => details.open"));
+        var improveAgentAction = improve.Locator(".df-agent-action");
+        await Expect(improveAgentAction).ToContainTextAsync("Improve this test with your agent");
+        Assert.Equal("BUTTON", await improveAgentAction.EvaluateAsync<string>("element => element.tagName"));
         var scanOptions = improve.Locator(".df-tool-details");
         await Expect(scanOptions).ToHaveCountAsync(1);
         await _page.Locator("#df-workbench-stage-run").ClickAsync();

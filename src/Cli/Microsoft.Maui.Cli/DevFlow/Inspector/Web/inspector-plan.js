@@ -549,14 +549,9 @@ export function renderPlanPanel(helpers) {
   });
   openSaved.classList.add('df-workbench-action-secondary');
   goalStart.append(quickActions);
-  helpers.agentGuide?.(goalStart, {
+  helpers.agentAction?.(goalStart, {
     title: 'Create this test with your agent',
-    description: 'Prefer to start in agent chat? Your agent can prepare the complete draft, then bring only the save and run decisions back here.',
-    steps: [
-      'Paste the prompt into your coding agent chat.',
-      'Review the prepared test when its request appears in Agent requests.',
-      'Approve saving and running separately.',
-    ],
+    description: 'Ask your host agent to prepare the complete draft. A standalone browser copies the same bounded request.',
     prompt: () => agentPreparationPrompt(plan.goal),
   });
   if (!draft.savedTestPickerOpen) root.append(goalStart);

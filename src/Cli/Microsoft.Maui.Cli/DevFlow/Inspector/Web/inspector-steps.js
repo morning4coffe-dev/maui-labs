@@ -256,7 +256,7 @@ function renderReviewIssueSummary(root, flow, draft, authoring, helpers) {
   }
   actions.append(button('Check again', () => authoring.validateFlow?.()));
   card.append(actions);
-  helpers.agentGuide?.(card, {
+  helpers.agentAction?.(card, {
     title: 'Ask your agent to help resolve this',
     description: 'Your agent can inspect the draft and current app, explain the blocker, and prepare an inert update request.',
     prompt: [
@@ -517,14 +517,9 @@ function renderSelectorResolution(parent, flow, stepIndex, draft, authoring, hel
           className: 'df-workbench-safety',
           text: 'None of these repeated controls has enough stable identity to save safely. Add a stable item key to the app, rebuild it, and record this step again.',
         }));
-        helpers.agentGuide?.(host, {
+        helpers.agentAction?.(host, {
           title: 'Ask your agent to make this control testable',
           description: 'The app needs stable identity for each repeated item before this step can be replayed safely.',
-          steps: [
-            'Add a stable model ID for each collection item.',
-            'Bind DevFlowTest.StableItemKey on the item-template root.',
-            'Rebuild the app and record this step again.',
-          ],
           prompt: [
             'Improve the connected MAUI app testability for this repeated control.',
             `Step ${sequence} uses duplicate AutomationId ${current?.automationId || '(missing)'}.`,

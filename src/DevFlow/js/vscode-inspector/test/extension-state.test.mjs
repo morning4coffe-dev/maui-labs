@@ -30,6 +30,7 @@ function selectRefreshedAgent(agents, current) {
 function requiresBridgeRequestId(type) {
   return type === 'devflow:sendToCopilot' ||
     type === 'devflow:attachCopilot' ||
+    type === 'devflow:requestTestProposal' ||
     type === 'devflow:pickWorkflow' ||
     type === 'devflow:attachData' ||
     type === 'devflow:openSource' ||
@@ -75,6 +76,10 @@ test('reconnect selection accepts the unique same-identity replacement', () => {
 
 test('request-gated bridge actions are enumerated', () => {
   assert.equal(requiresBridgeRequestId('devflow:attachData'), true);
+  assert.equal(requiresBridgeRequestId('devflow:requestTestProposal'), true);
   assert.equal(requiresBridgeRequestId('devflow:selectionChanged'), false);
   assert.equal(requiresBridgeRequestId('devflow:openSource'), true);
+  assert.match(source, /case "devflow:requestTestProposal":/);
+  assert.match(source, /isPartialQuery: false/);
+  assert.match(source, /'requestTestProposal'/);
 });

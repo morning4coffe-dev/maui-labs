@@ -156,8 +156,8 @@ test("failed-result agent guidance prepares one exact restricted handoff", () =>
   assert.doesNotMatch(repair, /latest failed local DevFlow test/i);
   assert.match(trace, /helpers\.run\?\.prepareFailureAgentPrompt/);
   assert.match(repair, /prepareFailureAgentPrompt/);
-  assert.match(shell, /await config\.prompt\(\)/);
-  assert.match(shell, /Preparing prompt/);
+  assert.match(shell, /typeof prompt === 'function' \? await prompt\(\)/);
+  assert.match(shell, /Preparing agent request/);
 });
 
 test("source proposal panel keeps XAML/C# review and flow repair separate", () => {
@@ -195,7 +195,7 @@ test("workbench assets are embedded, routed, and responsive", () => {
   assert.match(css, /data-host-layout="narrow"/);
   assert.match(css, /data-host-layout="short"/);
   assert.match(css, /forced-colors: active/);
-  assert.match(css, /\.df-agent-guide/);
+  assert.match(css, /\.df-agent-action/);
 });
 
 test("agent request inbox permits narrowing only and never treats chat as approval", async () => {
@@ -263,6 +263,66 @@ test("host bridge exposes optional workbench capability names", () => {
   assert.match(bridge, /bounded native trace picker/);
   assert.match(bridge, /testProposalApprovalResult/);
   assert.match(bridge, /grantId/);
+});
+
+test("agent assistance is a direct host-aware button with browser copy fallback", () => {
+  const workbench = read("inspector-workbench.js");
+
+  assert.match(workbench, /df-workbench-action df-agent-action/);
+  assert.match(workbench, /bridge\?\.has\?\.\('requestTestProposal'\)/);
+  assert.match(workbench, /bridge\.request\('requestTestProposal'/);
+  assert.match(workbench, /Copied the agent request/);
+  assert.doesNotMatch(workbench, /df-agent-guide/);
+});
+
+test("agent requests dispatch directly when supported and copy safely otherwise", async () => {
+  const { deliverAgentRequest } = await loadWorkbenchStateModule();
+  const sent = [];
+  let copied = "";
+  const bridge = {
+    has: (capability) => capability === "requestTestProposal",
+    request: async (capability, payload) => {
+      sent.push({ capability, payload });
+      return { ok: true, message: "Sent to Copilot." };
+    },
+  };
+
+  const direct = await deliverAgentRequest({
+    bridge,
+    prompt: " Prepare the test ",
+    label: "Create this test with your agent",
+    copyText: async (value) => { copied = value; return true; },
+  });
+  assert.equal(direct.delivery, "agent");
+  assert.equal(direct.buttonLabel, "Sent to agent");
+  assert.equal(copied, "");
+  assert.equal(sent[0].capability, "requestTestProposal");
+  assert.equal(sent[0].payload.prompt, "Prepare the test");
+
+  bridge.request = async () => ({ ok: false, error: "Host session closed." });
+  const fallback = await deliverAgentRequest({
+    bridge,
+    prompt: "Diagnose the run",
+    copyText: async (value) => { copied = value; return true; },
+  });
+  assert.equal(fallback.delivery, "clipboard");
+  assert.equal(copied, "Diagnose the run");
+  assert.match(fallback.status, /Host session closed/);
+
+  const hostClipboard = await deliverAgentRequest({
+    bridge: {
+      has: () => true,
+      request: async () => ({
+        ok: true,
+        message: "Copied by VS Code.",
+        value: { delivery: "clipboard" },
+      }),
+    },
+    prompt: "Improve the test",
+    copyText: async () => { throw new Error("must not copy twice"); },
+  });
+  assert.equal(hostClipboard.delivery, "clipboard");
+  assert.equal(hostClipboard.buttonLabel, "Prompt copied");
 });
 
 test("run preflight summaries retain action classes but never fill values", async () => {
@@ -559,8 +619,11 @@ test("VS Code host advertises implemented capabilities and refreshes after broke
   const extension = readVscodeHost();
   const capabilities = extension.match(/const capabilities = \[([^\]]+)\];/)?.[1] || "";
 
-  assert.doesNotMatch(capabilities, /attachTestContext|requestTestProposal/);
-  assert.doesNotMatch(extension, /devflow:attachTestContext|devflow:requestTestProposal/);
+  assert.doesNotMatch(capabilities, /attachTestContext/);
+  assert.match(capabilities, /requestTestProposal/);
+  assert.doesNotMatch(extension, /devflow:attachTestContext/);
+  assert.match(extension, /devflow:requestTestProposal/);
+  assert.match(extension, /isPartialQuery: false/);
   assert.match(extension, /const restartWatcher = setInterval/);
   assert.match(extension, /inspectorConnectionSignature/);
   assert.match(extension, /function normalizeAgentIdentityPart/);

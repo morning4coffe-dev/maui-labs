@@ -59,6 +59,61 @@ function boundedHint(value) {
   return hint && hint.length <= 4096 ? hint : null;
 }
 
+export async function deliverAgentRequest({
+  bridge,
+  prompt,
+  label = 'Work with your agent',
+  intent = 'devflow-test-assistance',
+  copyText,
+} = {}) {
+  const value = typeof prompt === 'function' ? await prompt() : prompt;
+  const request = String(value || '').trim().slice(0, 8192);
+  if (!request) {
+    return {
+      ok: false,
+      delivery: 'none',
+      buttonLabel: 'Agent request unavailable',
+      status: 'No agent request is available yet.',
+    };
+  }
+
+  let hostError = '';
+  if (bridge?.has?.('requestTestProposal')) {
+    try {
+      const result = await bridge.request('requestTestProposal', {
+        prompt: request,
+        title: label,
+        intent,
+      }, 30000);
+      if (result?.ok) {
+        const copied = result.value?.delivery === 'clipboard';
+        return {
+          ok: true,
+          delivery: copied ? 'clipboard' : 'agent',
+          buttonLabel: copied ? 'Prompt copied' : 'Sent to agent',
+          status: result.status || result.message ||
+            (copied ? 'Copied the agent request.' : `Sent “${label}” to the host agent.`),
+        };
+      }
+      hostError = String(result?.error || 'The host agent did not accept the request.');
+    } catch (error) {
+      hostError = String(error?.message || 'The host agent did not accept the request.');
+    }
+  }
+
+  const copied = typeof copyText === 'function' && await copyText(request);
+  return {
+    ok: !!copied,
+    delivery: copied ? 'clipboard' : 'none',
+    buttonLabel: copied ? 'Prompt copied' : 'Copy failed',
+    status: copied
+      ? hostError
+        ? `The host agent was unavailable. Copied the request instead: ${hostError}`
+        : 'Copied the agent request. Paste it into your coding agent chat.'
+      : hostError || 'The host agent was unavailable and the prompt could not be copied.',
+  };
+}
+
 export function parseWorkbenchStartupHints(search = '') {
   const query = new URLSearchParams(search);
   return {
@@ -479,67 +534,42 @@ export function createInspectorWorkbench(options = {}) {
         parent.append(button);
         return button;
       },
-      agentGuide(parent, config = {}) {
-        const guide = doc.createElement('details');
-        guide.className = 'df-agent-guide df-tool-details';
-        guide.open = config.open === true;
-        const summary = doc.createElement('summary');
-        summary.textContent = config.title || 'Work with your agent';
-        guide.append(summary);
-        if (config.description) {
-          const description = doc.createElement('p');
-          description.className = 'df-workbench-intro';
-          description.textContent = config.description;
-          guide.append(description);
-        }
-        if (Array.isArray(config.steps) && config.steps.length > 0) {
-          const steps = doc.createElement('ol');
-          steps.className = 'df-workbench-list df-agent-guide-steps';
-          for (const value of config.steps) {
-            const item = doc.createElement('li');
-            item.textContent = String(value);
-            steps.append(item);
+      agentAction(parent, config = {}) {
+        if (!config.prompt) return null;
+        const label = config.buttonLabel || config.title || 'Work with your agent';
+        const button = doc.createElement('button');
+        button.type = 'button';
+        button.className = 'df-workbench-action df-agent-action';
+        button.textContent = label;
+        if (config.description) button.title = config.description;
+        button.addEventListener('click', async () => {
+          button.disabled = true;
+          button.setAttribute('aria-busy', 'true');
+          button.textContent = 'Preparing agent request…';
+          try {
+            if (bridge?.has?.('requestTestProposal')) button.textContent = 'Sending to agent…';
+            const outcome = await deliverAgentRequest({
+              bridge,
+              prompt: config.prompt,
+              label,
+              intent: config.intent,
+              copyText,
+            });
+            button.textContent = outcome.buttonLabel;
+            setStatus(outcome.status);
+          } catch (error) {
+            button.textContent = 'Agent request unavailable';
+            setStatus(error?.message || 'Could not prepare the agent request.');
+          } finally {
+            win.setTimeout(() => {
+              button.disabled = false;
+              button.setAttribute('aria-busy', 'false');
+              button.textContent = label;
+            }, 1600);
           }
-          guide.append(steps);
-        }
-        if (config.prompt) {
-          const actions = doc.createElement('div');
-          actions.className = 'df-authoring-actions';
-          const copy = doc.createElement('button');
-          copy.type = 'button';
-          copy.className = 'df-workbench-action df-agent-guide-copy';
-          copy.textContent = config.buttonLabel || 'Copy prompt for your agent';
-          copy.addEventListener('click', async () => {
-            copy.disabled = true;
-            copy.textContent = 'Preparing prompt…';
-            try {
-              const value = typeof config.prompt === 'function' ? await config.prompt() : config.prompt;
-              const prompt = String(value || '').trim().slice(0, 8192);
-              if (!prompt) {
-                copy.textContent = 'Prompt unavailable';
-                setStatus('No agent prompt is available yet.');
-                return;
-              }
-              const copied = await copyText(prompt);
-              copy.textContent = copied ? 'Prompt copied' : 'Copy failed';
-              setStatus(copied
-                ? 'Copied an exact, time-limited run handoff. Paste it into your coding agent chat.'
-                : 'Could not copy the agent prompt.');
-            } catch (error) {
-              copy.textContent = 'Prompt unavailable';
-              setStatus(error?.message || 'Could not prepare the restricted agent handoff.');
-            } finally {
-              win.setTimeout(() => {
-                copy.disabled = false;
-                copy.textContent = config.buttonLabel || 'Copy prompt for your agent';
-              }, 1600);
-            }
-          });
-          actions.append(copy);
-          guide.append(actions);
-        }
-        parent.append(guide);
-        return guide;
+        });
+        parent.append(button);
+        return button;
       },
       placeholder(message) {
         setStatus(message);

@@ -75,6 +75,7 @@ interface BridgeResult {
     sourceColumn?: number;
     sourceHash?: string;
     sourceConfidence?: string;
+    delivery?: "agent" | "clipboard";
   };
 }
 interface TestBundle {
@@ -380,6 +381,7 @@ function selectRefreshedAgent(agents: AgentRegistration[], current: AgentRegistr
 function requiresBridgeRequestId(type: string | undefined): boolean {
   return type === "devflow:sendToCopilot" ||
     type === "devflow:attachCopilot" ||
+    type === "devflow:requestTestProposal" ||
     type === "devflow:pickWorkflow" ||
     type === "devflow:attachData" ||
     type === "devflow:openSource" ||
@@ -403,6 +405,9 @@ interface BridgeMessage {
   type?: string;
   bridgeId?: string;
   payload?: CopilotPayload;
+  prompt?: string;
+  title?: string;
+  intent?: string;
   file?: string;
   line?: number;
   column?: number;
@@ -450,6 +455,8 @@ async function handleBridgeMessage(msg: BridgeMessage | undefined, panelState: P
     case "devflow:attachCopilot":
       await sendToCopilot(msg.payload, panelState);
       return { ok: true, message: "Added Inspector context to Copilot." };
+    case "devflow:requestTestProposal":
+      return await sendAgentRequest(msg.prompt, msg.title);
     case "devflow:pickWorkflow":
       return await pickWorkflowFile();
     case "devflow:openSource":
@@ -789,6 +796,33 @@ async function sendToCopilot(payload: CopilotPayload | undefined, panelState: Pa
     "Added the MAUI selection to Copilot.",
     "Copied the MAUI selection context for Copilot.",
     "DevFlow: Copilot Chat unavailable — selection context copied to the clipboard.");
+}
+
+async function sendAgentRequest(prompt: string | undefined, title: string | undefined): Promise<BridgeResult> {
+  const request = typeof prompt === "string" ? prompt.trim() : "";
+  if (!request || request.length > 8192) {
+    return { ok: false, error: "The DevFlow agent request must contain 1 to 8192 characters." };
+  }
+  try {
+    await vscode.commands.executeCommand("workbench.action.chat.open", {
+      query: request,
+      isPartialQuery: false,
+    });
+    const requestTitle = typeof title === "string" ? title.trim().slice(0, 120) : "";
+    return {
+      ok: true,
+      message: requestTitle ? `Sent “${requestTitle}” to Copilot Chat.` : "Sent the DevFlow request to Copilot Chat.",
+      value: { delivery: "agent" },
+    };
+  } catch {
+    await vscode.env.clipboard.writeText(request);
+    vscode.window.showInformationMessage("DevFlow: Copilot Chat unavailable — agent request copied.");
+    return {
+      ok: true,
+      message: "Copilot Chat was unavailable, so the agent request was copied.",
+      value: { delivery: "clipboard" },
+    };
+  }
 }
 
 async function pickWorkflowFile(): Promise<BridgeResult> {
@@ -1252,7 +1286,7 @@ function renderHost(inspectorUrl: string, title: string, nonce: string, bridgeId
       const frame = document.getElementById('frame');
       const bridgeId = ${bridgeLiteral};
       // Capabilities this host contributes to the shared inspector.
-      const capabilities = ['copilot', 'copilotContext', 'workflowFilePicker', 'attachData', 'openSource', 'saveRecording', 'selection', 'saveTestBundle', 'loadTestBundle', 'pickTrace', 'openSourceDiff', 'applySourceProposal', 'applyCSharpSourceProposal', 'getCSharpSourceSelection'];
+      const capabilities = ['copilot', 'copilotContext', 'workflowFilePicker', 'attachData', 'openSource', 'saveRecording', 'selection', 'saveTestBundle', 'loadTestBundle', 'pickTrace', 'requestTestProposal', 'openSourceDiff', 'applySourceProposal', 'applyCSharpSourceProposal', 'getCSharpSourceSelection'];
       // Map the shared inspector's semantic theme tokens onto VS Code's theme colors so the panel
       // adopts the user's active color theme (light / dark / high-contrast). getComputedStyle resolves
       // each --vscode-* var to a concrete color; the inspector re-validates every value before use.
@@ -1377,7 +1411,7 @@ function renderHost(inspectorUrl: string, title: string, nonce: string, bridgeId
         }
         if (!d || d.bridgeId !== bridgeId) return;                // nonce-authenticated
         if (d.type === 'devflow:ready') { announce(); return; }
-        if (d.type === 'devflow:sendToCopilot' || d.type === 'devflow:attachCopilot' || d.type === 'devflow:pickWorkflow' || d.type === 'devflow:attachData' || d.type === 'devflow:openSource' || d.type === 'devflow:recordingComplete' || d.type === 'devflow:selectionChanged' || d.type === 'devflow:saveTestBundle' || d.type === 'devflow:loadTestBundle' || d.type === 'devflow:pickTrace' || d.type === 'devflow:openSourceDiff' || d.type === 'devflow:applySourceProposal' || d.type === 'devflow:applyCSharpSourceProposal' || d.type === 'devflow:getCSharpSourceSelection') {
+        if (d.type === 'devflow:sendToCopilot' || d.type === 'devflow:attachCopilot' || d.type === 'devflow:requestTestProposal' || d.type === 'devflow:pickWorkflow' || d.type === 'devflow:attachData' || d.type === 'devflow:openSource' || d.type === 'devflow:recordingComplete' || d.type === 'devflow:selectionChanged' || d.type === 'devflow:saveTestBundle' || d.type === 'devflow:loadTestBundle' || d.type === 'devflow:pickTrace' || d.type === 'devflow:openSourceDiff' || d.type === 'devflow:applySourceProposal' || d.type === 'devflow:applyCSharpSourceProposal' || d.type === 'devflow:getCSharpSourceSelection') {
           vscode.postMessage(d);                                  // relay to the extension host
         }
       });

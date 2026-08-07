@@ -76,16 +76,17 @@ screenshot, properties/source, Data dock, and Evidence controls remain unchanged
 5. DevFlow opens **Results** for every terminal outcome. Use the pass/fail banner and next actions
    to check and run again, improve the test, inspect a failed step, or review an eligible repair.
 
-The Goal page also includes a collapsed **Create this test with your agent** guide. It copies a
-ready-to-paste prompt that asks the restricted agent to prepare the complete draft and return only
-the save decision to **Requests**. Saving and running remain separate human decisions. Failed
-Results and Improve expose equivalent contextual prompts for diagnosis and read-only quality
-review; agent repair suggestions are never applied directly.
+The Goal page also includes a **Create this test with your agent** button. In VS Code and GitHub
+Copilot Canvas it sends the bounded request directly to the host agent through the authenticated
+bridge. In a standalone browser it copies the same ready-to-paste prompt. Saving and running remain
+separate human decisions. Failed Results and Improve expose equivalent direct buttons for diagnosis
+and read-only quality review; agent repair suggestions are never applied directly.
 
-For a failed local run, copying **Diagnose this failure with your agent** creates a ten-minute,
-run-bound restricted-agent handoff. The prompt already names the exact test, run, target, authoring
-session, and read capabilities, so the agent calls `maui_test_failure` once instead of creating a
-temporary draft, guessing the latest run, or using migration/run-status calls to recover context.
+For a failed local run, selecting **Diagnose this failure with your agent** creates a ten-minute,
+run-bound restricted-agent handoff and sends it directly to a capable host agent (or copies it in a
+standalone browser). The request already names the exact test, run, target, authoring session, and
+read capabilities, so the agent calls `maui_test_failure` once instead of creating a temporary
+draft, guessing the latest run, or using migration/run-status calls to recover context.
 The tool returns the canonical class, bounded failed-step facts, a plain-language explanation, and
 the next safe action. Missing route/checkpoint facts remain unknown rather than becoming false
 mismatches. An inert selector proposal is allowed only when the response explicitly marks a
@@ -188,10 +189,11 @@ fails closed and requires a fresh request. The inbox cannot approve
 repair application, source changes, lease takeover, arbitrary files/network/CDP, or any capability
 outside the restricted test-agent action set.
 
-The provider-neutral `requestTestProposal` host-bridge message remains reserved for future native
-host presentation and is not advertised as an available capability. Canvas, VS Code, and the
-browser all receive the shared broker-owned inbox when they embed the Inspector; they do not need
-to mint ambient credentials.
+The provider-neutral `requestTestProposal` host-bridge message carries these explicit button
+requests to VS Code or GitHub Copilot Canvas. It is nonce-authenticated, bounded to 8192 characters,
+and runs only after a human click. Standalone browser hosts do not advertise the capability and use
+the clipboard fallback. All hosts still receive the shared broker-owned approval inbox and do not
+mint ambient credentials.
 
 Canvas reports source apply unsupported. VS Code can open a native reviewed diff and ask its local
 human to confirm a bounded source apply, but it cannot approve itself, apply a flow repair, or
@@ -255,9 +257,9 @@ The initial **Repair** view shows only the current safe action: **Open Results**
 test exists, **Check latest failure** when one can be classified, or **Create suggested update**
 when eligibility passes. A suggestion then advances one reviewed action at a time: **Review
 suggested update**, **Try this update**, **Approve update**, and **Apply update**. Classification
-evidence, selector proof, and policy rules remain collapsed. **Diagnose with your agent** copies a
-bounded prompt for failure explanation or an inert suggestion; agent-originated suggestions are
-never applied directly.
+evidence, selector proof, and policy rules remain collapsed. **Diagnose with your agent** sends a
+bounded request to a capable host agent or copies it in the browser; agent-originated suggestions
+are never applied directly.
 
 The **Repair** tab explains eligibility rather than guessing. It accepts only a primary
 pre-dispatch `locator-not-found` with a complete matching current checkpoint and trusted local

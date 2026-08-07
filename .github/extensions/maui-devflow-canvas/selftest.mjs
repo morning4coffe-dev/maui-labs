@@ -300,6 +300,10 @@ if (target) {
   check("Canvas advertises copilotContext capability", /copilotContext/.test(shell));
   check("Canvas relays devflow:attachCopilot with acknowledgement", /devflow:attachCopilot/.test(shell)
     && /action:\s*'attachCopilot'/.test(shell));
+  check("Canvas advertises requestTestProposal capability", /requestTestProposal/.test(shell));
+  check("Canvas relays devflow:requestTestProposal with acknowledgement", /devflow:requestTestProposal/.test(shell)
+    && /action:\s*'requestTestProposal'/.test(shell));
+  check("agent request uses the joined Copilot session", /sharedSession\.send\(\{\s*prompt:\s*request\s*\}\)/.test(src));
   check("push uses a standard blob attachment", /type:\s*"blob"/.test(src));
   check("push labels the blob as text/plain", /mimeType:\s*"text\/plain"/.test(src));
   check("push base64-encodes the bounded UTF-8 context", /toString\("base64"\)/.test(src));

@@ -336,14 +336,9 @@ function renderResultsSummary(root, helpers, state, controller, snapshot, report
   }
   banner.append(actions);
   if (failed) {
-    helpers.agentGuide?.(banner, {
+    helpers.agentAction?.(banner, {
       title: 'Diagnose this failure with your agent',
-      description: 'Copy an exact, time-limited handoff. Your agent can explain this run without searching for files, sessions, or tokens.',
-      steps: [
-        'The Inspector identifies this exact failed run.',
-        'It explains whether to fix the test, inspect the app, or retry later.',
-        'Any repair remains a suggestion until you validate and approve it.',
-      ],
+      description: 'Send an exact, time-limited handoff so your agent can explain this run without searching for files, sessions, or tokens.',
       prompt: () => helpers.run?.prepareFailureAgentPrompt?.(),
     });
   }

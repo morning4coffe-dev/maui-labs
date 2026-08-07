@@ -30,10 +30,11 @@ Open `maui devflow inspect`, select **Tests**, then follow **Goal**, **Steps**, 
 
 ### Work with your coding agent
 
-From **Goal**, expand **Create this test with your agent** and copy the prepared prompt into your
-coding-agent chat. The agent prepares the complete draft and expected results, then its request
-appears under **Requests**. Review the test before choosing **Save test**; running it is always a
-second, separate **Allow one run** decision.
+From **Goal**, select **Create this test with your agent**. VS Code and GitHub Copilot Canvas send
+the bounded request directly to the host agent; a standalone browser copies it for pasting into
+agent chat. The agent prepares the complete draft and expected results, then its request appears
+under **Requests**. Review the test before choosing **Save test**; running it is always a second,
+separate **Allow one run** decision.
 
 After a failure, **Results** offers **Diagnose this failure with your agent**. The agent can explain
 the bounded failure and prepare an inert control-update suggestion, but it cannot apply the

@@ -20,6 +20,7 @@ import { LiveStore } from "./store.mjs";
 import { Recorder } from "./recorder.mjs";
 import { renderShell, renderDisconnected } from "./shell.mjs";
 import { readJsonBody, selectInspectorAgent } from "./http.mjs";
+import { dispatchAgentRequest } from "./agent-request.mjs";
 import { readBrokerState } from "@maui-devflow/client";
 
 // Device targeting is optional — the CLI auto-discovers the agent via the broker. Override
@@ -255,6 +256,12 @@ async function pushInspectorContext(instanceId, store, context, input) {
   });
 }
 
+async function sendAgentRequest(instanceId, prompt, title) {
+  return dispatchAgentRequest(sharedSession, instances.get(instanceId), prompt, title, {
+    timeout: withTimeout,
+  });
+}
+
 const DATA_CONTEXT_SCOPES = new Set(["logs", "network", "preferences", "device", "sensors", "files", "alerts"]);
 
 async function pushDataContext(instanceId, snapshot) {
@@ -301,6 +308,7 @@ async function applyControl(st, body, instanceId) {
   case "logs":         return store.getLogs(body.limit || 100);
   case "attachSelection": return pushSelectionContext(instanceId, store, body.element);
   case "attachCopilot": return pushInspectorContext(instanceId, store, body.context, body.payload);
+  case "requestTestProposal": return sendAgentRequest(instanceId, body.prompt, body.title);
   case "attachData":   return pushDataContext(instanceId, body.snapshot);
   case "saveTestBundle": return persistTestBundle(st, body.bundle);
   // ── Workflow Test Recorder ──────────────────────────────────────────────

@@ -409,14 +409,9 @@ export function renderImprovePanel(helpers) {
         : 'The scan is read-only and does not create a repair.'
   ));
   root.append(controls);
-  helpers.agentGuide?.(root, {
+  helpers.agentAction?.(root, {
     title: 'Improve this test with your agent',
     description: 'Your agent can run the same read-only quality check and explain the findings in plain language.',
-    steps: [
-      'The agent scans the loaded test without changing it.',
-      'It summarizes fragile controls and missing expected results.',
-      'You decide which suggestions to edit or review.',
-    ],
     prompt: [
       'Use only the restricted DevFlow test-agent tools.',
       'Review the currently loaded DevFlow test for fragile controls, missing expected results, and incomplete route or platform coverage.',

@@ -43,6 +43,9 @@ export function describeHostCapability(capabilities, capability) {
   if (!supported && capability === 'pickTrace') {
     return 'This host does not support a bounded native trace picker. The shared Inspector can offer its browser file-picker fallback when the host permits it.';
   }
+  if (!supported && capability === 'requestTestProposal') {
+    return 'This host does not support direct agent requests. The shared Inspector will copy the bounded request for you instead.';
+  }
   return supported
     ? `This host can ${label} through a bounded typed request.`
     : `This host does not support ${label}. The browser will offer a download fallback instead.`;

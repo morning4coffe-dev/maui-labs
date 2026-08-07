@@ -42,14 +42,9 @@ export function renderRepairPanel(helpers) {
     );
     classify.classList.add('df-authoring-primary');
     classify.disabled = state.classifying || !repair;
-    helpers.agentGuide?.(root, {
+    helpers.agentAction?.(root, {
       title: 'Diagnose with your agent',
-      description: 'Copy an exact, time-limited handoff for this failed run. The agent cannot apply a change.',
-      steps: [
-        'The Inspector identifies this exact failed test run.',
-        'If a safe control replacement exists, the agent prepares an inert suggestion.',
-        'You review, validate, and apply any change here.',
-      ],
+      description: 'Send an exact, time-limited handoff for this failed run. The agent cannot apply a change.',
       prompt: () => helpers.run?.prepareFailureAgentPrompt?.(),
     });
   } else if (eligibility?.eligible !== true && !proposal) {

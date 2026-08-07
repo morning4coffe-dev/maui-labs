@@ -103,6 +103,7 @@ maui-labs/
 │   │   ├── Microsoft.Maui.DevFlow.Analyzers/     # Roslyn analyzers
 │   │   ├── Microsoft.Maui.DevFlow.Blazor/        # Blazor WebView CDP bridge
 │   │   ├── Microsoft.Maui.DevFlow.Blazor.Gtk/    # WebKitGTK CDP bridge
+│   │   ├── Microsoft.Maui.DevFlow.Devices/       # Device layer (emulators/simulators around the app)
 │   │   ├── Microsoft.Maui.DevFlow.Driver/        # Cross-platform driver (AgentClient)
 │   │   ├── Microsoft.Maui.DevFlow.Logging/       # JSONL file logger
 │   │   ├── Microsoft.Maui.DevFlow.Tests/         # xUnit tests
@@ -221,7 +222,7 @@ Each product requires source setup **and** CI/CD configuration across two system
 
 ## DevFlow MCP Tools
 
-DevFlow exposes 79 MCP tools for AI agent integration (in `src/Cli/Microsoft.Maui.Cli/DevFlow/Mcp/Tools/`):
+DevFlow exposes 83 MCP tools for AI agent integration (in `src/Cli/Microsoft.Maui.Cli/DevFlow/Mcp/Tools/`):
 
 | Tool | Purpose |
 |------|---------|
@@ -238,6 +239,10 @@ DevFlow exposes 79 MCP tools for AI agent integration (in `src/Cli/Microsoft.Mau
 | `maui_clear` | Clear text from an element |
 | `maui_connectivity` | Network access and connection profiles |
 | `maui_device_info` | Device manufacturer, model, OS |
+| `maui_device_boot` | Boot an emulator/simulator and wait until it is ready |
+| `maui_device_list` | List emulators/simulators, each paired with the app running inside it |
+| `maui_device_shutdown` | Power an emulator/simulator off without erasing it |
+| `maui_device_tap` | Tap a physical device point, for UI the app's visual tree cannot reach |
 | `maui_display_info` | Screen density, size, orientation |
 | `maui_element` | Get full element details |
 | `maui_evidence_capture` | Write a redacted `.mauitrace` evidence bundle for the running app |

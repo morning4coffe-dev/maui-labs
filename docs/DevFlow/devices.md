@@ -159,6 +159,57 @@ authenticated round trip proves the binding.
   control instead of a clean error. A host that reports no version predates schema stamping and is
   assumed compatible.
 
+## Using it
+
+The broker is the single front door: the CLI, the Inspector, and the MCP server all read the same
+device list and share one idea of which app is on which device.
+
+### CLI
+
+```bash
+maui devflow devices list              # devices, each paired with the app inside it
+maui devflow devices list --json
+maui devflow devices boot <device-id>
+maui devflow devices shutdown <device-id>
+```
+
+`list` distinguishes its two empty states, because they need different actions from the reader:
+
+```
+No device host is installed or running.            # install/start the host
+No emulators or simulators were found. Create one. # host is fine, nothing to drive
+```
+
+### MCP
+
+| Tool | Purpose |
+|---|---|
+| `maui_device_list` | Devices, each paired with the app agent inside it |
+| `maui_device_boot` | Boot and wait until driveable |
+| `maui_device_shutdown` | Power off without erasing |
+| `maui_device_tap` | Tap a physical point |
+
+This set is deliberately small. Every tool added competes for an agent's attention against the
+~79 existing `maui_*` tools, and a bloated surface measurably degrades tool selection, so only
+operations the in-app agent structurally cannot perform are exposed.
+
+`maui_device_tap` exists for UI the visual tree cannot reach — permission dialogs, the soft
+keyboard, OS navigation, or anything before launch or after a crash. Its description steers callers
+back to `maui_tap` for anything inside the app, because a selector survives a layout change and a
+coordinate does not.
+
+### Broker HTTP
+
+| Route | Purpose |
+|---|---|
+| `GET /api/devices` | Devices plus host availability |
+| `POST /api/devices/{id}/boot` | Boot |
+| `POST /api/devices/{id}/shutdown` | Shut down |
+| `POST /api/devices/{id}/tap?x=&y=` | Tap at a device point |
+
+The device list carries the host's availability alongside the devices so a caller can tell "no
+devices" from "no device layer" without a second request.
+
 ## Implementation
 
 | Type | Responsibility |

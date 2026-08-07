@@ -88,9 +88,23 @@ offset is the existing renderer's job and is not duplicated.
 - **`displayScale`** — reported by the device rather than derived from a device-model lookup, so a
   backend can correct it.
 - **app window origin** — the app does not own the whole screen. On a phone it is inset by the
-  status and navigation bars. This is the one value the device layer cannot infer on its own.
+  status and navigation bars. **The app reports this itself**: only it can observe where its window
+  sits, so `DevFlowAgentService.GetWindowScreenOrigin` is overridden per platform (the `UIWindow`
+  frame on iOS, the content view's on-screen location on Android) and surfaced as
+  `windowScreenX`/`windowScreenY` on the agent status. When a platform cannot say, it reports
+  `null` and consumers assume the window fills the screen rather than guessing an inset — a
+  fabricated origin taps the wrong place while looking entirely plausible.
 - **app logical size, separately from window point size** — normally equal, but carried apart so a
   platform whose logical units differ from display points does not skew the overlay.
+
+## Arbitration
+
+Device input goes through the **same mutation lease** as app input. The key is the paired agent's
+id when an app is running, and `device:{deviceId}` when one is not — because a device tap can
+happen before launch or after a crash, when there is no agent to key on.
+
+Sharing the key is the point: a device-level tap and a `maui_tap` mutate the same screen, so two
+independent locks would let two sessions drive one device each believing it had exclusive control.
 
 ### Rotation
 
@@ -113,6 +127,25 @@ kept apart so a backend change cannot silently redefine either.
 the signal that an interaction must fall through to the device layer instead of being mis-sent to
 the app agent. A tap on a permission dialog, the soft keyboard, or the navigation bar is a device
 tap; a tap on a MAUI element is a semantic tap that records a durable selector.
+
+## Layer fallthrough in the Inspector
+
+The Inspector's Interact mode is **layer-aware**, and deliberately not a third mode the user has to
+manage. Making the human choose "app tap" or "device tap" would be the moment the abstraction
+failed, so the highest-fidelity layer that can service the click is chosen automatically:
+
+| Where the click lands | What happens | Recorded as |
+|---|---|---|
+| A MAUI element, app running | Semantic tap through the agent — **today's exact path** | `tap` with a durable selector |
+| Outside the app window | Device tap | not recorded; the user is told why |
+| Anywhere, app crashed or not launched | Device tap | not recorded |
+
+The last row is what turns the disconnected overlay from a dead end into something usable: the
+agent dies with the app, but the device does not, so a click can still dismiss a crash dialog.
+
+Everything about the second coordinate space lives beside `toAppCoords` in `devflow.js` rather than
+being recomputed per handler — six handlers each doing their own arithmetic is exactly how an
+overlay ends up correct in portrait and subtly wrong in landscape.
 
 ## Degradation
 

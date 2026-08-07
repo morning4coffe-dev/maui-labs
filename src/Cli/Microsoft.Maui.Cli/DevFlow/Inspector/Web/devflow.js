@@ -209,7 +209,71 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     };
   }
 
-  // Refresh state via AJAX (no full page reload — avoids flash)
+  // ── Device space ───────────────────────────────────────────────────────────────────────────
+  // The Inspector's viewport is the APP WINDOW. When a device layer is present the app window is
+  // inset within a larger device screen, so a click can land outside the app entirely — on a
+  // system dialog, the soft keyboard, or OS navigation. Those coordinates belong to the device,
+  // not the app.
+  //
+  // Everything about that second space lives here, beside toAppCoords, rather than being
+  // recomputed in each pointer handler. Six handlers each doing their own arithmetic is how an
+  // overlay ends up correct in portrait and subtly wrong in landscape.
+  let deviceContext = null; // { deviceId, screenWidth, screenHeight, originX, originY, canTap }
+
+  function setDeviceContext(ctx) {
+    deviceContext = ctx && ctx.deviceId ? ctx : null;
+  }
+
+  function hasDeviceLayer() {
+    return !!(deviceContext && deviceContext.canTap);
+  }
+
+  // Converts app logical coordinates to device points by adding the window's screen origin.
+  // Returns null when we do not know where the window sits, in which case callers must not
+  // fabricate a device coordinate — guessing an inset silently taps the wrong place.
+  function toDeviceCoords(appX, appY) {
+    if (!deviceContext) return null;
+    const ox = Number(deviceContext.originX);
+    const oy = Number(deviceContext.originY);
+    if (!isFinite(ox) || !isFinite(oy)) return null;
+    return { x: appX + ox, y: appY + oy };
+  }
+
+  // Whether an app-space point falls outside the app window, i.e. belongs to the OS rather than
+  // the app. The viewport is sized to the window, so anything beyond its bounds is out of app.
+  function isOutsideAppWindow(appX, appY) {
+    const dw = parseFloat(viewport.dataset.width) || 0;
+    const dh = parseFloat(viewport.dataset.height) || 0;
+    if (!dw || !dh) return false;
+    const x = appX - rootOffsetX;
+    const y = appY - rootOffsetY;
+    return x < 0 || y < 0 || x >= dw || y >= dh;
+  }
+
+  // Sends a tap to the device rather than the app. Used only when the app cannot service it:
+  // outside the window, under a foreign window, or with no agent attached at all.
+  async function deviceTap(appX, appY) {
+    const point = toDeviceCoords(appX, appY);
+    if (!point) {
+      setStatus('The app window position on the device is unknown, so a device tap cannot be placed.');
+      return false;
+    }
+    try {
+      const url = `${basePath}/api/device/tap?x=${encodeURIComponent(point.x)}&y=${encodeURIComponent(point.y)}`;
+      const resp = await fetch(url, { method: 'POST' });
+      const body = await resp.json().catch(() => null);
+      if (!resp.ok || (body && body.success === false)) {
+        setStatus((body && body.reason) || 'The device refused the tap.');
+        return false;
+      }
+      scheduleRefresh(300);
+      return true;
+    } catch (e) {
+      setStatus('The device layer is unreachable.');
+      return false;
+    }
+  }
+
   async function refreshState() {
     if (refreshInProgress) return;
     refreshInProgress = true;
@@ -218,6 +282,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       if (!resp.ok) { markConnected(false); return; }
       const state = await resp.json();
       markConnected(true);
+      // The device the app is running inside, when it is paired with one. Absent for desktop apps
+      // and machines with no device host, in which case every device path stays disabled.
+      setDeviceContext(state.device);
       // Update screenshot without flash
       if (screenshot && state.screenshotUrl) {
         screenshot.src = state.screenshotUrl;
@@ -607,6 +674,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       await selectAtPoint(e.clientX, e.clientY, picked);
       return;
     }
+    // Crash survival: the agent dies with the app, but the device does not. When the app is gone
+    // and a device layer is present, a click still reaches the screen — which is what lets a user
+    // dismiss a crash dialog or relaunch, instead of facing a frozen last frame.
+    if (!connected && hasDeviceLayer()) {
+      const gone = toAppCoords(e.clientX, e.clientY);
+      await deviceTap(gone.x, gone.y);
+      return;
+    }
     if (!ensureCanDrive()) return;
 
     let textEl = underCursor;
@@ -628,6 +703,18 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     // for any element, interactive or not) and record the hit element — replay resolves by selector.
     const tapEl = underCursor && underCursor.closest ? underCursor.closest('.devflow-element') : null;
     const { x, y } = toAppCoords(e.clientX, e.clientY);
+
+    // Layer fallthrough. The user does one thing — click — and the highest-fidelity layer that
+    // can service it is chosen automatically. A semantic tap is always preferred because it is
+    // what produces a durable recorded selector; the device layer is the fallback that keeps the
+    // session alive when the app cannot be the one to answer.
+    if (hasDeviceLayer() && (!connected || isOutsideAppWindow(x, y))) {
+      const sent = await deviceTap(x, y);
+      if (sent && recordingId) {
+        setStatus('Tapped the device directly — not recorded, because it happened outside the app.');
+      }
+      return;
+    }
 
     try {
       const resp = await fetch(`${basePath}/api/tap`, {

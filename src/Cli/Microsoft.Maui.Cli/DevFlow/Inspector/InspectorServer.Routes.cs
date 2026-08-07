@@ -27,6 +27,7 @@ public sealed partial class InspectorServer
         => request.Path switch
         {
             "/api/tap" => await HandleProxyTapAsync(request.Body),
+            "/api/device/tap" => await HandleDeviceTapAsync(request.Query),
             "/api/scroll" => await HandleProxyScrollAsync(request.Body),
             "/api/gesture" => await HandleProxyGestureAsync(request.Body),
             "/api/back" => await HandleProxyBackAsync(),

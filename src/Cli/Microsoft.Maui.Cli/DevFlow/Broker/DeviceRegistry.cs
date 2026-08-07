@@ -208,6 +208,34 @@ public sealed class DeviceRegistry
         return DeviceIdentityMatcher.FindBest(identity, devices);
     }
 
+    /// <summary>
+    /// The mutation-lease key that governs a device.
+    /// <para>
+    /// Leases are keyed per agent, but a device tap can happen when no agent exists at all —
+    /// before the app launches, or after it crashes — so a device needs a key of its own. When an
+    /// app <em>is</em> paired, its agent's key is used, so a device-level tap and a
+    /// <c>maui_tap</c> contend for the same lease. That is the point: both mutate the same screen,
+    /// and two independent locks would let two sessions drive one device believing each had
+    /// exclusive control.
+    /// </para>
+    /// </summary>
+    public async Task<string> ResolveLeaseKeyAsync(
+        string deviceId,
+        IEnumerable<AgentRegistration> agents,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(agents);
+
+        var paired = await ListPairedAsync(agents, cancellationToken: cancellationToken).ConfigureAwait(false);
+        var match = paired.FirstOrDefault(p =>
+            string.Equals(p.Device.Id, deviceId, StringComparison.OrdinalIgnoreCase));
+
+        return match?.AgentId ?? DeviceLeaseKey(deviceId);
+    }
+
+    /// <summary>The synthetic lease key for a device with no app running inside it.</summary>
+    public static string DeviceLeaseKey(string deviceId) => $"device:{deviceId}";
+
     /// <summary>Boots a device and waits until it can be driven.</summary>
     public Task<DeviceOperationResult> BootAsync(string deviceId, CancellationToken cancellationToken = default) =>
         Mutate(surface => surface.BootAsync(deviceId, cancellationToken));

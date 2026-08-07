@@ -123,6 +123,39 @@ public static class BrokerClient
         }
     }
 
+    /// <summary>
+    /// Resolves the device id an agent is running inside, or <c>null</c> when it is not paired
+    /// with one. Reads through the broker so there is a single view of pairing.
+    /// </summary>
+    public static async Task<string?> ResolveDeviceForAgentAsync(int brokerPort, string? agentId)
+    {
+        if (string.IsNullOrWhiteSpace(agentId))
+            return null;
+
+        var payload = await ListDevicesAsync(brokerPort);
+        if (payload is null)
+            return null;
+
+        try
+        {
+            var root = System.Text.Json.Nodes.JsonNode.Parse(payload);
+            if (root?["devices"] is not System.Text.Json.Nodes.JsonArray devices)
+                return null;
+
+            foreach (var device in devices)
+            {
+                if (string.Equals(device?["agentId"]?.GetValue<string>(), agentId, StringComparison.Ordinal))
+                    return device?["id"]?.GetValue<string>();
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // A broker we cannot parse simply means no device layer for this caller.
+        }
+
+        return null;
+    }
+
     public static AgentRegistration[]? ListAgents(int brokerPort)    {
         try
         {

@@ -636,9 +636,29 @@ public class BrokerServer : IDisposable
                 var query = context.Request.QueryString;
                 var x = ParseDouble(query["x"]);
                 var y = ParseDouble(query["y"]);
-                result = x is null || y is null
-                    ? DeviceOperationResult.Failed("A tap requires x and y coordinates.")
-                    : await _devices.TapAsync(deviceId, new DevicePoint(x.Value, y.Value));
+                if (x is null || y is null)
+                {
+                    result = DeviceOperationResult.Failed("A tap requires x and y coordinates.");
+                    break;
+                }
+
+                // A device tap mutates the same screen maui_tap does, so it honours the same
+                // lease. The key is the paired agent's when an app is running, so app-level and
+                // device-level input contend rather than each believing it has exclusive control.
+                var agents = _agents.Values.Select(c => c.Registration).ToArray();
+                var leaseKey = await _devices.ResolveLeaseKeyAsync(deviceId, agents);
+                var lease = _mutationLeases.Control(
+                    leaseKey, "status", leaseId: null, holderKind: null, label: null, force: false);
+
+                if (lease.HeldByOther)
+                {
+                    result = DeviceOperationResult.Failed(
+                        $"Another session ({lease.Label ?? lease.HolderKind ?? "unknown"}) is driving this device. "
+                        + "Take control before sending input.");
+                    break;
+                }
+
+                result = await _devices.TapAsync(deviceId, new DevicePoint(x.Value, y.Value));
                 break;
             default:
                 return (404, CliJson.SerializeUntyped(new JsonObject { ["error"] = $"Unknown device action '{action}'" }, indented: false));

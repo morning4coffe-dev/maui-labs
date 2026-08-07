@@ -855,6 +855,48 @@ public sealed partial class InspectorServer : IDisposable
     /// Returns JSON state for AJAX polling: screenshot (as timestamped URL) + element divs HTML.
     /// This avoids full page reload flash.
     /// </summary>
+    /// <summary>
+    /// The device this app is running inside, plus where its window sits on that device's screen.
+    /// <para>
+    /// Returns <c>null</c> whenever any part is unknown — no broker, no pairing, or an agent that
+    /// cannot report its window origin. A partial answer would be worse than none: without the
+    /// origin a device tap lands offset by the status bar height, which looks plausible and is
+    /// wrong, so the client is told nothing rather than something it might act on.
+    /// </para>
+    /// </summary>
+    private async Task<object?> BuildDeviceContextAsync()
+    {
+        try
+        {
+            var brokerPort = Broker.BrokerClient.ReadBrokerPortPublic();
+            if (brokerPort is null)
+                return null;
+
+            var deviceId = await Broker.BrokerClient.ResolveDeviceForAgentAsync(brokerPort.Value, _agentId);
+            if (string.IsNullOrWhiteSpace(deviceId))
+                return null;
+
+            var status = await _client.GetStatusAsync();
+            var x = status?.Device?.WindowScreenX;
+            var y = status?.Device?.WindowScreenY;
+            if (x is null || y is null)
+                return null;
+
+            return new
+            {
+                deviceId,
+                originX = x.Value,
+                originY = y.Value,
+                canTap = true,
+            };
+        }
+        catch
+        {
+            // Device context is an enhancement; the Inspector must render without it.
+            return null;
+        }
+    }
+
     private async Task<(int, string, byte[])> HandleStateAsync()
     {
         var frame = await CreateFrameAsync();
@@ -872,7 +914,11 @@ public sealed partial class InspectorServer : IDisposable
             viewportWidth = frame.Width,
             viewportHeight = frame.Height,
             rootOffsetX = frame.RootOffsetX,
-            rootOffsetY = frame.RootOffsetY
+            rootOffsetY = frame.RootOffsetY,
+            // Device context, when this app is paired with an emulator or simulator. Absent on
+            // desktop apps and on machines with no device host, in which case the client keeps
+            // behaving exactly as it did before.
+            device = await BuildDeviceContextAsync()
         });
 
         return (200, "application/json", Encoding.UTF8.GetBytes(json));
@@ -1276,6 +1322,53 @@ public sealed partial class InspectorServer : IDisposable
         => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()
             : null;
+
+    /// <summary>
+    /// Forwards a tap to the device rather than the app, for UI the visual tree cannot reach.
+    /// <para>
+    /// Routed through the broker so the device layer has a single front door and the tap contends
+    /// for the same mutation lease as an app-level tap on the same screen.
+    /// </para>
+    /// </summary>
+    private async Task<(int, string, byte[])> HandleDeviceTapAsync(IReadOnlyDictionary<string, string> query)
+    {
+        if (!TryParseInvariant(query.GetValueOrDefault("x"), out var x)
+            || !TryParseInvariant(query.GetValueOrDefault("y"), out var y))
+        {
+            return (400, "application/json",
+                Encoding.UTF8.GetBytes("{\"success\":false,\"reason\":\"A device tap requires x and y coordinates.\"}"));
+        }
+
+        var brokerPort = Broker.BrokerClient.ReadBrokerPortPublic();
+        if (brokerPort is null)
+        {
+            return (409, "application/json",
+                Encoding.UTF8.GetBytes("{\"success\":false,\"reason\":\"The DevFlow broker is not running, so device input is unavailable.\"}"));
+        }
+
+        var deviceId = await Broker.BrokerClient.ResolveDeviceForAgentAsync(brokerPort.Value, _agentId);
+        if (string.IsNullOrWhiteSpace(deviceId))
+        {
+            return (409, "application/json",
+                Encoding.UTF8.GetBytes("{\"success\":false,\"reason\":\"This app is not paired with a device, so device input is unavailable.\"}"));
+        }
+
+        var result = await Broker.BrokerClient.ControlDeviceAsync(brokerPort.Value, deviceId, "tap", x, y);
+        var payload = System.Text.Json.JsonSerializer.Serialize(new System.Text.Json.Nodes.JsonObject
+        {
+            ["success"] = result.Success,
+            ["reason"] = result.Reason,
+        });
+
+        return (200, "application/json", Encoding.UTF8.GetBytes(payload));
+    }
+
+    private static bool TryParseInvariant(string? value, out double parsed) =>
+        double.TryParse(
+            value,
+            System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture,
+            out parsed);
 
     private async Task<(int, string, byte[])> HandleProxyTapAsync(string? body)
     {

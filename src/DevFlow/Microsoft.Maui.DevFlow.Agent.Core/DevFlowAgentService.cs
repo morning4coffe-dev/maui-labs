@@ -510,6 +510,32 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
     /// <summary>Gets native window dimensions when MAUI reports 0. Override for platform-specific access.</summary>
     protected virtual (double width, double height) GetNativeWindowSize(IWindow window) => (0, 0);
 
+    /// <summary>
+    /// Where the app's window sits on the physical display, in device-independent points from the
+    /// top-left of the screen.
+    /// <para>
+    /// This is the one value neither DevFlow nor the device layer can infer on its own, and
+    /// without it a visual-tree overlay drawn on a full-screen device frame is offset by exactly
+    /// the height of the status bar — an error that looks plausible and is wrong. Only the app can
+    /// observe it, so the app reports it.
+    /// </para>
+    /// <para>
+    /// Returns <c>null</c> when the platform cannot say, in which case consumers fall back to
+    /// assuming the window fills the screen rather than guessing an inset.
+    /// </para>
+    /// </summary>
+    protected virtual (double x, double y)? GetWindowScreenOrigin(IWindow? window) => null;
+
+    /// <summary>
+    /// The window origin as reported to clients, or <c>null</c> when unknown. Exposed separately
+    /// from the protected override so the HTTP layer never has to know about platform details.
+    /// </summary>
+    internal (double x, double y)? GetWindowScreenOriginSafe(IWindow? window)
+    {
+        try { return GetWindowScreenOrigin(window); }
+        catch { return null; }
+    }
+
     /// <summary>Whether platform background jobs can be queried on this agent.</summary>
     protected virtual bool IsJobsSupported => false;
 
@@ -833,6 +859,11 @@ public partial class DevFlowAgentService : IDisposable, IMarkerPublisher
                     windowCount = _app?.Windows.Count ?? 0,
                     windowWidth = double.IsFinite(w) ? w : 0,
                     windowHeight = double.IsFinite(h) ? h : 0,
+                    // Where this window sits on the physical display, in device-independent
+                    // points. Only the app can observe it, and without it an overlay drawn on a
+                    // full-screen device frame is offset by the status bar height.
+                    windowScreenX = GetWindowScreenOriginSafe(window)?.x,
+                    windowScreenY = GetWindowScreenOriginSafe(window)?.y,
                 },
                 app = new
                 {

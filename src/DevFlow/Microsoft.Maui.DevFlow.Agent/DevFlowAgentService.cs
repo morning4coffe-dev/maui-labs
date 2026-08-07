@@ -60,6 +60,57 @@ public class PlatformAgentService : DevFlowAgentService
         }
     }
 
+    /// <summary>
+    /// Where the app window sits on the physical display, in device-independent points.
+    /// <para>
+    /// Reported per platform because only the app can observe it, and it is the value that makes
+    /// a visual-tree overlay line up with a full-screen device video frame. Returning null is
+    /// always safe: consumers then assume the window fills the screen rather than guessing.
+    /// </para>
+    /// </summary>
+    protected override (double x, double y)? GetWindowScreenOrigin(IWindow? window)
+    {
+        try
+        {
+#if IOS || MACCATALYST
+            // A simulator's UIWindow frame is already in points and already relative to the
+            // screen, so its origin is the answer directly.
+            if (window?.Handler?.PlatformView is UIKit.UIWindow uiWindow)
+            {
+                var frame = uiWindow.Frame;
+                return (frame.X, frame.Y);
+            }
+            return null;
+#elif ANDROID
+            if (window?.Handler?.PlatformView is global::Android.App.Activity activity)
+            {
+                var decor = activity.Window?.DecorView;
+                var content = activity.FindViewById(global::Android.Resource.Id.Content);
+                var density = activity.Resources?.DisplayMetrics?.Density ?? 1.0;
+                if (content is null || density <= 0)
+                    return null;
+
+                // The content view excludes the status and navigation bars, which is exactly the
+                // inset an overlay has to account for. Locations are in pixels, so convert.
+                var location = new int[2];
+                content.GetLocationOnScreen(location);
+                return (location[0] / density, location[1] / density);
+            }
+            return null;
+#elif WINDOWS || MACOS
+            // Desktop windows are positioned by the user and there is no device frame to align
+            // with, so the origin has no consumer.
+            return null;
+#else
+            return base.GetWindowScreenOrigin(window);
+#endif
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     protected override Task<bool> TryNativeScroll(VisualElement element, double deltaX, double deltaY)
     {
         try

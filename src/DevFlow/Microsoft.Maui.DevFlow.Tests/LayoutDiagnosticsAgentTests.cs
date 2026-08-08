@@ -276,6 +276,45 @@ public class LayoutDiagnosticsAgentTests
     }
 
     [Fact]
+    public void Window_IsAVisibleStructuralRootForEffectiveVisibility()
+    {
+        var label = new Label { AutomationId = "Title", IsVisible = true };
+        var window = new Window(new ContentPage { Content = label });
+        var walker = new VisualTreeWalker { CaptureWalkElements = true };
+        var roots = walker.WalkTree(new TestApplication([window]));
+
+        var root = Assert.Single(roots);
+        Assert.Equal("Window", root.Type);
+        Assert.True(root.IsVisible);
+
+        var collected = LayoutSnapshotCollector.Collect(
+            roots,
+            walker.WalkElements,
+            rootElementId: null,
+            maxElements: 20);
+        Assert.True(Assert.Single(
+            collected.Snapshots,
+            snapshot => snapshot.Id == "Title").IsVisible);
+    }
+
+    [Fact]
+    public void ShellItems_PreserveTheirStructuralVisibility()
+    {
+        var shellContent = new ShellContent
+        {
+            AutomationId = "NativeRoute",
+            IsVisible = true,
+            IsEnabled = true,
+        };
+        var roots = new VisualTreeWalker().WalkTree(new TestApplication([shellContent]));
+
+        var info = Assert.Single(roots);
+        Assert.Equal("ShellContent", info.Type);
+        Assert.True(info.IsVisible);
+        Assert.True(info.IsEnabled);
+    }
+
+    [Fact]
     public void Walker_ElementBudgetStopsTraversalAndRuntimeReferenceCapture()
     {
         var walker = new VisualTreeWalker { CaptureWalkElements = true };

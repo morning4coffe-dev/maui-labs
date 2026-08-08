@@ -3,7 +3,7 @@
 import { createInspectorApi } from './inspector-api.js';
 import { confirmModal } from './inspector-dialog.js';
 import { createDataSnapshot, isSecretContextKey, supportsDataContextScope } from './inspector-data-context.js';
-import { createLayoutDataPayload, diffLayoutReports, formatLayoutReport, formatPerformanceSummary } from './inspector-diagnostics.js';
+import { chooseLayoutScopeRoot, createLayoutDataPayload, diffLayoutReports, formatLayoutReport, formatPerformanceSummary } from './inspector-diagnostics.js';
 import { createEvidenceController } from './inspector-evidence.js';
 import { createAgentRequestController } from './inspector-agent-requests.js';
 import { createInspectorHostBridge } from './inspector-host-bridge.js';
@@ -3629,7 +3629,12 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       layoutScanPending = true;
       return;
     }
-    const scopedElementId = layoutOptions.selectedScope ? selectedId : null;
+    const renderedElements = [...viewport.querySelectorAll('.devflow-element')];
+    const activeVisualRootId = chooseLayoutScopeRoot(renderedElements.map((element) => ({
+      id: element.getAttribute('data-id'),
+      type: element.getAttribute('data-type'),
+    })));
+    const scopedElementId = layoutOptions.selectedScope ? selectedId : activeVisualRootId;
     if (layoutOptions.selectedScope && !scopedElementId) {
       setStatus('Select an element before scanning its subtree.');
       return;

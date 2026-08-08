@@ -65,6 +65,24 @@ public class LayoutDiagnosticsAnalyzerTests
     }
 
     [Fact]
+    public void VisibleZeroArea_UsesWindowBoundsWhenManagedFrameIsUnset()
+    {
+        var element = Element("shell", frame: null);
+        element.WindowBounds = Rect(0, 0, 1000, 700);
+
+        var report = Analyze([element]);
+
+        Assert.DoesNotContain(report.Findings, finding =>
+            finding.RuleId == LayoutDiagnosticRules.VisibleZeroArea &&
+            finding.Outcome == LayoutOutcomes.Violation);
+        var coverage = Assert.Single(
+            report.Coverage.Rules,
+            rule => rule.RuleId == LayoutDiagnosticRules.VisibleZeroArea);
+        Assert.Equal(1, coverage.Evaluated);
+        Assert.Equal(0, coverage.Skipped);
+    }
+
+    [Fact]
     public void VisibleUnrealizedElement_MakesCoveragePartialInsteadOfFull()
     {
         var report = Analyze([

@@ -129,13 +129,15 @@ internal static class LayoutSnapshotCollector
         if (double.IsFinite(frame.X) && double.IsFinite(frame.Y) &&
             double.IsFinite(frame.Width) && double.IsFinite(frame.Height))
         {
-            snapshot.Frame = new LayoutRect
-            {
-                X = frame.X,
-                Y = frame.Y,
-                Width = frame.Width,
-                Height = frame.Height,
-            };
+            snapshot.Frame = frame.Width >= 0 && frame.Height >= 0
+                ? new LayoutRect
+                {
+                    X = frame.X,
+                    Y = frame.Y,
+                    Width = frame.Width,
+                    Height = frame.Height,
+                }
+                : null;
         }
 
         var desired = view.DesiredSize;
@@ -221,7 +223,8 @@ internal static class LayoutSnapshotCollector
     {
         if (bounds is null) return null;
         if (!double.IsFinite(bounds.X) || !double.IsFinite(bounds.Y) ||
-            !double.IsFinite(bounds.Width) || !double.IsFinite(bounds.Height))
+            !double.IsFinite(bounds.Width) || !double.IsFinite(bounds.Height) ||
+            bounds.Width < 0 || bounds.Height < 0)
             return null;
 
         return new LayoutRect

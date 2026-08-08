@@ -190,6 +190,13 @@ export function diffLayoutReports(previous, current) {
   return { added, updated, removed };
 }
 
+export function chooseLayoutScopeRoot(elements) {
+  const candidates = Array.isArray(elements) ? elements : [];
+  const page = candidates.find((element) =>
+    element && /Page$/i.test(String(element.type || '')));
+  return String((page || candidates[0])?.id || '') || null;
+}
+
 /** Builds the view model the Layout tab renders. Pure: no DOM, no network. */
 export function formatLayoutReport(report, filters = null) {
   const summary = (report && report.summary) || {};

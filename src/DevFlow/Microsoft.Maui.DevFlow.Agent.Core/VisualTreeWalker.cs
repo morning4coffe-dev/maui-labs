@@ -1794,6 +1794,21 @@ public class VisualTreeWalker
             ParentId = parentId,
             Type = cometResolved?.Type ?? element.GetType().Name,
             FullType = cometResolved?.FullType ?? element.GetType().FullName ?? element.GetType().Name,
+            // Window and Shell item nodes are structural rather than IView instances, but their
+            // descendants are the live rendered tree. Preserve their structural visibility so
+            // effective-visibility consumers do not incorrectly hide every control beneath them.
+            IsVisible = element switch
+            {
+                Window => true,
+                BaseShellItem shellItem => IsActiveShellItem(shellItem),
+                _ => false,
+            },
+            IsEnabled = element switch
+            {
+                Window => true,
+                BaseShellItem shellItem => shellItem.IsEnabled,
+                _ => false,
+            },
         };
 
         if (element is VisualElement ve)
@@ -1948,6 +1963,26 @@ public class VisualTreeWalker
         }
 
         return info;
+    }
+
+    private static bool IsActiveShellItem(BaseShellItem item)
+    {
+        if (!item.IsVisible)
+            return false;
+
+        var shell = Shell.Current;
+        if (shell is null)
+            return true;
+
+        return item switch
+        {
+            ShellItem shellItem => ReferenceEquals(shell.CurrentItem, shellItem),
+            ShellSection section => ReferenceEquals(shell.CurrentItem?.CurrentItem, section),
+            ShellContent content => ReferenceEquals(
+                shell.CurrentItem?.CurrentItem?.CurrentItem,
+                content),
+            _ => true,
+        };
     }
 
     private static string? FindStableItemKey(Element? element)

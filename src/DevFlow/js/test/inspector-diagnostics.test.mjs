@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   LAYOUT_FINDING_LIMIT,
+  chooseLayoutScopeRoot,
   createLayoutDataPayload,
   diffLayoutReports,
   filterLayoutFindings,
@@ -214,6 +215,15 @@ test("layout report deltas distinguish added changed and removed findings", () =
   assert.deepEqual(delta.updated.map((finding) => finding.id), ["kept"]);
   assert.deepEqual(delta.removed, ["removed"]);
   assert.equal(diffLayoutReports(current, current), null);
+});
+
+test("layout scans prefer the rendered page over the Shell root", () => {
+  assert.equal(chooseLayoutScopeRoot([
+    { id: "shell", type: "AppShell" },
+    { id: "page", type: "MainPage" },
+    { id: "grid", type: "Grid" },
+  ]), "page");
+  assert.equal(chooseLayoutScopeRoot([{ id: "root", type: "Grid" }]), "root");
 });
 
 const performanceSummary = {

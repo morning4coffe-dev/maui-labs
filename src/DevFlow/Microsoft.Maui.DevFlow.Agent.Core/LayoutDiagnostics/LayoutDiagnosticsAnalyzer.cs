@@ -228,7 +228,7 @@ public static class LayoutDiagnosticsAnalyzer
             return;
         }
 
-        var rect = snapshot.Frame;
+        var rect = snapshot.Frame ?? snapshot.WindowBounds;
         if (rect is null)
         {
             rule.Skipped++;
@@ -290,7 +290,7 @@ public static class LayoutDiagnosticsAnalyzer
             return;
         }
 
-        var rect = snapshot.Frame;
+        var rect = snapshot.Frame ?? snapshot.WindowBounds;
         if (rect is null || !IsUsable(rect.Width) || !IsUsable(rect.Height))
         {
             rule.Skipped++;
@@ -340,7 +340,7 @@ public static class LayoutDiagnosticsAnalyzer
             Element = Reference(snapshot),
             Evidence = new LayoutFindingEvidence
             {
-                Frame = snapshot.Frame,
+                Frame = snapshot.Frame ?? snapshot.WindowBounds,
                 Constraint = constraint,
                 ConstraintValue = limit,
                 ActualValue = actual,
@@ -426,7 +426,7 @@ public static class LayoutDiagnosticsAnalyzer
             return;
         }
 
-        var rect = snapshot.Frame;
+        var rect = snapshot.Frame ?? snapshot.WindowBounds;
         var desired = snapshot.DesiredSize;
         if (rect is null || desired is null || !IsUsable(desired.Width) || !IsUsable(desired.Height))
         {

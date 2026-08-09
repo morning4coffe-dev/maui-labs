@@ -1768,7 +1768,7 @@ public class InspectorPageTests : IAsyncLifetime
 
         var scope = await root.Locator(".df-layout-scope").InnerTextAsync();
         Assert.Contains("Current page", scope, StringComparison.Ordinal);
-        Assert.Contains("MainPage", scope, StringComparison.Ordinal);
+        Assert.Matches("Current page · [^·]*Page", scope);
         Assert.DoesNotMatch("[a-f0-9]{12}", scope);
 
         await Expect(root.Locator(".df-layout-header .df-layout-button-primary")).ToContainTextAsync("Rescan");

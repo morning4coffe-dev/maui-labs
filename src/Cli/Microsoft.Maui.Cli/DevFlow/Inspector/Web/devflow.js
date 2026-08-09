@@ -3232,12 +3232,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   const layoutOptions = {
     profile: 'agent',
     selectedScope: false,
-    outcome: 'actionable',
+    outcome: 'all',
     minimumSeverity: 'info',
     minimumConfidence: 'low',
     rule: '',
     includeSuppressed: false,
     live: false,
+    advancedOpen: false,
+    coverageOpen: false,
   };
 
   function clearLayoutOverlays() {
@@ -3292,11 +3294,27 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     for (const clip of finding.evidence.clipChain || [])
       appendLayoutRegion(svg, clip.region, 'df-layout-region-clip');
     appendLayoutRegion(svg, finding.evidence.overlap?.intersectionRegion, 'df-layout-region-overlap');
-    if (svg.childNodes.length) layoutOverlays.appendChild(svg);
+    if (!svg.childNodes.length) return;
+    layoutOverlays.appendChild(svg);
+    const legend = elh('div', { class: 'df-layout-overlay-legend' });
+    const entries = [
+      ['df-layout-legend-full', 'Affected bounds', finding.evidence.fullRegion],
+      ['df-layout-legend-visible', 'Visible region', finding.evidence.visibleRegion],
+      ['df-layout-legend-content', 'Content region', finding.evidence.contentRegion],
+      ['df-layout-legend-clip', 'Clip', finding.evidence.clipChain?.length],
+      ['df-layout-legend-overlap', 'Overlap', finding.evidence.overlap?.intersectionRegion],
+    ];
+    for (const [className, label, present] of entries) {
+      if (!present) continue;
+      legend.append(elh('span', null,
+        elh('i', { class: className }),
+        elh('span', { text: label })));
+    }
+    layoutOverlays.appendChild(legend);
   }
 
   function layoutSelect(label, value, choices, onChange) {
-    const wrapper = elh('label', null, elh('span', { text: label }));
+    const wrapper = elh('label', { class: 'df-layout-field' }, elh('span', { text: label }));
     const select = elh('select', { 'aria-label': label });
     for (const [optionValue, optionLabel] of choices) {
       const option = elh('option', { value: optionValue, text: optionLabel });
@@ -3359,6 +3377,295 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       });
   }
 
+  function layoutStatusPill(label, tone = 'neutral') {
+    return elh('span', { class: `df-status-pill df-status-pill-${tone}`, text: label });
+  }
+
+  function layoutActionButton(label, icon, className = '') {
+    return elh(
+      'button',
+      { class: `df-layout-button ${className}`.trim(), type: 'button' },
+      icon ? svgIcon(icon) : null,
+      elh('span', { text: label }));
+  }
+
+  function formatLayoutCaptureTime(value) {
+    if (!value) return null;
+    const captured = new Date(value);
+    return Number.isNaN(captured.getTime())
+      ? null
+      : captured.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', second: '2-digit' });
+  }
+
+  function layoutScopeLabel(view) {
+    const target = view.scopeRootId ? elById(view.scopeRootId) : null;
+    const label = target ? elementLabel(target) : 'Current page';
+    return `${layoutOptions.selectedScope ? 'Selected subtree' : 'Current page'} · ${label}`;
+  }
+
+  function layoutSummaryCard(label, value, tone, detail) {
+    const card = elh('div', { class: `df-summary-card df-summary-card-${tone || 'neutral'}` });
+    card.append(
+      elh('span', { class: 'df-summary-label', text: label }),
+      elh('strong', { class: 'df-summary-value', text: String(value) }));
+    if (detail) card.append(elh('span', { class: 'df-summary-detail', text: detail }));
+    return card;
+  }
+
+  function layoutEvidenceLine(finding) {
+    const evidence = finding.evidence;
+    if (!evidence) return null;
+    const bounds = evidence.fullRegion?.bounds || evidence.visibleRegion?.bounds;
+    const parts = [];
+    if (bounds) {
+      parts.push(
+        `${Math.round(bounds.width * 10) / 10} × ${Math.round(bounds.height * 10) / 10}` +
+        ` at ${Math.round(bounds.x * 10) / 10}, ${Math.round(bounds.y * 10) / 10}`);
+    }
+    if (evidence.lostAreaRatio != null)
+      parts.push(`${Math.round(evidence.lostAreaRatio * 100)}% outside the visible region`);
+    if (evidence.overlap?.overlapAreaRatio != null)
+      parts.push(`${Math.round(evidence.overlap.overlapAreaRatio * 100)}% overlap`);
+    if (evidence.text?.isTruncated === true)
+      parts.push('Native text metrics report truncation');
+    return parts.length ? parts.join(' · ') : null;
+  }
+
+  function resetLayoutFilters() {
+    layoutOptions.outcome = 'all';
+    layoutOptions.minimumSeverity = 'info';
+    layoutOptions.minimumConfidence = 'low';
+    layoutOptions.rule = '';
+    layoutOptions.includeSuppressed = false;
+    if (latestLayoutReport)
+      renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+  }
+
+  function renderLayoutCoverage(view) {
+    const details = elh('details', { class: 'df-disclosure df-layout-coverage' });
+    details.open = layoutOptions.coverageOpen;
+    details.addEventListener('toggle', () => { layoutOptions.coverageOpen = details.open; });
+    const tone = view.coverageOverall === 'full'
+      ? 'success'
+      : view.coverageOverall === 'partial' ? 'warning' : 'neutral';
+    const supported = view.rules.filter((rule) => rule.support !== 'unavailable');
+    const unavailable = view.rules.filter((rule) => rule.support === 'unavailable');
+    const summary = elh('summary', null,
+      elh('span', { class: 'df-disclosure-title', text: 'Coverage and limitations' }),
+      elh('span', {
+        class: 'df-disclosure-meta',
+        text: `${supported.length} available · ${unavailable.length} unavailable`,
+      }),
+      layoutStatusPill(view.coverageLabel, tone));
+    details.append(summary);
+
+    const body = elh('div', { class: 'df-disclosure-body' });
+    body.append(elh('p', {
+      class: 'df-layout-guidance',
+      text: view.coverageOverall === 'full'
+        ? 'Every enabled check had the evidence it needed in this scope.'
+        : 'Missing evidence is reported as incomplete or unavailable, never as a clean pass.',
+    }));
+
+    if (supported.length) {
+      body.append(elh('h5', { class: 'df-layout-subheading', text: 'Available checks' }));
+      const list = elh('div', { class: 'df-layout-rule-list' });
+      for (const rule of supported) {
+        list.append(elh('div', { class: 'df-layout-rule-row' },
+          elh('div', { class: 'df-layout-rule-name' },
+            elh('strong', { text: rule.label }),
+            elh('code', { text: rule.ruleId })),
+          layoutStatusPill(rule.supportLabel, rule.support === 'full' ? 'success' : 'warning'),
+          elh('span', { class: 'df-layout-rule-count', text: rule.detail })));
+      }
+      body.append(list);
+    }
+
+    if (unavailable.length) {
+      const unavailableDetails = elh('details', { class: 'df-disclosure df-layout-nested-disclosure' });
+      unavailableDetails.append(elh('summary', null,
+        elh('span', { class: 'df-disclosure-title', text: `${unavailable.length} unavailable checks` }),
+        elh('span', { class: 'df-disclosure-meta', text: 'Waiting for native or WebView evidence' })));
+      const list = elh('div', { class: 'df-layout-rule-list' });
+      for (const rule of unavailable) {
+        const row = elh('div', { class: 'df-layout-rule-row df-layout-rule-unavailable' },
+          elh('div', { class: 'df-layout-rule-name' },
+            elh('strong', { text: rule.label }),
+            elh('code', { text: rule.ruleId })),
+          layoutStatusPill('Unavailable', 'neutral'));
+        if (rule.limitations.length)
+          row.append(elh('span', { class: 'df-layout-rule-reason', text: rule.limitations[0] }));
+        list.append(row);
+      }
+      unavailableDetails.append(elh('div', { class: 'df-disclosure-body' }, list));
+      body.append(unavailableDetails);
+    }
+
+    if (view.limitations.length || view.neverCaptured.length) {
+      const limits = elh('details', { class: 'df-disclosure df-layout-nested-disclosure' });
+      limits.append(elh('summary', null,
+        elh('span', { class: 'df-disclosure-title', text: 'Known limitations and privacy' })));
+      const limitsBody = elh('div', { class: 'df-disclosure-body' });
+      if (view.limitations.length) {
+        const list = elh('ul', { class: 'df-layout-list' });
+        for (const limitation of view.limitations) list.append(elh('li', { text: limitation }));
+        limitsBody.append(list);
+      }
+      if (view.neverCaptured.length) {
+        limitsBody.append(
+          elh('h5', { class: 'df-layout-subheading', text: 'Never captured' }),
+          elh('p', { class: 'df-layout-guidance', text: view.neverCaptured.join(', ') }));
+      }
+      limits.append(limitsBody);
+      body.append(limits);
+    }
+
+    body.append(elh('p', {
+      class: 'df-layout-technical',
+      text: `${view.counts.passes} evaluated passes · ${view.counts.notApplicable} not applicable · ${view.version}`,
+    }));
+    details.append(body);
+    return details;
+  }
+
+  function renderLayoutFinding(finding, report) {
+    const tone = finding.outcome === 'violation'
+      ? 'error'
+      : finding.outcome === 'observation' ? 'warning' : 'neutral';
+    const card = elh('article', {
+      class: `df-card df-layout-finding-card df-layout-${finding.outcome}` +
+        (finding.suppressed ? ' df-suppressed' : '') +
+        (finding.id === selectedLayoutFindingId ? ' df-selected' : ''),
+    });
+    card.dataset.layoutFindingId = finding.id;
+
+    const heading = elh('div', { class: 'df-layout-finding-heading' });
+    const title = elh('div', { class: 'df-layout-finding-title' });
+    title.append(
+      layoutStatusPill(finding.outcomeLabel, tone),
+      elh('h5', { text: finding.ruleLabel }));
+    heading.append(
+      title,
+      elh('span', {
+        class: 'df-layout-severity',
+        text: `${finding.severityLabel} · ${finding.confidenceLabel}`,
+      }));
+    card.append(
+      heading,
+      elh('p', { class: 'df-layout-finding-message', text: finding.message }));
+    if (finding.context)
+      card.append(elh('p', { class: 'df-layout-finding-context', text: finding.context }));
+
+    const actions = elh('div', { class: 'df-action-row df-layout-finding-actions' });
+    if (finding.elementId) {
+      const show = layoutActionButton('Show in app', 'i-inspect', 'df-layout-button-primary');
+      show.addEventListener('click', () => selectLayoutFinding(finding));
+      actions.append(show);
+    }
+
+    const why = elh('details', { class: 'df-disclosure df-layout-finding-details' });
+    why.append(elh('summary', null,
+      elh('span', { class: 'df-disclosure-title', text: 'Why and evidence' })));
+    const whyBody = elh('div', { class: 'df-disclosure-body' });
+    whyBody.append(elh('p', { class: 'df-layout-guidance', text: finding.explanation }));
+    const evidenceLine = layoutEvidenceLine(finding);
+    if (evidenceLine)
+      whyBody.append(elh('p', { class: 'df-layout-evidence-line', text: evidenceLine }));
+    if (finding.fixCategories.length || finding.actionability) {
+      const tags = elh('div', { class: 'df-layout-tags' });
+      tags.append(elh('span', { class: 'df-layout-tag', text: finding.actionability }));
+      for (const category of finding.fixCategories)
+        tags.append(elh('span', { class: 'df-layout-tag', text: category.replace(/-/g, ' ') }));
+      if (finding.suppressed)
+        tags.append(elh('span', {
+          class: 'df-layout-tag',
+          text: finding.suppressionReason || 'suppressed',
+        }));
+      whyBody.append(tags);
+    }
+    if (finding.relatedElements.length) {
+      whyBody.append(elh('h6', { class: 'df-layout-subheading', text: 'Related elements' }));
+      const related = elh('div', { class: 'df-action-row df-layout-related' });
+      for (const item of finding.relatedElements) {
+        const button = layoutActionButton(
+          `${item.relation}: ${item.element.automationId || item.element.type}`,
+          'i-inspect');
+        button.addEventListener('click', () => {
+          const target = elById(item.element.id);
+          if (!target) {
+            setStatus('The related element is no longer present in the current frame.');
+            return;
+          }
+          selectElement(item.element.id);
+          propertyGrid.open(target);
+        });
+        related.append(button);
+      }
+      whyBody.append(related);
+    }
+    if (finding.limitations.length) {
+      const limits = elh('ul', { class: 'df-layout-list df-layout-finding-limitations' });
+      for (const limitation of finding.limitations) limits.append(elh('li', { text: limitation }));
+      whyBody.append(limits);
+    }
+    why.append(whyBody);
+    actions.append(why);
+
+    const more = elh('details', { class: 'df-disclosure df-layout-more-actions' });
+    more.append(elh('summary', null,
+      svgIcon('i-more'),
+      elh('span', { class: 'df-disclosure-title', text: 'More' })));
+    const moreBody = elh('div', { class: 'df-layout-more-menu' });
+    if (finding.elementId && finding.element?.sourceFile) {
+      const source = layoutActionButton('Open source', 'i-source');
+      source.addEventListener('click', async () => {
+        selectLayoutFinding(finding);
+        await openSource();
+      });
+      moreBody.append(source);
+    }
+    const copilot = layoutActionButton('Add to Copilot', 'i-copilot');
+    copilot.addEventListener('click', async () => {
+      setLayoutCopilotSnapshot(report, finding.id);
+      await attachDockDataToCopilot();
+    });
+    const copy = layoutActionButton('Copy payload', 'i-data');
+    copy.addEventListener('click', async () => {
+      const ok = await copyText(JSON.stringify(createLayoutDataPayload(report, finding.id), null, 2));
+      setStatus(ok ? 'Copied the selected layout finding.' : 'Could not copy the layout finding.');
+    });
+    moreBody.append(copilot, copy);
+    if (finding.outcome !== 'pass' && finding.id) {
+      const suppression = layoutActionButton(
+        finding.suppressed ? 'Unsuppress' : 'Suppress',
+        finding.suppressed ? 'i-refresh' : 'i-close');
+      suppression.addEventListener('click', async () => {
+        suppression.disabled = true;
+        const endpoint = finding.suppressed
+          ? '/api/diagnostics/unsuppress'
+          : '/api/diagnostics/suppress';
+        const result = await apiPost(endpoint, {
+          findingId: finding.id,
+          reason: finding.suppressed ? null : 'Suppressed in DevFlow Inspector',
+        });
+        if (!result || result.ok === false) {
+          suppression.disabled = false;
+          setStatus((result && (result.error || result.message)) || 'The layout suppression policy could not be changed.');
+          return;
+        }
+        setStatus(finding.suppressed
+          ? 'Removed the exact project layout suppression.'
+          : 'Saved an exact layout suppression in .mauidevflow.');
+        await runLayoutScan(dockViewGeneration);
+      });
+      moreBody.append(suppression);
+    }
+    more.append(moreBody);
+    actions.append(more);
+    card.append(actions);
+    return card;
+  }
+
   function renderLayoutDiagnostics(j) {
     if (!j || j.ok === false || !j.report) {
       latestLayoutReport = null;
@@ -3387,74 +3694,28 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       rule: layoutOptions.rule,
       includeSuppressed: layoutOptions.includeSuppressed,
     });
-    const fragment = document.createDocumentFragment();
-
-    const header = elh('div', { class: 'df-diag-header' });
-    header.append(
-      elh('div', { class: 'df-section-title', text: view.title }),
-      elh('div', { class: 'df-diag-meta', text: `${view.summary} · ${view.scope}` }),
-      elh('div', { class: 'df-diag-meta', text: `${view.coverage} · ${view.version}` }));
-    if (view.snapshot.capturedAt) {
-      header.append(elh('div', {
-        class: 'df-diag-meta',
-        text: `${view.snapshot.platform} · captured ${view.snapshot.capturedAt}` +
-          (view.snapshot.stable === false ? ` · stability: ${view.snapshot.stabilityReason || 'not established'}` : ''),
+    const root = elh('div', { class: 'df-layout-root' });
+    const header = elh('header', { class: 'df-layout-header' });
+    const headingRow = elh('div', { class: 'df-layout-heading-row' });
+    const heading = elh('div', { class: 'df-layout-heading' });
+    heading.append(
+      elh('div', { class: 'df-layout-title-row' },
+        elh('h3', { text: view.title }),
+        layoutStatusPill(view.status.label, view.status.tone)),
+      elh('p', {
+        class: 'df-layout-scope',
+        text: `${layoutScopeLabel(view)} · ${view.scope}${view.scopeTruncated ? ' · truncated' : ''}`,
       }));
-    }
 
-    const controls = elh('div', { class: 'df-diag-controls' });
-    controls.append(
-      layoutSelect('Profile', layoutOptions.profile, [
-        ['agent', 'Agent'],
-        ['strict', 'Strict'],
-        ['exhaustive', 'Exhaustive'],
-        ['ci', 'CI'],
-      ], (value) => { layoutOptions.profile = value; }),
-      layoutSelect('Outcome', layoutOptions.outcome, [
-        ['actionable', 'Actionable'],
-        ['all', 'All findings'],
-        ['violations', 'Violations'],
-        ['incomplete', 'Incomplete'],
-        ['passes', 'Passes'],
-      ], (value) => { layoutOptions.outcome = value; renderLayoutDiagnostics({ ok: true, report: latestLayoutReport }); }),
-      layoutSelect('Severity', layoutOptions.minimumSeverity, [
-        ['info', 'Info+'],
-        ['minor', 'Minor+'],
-        ['moderate', 'Moderate+'],
-        ['serious', 'Serious+'],
-        ['critical', 'Critical'],
-      ], (value) => { layoutOptions.minimumSeverity = value; renderLayoutDiagnostics({ ok: true, report: latestLayoutReport }); }),
-      layoutSelect('Confidence', layoutOptions.minimumConfidence, [
-        ['low', 'Low+'],
-        ['medium', 'Medium+'],
-        ['high', 'High+'],
-        ['exact', 'Exact'],
-      ], (value) => { layoutOptions.minimumConfidence = value; renderLayoutDiagnostics({ ok: true, report: latestLayoutReport }); }));
-
-    const rule = elh('input', {
-      type: 'search',
-      value: layoutOptions.rule,
-      placeholder: 'Filter rule',
-      'aria-label': 'Filter layout rule',
-    });
-    rule.addEventListener('change', () => {
-      layoutOptions.rule = rule.value;
-      renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
-    });
-    const selectedScope = elh('input', { id: 'df-layout-selected-scope', type: 'checkbox' });
-    selectedScope.checked = layoutOptions.selectedScope;
-    selectedScope.disabled = !selectedId;
-    selectedScope.addEventListener('change', () => { layoutOptions.selectedScope = selectedScope.checked; });
-    const suppressed = elh('input', { type: 'checkbox' });
-    suppressed.checked = layoutOptions.includeSuppressed;
-    suppressed.addEventListener('change', () => {
-      layoutOptions.includeSuppressed = suppressed.checked;
-      renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
-    });
-    const live = elh('input', { type: 'checkbox' });
-    live.checked = layoutOptions.live;
-    live.addEventListener('change', () => {
-      layoutOptions.live = live.checked;
+    const headerActions = elh('div', { class: 'df-action-row df-layout-header-actions' });
+    const liveInput = elh('input', { type: 'checkbox', 'aria-label': 'Live layout diagnostics' });
+    liveInput.checked = layoutOptions.live;
+    const live = elh('label', { class: 'df-layout-live-toggle' },
+      liveInput,
+      elh('span', { class: 'df-layout-switch', 'aria-hidden': 'true' }),
+      elh('span', { text: 'Live' }));
+    liveInput.addEventListener('change', () => {
+      layoutOptions.live = liveInput.checked;
       setStatus(layoutOptions.live
         ? 'Live layout diagnostics enabled. Relevant UI changes will trigger read-only rescans.'
         : 'Live layout diagnostics disabled.');
@@ -3464,163 +3725,172 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         layoutLiveTimer = null;
       }
     });
-    const rescan = elh('button', {
-      type: 'button',
-      text: layoutScanBusy ? 'Scanning…' : 'Rescan',
-    });
+    const rescan = layoutActionButton(
+      layoutScanBusy ? 'Scanning…' : 'Rescan',
+      'i-refresh',
+      'df-layout-button-primary');
     rescan.disabled = layoutScanBusy;
     rescan.addEventListener('click', () => runLayoutScan(dockViewGeneration));
-    controls.append(
-      rule,
-      elh('label', null, selectedScope, elh('span', { text: 'Selected subtree' })),
-      elh('label', null, suppressed, elh('span', { text: 'Suppressed' })),
-      elh('label', null, live, elh('span', { text: 'Live' })),
-      rescan);
-    header.append(controls);
-    fragment.append(header);
+    headerActions.append(live, rescan);
+    headingRow.append(heading, headerActions);
+    header.append(headingRow);
 
-    if (view.rules.length) {
-      const table = elh('table', { class: 'df-diag-rules' });
-      table.append(elh('tr', null,
-        elh('th', { text: 'Rule' }), elh('th', { text: 'Coverage' }), elh('th', { text: 'Elements' })));
-      for (const rule of view.rules) {
-        table.append(elh('tr', null,
-          elh('td', { text: rule.ruleId }),
-          elh('td', { text: rule.support }),
-          elh('td', { text: rule.detail })));
-      }
-      fragment.append(table);
-    }
+    const captured = formatLayoutCaptureTime(view.snapshot.capturedAt);
+    header.append(elh('p', {
+      class: 'df-layout-capture',
+      text: [
+        view.snapshot.platform,
+        captured ? `Captured ${captured}` : null,
+        view.snapshot.stable === false ? 'Single-frame snapshot' : null,
+      ].filter(Boolean).join(' · '),
+    }));
+    root.append(header);
+
+    const summary = elh('section', {
+      class: 'df-summary-grid df-layout-summary',
+      'aria-label': 'Layout diagnostic summary',
+    });
+    summary.append(
+      layoutSummaryCard('Issues', view.counts.violations, view.counts.violations ? 'error' : 'neutral'),
+      layoutSummaryCard('Observations', view.counts.observations, view.counts.observations ? 'warning' : 'neutral'),
+      layoutSummaryCard('Incomplete', view.counts.incomplete, view.counts.incomplete ? 'neutral' : 'success'),
+      layoutSummaryCard('Coverage', view.coverageLabel, view.coverageOverall === 'full' ? 'success' : view.coverageOverall === 'partial' ? 'warning' : 'neutral'));
+    root.append(summary);
+
+    const filters = elh('section', { class: 'df-layout-filterbar', 'aria-label': 'Filter layout findings' });
+    const rule = elh('input', {
+      class: 'df-field df-layout-search',
+      type: 'search',
+      value: layoutOptions.rule,
+      placeholder: 'Search findings',
+      'aria-label': 'Search layout findings',
+    });
+    rule.addEventListener('change', () => {
+      layoutOptions.rule = rule.value;
+      renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+    });
+    filters.append(
+      rule,
+      layoutSelect('Finding type', layoutOptions.outcome, [
+        ['all', 'All findings'],
+        ['violations', 'Issues'],
+        ['observations', 'Observations'],
+        ['incomplete', 'Incomplete'],
+      ], (value) => {
+        layoutOptions.outcome = value;
+        renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+      }));
+
+    const advanced = elh('details', { class: 'df-disclosure df-layout-advanced' });
+    advanced.open = layoutOptions.advancedOpen;
+    advanced.addEventListener('toggle', () => { layoutOptions.advancedOpen = advanced.open; });
+    advanced.append(elh('summary', null,
+      elh('span', { class: 'df-disclosure-title', text: 'Advanced options' })));
+    const advancedBody = elh('div', { class: 'df-disclosure-body df-layout-advanced-grid' });
+    advancedBody.append(
+      layoutSelect('Profile', layoutOptions.profile, [
+        ['agent', 'Agent'],
+        ['strict', 'Strict'],
+        ['exhaustive', 'Exhaustive'],
+        ['ci', 'CI'],
+      ], (value) => {
+        layoutOptions.profile = value;
+        runLayoutScan(dockViewGeneration);
+      }),
+      layoutSelect('Minimum severity', layoutOptions.minimumSeverity, [
+        ['info', 'Info+'],
+        ['minor', 'Minor+'],
+        ['moderate', 'Moderate+'],
+        ['serious', 'Serious+'],
+        ['critical', 'Critical'],
+      ], (value) => {
+        layoutOptions.minimumSeverity = value;
+        renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+      }),
+      layoutSelect('Minimum confidence', layoutOptions.minimumConfidence, [
+        ['low', 'Low+'],
+        ['medium', 'Medium+'],
+        ['high', 'High+'],
+        ['exact', 'Exact'],
+      ], (value) => {
+        layoutOptions.minimumConfidence = value;
+        renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+      }));
+    const selectedScope = elh('input', { id: 'df-layout-selected-scope', type: 'checkbox' });
+    selectedScope.checked = layoutOptions.selectedScope;
+    selectedScope.disabled = !selectedId;
+    selectedScope.addEventListener('change', () => {
+      layoutOptions.selectedScope = selectedScope.checked;
+      runLayoutScan(dockViewGeneration);
+    });
+    const suppressed = elh('input', { type: 'checkbox' });
+    suppressed.checked = layoutOptions.includeSuppressed;
+    suppressed.addEventListener('change', () => {
+      layoutOptions.includeSuppressed = suppressed.checked;
+      renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+    });
+    advancedBody.append(
+      elh('label', { class: 'df-layout-check' }, selectedScope, elh('span', { text: 'Scan selected subtree' })),
+      elh('label', { class: 'df-layout-check' }, suppressed, elh('span', { text: 'Show suppressed findings' })));
+    advanced.append(advancedBody);
+    filters.append(advanced);
+    root.append(filters);
+
+    const coverageDetails = renderLayoutCoverage(view);
+    const findingsSection = elh('section', { class: 'df-layout-findings' });
+    findingsSection.append(elh('div', { class: 'df-layout-section-heading' },
+      elh('h4', { text: 'Findings' }),
+      elh('span', {
+        class: 'df-layout-section-count',
+        text: view.matchingFindings === view.totalFindings
+          ? String(view.totalFindings)
+          : `${view.matchingFindings} of ${view.totalFindings}`,
+      })));
 
     if (!view.findings.length) {
-      fragment.append(elh('div', {
-        class: 'df-empty',
-        text: view.totalFindings
-          ? 'No findings match the active filters.'
-          : 'No findings. Read the coverage table above — unevaluated elements are incomplete, not passing.',
+      const empty = elh('div', { class: 'df-empty-state df-layout-empty-state' });
+      empty.append(
+        svgIcon(view.totalFindings ? 'i-inspect' : 'i-check', 'df-empty-state-icon'),
+        elh('div', { class: 'df-empty-state-copy' },
+          elh('h4', { text: view.totalFindings ? 'No findings match these filters' : 'No layout findings in the evaluated elements' }),
+          elh('p', {
+            text: view.totalFindings
+              ? 'Reset the filters to see the complete result.'
+              : view.coverageOverall === 'full'
+                ? 'Every enabled check completed without a finding.'
+                : 'Coverage is not complete. Review what could and could not be evaluated.',
+          })));
+      const emptyActions = elh('div', { class: 'df-action-row' });
+      if (view.totalFindings) {
+        const reset = layoutActionButton('Reset filters', 'i-refresh');
+        reset.addEventListener('click', resetLayoutFilters);
+        emptyActions.append(reset);
+      } else if (view.coverageOverall !== 'full') {
+        const review = layoutActionButton('Review coverage', 'i-data');
+        review.addEventListener('click', () => {
+          layoutOptions.coverageOpen = true;
+          coverageDetails.open = true;
+          coverageDetails.scrollIntoView({ block: 'nearest' });
+        });
+        emptyActions.append(review);
+      }
+      empty.append(emptyActions);
+      findingsSection.append(empty);
+    } else {
+      const list = elh('div', { class: 'df-layout-finding-list' });
+      for (const finding of view.findings)
+        list.append(renderLayoutFinding(finding, j.report));
+      findingsSection.append(list);
+    }
+    if (view.findingsTruncated) {
+      findingsSection.append(elh('p', {
+        class: 'df-layout-guidance',
+        text: 'The visible list is capped. Use `maui devflow diagnostics layout --json` for the complete report.',
       }));
     }
-    for (const finding of view.findings) {
-      const row = elh('div', {
-        class: `df-diag-finding df-diag-${finding.outcome}` +
-          (finding.suppressed ? ' df-suppressed' : '') +
-          (finding.id === selectedLayoutFindingId ? ' df-selected' : ''),
-        role: 'button',
-        tabindex: '0',
-      });
-      row.dataset.layoutFindingId = finding.id;
-      const heading = elh('div', { class: 'df-problem-heading' });
-      heading.append(
-        elh('span', { class: 'df-problem-code', text: `${finding.outcomeLabel} · ${finding.ruleId}` }),
-        elh('span', { class: 'df-problem-count', text: `${finding.severity} · ${finding.confidence}` }));
-      row.append(heading, elh('div', { class: 'df-problem-message', text: finding.message }));
-      if (finding.context) row.append(elh('div', { class: 'df-problem-context', text: finding.context }));
-      row.append(elh('div', { class: 'df-diag-explanation', text: finding.explanation }));
-      const tags = elh('div', { class: 'df-diag-tags' });
-      tags.append(
-        elh('span', { class: 'df-diag-tag', text: finding.actionability }),
-        ...finding.fixCategories.map((category) => elh('span', { class: 'df-diag-tag', text: category })));
-      if (finding.suppressed)
-        tags.append(elh('span', { class: 'df-diag-tag', text: finding.suppressionReason || 'suppressed' }));
-      row.append(tags);
-      for (const limitation of finding.limitations)
-        row.append(elh('div', { class: 'df-diag-limitation', text: `! ${limitation}` }));
+    root.append(findingsSection, coverageDetails);
 
-      if (finding.relatedElements.length) {
-        const related = elh('div', { class: 'df-diag-related' });
-        for (const item of finding.relatedElements) {
-          const button = elh('button', {
-            type: 'button',
-            text: `${item.relation}: ${item.element.automationId || item.element.id}`,
-          });
-          button.addEventListener('click', (event) => {
-            event.stopPropagation();
-            const target = elById(item.element.id);
-            if (!target) {
-              setStatus('The related element is no longer present in the current frame.');
-              return;
-            }
-            selectElement(item.element.id);
-            propertyGrid.open(target);
-          });
-          related.append(button);
-        }
-        row.append(related);
-      }
-
-      const actions = elh('div', { class: 'df-diag-actions' });
-      if (finding.elementId && finding.element?.sourceFile) {
-        const source = elh('button', { type: 'button', text: 'Source' });
-        source.addEventListener('click', async (event) => {
-          event.stopPropagation();
-          selectLayoutFinding(finding);
-          await openSource();
-        });
-        actions.append(source);
-      }
-      if (finding.outcome !== 'pass' && finding.id) {
-        const suppression = elh('button', {
-          type: 'button',
-          text: finding.suppressed ? 'Unsuppress' : 'Suppress',
-        });
-        suppression.addEventListener('click', async (event) => {
-          event.stopPropagation();
-          suppression.disabled = true;
-          const endpoint = finding.suppressed
-            ? '/api/diagnostics/unsuppress'
-            : '/api/diagnostics/suppress';
-          const result = await apiPost(endpoint, {
-            findingId: finding.id,
-            reason: finding.suppressed ? null : 'Suppressed in DevFlow Inspector',
-          });
-          if (!result || result.ok === false) {
-            suppression.disabled = false;
-            setStatus((result && (result.error || result.message)) || 'The layout suppression policy could not be changed.');
-            return;
-          }
-          setStatus(finding.suppressed
-            ? 'Removed the exact project layout suppression.'
-            : 'Saved an exact layout suppression in .mauidevflow.');
-          await runLayoutScan(dockViewGeneration);
-        });
-        actions.append(suppression);
-      }
-      const copilot = elh('button', { type: 'button', text: 'Add to Copilot' });
-      copilot.addEventListener('click', async (event) => {
-        event.stopPropagation();
-        setLayoutCopilotSnapshot(j.report, finding.id);
-        await attachDockDataToCopilot();
-      });
-      const copy = elh('button', { type: 'button', text: 'Copy payload' });
-      copy.addEventListener('click', async (event) => {
-        event.stopPropagation();
-        const ok = await copyText(JSON.stringify(createLayoutDataPayload(j.report, finding.id), null, 2));
-        setStatus(ok ? 'Copied the selected layout finding.' : 'Could not copy the layout finding.');
-      });
-      actions.append(copilot, copy);
-      row.append(actions);
-      row.addEventListener('click', () => selectLayoutFinding(finding));
-      row.addEventListener('keydown', (event) => {
-        if (event.key !== 'Enter' && event.key !== ' ') return;
-        event.preventDefault();
-        selectLayoutFinding(finding);
-      });
-      fragment.append(row);
-    }
-
-    if (view.findingsTruncated) {
-      fragment.append(elh('div', { class: 'df-diag-limitation', text: 'The finding list was truncated for display. Use `maui devflow diagnostics layout --json` for the full report.' }));
-    }
-
-    const limits = elh('div', { class: 'df-diag-footer' });
-    limits.append(elh('div', { class: 'df-diag-subtitle', text: 'Limitations' }));
-    for (const limitation of view.limitations)
-      limits.append(elh('div', { class: 'df-diag-limitation', text: `! ${limitation}` }));
-    if (view.neverCaptured.length)
-      limits.append(elh('div', { class: 'df-diag-meta', text: `Never captured: ${view.neverCaptured.join(', ')}` }));
-    fragment.append(limits);
-
-    dockBodyEl.replaceChildren(fragment);
+    dockBodyEl.replaceChildren(root);
     setLayoutCopilotSnapshot(j.report, selectedLayoutFindingId);
   }
 
@@ -3660,7 +3930,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         },
         minimumSeverity: 'info',
         includeEvidence: true,
-        includePasses: true,
+        includePasses: false,
         stability: { mode: 'wait', stableFrames: 2, quietPeriodMs: 100, timeoutMs: 2500 },
         occlusion: { mode: 'interactiveTargets', maxSamplesPerElement: 81, coverageError: 0.05, minimumOverlapRatio: 0.02 },
         privacy: { text: 'none' },

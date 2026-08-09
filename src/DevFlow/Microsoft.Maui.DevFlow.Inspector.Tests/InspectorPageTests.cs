@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Maui.DevFlow.Testing;
 using Microsoft.Playwright;
 using Xunit;
@@ -1746,6 +1747,73 @@ public class InspectorPageTests : IAsyncLifetime
         Assert.NotNull(content);
         Assert.True(Math.Abs(content.Y - (tabs.Y + tabs.Height)) <= 1,
             $"Expected Data content to start at the tab boundary, gap was {content.Y - (tabs.Y + tabs.Height)}px");
+    }
+
+    [LiveInspectorFact]
+    public async Task LayoutTabUsesProductHierarchyAcrossResponsiveWidths()
+    {
+        await _page.SetViewportSizeAsync(1440, 900);
+        await _page.GotoAsync(BaseUrl);
+        await Expect(_page.Locator(".devflow-element").First).ToBeAttachedAsync();
+        await _page.Locator("#df-toggle-dock").ClickAsync();
+        await _page.Locator("[data-tab='layout']").ClickAsync();
+
+        var root = _page.Locator(".df-layout-root");
+        await Expect(root).ToBeVisibleAsync();
+        await Expect(root.Locator(".df-layout-header")).ToBeVisibleAsync();
+        await Expect(root.Locator(".df-layout-summary .df-summary-card")).ToHaveCountAsync(4);
+        await Expect(root.Locator(".df-layout-findings")).ToBeVisibleAsync();
+        await Expect(root.Locator(".df-layout-coverage")).ToBeVisibleAsync();
+        await Expect(root.Locator(".df-diag-rules")).ToHaveCountAsync(0);
+
+        var scope = await root.Locator(".df-layout-scope").InnerTextAsync();
+        Assert.Contains("Current page", scope, StringComparison.Ordinal);
+        Assert.Contains("MainPage", scope, StringComparison.Ordinal);
+        Assert.DoesNotMatch("[a-f0-9]{12}", scope);
+
+        await Expect(root.Locator(".df-layout-header .df-layout-button-primary")).ToContainTextAsync("Rescan");
+        await Expect(root.Locator(".df-layout-live-toggle")).ToBeVisibleAsync();
+        Assert.False(await root.Locator(".df-layout-advanced").EvaluateAsync<bool>("details => details.open"));
+        Assert.False(await root.Locator(".df-layout-coverage").EvaluateAsync<bool>("details => details.open"));
+
+        await root.Locator(".df-layout-advanced > summary").ClickAsync();
+        await Expect(root.Locator(".df-layout-advanced select[aria-label='Profile']")).ToBeVisibleAsync();
+        await root.Locator(".df-layout-advanced > summary").ClickAsync();
+        await root.Locator(".df-layout-coverage > summary").ClickAsync();
+        await Expect(root.GetByText("Available checks", new() { Exact = true })).ToBeVisibleAsync();
+        await Expect(root.GetByText(new Regex("unavailable checks", RegexOptions.IgnoreCase))).ToBeVisibleAsync();
+        await root.Locator(".df-layout-coverage > summary").ClickAsync();
+
+        var findingsBox = await root.Locator(".df-layout-findings").BoundingBoxAsync();
+        var coverageBox = await root.Locator(".df-layout-coverage").BoundingBoxAsync();
+        Assert.NotNull(findingsBox);
+        Assert.NotNull(coverageBox);
+        Assert.True(findingsBox.Y < coverageBox.Y, "Findings should appear before diagnostic coverage details.");
+
+        var firstFinding = root.Locator(".df-layout-finding-card").First;
+        if (await firstFinding.CountAsync() > 0)
+        {
+            await Expect(firstFinding.Locator(".df-status-pill")).ToBeVisibleAsync();
+            await Expect(firstFinding.GetByText("Why and evidence", new() { Exact = true })).ToBeVisibleAsync();
+            await Expect(firstFinding.GetByText("More", new() { Exact = true })).ToBeVisibleAsync();
+        }
+
+        await _page.SetViewportSizeAsync(900, 700);
+        await _page.WaitForTimeoutAsync(100);
+        await Expect(_page.Locator("body")).ToHaveAttributeAsync("data-layout-width", "compact");
+        var compactTemplate = await root.Locator(".df-layout-summary").EvaluateAsync<string>(
+            "summary => getComputedStyle(summary).gridTemplateColumns");
+        Assert.True(
+            compactTemplate.StartsWith("repeat(2", StringComparison.Ordinal) ||
+            compactTemplate.Split(' ', StringSplitOptions.RemoveEmptyEntries).Length == 2,
+            $"Expected a two-column compact summary grid, got '{compactTemplate}'.");
+
+        await _page.SetViewportSizeAsync(420, 820);
+        await _page.WaitForTimeoutAsync(100);
+        await Expect(_page.Locator("body")).ToHaveAttributeAsync("data-layout-width", "narrow");
+        Assert.True(await root.EvaluateAsync<bool>(
+            "root => root.scrollWidth <= root.clientWidth + 1"),
+            "The narrow Layout surface must not introduce horizontal overflow.");
     }
 
     [LiveInspectorFact]

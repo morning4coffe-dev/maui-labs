@@ -137,21 +137,29 @@ export function createPropertyGridController(options) {
     if (!Array.isArray(findings) || findings.length === 0) return false;
 
     const section = document.createElement('section');
-    section.className = 'df-prop-diagnostics';
+    section.className = 'df-card df-prop-diagnostics';
     const heading = document.createElement('h3');
     heading.textContent = `Layout findings (${findings.length})`;
     section.append(heading);
     for (const finding of findings) {
       const row = document.createElement('button');
       row.type = 'button';
-      row.className = `df-prop-diagnostic df-diag-${finding.outcome || 'observation'}`;
+      row.className = `df-prop-diagnostic df-layout-${finding.outcome || 'observation'}`;
+      const meta = document.createElement('span');
+      meta.className = 'df-prop-diagnostic-meta';
+      const outcome = document.createElement('span');
+      outcome.className = `df-status-pill df-status-pill-${
+        finding.outcome === 'violation' ? 'error' :
+        finding.outcome === 'observation' ? 'warning' : 'neutral'}`;
+      outcome.textContent = finding.outcomeLabel || 'Finding';
       const title = document.createElement('span');
       title.className = 'df-prop-diagnostic-title';
-      title.textContent = `${finding.severity || 'info'} · ${finding.ruleId || 'layout finding'}`;
+      title.textContent = finding.ruleLabel || finding.ruleId || 'Layout finding';
+      meta.append(outcome, title);
       const message = document.createElement('span');
       message.className = 'df-prop-diagnostic-message';
       message.textContent = finding.message || '';
-      row.append(title, message);
+      row.append(meta, message);
       row.addEventListener('click', () => {
         if (typeof onSelectDiagnostic === 'function') onSelectDiagnostic(finding);
       });

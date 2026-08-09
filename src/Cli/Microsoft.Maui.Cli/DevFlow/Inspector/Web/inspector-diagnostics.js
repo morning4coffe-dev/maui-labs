@@ -23,9 +23,33 @@ const OUTCOME_LABELS = Object.freeze({
 
 const SEVERITY_RANKS = Object.freeze({ info: 0, minor: 1, moderate: 2, serious: 3, critical: 4 });
 const CONFIDENCE_RANKS = Object.freeze({ low: 0, medium: 1, high: 2, exact: 3 });
+const RULE_LABELS = Object.freeze({
+  'layout.element-clipped': 'Clipped element',
+  'layout.element-outside-window': 'Outside window',
+  'layout.content-overflow': 'Content overflow',
+  'layout.text-not-fully-rendered': 'Text not fully rendered',
+  'layout.interaction-occluded': 'Interaction blocked',
+  'layout.visual-occluded': 'Visually covered',
+  'layout.geometric-overlap': 'Element overlap',
+  'layout.accessibility-visibility-mismatch': 'Accessibility visibility mismatch',
+  'layout.visible-zero-area': 'Zero-size visible element',
+  'layout.constraint-violation': 'Layout constraint violation',
+  'layout.desired-size-constrained': 'Content under size pressure',
+  'layout.child-outside-parent': 'Child outside parent',
+});
 
 function outcomeLabel(outcome) {
   return OUTCOME_LABELS[outcome] || 'Finding';
+}
+
+function titleCase(value) {
+  const normalized = text(value).replace(/[-_]/g, ' ');
+  return normalized ? normalized[0].toUpperCase() + normalized.slice(1) : '';
+}
+
+export function layoutRuleLabel(ruleId) {
+  const value = text(ruleId);
+  return RULE_LABELS[value] || value.replace(/^layout\./, '').split('-').map(titleCase).join(' ');
 }
 
 function text(value, fallback = '') {
@@ -133,6 +157,7 @@ export function filterLayoutFindings(findings, filters = {}) {
     const findingOutcome = text(finding && finding.outcome, 'observation');
     if (outcome === 'actionable' && findingOutcome !== 'violation' && findingOutcome !== 'incomplete') return false;
     if (outcome === 'violations' && findingOutcome !== 'violation') return false;
+    if (outcome === 'observations' && findingOutcome !== 'observation') return false;
     if (outcome === 'incomplete' && findingOutcome !== 'incomplete') return false;
     if (outcome === 'passes' && findingOutcome !== 'pass') return false;
     if ((SEVERITY_RANKS[text(finding && finding.severity, 'info')] || 0) <
@@ -225,20 +250,38 @@ export function formatLayoutReport(report, filters = null) {
     suppressed ? `${suppressed} suppressed` : null,
   ].filter(Boolean);
 
-  const scopeText = [
-    `${Number(scope.elementsExamined) || 0} element${(Number(scope.elementsExamined) || 0) === 1 ? '' : 's'} examined`,
-    scope.rootElementId ? `under ${scope.rootElementId}` : null,
-    scope.truncated ? `truncated at ${Number(scope.maxElements) || 0}` : null,
-  ].filter(Boolean).join(' · ');
+  const elementsExamined = Number(scope.elementsExamined) || 0;
+  const coverageOverall = text(coverage.overall, 'unavailable');
+  const status = violations > 0
+    ? { tone: 'error', label: `${violations} issue${violations === 1 ? '' : 's'}` }
+    : observations > 0
+      ? { tone: 'warning', label: `${observations} observation${observations === 1 ? '' : 's'}` }
+      : incomplete > 0
+        ? { tone: 'neutral', label: 'Coverage incomplete' }
+        : { tone: 'success', label: 'No findings' };
 
   const truncated = findings.length > LAYOUT_FINDING_LIMIT;
   const shown = truncated ? findings.slice(0, LAYOUT_FINDING_LIMIT) : findings;
 
   return {
-    title: `Layout · ${headline}`,
+    title: 'Layout',
+    headline,
+    status,
+    counts: {
+      violations,
+      observations,
+      incomplete,
+      passes,
+      notApplicable,
+      suppressed,
+    },
     summary: parts.join(' · '),
-    scope: scopeText,
-    coverage: `Coverage: ${text(coverage.overall, 'unavailable')}`,
+    scope: `${elementsExamined} element${elementsExamined === 1 ? '' : 's'} examined`,
+    scopeRootId: scope.rootElementId ? String(scope.rootElementId) : null,
+    scopeTruncated: scope.truncated === true,
+    coverage: `Coverage: ${coverageOverall}`,
+    coverageOverall,
+    coverageLabel: titleCase(coverageOverall),
     version: `schema v${text(report && report.schemaVersion, '?')} · rules v${text(report && report.ruleSetVersion, '?')}`,
     snapshot: {
       id: text(report && report.snapshot && report.snapshot.id),
@@ -249,19 +292,32 @@ export function formatLayoutReport(report, filters = null) {
       stable: report && report.snapshot ? report.snapshot.stable === true : null,
       stabilityReason: text(report && report.snapshot && report.snapshot.stabilityReason),
     },
-    rules: (Array.isArray(coverage.rules) ? coverage.rules : []).map((rule) => ({
-      ruleId: text(rule.ruleId),
-      support: text(rule.support, 'unavailable'),
-      detail: `${Number(rule.evaluated) || 0} evaluated · ${Number(rule.skipped) || 0} skipped`,
-    })),
+    rules: (Array.isArray(coverage.rules) ? coverage.rules : []).map((rule) => {
+      const support = text(rule.support, 'unavailable');
+      const evaluated = Number(rule.evaluated) || 0;
+      const skipped = Number(rule.skipped) || 0;
+      return {
+        ruleId: text(rule.ruleId),
+        label: layoutRuleLabel(rule.ruleId),
+        support,
+        supportLabel: titleCase(support),
+        evaluated,
+        skipped,
+        detail: `${evaluated} evaluated · ${skipped} skipped`,
+        limitations: Array.isArray(rule.limitations) ? rule.limitations.map(String) : [],
+      };
+    }),
     findings: shown.map((finding) => ({
       id: text(finding.id),
       ruleId: text(finding.ruleId),
+      ruleLabel: layoutRuleLabel(finding.ruleId),
       outcome: text(finding.outcome, 'observation'),
       outcomeLabel: outcomeLabel(finding.outcome),
       subtype: finding.subtype ? String(finding.subtype) : null,
       severity: text(finding.severity, 'info'),
+      severityLabel: titleCase(finding.severity || 'info'),
       confidence: text(finding.confidence, 'medium'),
+      confidenceLabel: titleCase(finding.confidence || 'medium'),
       actionability: text(finding.actionability, 'review'),
       message: text(finding.message),
       explanation: text(finding.explanation),

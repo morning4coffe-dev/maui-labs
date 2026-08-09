@@ -58,17 +58,20 @@ const layoutReport = {
 test("layout view reports coverage next to the counts", () => {
   const view = formatLayoutReport(layoutReport);
 
-  assert.equal(view.title, "Layout · 1 violation");
+  assert.equal(view.title, "Layout");
+  assert.deepEqual(view.status, { tone: "error", label: "1 issue" });
   assert.match(view.summary, /1 violation/);
   assert.match(view.summary, /2 observations/);
   assert.match(view.summary, /1 incomplete/);
   assert.match(view.scope, /42 elements examined/);
   assert.equal(view.coverage, "Coverage: partial");
+  assert.equal(view.coverageLabel, "Partial");
   assert.equal(view.version, "schema v1.0 · rules v1.0");
   assert.deepEqual(view.rules.map((rule) => rule.ruleId), [
     "layout.visible-zero-area",
     "layout.outside-window",
   ]);
+  assert.equal(view.rules[0].label, "Zero-size visible element");
   assert.equal(view.rules[1].detail, "20 evaluated · 22 skipped");
 });
 
@@ -79,7 +82,9 @@ test("a clean scan is never summarised as a pass", () => {
     findings: [],
   });
 
-  assert.equal(view.title, "Layout · No violations in the evaluated elements");
+  assert.equal(view.title, "Layout");
+  assert.deepEqual(view.status, { tone: "neutral", label: "Coverage incomplete" });
+  assert.equal(view.headline, "No violations in the evaluated elements");
   assert.match(view.summary, /3 incomplete/);
   assert.equal(view.findings.length, 0);
   assert.equal(view.coverage, "Coverage: partial");
@@ -90,6 +95,7 @@ test("findings expose the element to select and their source context", () => {
 
   assert.equal(view.findings[0].elementId, "e1");
   assert.equal(view.findings[0].outcomeLabel, "Violation");
+  assert.equal(view.findings[0].ruleLabel, "Zero-size visible element");
   assert.equal(view.findings[0].context, "Label · #Title · MainPage.xaml:12");
   assert.deepEqual(view.findings[0].limitations, ["A deliberately collapsed element matches this rule."]);
   // An aggregate incomplete finding has no element to select.

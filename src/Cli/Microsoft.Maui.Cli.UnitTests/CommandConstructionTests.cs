@@ -123,6 +123,23 @@ public class CommandConstructionTests
 	}
 
 	[Fact]
+	public void UiTree_DefaultsToActiveVisualProjection()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var uiCommand = Assert.Single(devflowCommand.Subcommands, command => command.Name == "ui");
+		var treeCommand = Assert.Single(uiCommand.Subcommands, command => command.Name == "tree");
+		var projectionOption = (Option<string>)Assert.Single(
+			treeCommand.Options,
+			option => option.Name == "--projection");
+
+		var parseResult = treeCommand.Parse("");
+
+		Assert.Empty(parseResult.Errors);
+		Assert.Equal("activeVisual", parseResult.GetValue(projectionOption));
+	}
+
+	[Fact]
 	public void FlowReplay_BareEvidenceOnFailureOptionIsPresent()
 	{
 		var jsonOption = new Option<bool>("--json");

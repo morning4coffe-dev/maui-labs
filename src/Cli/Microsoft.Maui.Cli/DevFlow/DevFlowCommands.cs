@@ -3215,6 +3215,7 @@ public class DevFlowCommands
     {
         try
         {
+            EnsureAgentPortResolved(port);
             List<ElementInfo>? tree;
             if (projection.Equals("activeVisual", StringComparison.OrdinalIgnoreCase))
             {

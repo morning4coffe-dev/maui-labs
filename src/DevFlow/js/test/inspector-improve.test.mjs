@@ -97,6 +97,10 @@ test("Improve renderer exposes evidence, links, filters, and no apply action", (
   assert.match(source, /read-only and does not create a repair/i);
   assert.match(source, /The scan is read-only and does not create a repair/i);
   assert.match(source, /aria-live', 'polite/);
+  assert.ok(
+    source.indexOf("root.append(scanOptions);") < source.indexOf("if (!analysis) return root;"),
+    "Scan options must render before the first analysis exists",
+  );
   assert.match(read("devflow.js"), /openSourceDiff/);
   assert.match(css, /\.df-improve-filters/);
   assert.match(css, /repeat\(auto-fit, minmax\(150px, 1fr\)\)/);

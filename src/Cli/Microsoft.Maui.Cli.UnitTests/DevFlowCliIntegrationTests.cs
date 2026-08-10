@@ -39,12 +39,13 @@ public class DevFlowCliIntegrationTests
     }
 
     [Fact]
-    public async Task UiTree_WithDepth_UsesV1TreeRoute()
+    public async Task UiTree_RawProjectionWithDepth_UsesV1TreeRoute()
     {
         var (server, cli) = await CreateFixturesAsync();
         await using var serverHandle = server;
 
-        var result = await cli.InvokeAsync("devflow", "ui", "tree", "--depth", "2", "--json");
+        var result = await cli.InvokeAsync(
+            "devflow", "ui", "tree", "--depth", "2", "--projection", "raw", "--json");
 
         Assert.Equal(0, result.ExitCode);
         var json = result.ParseJsonOutput();

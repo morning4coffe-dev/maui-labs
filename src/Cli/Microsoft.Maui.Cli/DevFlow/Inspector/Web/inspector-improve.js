@@ -439,8 +439,8 @@ export function renderImprovePanel(helpers) {
         : 'Live tree facts were unavailable; flow and plan diagnostics remain deterministic.'
     ));
   }
-  if (!analysis) return root;
   root.append(scanOptions);
+  if (!analysis) return root;
 
   const result = create('section', 'df-improve-results');
   result.setAttribute('aria-live', 'polite');

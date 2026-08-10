@@ -57,6 +57,18 @@ test('Inspector accessibility structure keeps hidden inputs out of tab order', (
   assert.match(html, /id="df-problems-status"[^>]*aria-live="polite"/);
 });
 
+test('Layout discovery uses a smart top-level toolbar entry and shared cached state', () => {
+  assert.match(
+    html,
+    /id="df-layout-entry"[\s\S]*id="df-toolbar-secondary"[\s\S]*id="df-toggle-fit"/);
+  assert.match(html, /id="df-layout-entry-status"[^>]*data-state="idle"[^>]*>Start</);
+  assert.match(source, /function openLayoutDiagnostics\(options = \{\}\)/);
+  assert.match(source, /propertyGrid\.refreshDiagnostics\(\)/);
+  assert.match(source, /!latestLayoutReport && !layoutError && !layoutScanBusy/);
+  assert.match(source, /tab\.textContent = latestLayoutReport && issues\.length \? `Layout \(\$\{issues\.length\}\)` : 'Layout'/);
+  assert.match(source, /layoutError \? 'Retry' : 'Start'/);
+});
+
 test('Evidence dialog redirects tab focus back inside when focus escapes', () => {
   assert.match(evidence, /if \(!box\.contains\(document\.activeElement\)\)/);
 });

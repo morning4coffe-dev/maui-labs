@@ -409,7 +409,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       }
 
       // Update viewport size if changed
+      let layoutChanged = false;
       if (state.viewportWidth && state.viewportHeight) {
+        layoutChanged = viewport.dataset.width !== String(state.viewportWidth)
+          || viewport.dataset.height !== String(state.viewportHeight);
         viewport.style.width = state.viewportWidth + 'px';
         viewport.style.height = state.viewportHeight + 'px';
         viewport.dataset.width = state.viewportWidth;
@@ -423,9 +426,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
 
       // Smart DOM diff — only update elements that changed, preserving hover/selection
       if (state.elements) {
-        patchElements(state.elements);
+        layoutChanged = patchElements(state.elements) || layoutChanged;
         onElementsUpdated();
       }
+      if (layoutChanged) markLayoutStale();
     } catch (err) {
       markConnected(false);
       console.error('State refresh failed:', err);
@@ -448,6 +452,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
     if (!value) {
       disconnectReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+      markLayoutStale();
     } else if (disconnectReturnFocus && disconnectReturnFocus.isConnected) {
       const active = document.activeElement;
       if (!active || active === document.body || active === document.documentElement ||
@@ -456,6 +461,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       }
       disconnectReturnFocus = null;
     }
+    if (value) scheduleLayoutLiveScan(0);
     renderWriterPresence();
     const status = document.getElementById('df-status');
     if (!value) setStatus(disconnectedStatus);
@@ -524,6 +530,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     // Build map of existing elements
     const oldEls = viewport.querySelectorAll('.devflow-element');
     const oldMap = new Map();
+    let changed = false;
     oldEls.forEach(el => {
       const id = el.getAttribute('data-id');
       if (id) oldMap.set(id, el);
@@ -533,6 +540,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     oldMap.forEach((el, id) => {
       if (!newMap.has(id)) {
         el.remove();
+        changed = true;
       }
     });
 
@@ -546,12 +554,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         // Update only if style or attributes changed
         if (oldEl.getAttribute('style') !== newEl.getAttribute('style')) {
           oldEl.setAttribute('style', newEl.getAttribute('style'));
+          changed = true;
         }
         // Sync data attributes
-        syncDataAttrs(oldEl, newEl);
+        changed = syncDataAttrs(oldEl, newEl) || changed;
         // Ensure correct order
         if (prevEl && prevEl.nextSibling !== oldEl) {
           prevEl.after(oldEl);
+          changed = true;
         }
         prevEl = oldEl;
       } else {
@@ -563,24 +573,30 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           viewport.appendChild(clone);
         }
         prevEl = clone;
+        changed = true;
       }
     }
+    return changed;
   }
 
   // Sync data-* attributes from src to dst without replacing the element
   function syncDataAttrs(dst, src) {
+    let changed = false;
     // Remove old data attrs not in src
     for (const attr of [...dst.attributes]) {
       if (attr.name.startsWith('data-') && !src.hasAttribute(attr.name)) {
         dst.removeAttribute(attr.name);
+        changed = true;
       }
     }
     // Set/update from src
     for (const attr of src.attributes) {
       if (attr.name.startsWith('data-') && dst.getAttribute(attr.name) !== attr.value) {
         dst.setAttribute(attr.name, attr.value);
+        changed = true;
       }
     }
+    return changed;
   }
 
   // Debounced refresh — coalesce rapid calls
@@ -1045,6 +1061,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         }
         if (!document.hidden && !replaying
           && (!type || ['treeChange', 'navigation', 'lifecycle', 'themeChange', 'alert'].includes(type))) {
+          markLayoutStale();
           scheduleLayoutLiveScan(175);
           scheduleRefresh(150);
         }
@@ -1114,8 +1131,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     syncPaneChrome,
     setStatus,
     labelFor: elementLabel,
-    getDiagnostics: (elementId) => layoutFindingsForElement(elementId),
+    getLayoutState: (elementId) => layoutHealthForElement(elementId),
     onSelectDiagnostic: (finding) => selectLayoutFinding(finding),
+    onStartLayout: ({ elementId, force }) =>
+      openLayoutDiagnostics({ elementId, forceScan: force === true }),
+    onOpenLayout: ({ elementId }) => openLayoutDiagnostics({ elementId }),
     onOpen: () => {
       if (isTreeDrawerLayout() && propsReturnFocus && propsReturnFocus.classList.contains('df-tree-node'))
         propsPaneEl.focus({ preventScroll: true });
@@ -1123,6 +1143,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     onClose: () => restoreFocus(propsReturnFocus, tb && tb.tree),
     onRuntimeChange: ({ elementId, name, value }) => {
       if (recordingId) recordStep('setProperty', elById(elementId), { name, value });
+      markLayoutStale();
+      scheduleLayoutLiveScan(175);
       scheduleRefresh(200);
     },
   });
@@ -1142,6 +1164,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     inspect: document.getElementById('df-mode-inspect'),
     tree: document.getElementById('df-toggle-tree'),
     bounds: document.getElementById('df-toggle-bounds'),
+    layout: document.getElementById('df-layout-entry'),
+    layoutStatus: document.getElementById('df-layout-entry-status'),
     more: document.getElementById('df-more'),
     secondary: document.getElementById('df-toolbar-secondary'),
     overflow: document.getElementById('df-toolbar-overflow'),
@@ -1149,6 +1173,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   };
   const toolbarActions = tb.secondary ? [...tb.secondary.querySelectorAll(':scope > button')] : [];
   const toolbarPriorities = new Map([
+    ['df-toggle-fit', 20],
     ['df-toggle-bounds', 30],
     ['df-open-source', 50],
     ['df-send-copilot', 80],
@@ -1270,6 +1295,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     toolbarLayoutFrame = 0;
     if (!tb.secondary || !tb.overflow || !tb.more) return;
     const focused = document.activeElement;
+    const wasOpen = document.body.classList.contains('df-more-open');
     setMoreOpen(false);
     for (const button of toolbarActions)
       moveToolbarAction(tb.secondary, button);
@@ -1296,6 +1322,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         focused.focus({ preventScroll: true });
     }
     tb.more.classList.toggle('df-active', !!tb.overflow.querySelector('.df-tool-btn.df-active'));
+    if (wasOpen && tb.overflow.children.length > 0)
+      setMoreOpen(true);
   }
 
   function scheduleToolbarLayout() {
@@ -3212,6 +3240,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   // ── Layout diagnostics tab ──
   let latestLayoutReport = null;
   let selectedLayoutFindingId = null;
+  let layoutFocusedElementId = null;
+  let layoutError = null;
+  let layoutStale = false;
   let layoutScanBusy = false;
   let layoutScanPending = false;
   let layoutLiveTimer = null;
@@ -3242,19 +3273,146 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     coverageOpen: false,
   };
 
+  function actionableLayoutFindings(report, elementId = null) {
+    return (Array.isArray(report?.findings) ? report.findings : []).filter((finding) => {
+      if (!finding || finding.suppressed === true ||
+          !['violation', 'observation'].includes(finding.outcome)) return false;
+      const findingElementId = finding.elementId || finding.element?.id;
+      return !elementId || findingElementId === elementId;
+    });
+  }
+
+  function layoutHealthForElement(elementId) {
+    const findings = layoutFindingsForElement(elementId)
+      .filter((finding) => finding.outcome !== 'pass' && finding.suppressed !== true);
+    const issues = findings.filter((finding) =>
+      finding.outcome === 'violation' || finding.outcome === 'observation');
+    const hasViolation = issues.some((finding) => finding.outcome === 'violation');
+    const view = latestLayoutReport ? formatLayoutReport(latestLayoutReport) : null;
+    const status = layoutScanBusy
+      ? 'scanning'
+      : !latestLayoutReport && layoutError
+        ? 'error'
+        : !latestLayoutReport
+          ? 'idle'
+          : layoutStale ? 'stale' : 'ready';
+    const issueLabel = `${issues.length} issue${issues.length === 1 ? '' : 's'}`;
+    const coverage = view?.coverageLabel || 'Unavailable';
+    const message = status === 'idle'
+      ? 'Check this page for clipping, overflow, overlap, and sizing issues.'
+      : status === 'scanning'
+        ? 'Checking the current page. Results will appear here when the scan completes.'
+        : status === 'error'
+          ? (layoutError || 'Layout diagnostics are unavailable for this app.')
+          : status === 'stale'
+            ? `The UI changed after this scan. ${issueLabel} may be outdated.`
+            : issues.length
+              ? `${issueLabel} for this element. Coverage: ${coverage}.`
+              : `No findings for this element in the evaluated checks. Coverage: ${coverage}.`;
+    return {
+      status,
+      findings,
+      issueCount: issues.length,
+      tone: hasViolation ? 'error' : issues.length ? 'warning' : 'neutral',
+      label: status === 'idle'
+        ? 'Not checked'
+        : status === 'scanning'
+          ? 'Checking'
+          : status === 'error'
+            ? 'Unavailable'
+            : status === 'stale'
+              ? 'Stale'
+              : issues.length ? issueLabel : 'No findings',
+      message,
+    };
+  }
+
+  function updateLayoutEntry() {
+    if (!tb.layout || !tb.layoutStatus) return;
+    const previousState = tb.layoutStatus.dataset.state || '';
+    const previousTone = tb.layoutStatus.dataset.tone || '';
+    const previousText = tb.layoutStatus.textContent || '';
+    const issues = actionableLayoutFindings(latestLayoutReport);
+    const hasViolation = issues.some((finding) => finding.outcome === 'violation');
+    const isOpen = dockActiveTab === 'layout' && !dockEl.classList.contains('df-hidden');
+    let state = 'idle';
+    let text = 'Start';
+    let tone = '';
+    let label = 'Start layout check';
+    let title = 'Start a layout check and open Layout diagnostics';
+
+    if (layoutScanBusy) {
+      state = 'scanning';
+      text = 'Checking';
+      label = 'Layout check in progress';
+      title = 'Open the running Layout check';
+    } else if (!latestLayoutReport && layoutError) {
+      state = 'error';
+      text = '!';
+      tone = 'neutral';
+      label = 'Layout diagnostics unavailable';
+      title = 'Open Layout diagnostics to review the error and retry';
+    } else if (latestLayoutReport && layoutStale) {
+      state = 'stale';
+      text = 'Stale';
+      tone = 'neutral';
+      label = `Open stale Layout results, ${issues.length} issue${issues.length === 1 ? '' : 's'}`;
+      title = 'The UI changed after this Layout check; open the previous results and rescan';
+    } else if (latestLayoutReport) {
+      state = 'ready';
+      text = String(issues.length);
+      tone = hasViolation ? 'error' : issues.length ? 'warning' : 'neutral';
+      label = issues.length
+        ? `Open Layout diagnostics, ${issues.length} issue${issues.length === 1 ? '' : 's'}`
+        : 'Open Layout diagnostics, no findings in the evaluated checks';
+      title = label;
+    }
+
+    tb.layout.classList.toggle('df-active', isOpen);
+    tb.layout.setAttribute('aria-expanded', String(isOpen));
+    tb.layout.setAttribute('aria-label', label);
+    tb.layout.title = title;
+    tb.layoutStatus.dataset.state = state;
+    if (tone) tb.layoutStatus.dataset.tone = tone;
+    else tb.layoutStatus.removeAttribute('data-tone');
+    tb.layoutStatus.textContent = text;
+
+    const tab = document.getElementById('df-tab-layout');
+    if (tab) {
+      tab.textContent = latestLayoutReport && issues.length ? `Layout (${issues.length})` : 'Layout';
+      tab.setAttribute('aria-label', latestLayoutReport
+        ? `Layout, ${issues.length} issue${issues.length === 1 ? '' : 's'}`
+        : 'Layout');
+    }
+    if (previousState !== state || previousTone !== tone || previousText !== text)
+      scheduleToolbarLayout();
+  }
+
+  function updateLayoutSurfaces() {
+    updateLayoutEntry();
+    propertyGrid.refreshDiagnostics();
+  }
+
+  function markLayoutStale() {
+    if (!latestLayoutReport || layoutScanBusy || layoutStale) return;
+    layoutStale = true;
+    updateLayoutSurfaces();
+    if (dockActiveTab === 'layout' && !dockEl.classList.contains('df-hidden'))
+      renderLayoutDiagnostics();
+  }
+
   function clearLayoutOverlays() {
     layoutOverlays?.replaceChildren();
   }
 
   function scheduleLayoutLiveScan(delay = 200) {
     if (!layoutOptions.live ||
-        dockActiveTab !== 'layout' ||
-        dockEl.classList.contains('df-hidden') ||
+        !connected ||
         document.hidden) return;
     if (layoutLiveTimer) clearTimeout(layoutLiveTimer);
     layoutLiveTimer = setTimeout(() => {
       layoutLiveTimer = null;
-      runLayoutScan(dockViewGeneration);
+      runLayoutScan();
     }, delay);
   }
 
@@ -3437,8 +3595,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     layoutOptions.minimumConfidence = 'low';
     layoutOptions.rule = '';
     layoutOptions.includeSuppressed = false;
+    layoutFocusedElementId = null;
     if (latestLayoutReport)
-      renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+      renderLayoutDiagnostics();
   }
 
   function renderLayoutCoverage(view) {
@@ -3656,7 +3815,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         setStatus(finding.suppressed
           ? 'Removed the exact project layout suppression.'
           : 'Saved an exact layout suppression in .mauidevflow.');
-        await runLayoutScan(dockViewGeneration);
+        await runLayoutScan();
       });
       moreBody.append(suppression);
     }
@@ -3666,34 +3825,46 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     return card;
   }
 
-  function renderLayoutDiagnostics(j) {
-    if (!j || j.ok === false || !j.report) {
-      latestLayoutReport = null;
-      selectedLayoutFindingId = null;
-      clearLayoutOverlays();
-      elementTree.setDiagnostics([]);
+  function renderLayoutDiagnostics() {
+    if (!latestLayoutReport) {
       clearDockSnapshot();
-      dockEmpty((j && j.error) || 'Layout diagnostics are unavailable for this agent.');
+      if (layoutScanBusy) {
+        dockEmpty('Scanning layout…');
+        return;
+      }
+      const empty = elh('div', { class: 'df-empty-state df-layout-empty-state' },
+        svgIcon(layoutError ? 'i-refresh' : 'i-layout', 'df-empty-state-icon'),
+        elh('div', { class: 'df-empty-state-copy' },
+          elh('h4', { text: layoutError ? 'Layout diagnostics are unavailable' : 'Check this page layout' }),
+          elh('p', {
+            text: layoutError || 'Check this page for clipping, overflow, overlap, and sizing issues.',
+          })));
+      const actions = elh('div', { class: 'df-action-row' });
+      const start = layoutActionButton(layoutError ? 'Retry' : 'Start', 'i-refresh', 'df-layout-button-primary');
+      start.addEventListener('click', () => runLayoutScan());
+      actions.append(start);
+      empty.append(actions);
+      dockBodyEl.replaceChildren(empty);
       return;
     }
 
-    const reportChanged = latestLayoutReport !== j.report;
-    latestLayoutReport = j.report;
-    if (reportChanged)
-      elementTree.setDiagnostics(Array.isArray(j.report.findings) ? j.report.findings : []);
     if (selectedLayoutFindingId &&
-        !(Array.isArray(j.report.findings) &&
-          j.report.findings.some((finding) => finding && finding.id === selectedLayoutFindingId))) {
+        !(Array.isArray(latestLayoutReport.findings) &&
+          latestLayoutReport.findings.some((finding) => finding && finding.id === selectedLayoutFindingId))) {
       selectedLayoutFindingId = null;
       clearLayoutOverlays();
     }
-    const view = formatLayoutReport(j.report, {
+    const view = formatLayoutReport(latestLayoutReport, {
       outcome: layoutOptions.outcome,
       minimumSeverity: layoutOptions.minimumSeverity,
       minimumConfidence: layoutOptions.minimumConfidence,
       rule: layoutOptions.rule,
       includeSuppressed: layoutOptions.includeSuppressed,
     });
+    if (layoutFocusedElementId) {
+      view.findings = view.findings.filter((finding) => finding.elementId === layoutFocusedElementId);
+      view.findingsTruncated = false;
+    }
     const root = elh('div', { class: 'df-layout-root' });
     const header = elh('header', { class: 'df-layout-header' });
     const headingRow = elh('div', { class: 'df-layout-heading-row' });
@@ -3730,7 +3901,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       'i-refresh',
       'df-layout-button-primary');
     rescan.disabled = layoutScanBusy;
-    rescan.addEventListener('click', () => runLayoutScan(dockViewGeneration));
+    rescan.addEventListener('click', () => runLayoutScan());
     headerActions.append(live, rescan);
     headingRow.append(heading, headerActions);
     header.append(headingRow);
@@ -3745,6 +3916,15 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       ].filter(Boolean).join(' · '),
     }));
     root.append(header);
+    if (layoutStale || layoutError) {
+      root.append(elh('div', {
+        class: `df-layout-state-banner ${layoutError ? 'df-layout-state-error' : 'df-layout-state-stale'}`,
+        role: 'status',
+        text: layoutError
+          ? `${layoutError} The previous Layout results are retained.`
+          : 'The UI changed after this Layout check. Results may be outdated until you rescan.',
+      }));
+    }
 
     const summary = elh('section', {
       class: 'df-summary-grid df-layout-summary',
@@ -3767,7 +3947,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     });
     rule.addEventListener('change', () => {
       layoutOptions.rule = rule.value;
-      renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+      renderLayoutDiagnostics();
     });
     filters.append(
       rule,
@@ -3778,7 +3958,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         ['incomplete', 'Incomplete'],
       ], (value) => {
         layoutOptions.outcome = value;
-        renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+        renderLayoutDiagnostics();
       }));
 
     const advanced = elh('details', { class: 'df-disclosure df-layout-advanced' });
@@ -3795,7 +3975,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         ['ci', 'CI'],
       ], (value) => {
         layoutOptions.profile = value;
-        runLayoutScan(dockViewGeneration);
+        runLayoutScan();
       }),
       layoutSelect('Minimum severity', layoutOptions.minimumSeverity, [
         ['info', 'Info+'],
@@ -3805,7 +3985,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         ['critical', 'Critical'],
       ], (value) => {
         layoutOptions.minimumSeverity = value;
-        renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+        renderLayoutDiagnostics();
       }),
       layoutSelect('Minimum confidence', layoutOptions.minimumConfidence, [
         ['low', 'Low+'],
@@ -3814,20 +3994,20 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         ['exact', 'Exact'],
       ], (value) => {
         layoutOptions.minimumConfidence = value;
-        renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+        renderLayoutDiagnostics();
       }));
     const selectedScope = elh('input', { id: 'df-layout-selected-scope', type: 'checkbox' });
     selectedScope.checked = layoutOptions.selectedScope;
     selectedScope.disabled = !selectedId;
     selectedScope.addEventListener('change', () => {
       layoutOptions.selectedScope = selectedScope.checked;
-      runLayoutScan(dockViewGeneration);
+      runLayoutScan();
     });
     const suppressed = elh('input', { type: 'checkbox' });
     suppressed.checked = layoutOptions.includeSuppressed;
     suppressed.addEventListener('change', () => {
       layoutOptions.includeSuppressed = suppressed.checked;
-      renderLayoutDiagnostics({ ok: true, report: latestLayoutReport });
+      renderLayoutDiagnostics();
     });
     advancedBody.append(
       elh('label', { class: 'df-layout-check' }, selectedScope, elh('span', { text: 'Scan selected subtree' })),
@@ -3835,6 +4015,22 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     advanced.append(advancedBody);
     filters.append(advanced);
     root.append(filters);
+    if (layoutFocusedElementId) {
+      const focusedElement = elById(layoutFocusedElementId);
+      const focus = elh('div', { class: 'df-layout-focus' },
+        elh('span', {
+          text: `Selected element · ${focusedElement ? elementLabel(focusedElement) : 'Element no longer present'}`,
+        }));
+      const clear = layoutActionButton('Clear', 'i-close');
+      clear.addEventListener('click', () => {
+        layoutFocusedElementId = null;
+        selectedLayoutFindingId = null;
+        clearLayoutOverlays();
+        renderLayoutDiagnostics();
+      });
+      focus.append(clear);
+      root.append(focus);
+    }
 
     const coverageDetails = renderLayoutCoverage(view);
     const findingsSection = elh('section', { class: 'df-layout-findings' });
@@ -3842,7 +4038,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       elh('h4', { text: 'Findings' }),
       elh('span', {
         class: 'df-layout-section-count',
-        text: view.matchingFindings === view.totalFindings
+        text: layoutFocusedElementId
+          ? String(view.findings.length)
+          : view.matchingFindings === view.totalFindings
           ? String(view.totalFindings)
           : `${view.matchingFindings} of ${view.totalFindings}`,
       })));
@@ -3852,16 +4050,29 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       empty.append(
         svgIcon(view.totalFindings ? 'i-inspect' : 'i-check', 'df-empty-state-icon'),
         elh('div', { class: 'df-empty-state-copy' },
-          elh('h4', { text: view.totalFindings ? 'No findings match these filters' : 'No layout findings in the evaluated elements' }),
+          elh('h4', {
+            text: layoutFocusedElementId
+              ? 'No findings for the selected element'
+              : view.totalFindings ? 'No findings match these filters' : 'No layout findings in the evaluated elements',
+          }),
           elh('p', {
-            text: view.totalFindings
+            text: layoutFocusedElementId
+              ? 'Clear the selected-element filter to return to the complete page result.'
+              : view.totalFindings
               ? 'Reset the filters to see the complete result.'
               : view.coverageOverall === 'full'
                 ? 'Every enabled check completed without a finding.'
                 : 'Coverage is not complete. Review what could and could not be evaluated.',
           })));
       const emptyActions = elh('div', { class: 'df-action-row' });
-      if (view.totalFindings) {
+      if (layoutFocusedElementId) {
+        const clear = layoutActionButton('Clear element filter', 'i-close');
+        clear.addEventListener('click', () => {
+          layoutFocusedElementId = null;
+          renderLayoutDiagnostics();
+        });
+        emptyActions.append(clear);
+      } else if (view.totalFindings) {
         const reset = layoutActionButton('Reset filters', 'i-refresh');
         reset.addEventListener('click', resetLayoutFilters);
         emptyActions.append(reset);
@@ -3879,7 +4090,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     } else {
       const list = elh('div', { class: 'df-layout-finding-list' });
       for (const finding of view.findings)
-        list.append(renderLayoutFinding(finding, j.report));
+        list.append(renderLayoutFinding(finding, latestLayoutReport));
       findingsSection.append(list);
     }
     if (view.findingsTruncated) {
@@ -3891,10 +4102,16 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     root.append(findingsSection, coverageDetails);
 
     dockBodyEl.replaceChildren(root);
-    setLayoutCopilotSnapshot(j.report, selectedLayoutFindingId);
+    setLayoutCopilotSnapshot(latestLayoutReport, selectedLayoutFindingId);
+    if (selectedLayoutFindingId) {
+      requestAnimationFrame(() => {
+        dockBodyEl.querySelector(`[data-layout-finding-id="${CSS.escape(selectedLayoutFindingId)}"]`)
+          ?.scrollIntoView({ block: 'nearest' });
+      });
+    }
   }
 
-  async function runLayoutScan(generation) {
+  async function runLayoutScan() {
     if (layoutScanBusy) {
       layoutScanPending = true;
       return;
@@ -3912,8 +4129,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
 
     layoutScanBusy = true;
     layoutScanPending = false;
+    layoutError = null;
     clearLayoutOverlays();
-    if (!latestLayoutReport) dockEmpty('Scanning layout…');
+    updateLayoutSurfaces();
+    if (dockActiveTab === 'layout' && !dockEl.classList.contains('df-hidden'))
+      renderLayoutDiagnostics();
     let result = null;
     const previous = latestLayoutReport;
     try {
@@ -3939,18 +4159,48 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     } finally {
       layoutScanBusy = false;
     }
-    if (dockLoadIsCurrent('layout', generation)) {
-      const delta = result && result.ok !== false && result.report
-        ? diffLayoutReports(previous, result.report)
-        : null;
-      renderLayoutDiagnostics(result);
+    const succeeded = result && result.ok !== false && result.report;
+    const delta = succeeded ? diffLayoutReports(previous, result.report) : null;
+    if (succeeded) {
+      latestLayoutReport = result.report;
+      layoutError = null;
+      layoutStale = false;
+      elementTree.setDiagnostics(Array.isArray(result.report.findings) ? result.report.findings : []);
+      if (selectedLayoutFindingId &&
+          !result.report.findings?.some((finding) => finding?.id === selectedLayoutFindingId)) {
+        selectedLayoutFindingId = null;
+      }
+      if (layoutFocusedElementId) {
+        const focusedFinding = layoutFindingsForElement(layoutFocusedElementId)
+          .find((finding) =>
+            finding.suppressed !== true &&
+            (finding.outcome === 'violation' || finding.outcome === 'observation'));
+        selectedLayoutFindingId = focusedFinding?.id || null;
+        if (focusedFinding) renderLayoutOverlays(focusedFinding);
+      }
       if (delta) {
         setStatus(
           `Layout updated: ${delta.added.length} added, ${delta.updated.length} changed, ${delta.removed.length} removed.`);
+      } else {
+        const completed = formatLayoutReport(result.report);
+        setStatus(`Layout check complete: ${completed.status.label}. ${completed.coverage}.`);
+      }
+    } else {
+      layoutError = (result && (result.error || result.message))
+        || 'Layout diagnostics are unavailable for this agent.';
+      layoutStale = !!latestLayoutReport;
+      if (!latestLayoutReport) {
+        selectedLayoutFindingId = null;
+        elementTree.setDiagnostics([]);
       }
     }
-    if (layoutScanPending)
-      scheduleLayoutLiveScan(0);
+    updateLayoutSurfaces();
+    if (dockActiveTab === 'layout' && !dockEl.classList.contains('df-hidden'))
+      renderLayoutDiagnostics();
+    if (layoutScanPending) {
+      layoutScanPending = false;
+      runLayoutScan();
+    }
   }
 
   // ── Performance triage tab ──
@@ -4065,7 +4315,13 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       const j = await apiPost('/api/problems', { limit: 200 });
       if (dockLoadIsCurrent('problems', generation)) renderProblems(j);
     },
-    layout: async (generation) => runLayoutScan(generation),
+    layout: async (generation, options = {}) => {
+      if (options.forceScan === true ||
+          (!latestLayoutReport && !layoutError && !layoutScanBusy))
+        await runLayoutScan();
+      else if (dockLoadIsCurrent('layout', generation))
+        renderLayoutDiagnostics();
+    },
     performance: async (generation) => {
       const j = await apiPost('/api/performance/snapshot', {});
       if (dockLoadIsCurrent('performance', generation)) renderPerformance(j);
@@ -4218,15 +4474,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     if (out) out.replaceChildren(jsonView(j && j.ok ? j.result : ((j && j.error) || 'evaluate failed')));
   }
 
-  async function loadTab(name) {
+  async function loadTab(name, options = {}) {
     const generation = ++dockViewGeneration;
     dockActiveTab = name;
     if (name !== 'layout') {
       clearLayoutOverlays();
-      if (layoutLiveTimer) {
-        clearTimeout(layoutLiveTimer);
-        layoutLiveTimer = null;
-      }
     }
     networkDetailId = null;
     clearDockSnapshot();
@@ -4237,11 +4489,12 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       b.tabIndex = active ? 0 : -1;
       if (active && b.id) dockBodyEl.setAttribute('aria-labelledby', b.id);
     }
+    updateLayoutEntry();
     dockEmpty('Loading…');
     setDockMeta('loading…');
     setDockMetaNote('');
     try {
-      await tabLoaders[name](generation);
+      await tabLoaders[name](generation, options);
       if (!dockLoadIsCurrent(name, generation)) return;
       setDockMeta((name === 'network' ? 'live · updated ' : 'captured ') + new Date().toLocaleTimeString());
     }
@@ -4252,7 +4505,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
   }
 
-  function openDock() {
+  function openDock(targetTab = null, options = {}) {
     const active = document.activeElement;
     if (active instanceof HTMLElement && active !== document.body && !dockEl.contains(active))
       dockReturnFocus = active;
@@ -4272,7 +4525,13 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       toggleDockBtn.classList.add('df-active');
       setToolbarToggleState(toggleDockBtn, true);
     }
-    if (!dockLoaded) { dockLoaded = true; loadTab(dockActiveTab); }
+    if (!dockLoaded) {
+      dockLoaded = true;
+      loadTab(targetTab || dockActiveTab, options);
+    } else if (targetTab) {
+      loadTab(targetTab, options);
+    }
+    updateLayoutEntry();
     syncPaneChrome();
   }
   function closeDock(restore = false, preserveLayoutOverlay = false) {
@@ -4287,6 +4546,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       toggleDockBtn.classList.remove('df-active');
       setToolbarToggleState(toggleDockBtn, false);
     }
+    updateLayoutEntry();
     syncPaneChrome();
     if (restore) restoreFocus(dockReturnFocus, tb.more || toggleDockBtn);
   }
@@ -4296,6 +4556,28 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       dockCollapseBtn.setAttribute('aria-expanded', String(!collapsed));
       dockCollapseBtn.title = collapsed ? 'Expand data panel' : 'Collapse data panel';
     }
+  }
+
+  function openLayoutDiagnostics(options = {}) {
+    const elementId = options.elementId || null;
+    const forceScan = options.forceScan === true;
+    layoutFocusedElementId = elementId;
+    selectedLayoutFindingId = null;
+    clearLayoutOverlays();
+
+    if (latestLayoutReport && elementId) {
+      const finding = layoutFindingsForElement(elementId)
+        .find((candidate) =>
+          candidate.suppressed !== true &&
+          (candidate.outcome === 'violation' || candidate.outcome === 'observation'));
+      if (finding) {
+        selectedLayoutFindingId = finding.id;
+        renderLayoutOverlays(finding);
+      }
+    }
+
+    const shouldScan = forceScan || (!latestLayoutReport && !layoutError && !layoutScanBusy);
+    openDock('layout', { forceScan: shouldScan });
   }
   function parseAuthoringFlow(markdown) {
     if (typeof markdown !== 'string') return null;
@@ -7446,17 +7728,33 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   }
   window.addEventListener('beforeunload', () => agentRequestController?.stop?.(), { once: true });
   runController.restore();
+  if (tb.layout) tb.layout.addEventListener('click', () => {
+    if (dockActiveTab === 'layout' && !dockEl.classList.contains('df-hidden')) {
+      closeDock(true);
+      return;
+    }
+    openLayoutDiagnostics();
+  });
   if (toggleDockBtn) toggleDockBtn.addEventListener('click', () => (dockEl.classList.contains('df-hidden') ? openDock() : closeDock()));
   if (dockCloseBtn) dockCloseBtn.addEventListener('click', () => closeDock(true));
   if (dockCollapseBtn) dockCollapseBtn.addEventListener('click', toggleDockCollapsed);
   if (dockRefreshBtn) dockRefreshBtn.addEventListener('click', () => {
     if (dockActiveTab === 'network' && networkDetailId) loadNetworkDetail(networkDetailId);
+    else if (dockActiveTab === 'layout') runLayoutScan();
     else loadTab(dockActiveTab);
   });
   if (attachDataBtn) attachDataBtn.addEventListener('click', attachDockDataToCopilot);
   const dockTabButtons = [...dockTabsEl.querySelectorAll('.df-dock-tab')];
   for (const b of dockTabButtons) {
-    b.addEventListener('click', () => loadTab(b.getAttribute('data-tab')));
+    b.addEventListener('click', () => {
+      const tab = b.getAttribute('data-tab');
+      if (tab === 'layout') {
+        layoutFocusedElementId = null;
+        selectedLayoutFindingId = null;
+        clearLayoutOverlays();
+      }
+      loadTab(tab);
+    });
     b.addEventListener('keydown', (e) => {
       const index = dockTabButtons.indexOf(b);
       let target = null;
@@ -7467,7 +7765,13 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       else return;
       e.preventDefault();
       target.focus();
-      loadTab(target.getAttribute('data-tab'));
+      const tab = target.getAttribute('data-tab');
+      if (tab === 'layout') {
+        layoutFocusedElementId = null;
+        selectedLayoutFindingId = null;
+        clearLayoutOverlays();
+      }
+      loadTab(tab);
     });
   }
   setInterval(() => {
@@ -7765,6 +8069,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   document.documentElement.dataset.hostKind = hostIdentity;
   applyHostProfile({ surface: 'browser' });
   updateHostLayout();
+  updateLayoutSurfaces();
   scheduleToolbarLayout();
   elementTree.build();
   applyScale();

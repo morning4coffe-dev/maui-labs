@@ -1639,6 +1639,7 @@ public class InspectorPageTests : IAsyncLifetime
             ("#df-toggle-workbench", "Open Tests"),
             ("#df-toggle-tree", "Tree"),
             ("#df-toggle-fit", "Fit"),
+            ("#df-layout-entry", "Start layout check"),
             ("#df-toggle-bounds", "Bounds"),
             ("#df-open-source", "Source"),
             ("#df-send-copilot", "Copilot"),
@@ -1652,6 +1653,172 @@ public class InspectorPageTests : IAsyncLifetime
 
         Assert.Equal("Open Tests", await _page.GetByRole(AriaRole.Button, new() { Name = "Open Tests", Exact = true }).GetAttributeAsync("aria-label"));
         Assert.Equal("Tree", await _page.GetByRole(AriaRole.Button, new() { Name = "Tree", Exact = true }).GetAttributeAsync("aria-label"));
+    }
+
+    [LiveInspectorFact]
+    public async Task LayoutToolbarStartsOnceAndReopensCachedResults()
+    {
+        await _page.SetViewportSizeAsync(1440, 900);
+        await _page.RouteAsync("**/api/control", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = "{\"youAreWriter\":true,\"heldByOther\":false}",
+        }));
+        await _page.GotoAsync(BaseUrl);
+        var header = _page.Locator("[data-automationId='HeaderLabel']");
+        await Expect(header).ToBeAttachedAsync();
+        var elementId = await header.GetAttributeAsync("data-id");
+        Assert.False(string.IsNullOrWhiteSpace(elementId));
+
+        var treeRow = _page.Locator($".df-tree-node[data-tree-id='{elementId}']");
+        await treeRow.ClickAsync();
+        var propertyLayout = _page.Locator(".df-prop-diagnostics");
+        await Expect(propertyLayout).ToHaveAttributeAsync("data-layout-state", "idle");
+        await Expect(propertyLayout).ToContainTextAsync("Not checked");
+        await Expect(propertyLayout.GetByRole(AriaRole.Button, new() { Name = "Start", Exact = true }))
+            .ToBeVisibleAsync();
+
+        var scanRequests = 0;
+        var response = JsonSerializer.Serialize(new
+        {
+            ok = true,
+            report = new
+            {
+                schemaVersion = "2.0",
+                ruleSetVersion = "2.0",
+                capturedUtc = "2026-08-10T08:00:00Z",
+                platform = "Test",
+                snapshot = new
+                {
+                    id = "layout-toolbar",
+                    capturedAt = "2026-08-10T08:00:00Z",
+                    platform = "Test",
+                    treeRevision = "tree-1",
+                    diagnosticsRevision = "diagnostics-1",
+                    stable = true,
+                },
+                scope = new
+                {
+                    rootElementId = elementId,
+                    elementsExamined = 1,
+                    maxElements = 2000,
+                    truncated = false,
+                },
+                coverage = new
+                {
+                    overall = "partial",
+                    rules = new[]
+                    {
+                        new
+                        {
+                            ruleId = "layout.visible-zero-area",
+                            support = "full",
+                            confidence = "high",
+                            evaluated = 1,
+                            skipped = 0,
+                            limitations = Array.Empty<string>(),
+                        },
+                    },
+                    limitations = Array.Empty<string>(),
+                    neverCaptured = new[] { "Element Text/Value content" },
+                },
+                summary = new
+                {
+                    violations = 1,
+                    observations = 0,
+                    incomplete = 0,
+                    passes = 0,
+                    notApplicable = 0,
+                    suppressed = 0,
+                },
+                findings = new[]
+                {
+                    new
+                    {
+                        id = $"layout.visible-zero-area:{elementId}:area",
+                        ruleId = "layout.visible-zero-area",
+                        outcome = "violation",
+                        severity = "serious",
+                        confidence = "high",
+                        actionability = "fix",
+                        message = "The selected label has no visible area.",
+                        explanation = "A realized element with no area cannot draw.",
+                        element = new
+                        {
+                            id = elementId,
+                            type = "Label",
+                            automationId = "HeaderLabel",
+                        },
+                        relatedElements = Array.Empty<object>(),
+                        limitations = Array.Empty<string>(),
+                        fixCategories = new[] { "adjust-layout-constraints" },
+                    },
+                },
+            },
+        });
+        await _page.RouteAsync("**/api/diagnostics/layout", route =>
+        {
+            Interlocked.Increment(ref scanRequests);
+            return route.FulfillAsync(new()
+            {
+                Status = 200,
+                ContentType = "application/json",
+                Body = response,
+            });
+        });
+
+        var layoutEntry = _page.Locator("#df-layout-entry");
+        Assert.Equal("df-toolbar", await layoutEntry.EvaluateAsync<string>(
+            "button => button.parentElement?.id"));
+        await layoutEntry.ClickAsync();
+
+        await Expect(_page.Locator("#df-dock")).ToBeVisibleAsync();
+        await Expect(_page.Locator("#df-tab-layout")).ToHaveAttributeAsync("aria-selected", "true");
+        await Expect(_page.Locator(".df-layout-root")).ToBeVisibleAsync();
+        await Expect(_page.Locator("#df-layout-entry-status")).ToHaveTextAsync("1");
+        await Expect(layoutEntry).ToHaveAttributeAsync("aria-label", "Open Layout diagnostics, 1 issue");
+        await Expect(_page.Locator("#df-tab-layout")).ToHaveTextAsync("Layout (1)");
+        await Expect(treeRow.Locator(".df-tree-diagnostic")).ToHaveTextAsync("1");
+        await Expect(propertyLayout).ToHaveAttributeAsync("data-layout-state", "ready");
+        await Expect(propertyLayout).ToContainTextAsync("1 issue");
+        Assert.Equal(1, scanRequests);
+
+        await _page.Locator("#df-dock-close").ClickAsync();
+        await layoutEntry.ClickAsync();
+        await Expect(_page.Locator(".df-layout-root")).ToBeVisibleAsync();
+        Assert.Equal(1, scanRequests);
+
+        await _page.Locator("#df-dock-close").ClickAsync();
+        await treeRow.ClickAsync();
+        await propertyLayout.GetByRole(
+            AriaRole.Button,
+            new() { Name = "View all in Layout", Exact = true }).ClickAsync();
+        await Expect(_page.Locator(".df-layout-focus")).ToContainTextAsync("HeaderLabel");
+        Assert.Equal(1, scanRequests);
+
+        await _page.RouteAsync("**/api/setProperty", route => route.FulfillAsync(new()
+        {
+            Status = 200,
+            ContentType = "application/json",
+            Body = "{\"ok\":true}",
+        }));
+        var opacity = _page
+            .Locator(".df-prop-row")
+            .Filter(new() { HasText = "Opacity" })
+            .Locator("input[type='number']");
+        await opacity.FillAsync("0.9");
+        await opacity.DispatchEventAsync("change");
+        await Expect(_page.Locator("#df-layout-entry-status")).ToHaveTextAsync("Stale");
+        await Expect(propertyLayout).ToHaveAttributeAsync("data-layout-state", "stale");
+        await Expect(_page.Locator(".df-layout-state-banner")).ToContainTextAsync("may be outdated");
+
+        await propertyLayout.GetByRole(
+            AriaRole.Button,
+            new() { Name = "Rescan", Exact = true }).ClickAsync();
+        await Expect(_page.Locator("#df-layout-entry-status")).ToHaveTextAsync("1");
+        await Expect(propertyLayout).ToHaveAttributeAsync("data-layout-state", "ready");
+        Assert.Equal(2, scanRequests);
     }
 
     [LiveInspectorFact]

@@ -101,12 +101,15 @@ export function createPropertyGridController(options) {
     syncPaneChrome,
     setStatus,
     onRuntimeChange,
-    getDiagnostics,
+    getLayoutState,
     onSelectDiagnostic,
+    onStartLayout,
+    onOpenLayout,
     onOpen,
     onClose,
   } = options;
   let loadToken = 0;
+  let currentElementId = null;
 
   function updateWriterState() {
     for (const field of body.querySelectorAll('.df-field:not(.df-prop-filter)')) {
@@ -127,21 +130,40 @@ export function createPropertyGridController(options) {
     pane.classList.add('df-hidden');
     body.replaceChildren();
     labelElement.textContent = '';
+    currentElementId = null;
     loadToken++;
     syncPaneChrome();
     if (wasOpen && onClose) onClose();
   }
 
-  function appendDiagnostics(elementId) {
-    const findings = typeof getDiagnostics === 'function' ? getDiagnostics(elementId) : [];
-    if (!Array.isArray(findings) || findings.length === 0) return false;
-
+  function createDiagnostics(elementId) {
+    const layout = typeof getLayoutState === 'function'
+      ? getLayoutState(elementId)
+      : { status: 'idle', findings: [] };
+    const findings = Array.isArray(layout?.findings) ? layout.findings : [];
+    const issueCount = Number(layout?.issueCount) || 0;
     const section = document.createElement('section');
     section.className = 'df-card df-prop-diagnostics';
+    section.dataset.layoutState = layout?.status || 'idle';
+    const header = document.createElement('div');
+    header.className = 'df-prop-diagnostics-header';
     const heading = document.createElement('h3');
-    heading.textContent = `Layout findings (${findings.length})`;
-    section.append(heading);
-    for (const finding of findings) {
+    heading.textContent = 'Layout';
+    const status = document.createElement('span');
+    const statusTone = layout?.tone === 'error'
+      ? 'error'
+      : layout?.tone === 'warning' ? 'warning' : 'neutral';
+    status.className = `df-status-pill df-status-pill-${statusTone}`;
+    status.textContent = layout?.label || 'Not checked';
+    header.append(heading, status);
+    section.append(header);
+
+    const copy = document.createElement('p');
+    copy.className = 'df-prop-diagnostics-copy';
+    copy.textContent = layout?.message || 'Check this page for clipping, overflow, overlap, and sizing issues.';
+    section.append(copy);
+
+    for (const finding of findings.slice(0, 3)) {
       const row = document.createElement('button');
       row.type = 'button';
       row.className = `df-prop-diagnostic df-layout-${finding.outcome || 'observation'}`;
@@ -165,14 +187,58 @@ export function createPropertyGridController(options) {
       });
       section.append(row);
     }
-    body.append(section);
+    if (findings.length > 3) {
+      const more = document.createElement('p');
+      more.className = 'df-prop-diagnostics-more';
+      more.textContent = `${findings.length - 3} more finding${findings.length - 3 === 1 ? '' : 's'} in Layout.`;
+      section.append(more);
+    }
+
+    const actions = document.createElement('div');
+    actions.className = 'df-action-row df-prop-diagnostics-actions';
+    const action = (label, handler, primary = false) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `df-dock-btn${primary ? ' df-layout-button-primary' : ''}`;
+      button.textContent = label;
+      button.addEventListener('click', handler);
+      return button;
+    };
+    if (layout?.status === 'idle') {
+      actions.append(action('Start', () => onStartLayout?.({ elementId }), true));
+    } else if (layout?.status === 'scanning') {
+      actions.append(action('Show Layout', () => onOpenLayout?.({ elementId })));
+    } else if (layout?.status === 'error') {
+      actions.append(action('Retry', () => onStartLayout?.({ elementId, force: true }), true));
+    } else {
+      if (layout?.status === 'stale')
+        actions.append(action('Rescan', () => onStartLayout?.({ elementId, force: true }), true));
+      actions.append(action(
+        issueCount > 0 ? 'View all in Layout' : 'View Layout',
+        () => onOpenLayout?.({ elementId })));
+    }
+    section.append(actions);
+    return section;
+  }
+
+  function appendDiagnostics(elementId) {
+    body.append(createDiagnostics(elementId));
     return true;
+  }
+
+  function refreshDiagnostics() {
+    if (!currentElementId || pane.classList.contains('df-hidden')) return;
+    const section = createDiagnostics(currentElementId);
+    const previous = body.querySelector(':scope > .df-prop-diagnostics');
+    if (previous) previous.replaceWith(section);
+    else body.prepend(section);
   }
 
   async function open(targetElement) {
     const elementId = targetElement.getAttribute('data-id');
     if (!elementId) return;
 
+    currentElementId = elementId;
     prepareOpen();
     const type = targetElement.dataset.type || 'Element';
     labelElement.textContent = options.labelFor(targetElement);
@@ -473,5 +539,5 @@ export function createPropertyGridController(options) {
   }
 
   if (closeButton) closeButton.addEventListener('click', close);
-  return Object.freeze({ close, open, updateWriterState });
+  return Object.freeze({ close, open, refreshDiagnostics, updateWriterState });
 }

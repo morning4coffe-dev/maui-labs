@@ -276,7 +276,9 @@ export function createElementTreeController(options) {
     const next = new Map();
     for (const finding of Array.isArray(findings) ? findings : []) {
       const id = finding && (finding.elementId || finding.element?.id);
-      if (!id || finding.outcome === 'pass' || finding.suppressed === true) continue;
+      if (!id ||
+          !['violation', 'observation'].includes(finding.outcome) ||
+          finding.suppressed === true) continue;
       const severity = finding.severity || 'info';
       const current = next.get(id);
       if (!current) {

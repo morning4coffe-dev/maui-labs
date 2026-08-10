@@ -1677,6 +1677,10 @@ public class InspectorPageTests : IAsyncLifetime
         await Expect(propertyLayout).ToHaveCountAsync(0);
 
         var scanRequests = 0;
+        var firstScanStarted = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var releaseFirstScan = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
         var response = JsonSerializer.Serialize(new
         {
             ok = true,
@@ -1754,10 +1758,15 @@ public class InspectorPageTests : IAsyncLifetime
                 },
             },
         });
-        await _page.RouteAsync("**/api/diagnostics/layout", route =>
+        await _page.RouteAsync("**/api/diagnostics/layout", async route =>
         {
-            Interlocked.Increment(ref scanRequests);
-            return route.FulfillAsync(new()
+            var requestNumber = Interlocked.Increment(ref scanRequests);
+            if (requestNumber == 1)
+            {
+                firstScanStarted.TrySetResult(true);
+                await releaseFirstScan.Task;
+            }
+            await route.FulfillAsync(new()
             {
                 Status = 200,
                 ContentType = "application/json",
@@ -1769,11 +1778,16 @@ public class InspectorPageTests : IAsyncLifetime
         Assert.Equal("df-toolbar", await layoutEntry.EvaluateAsync<string>(
             "button => button.parentElement?.id"));
         await layoutEntry.ClickAsync();
+        await firstScanStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        await Expect(_page.Locator("#df-layout-entry-status")).ToHaveTextAsync("Start");
+        await Expect(layoutEntry).ToHaveAttributeAsync("aria-busy", "true");
+        releaseFirstScan.TrySetResult(true);
 
         await Expect(_page.Locator("#df-dock")).ToBeVisibleAsync();
         await Expect(_page.Locator("#df-tab-layout")).ToHaveAttributeAsync("aria-selected", "true");
         await Expect(_page.Locator(".df-layout-root")).ToBeVisibleAsync();
         await Expect(_page.Locator("#df-layout-entry-status")).ToHaveTextAsync("1");
+        await Expect(layoutEntry).ToHaveAttributeAsync("aria-busy", "false");
         await Expect(layoutEntry).ToHaveAttributeAsync("aria-label", "Open Layout diagnostics, 1 issue");
         await Expect(_page.Locator("#df-tab-layout")).ToHaveTextAsync("Layout (1)");
         await Expect(treeRow.Locator(".df-tree-diagnostic")).ToHaveTextAsync("1");

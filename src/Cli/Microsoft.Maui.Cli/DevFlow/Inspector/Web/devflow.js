@@ -3289,7 +3289,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       finding.outcome === 'violation' || finding.outcome === 'observation');
     const hasViolation = issues.some((finding) => finding.outcome === 'violation');
     const view = latestLayoutReport ? formatLayoutReport(latestLayoutReport) : null;
-    const status = layoutScanBusy
+    const status = !latestLayoutReport && layoutScanBusy
       ? 'scanning'
       : !latestLayoutReport && layoutError
         ? 'error'
@@ -3342,8 +3342,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     let title = 'Start a layout check and open Layout diagnostics';
 
     if (layoutScanBusy) {
-      state = 'scanning';
-      text = 'Checking';
+      state = latestLayoutReport ? 'ready' : 'idle';
+      text = latestLayoutReport ? String(issues.length) : 'Start';
+      tone = latestLayoutReport
+        ? hasViolation ? 'error' : issues.length ? 'warning' : 'neutral'
+        : '';
       label = 'Layout check in progress';
       title = 'Open the running Layout check';
     } else if (!latestLayoutReport && layoutError) {
@@ -3372,6 +3375,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
 
     tb.layout.classList.toggle('df-active', isOpen);
     tb.layout.setAttribute('aria-expanded', String(isOpen));
+    tb.layout.setAttribute('aria-busy', String(layoutScanBusy));
     tb.layout.setAttribute('aria-label', label);
     tb.layout.title = title;
     tb.layoutStatus.dataset.state = state;

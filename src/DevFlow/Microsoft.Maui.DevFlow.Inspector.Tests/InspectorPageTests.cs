@@ -1674,10 +1674,7 @@ public class InspectorPageTests : IAsyncLifetime
         var treeRow = _page.Locator($".df-tree-node[data-tree-id='{elementId}']");
         await treeRow.ClickAsync();
         var propertyLayout = _page.Locator(".df-prop-diagnostics");
-        await Expect(propertyLayout).ToHaveAttributeAsync("data-layout-state", "idle");
-        await Expect(propertyLayout).ToContainTextAsync("Not checked");
-        await Expect(propertyLayout.GetByRole(AriaRole.Button, new() { Name = "Start", Exact = true }))
-            .ToBeVisibleAsync();
+        await Expect(propertyLayout).ToHaveCountAsync(0);
 
         var scanRequests = 0;
         var response = JsonSerializer.Serialize(new
@@ -1784,6 +1781,16 @@ public class InspectorPageTests : IAsyncLifetime
         await Expect(propertyLayout).ToContainTextAsync("1 issue");
         Assert.Equal(1, scanRequests);
 
+        var otherElementId = await _page
+            .Locator(".devflow-element:not([data-automationId='HeaderLabel'])")
+            .First
+            .GetAttributeAsync("data-id");
+        Assert.False(string.IsNullOrWhiteSpace(otherElementId));
+        await _page.Locator($".df-tree-node[data-tree-id='{otherElementId}']").ClickAsync();
+        await Expect(propertyLayout).ToHaveCountAsync(0);
+        await treeRow.ClickAsync();
+        await Expect(propertyLayout).ToHaveAttributeAsync("data-layout-state", "ready");
+
         await _page.Locator("#df-dock-close").ClickAsync();
         await layoutEntry.ClickAsync();
         await Expect(_page.Locator(".df-layout-root")).ToBeVisibleAsync();
@@ -1809,7 +1816,10 @@ public class InspectorPageTests : IAsyncLifetime
             .Locator("input[type='number']");
         await opacity.FillAsync("0.9");
         await opacity.DispatchEventAsync("change");
-        await Expect(_page.Locator("#df-layout-entry-status")).ToHaveTextAsync("Stale");
+        await Expect(_page.Locator("#df-layout-entry-status")).ToHaveTextAsync("1");
+        await Expect(_page.Locator("#df-layout-entry")).ToHaveAttributeAsync(
+            "aria-label",
+            new Regex("results may be outdated", RegexOptions.IgnoreCase));
         await Expect(propertyLayout).ToHaveAttributeAsync("data-layout-state", "stale");
         await Expect(_page.Locator(".df-layout-state-banner")).ToContainTextAsync("may be outdated");
 

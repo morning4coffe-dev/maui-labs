@@ -141,6 +141,7 @@ export function createPropertyGridController(options) {
       ? getLayoutState(elementId)
       : { status: 'idle', findings: [] };
     const findings = Array.isArray(layout?.findings) ? layout.findings : [];
+    if (findings.length === 0) return null;
     const issueCount = Number(layout?.issueCount) || 0;
     const section = document.createElement('section');
     section.className = 'df-card df-prop-diagnostics';
@@ -222,7 +223,9 @@ export function createPropertyGridController(options) {
   }
 
   function appendDiagnostics(elementId) {
-    body.append(createDiagnostics(elementId));
+    const section = createDiagnostics(elementId);
+    if (!section) return false;
+    body.append(section);
     return true;
   }
 
@@ -230,6 +233,10 @@ export function createPropertyGridController(options) {
     if (!currentElementId || pane.classList.contains('df-hidden')) return;
     const section = createDiagnostics(currentElementId);
     const previous = body.querySelector(':scope > .df-prop-diagnostics');
+    if (!section) {
+      previous?.remove();
+      return;
+    }
     if (previous) previous.replaceWith(section);
     else body.prepend(section);
   }

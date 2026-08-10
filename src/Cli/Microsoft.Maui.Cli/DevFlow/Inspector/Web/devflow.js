@@ -3353,11 +3353,13 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       label = 'Layout diagnostics unavailable';
       title = 'Open Layout diagnostics to review the error and retry';
     } else if (latestLayoutReport && layoutStale) {
-      state = 'stale';
-      text = 'Stale';
-      tone = 'neutral';
-      label = `Open stale Layout results, ${issues.length} issue${issues.length === 1 ? '' : 's'}`;
-      title = 'The UI changed after this Layout check; open the previous results and rescan';
+      state = 'ready';
+      text = String(issues.length);
+      tone = hasViolation ? 'error' : issues.length ? 'warning' : 'neutral';
+      label = issues.length
+        ? `Open Layout diagnostics, ${issues.length} issue${issues.length === 1 ? '' : 's'}; results may be outdated`
+        : 'Open Layout diagnostics; results may be outdated';
+      title = 'Open Layout diagnostics. The UI changed after this check, so the results may be outdated.';
     } else if (latestLayoutReport) {
       state = 'ready';
       text = String(issues.length);

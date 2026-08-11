@@ -27,7 +27,7 @@ The implementation must build on these existing boundaries:
 |---|---|---|
 | Shared Inspector UI and host bridge | `src/Cli/Microsoft.Maui.Cli/DevFlow/Inspector/Web/` | Browser, VS Code, Canvas, and MCP Apps use the same bounded presentation contracts. |
 | Canonical Inspector snapshot | `InspectorSnapshotService.cs`, `InspectorSnapshotClient.cs`, `@maui-devflow/client` at `src/DevFlow/js/devflow-client/` | Runtime element identity comes from the broker snapshot; hosts do not walk the app independently. |
-| Driver diagnostics | `AgentClient`, `DiagnosticProblems.cs`, `LayoutDiagnosticsModels.cs` | Problems and layout findings keep their existing typed source metadata and coverage semantics. |
+| Driver diagnostics | `src/DevFlow/Microsoft.Maui.DevFlow.Driver/AgentClient.cs`, `DiagnosticProblems.cs`, `Diagnostics/LayoutDiagnosticsModels.cs` | Problems and layout findings keep their existing typed source metadata and coverage semantics; TypeScript consumes their broker HTTP projections rather than referencing the Driver assembly. |
 | Evidence capture and hostile-input reader | `src/Cli/Microsoft.Maui.Cli/DevFlow/Evidence/` | All local and cloud projections use the same redaction and validation rules. |
 | Flow-run contracts | `Microsoft.Maui.DevFlow.Testing/Contracts/MauiFlowRunReport.cs` | MCP Apps and cloud tools render the canonical bounded report. |
 | MCP tools | `src/Cli/Microsoft.Maui.Cli/DevFlow/Mcp/` | Existing tools remain authoritative; UI metadata is additive. |
@@ -93,26 +93,48 @@ GitHub-hosted agents cannot reach a developer's localhost broker. Cloud integrat
 bounded CI artifacts, flow-run reports, evidence bundles, and trusted handoff envelopes. Live app
 control is out of scope unless a separately reviewed authenticated relay is designed later.
 
+### 7. Existing Inspector-to-Copilot actions remain one coherent entry path
+
+The existing **Add to Copilot** menu remains the explicit attachment path for selected elements,
+workflows, and bounded redacted Data snapshots. The new participant and tools add diagnosis and
+orchestration; they do not silently broaden what the attachment menu exports.
+
+- **Add to Copilot** attaches an explicit bounded snapshot chosen by the human.
+- `@devflow` resolves live state and calls existing read tools after an explicit prompt.
+- Layout and performance data remain excluded from generic attachment until each has a separately
+  reviewed model-safe projection.
+- Inspector actions that start a participant workflow reuse the existing host bridge rather than
+  creating a second chat/session transport.
+
 ## Phase 0: compatibility and contract spike
 
 Before product implementation:
 
-1. Upgrade `@types/vscode` from its current 1.90 floor to at least the selected engine version.
-   Determine the minimum VS Code version where every required Chat Participant, URI handler, LM
-   tool, diagnostics, Code Action, and MCP server-definition API is stable and Marketplace-eligible,
-   not a proposed API. Remove `any` shims where that version provides stable types.
-2. Set `engines.vscode` from that result and document which features degrade on older hosts.
-3. Pin `maui-labs.maui-devflow-inspector` as the public extension identifier before any CLI,
-   report, artifact, or documentation emits a DevFlow URI. Keep the identifier in one shared
-   constant used by URI generation and tests.
-4. Verify whether `ModelContextProtocol` 1.1.0 can emit MCP resource templates, structured tool
-   content, and the MCP Apps `_meta` fields required by supported clients.
-5. If the .NET SDK cannot express the required MCP Apps metadata without protocol-unsafe JSON
+1. Reconcile the current manifest mismatch: `engines.vscode` is already `^1.98.0`, while
+   `@types/vscode` remains `^1.90.0`. Determine the minimum version where every API actually used by
+   each phase is stable and Marketplace-eligible, not proposed. Keep the non-MCP VS Code work on
+   the lowest supported stable floor; raise the floor only if an adopted MCP server-definition API
+   requires it.
+2. Set `@types/vscode` and `engines.vscode` from that result, remove stable-API `any` shims, and
+   document desktop, Remote/WSL/SSH, Codespaces, and unsupported web-host behavior.
+3. Adopt the manifest's existing `maui-labs.maui-devflow-inspector` identity as the pinned public
+   extension identifier. Keep it in one shared constant used by URI generation and tests.
+4. Prove Marketplace delivery before any external producer emits a DevFlow URI:
+   - verify ownership of the `maui-labs` publisher;
+   - decide preview-only versus public stable distribution;
+   - remove or replace the current `private: true` packaging blocker;
+   - define signing/publishing credentials and release ownership; and
+   - package and install the VSIX in a clean test profile under the pinned identity.
+5. Verify whether the centrally managed `ModelContextProtocol` version can emit MCP resource
+   templates, structured tool content, extension negotiation, and the MCP Apps `_meta.ui` fields
+   required by supported clients.
+6. If the .NET SDK cannot express the required MCP Apps metadata without protocol-unsafe JSON
    manipulation, update the centrally managed package version before implementing Apps. Do not add
    a second Node MCP server solely for UI support.
-6. Build one offline MCP App proof that renders a static Problems payload and still returns a useful
-   text result to a client that ignores `ui://`.
-7. Produce a written go/no-go result:
+7. Build one offline MCP App proof with both a negotiating and non-negotiating client. The
+   negotiating client renders a static Problems payload; the other receives byte-identical legacy
+   text and no UI metadata.
+8. Produce a written go/no-go result:
    - **go:** record the required .NET MCP package version and migration work;
    - **defer:** ship the VS Code, diagnostics, Code Action, and artifact-first phases without MCP
      Apps until a supported .NET protocol path exists.
@@ -156,6 +178,11 @@ src/
   context-store.ts
 ```
 
+The characterization suite must import and execute built modules with a VS Code API mock or a
+supported extension-host test harness. Source-regex tests and copied implementations do not qualify
+as refactor protection. Extend and replace the current
+`vscode-inspector/test/extension-state.test.mjs` assertions as needed before extraction.
+
 After the mechanical refactor is green, introduce `DevFlowWorkspaceSession` and the new lifecycle
 behavior. `context-store.ts` retains only bounded per-window state:
 
@@ -174,6 +201,13 @@ Opaque references issued to Chat or Code Actions are bound to the agent instance
 revision, expire when their source diagnostic/context entry is evicted, and fail closed after an
 app restart, target change, diagnostic clear, or extension reload.
 
+The registry has a fixed capacity, byte budget, and LRU expiry. Its tokens are random opaque
+identifiers; no source path, problem message, prompt, or authority material is encoded into them.
+
+The package remains ESM and is consumed by the CommonJS VS Code extension through the current
+dynamic-import/bundling boundary. Changes to `@maui-devflow/client` require a lockstep client version
+bump, built `dist/`, workspace lockfile refresh, Canvas dependency verification, and VSIX rebundle.
+
 ## Phase 2: `@devflow` Chat Participant
 
 ### Contribution
@@ -183,7 +217,7 @@ Contribute one participant named `devflow` with explicit commands:
 | Command | Behavior |
 |---|---|
 | `@devflow /inspect` | Resolve or ask the user to select a running app, open/focus its Inspector, and report the target identity. Optional arguments may identify a platform or app. |
-| `@devflow /diagnose-selection` | Resolve the current Inspector selection, query Problems for that element, run one explicit scoped layout scan, and explain coverage and limitations. It never mutates the app. |
+| `@devflow /diagnose-selection` | Resolve the current Inspector selection, query Problems for that element, run the existing explicit layout scan, then filter/highlight findings for the selected element. It never claims the underlying scan was element-scoped and never mutates the app. |
 | `@devflow /explain-problem` | Resolve a diagnostic/problem ID from the prompt, active editor Code Action, or selected element; fetch the current problem record; then explain it with source references and suggested next actions. |
 | `@devflow /create-test` | Open the shared Test Workbench at Goal and send the existing bounded test-agent starter request. Saving and running remain separate human approvals. |
 
@@ -212,12 +246,12 @@ separate test commit/run approval contract.
 
 Keep the existing selected-element and Data-snapshot tools and add:
 
-| Tool | Mutability | Result |
-|---|---|---|
-| `maui-devflow_openInspector` | Host UI only | Opens/focuses the Inspector for an exact resolved app and optional element/run/problem reference. |
-| `maui-devflow_resolveActiveApp` | Read-only | Returns the exact active app, platform, agent/instance identity, connection state, and available Inspector capabilities. |
-| `maui-devflow_getProblems` | Read-only | Returns bounded current Problems, optionally filtered by element or source location. |
-| `maui-devflow_getCurrentEvidence` | Read-only | Returns the last explicit evidence preview/import safe projection or retained flow-run reference. It never captures a new screenshot or reads a raw archive. |
+| Tool | Mutability | Prompt reference | Result |
+|---|---|---|---|
+| `maui-devflow_openInspector` | Host UI only | No | Opens/focuses the Inspector for an exact resolved app and optional element/run/problem reference. |
+| `maui-devflow_resolveActiveApp` | Read-only | Yes | Returns the exact active app, platform, agent/instance identity, connection state, and available Inspector capabilities. |
+| `maui-devflow_getProblems` | Read-only | Yes | Returns bounded current Problems, optionally filtered by element or source location. |
+| `maui-devflow_getCurrentEvidence` | Read-only | Yes | Returns the last explicit evidence preview/import safe projection or retained flow-run reference. It never captures a new screenshot or reads a raw archive. |
 
 Add `maui-devflow_runLayoutDiagnostics` only if evaluation shows that agent mode cannot reliably
 discover the existing `maui_layout_diagnostics` MCP tool. Prefer the MCP tool when it is registered.
@@ -255,6 +289,9 @@ Rules:
 - links resolve only against the locally discovered broker;
 - `instance` mismatch produces a stale-link message rather than falling back to another app;
 - element selection is verified against the current snapshot revision;
+- `problem`, `element`, and `run` may focus only records already resolved from the current local
+  target; URI activation never causes first-time diagnostic publication or artifact import;
+- missing/expired run IDs produce a recovery message explaining how to import or reproduce the run;
 - unknown versions or views fail closed; and
 - URI activation never mutates the app or starts a test.
 
@@ -268,12 +305,16 @@ Create one `DiagnosticCollection` named `maui-devflow`.
 ### Binding and property Problems
 
 - Refresh only while at least one DevFlow UI surface is active or a participant/tool command
-  requests Problems. Prefer an existing agent/broker event capability when it can carry the
-  Problems revision. Otherwise use a bounded revision poll with a documented minimum interval,
-  exponential backoff on failure, and suspension while the app is disconnected or the extension
-  surface is hidden.
+  requests Problems. Expose the existing debounced `problemsChange` agent event through the shared
+  client and use its revision/count as the primary invalidation signal. Use a bounded revision poll
+  only as a compatibility fallback, with a documented minimum interval, exponential backoff, and
+  suspension while the app is disconnected or the extension surface is hidden.
 - Use the agent's Problems revision to avoid replacing unchanged diagnostics.
-- Publish only records whose normalized source path resolves inside the current workspace.
+- Stamp every fetched batch with the exact resolving agent and agent-instance identity before it
+  enters shared state; individual Problem records are not self-describing across agents.
+- Resolve build-time XAML source URIs through the registered project/source-map identity. Direct
+  absolute paths, `pack://` URIs, basename matches, and remote checkout roots are never assumed to
+  be workspace files. Ambiguous or outside-workspace mappings remain source-unavailable.
 - Map runtime severity conservatively to VS Code severity.
 - Preserve the runtime problem code and count in the diagnostic message.
 - Use source line/column when available; otherwise attach the finding to the file with a minimal
@@ -284,19 +325,26 @@ Create one `DiagnosticCollection` named `maui-devflow`.
 - Publish findings only from the last explicit layout scan.
 - Preserve outcome, confidence, coverage, and limitations in the diagnostic message or related
   information.
-- Do not publish incomplete checks as passes or errors.
+- Use an explicit mapping table: binding warnings map to Warning; proven layout violations may map
+  to Warning; observations map to Information; incomplete or unavailable checks are Information or
+  Hint only and never Error/Warning. Low confidence/actionability cannot increase severity.
 - Clear findings when the target instance or relevant source file identity changes.
+- Include the report window and existing finding/suppression identity in layout diagnostic keys.
 
 ### Diagnostic identity
 
 Maintain an in-memory registry keyed by:
 
 ```text
-agent-instance + source-file + problem/finding-id + source-range + capture-revision
+Problem: agent-instance + normalized-source-file + problem-id + optional source point
+Layout:  agent-instance + window + normalized-source-file + finding/suppression-id
 ```
 
-The VS Code `Diagnostic.code` target points to the versioned DevFlow URI. Rich live identifiers stay
-in the extension registry rather than being serialized into source files or arbitrary command URIs.
+The Problems batch revision is a collection freshness token, not per-record identity. The VS Code
+`Diagnostic.code` target points to the versioned DevFlow URI. Rich live identifiers stay in the
+extension registry rather than being serialized into source files or arbitrary command URIs.
+Clearing the VS Code collection never calls `maui_problems_clear`; runtime diagnostic history is a
+separate explicit action.
 
 ## Phase 6: editor Code Actions
 
@@ -310,6 +358,10 @@ Register a Code Action provider for XAML and C# documents with DevFlow source ma
 
 Code Actions perform no app mutation or source edit. Any later fix remains normal Copilot/editor work
 or the existing separately reviewed DevFlow source-proposal flow.
+
+`Explain with Copilot` places only the opaque token in the participant command. The participant
+resolves it from extension state after validating agent instance and freshness; diagnostic content
+is not embedded in a free-text query.
 
 ## Phase 7: structured MCP result migration
 
@@ -347,6 +399,12 @@ The resource hosts a small shell that renders one of these typed payloads:
 Do not embed the full Inspector initially. Compact views are bounded chat artifacts, not a live
 replacement for the Inspector or Canvas.
 
+Version 1 targets the standard MCP Apps extension (`io.modelcontextprotocol/ui`), `ui://` resources,
+`text/html;profile=mcp-app`, and current `_meta.ui` keys. Client support is negotiated explicitly.
+UI metadata and resource reads are omitted for clients that did not negotiate the extension.
+Provider-specific alternatives such as `text/html+skybridge` or `openai/*` metadata are out of
+scope.
+
 ### Reuse strategy
 
 1. Extract DOM-independent formatters and render models from existing Inspector modules where they
@@ -360,6 +418,8 @@ replacement for the Inspector or Canvas.
    endpoints directly.
 5. Mutation buttons are omitted from version 1. A later version may invoke existing mutation tools
    only with normal MCP permission handling and mutation-lease enforcement.
+6. Tools callable from the app declare the minimum app-only visibility required by the standard;
+   they are not made model-visible solely to support a UI refresh.
 
 ### Tool mapping
 
@@ -380,13 +440,19 @@ The compact app reads an already retained flow-run projection. It never invokes
 ### App security
 
 - strict CSP and no arbitrary remote content;
+- one zero-external-origin CSP for the shared v1 resource: bundled assets only, no CDN, fonts,
+  images, frames, or network origins; a future view needing broader access gets a separate resource;
 - no raw HTML from app data;
 - all messages, paths, labels, and Markdown treated as text;
 - no direct filesystem access;
 - no automatic screenshot inclusion;
 - bounded arrays, strings, depth, and total serialized bytes;
 - app-to-host messages validated against a closed action schema; and
-- prompt-injection and hostile-artifact canaries included in tests.
+- prompt-injection and hostile-artifact canaries included in tests;
+- structured/model/UI projections copy only allow-listed fields and discard `ExtensionData` and all
+  unknown properties; and
+- this UI phase targets local clients that support MCP Apps, primarily VS Code. GitHub cloud agent
+  and code review consume text/structured tool results only.
 
 ## Phase 9: artifact-first GitHub Copilot integration
 
@@ -397,7 +463,12 @@ Create a separate read-only cloud diagnostic path. Do not weaken or repurpose th
 
 ### Artifact contract
 
-Define `devflow-copilot-diagnostic-v1`, a bounded manifest that references:
+Extend the existing trusted `devflow-ci-failure-handoff` envelope and verifier wherever its safe
+identity/digest fields are sufficient. Add a companion `devflow-copilot-diagnostic-v1` manifest
+only for additional read-only diagnostic references that cannot fit the existing contract; it must
+not become a parallel publication authority.
+
+The bounded diagnostic manifest references:
 
 - trusted workflow/run/attempt/repository/commit provenance;
 - a `flow-run.json` digest and safe run summary;
@@ -416,15 +487,27 @@ Add a read-only MCP profile or companion command that:
 
 1. accepts an explicit repository, workflow run, artifact, and expected digest;
 2. downloads through the authenticated GitHub environment supplied to the agent;
-3. applies ZIP bomb, traversal, allow-list, UTF-8, schema, size, hash, and provenance checks before
-   projection;
+3. verifies expected artifact digest and trusted provenance before any structured parse, then
+   applies ZIP bomb, traversal, allow-list, UTF-8, schema, size, and entry-hash checks;
 4. parses `.mauitrace` and flow-run content through the existing hostile-input readers;
 5. labels artifact content as untrusted data;
 6. returns only bounded typed projections; and
 7. exposes no mutation, issue-write, source-apply, replay, or arbitrary-download tool.
 
-Start with stdio MCP inside the Copilot cloud-agent environment. A hosted remote MCP service is a
-later option after its authentication and tenant-isolation design is reviewed.
+Reapply the current redaction rules during projection; never trust only the artifact's declared
+redaction version. Unknown and extension-data fields are discarded.
+
+Split delivery by GitHub host:
+
+- **Copilot coding agent:** start with a repo-configured stdio MCP reader installed inside the agent
+  environment, with an explicit, firewall-compatible artifact download mechanism.
+- **Copilot code review:** use only read-only tools reachable from the hosted review environment.
+  Do not assume it can launch the local stdio reader. A remote service is optional and requires a
+  separate authentication, tenant-isolation, secret-header, and network-policy review; OAuth-based
+  remote MCP is not assumed available.
+
+Both GitHub surfaces are tool-only consumers for this plan; MCP Apps resources and prompt templates
+are not part of the cloud contract.
 
 ### GitHub agents and skills
 
@@ -447,7 +530,9 @@ For trusted CI runs, publish a small check summary containing:
 - outcome and qualification;
 - artifact/run identifiers and digests;
 - a link to the workflow artifact;
-- a DevFlow URI for local reproduction where applicable; and
+- a DevFlow URI only when the referenced run already exists in the local broker; otherwise link to
+  the documented verify/import/reproduce workflow rather than implying a cloud run can be opened
+  locally; and
 - a suggested Copilot prompt that names the explicit artifact.
 
 Do not automatically mention or assign Copilot on untrusted pull requests. Human invocation remains
@@ -473,6 +558,8 @@ the admission boundary.
 ### TypeScript and VS Code extension
 
 - unit tests for participant command parsing and result formatting;
+- extension-host or mocked-runtime tests that import and execute the compiled activation and bridge
+  handlers; source-regex/copy-paste tests do not satisfy this gate;
 - fake broker tests for lifecycle, ambiguity, stale instance, and capability degradation;
 - URI parser and round-trip tests, including hostile and oversized input;
 - diagnostic range, severity, clearing, deduplication, and revision tests;
@@ -482,10 +569,18 @@ the admission boundary.
   Actions; and
 - prompt-injection/secret/path canary tests for every Copilot-facing projection.
 
+Maintain an explicit inventory of Copilot-facing projections and run one shared adversarial corpus
+against each: participant output, every LM tool, URI parsing, diagnostic messages, compact-app
+payloads, and cloud projections.
+
 ### C# and MCP
 
 - typed structured-result compatibility tests that retain legacy text;
+- golden fixtures proving legacy text bytes remain unchanged during each structured-result
+  migration;
 - resource and resource-template inventory tests;
+- negotiated and non-negotiated MCP Apps protocol tests, including resource MIME, `_meta.ui`, CSP,
+  visibility, and resource-read failure fallback;
 - MCP App metadata and unsupported-client fallback tests;
 - evidence/flow-run hostile-input regression tests;
 - cloud artifact provenance, ZIP, digest, size, and trust-state tests; and
@@ -530,6 +625,16 @@ Implement as separate reviewable commits or pull requests:
 
 Do not combine the cloud trust boundary with the initial VS Code feature pull request.
 
+The VS Code, MCP Apps spike, and artifact-contract design can proceed as parallel workstreams after
+their shared contracts are fixed. Diagnostics ship behind a preview setting until live clearing,
+multi-agent identity, and source mapping are proven. Participant and LM tools may be independently
+disabled without disabling the Inspector.
+
+Before Marketplace release, add a CI job that installs the JS workspace, builds the shared client,
+type-checks and tests the extension, packages the VSIX, installs it in a clean profile, and verifies
+the pinned identifier. Define extension version bumps, release notes, preview-to-stable criteria,
+and an explicit no-telemetry decision or Marketplace-compliant privacy disclosure.
+
 ## Completion criteria
 
 The initiative is complete when:
@@ -541,8 +646,34 @@ The initiative is complete when:
 - DevFlow Problems and explicit layout findings appear at their mapped source locations and provide
   safe navigation and explanation actions;
 - versioned URIs reopen an exact non-stale Inspector context without carrying authority or payloads;
-- supported MCP clients render compact views and unsupported clients retain equivalent text;
+- when the Phase 0 Apps gate is **go**, supported local MCP clients render compact views and
+  unsupported/non-negotiating clients retain equivalent text; an Apps **defer** decision does not
+  block completion of the VS Code and artifact-first milestones;
 - a GitHub-hosted Copilot agent can diagnose an explicit trusted DevFlow artifact without localhost
   access or write authority; and
 - all paths preserve DevFlow's redaction, evidence, mutation-lease, test approval, source-apply, and
   imported-artifact trust contracts.
+
+## External compatibility references
+
+Revalidate these primary sources during Phase 0 because host and protocol capabilities evolve:
+
+- VS Code AI extensibility:
+  <https://code.visualstudio.com/api/extension-guides/ai/ai-extensibility-overview>
+- VS Code Chat Participant API:
+  <https://code.visualstudio.com/api/extension-guides/ai/chat>
+- VS Code Language Model Tools:
+  <https://code.visualstudio.com/api/extension-guides/ai/tools>
+- VS Code MCP developer guide:
+  <https://code.visualstudio.com/api/extension-guides/ai/mcp>
+- VS Code Marketplace publishing:
+  <https://code.visualstudio.com/api/working-with-extensions/publishing-extension>
+- MCP Apps overview and specification:
+  <https://modelcontextprotocol.io/extensions/apps/overview> and
+  <https://github.com/modelcontextprotocol/ext-apps>
+- GitHub Copilot cloud agent MCP:
+  <https://docs.github.com/en/copilot/concepts/agents/cloud-agent/mcp-and-cloud-agent>
+- GitHub Copilot repository MCP configuration:
+  <https://docs.github.com/en/copilot/how-tos/copilot-on-github/customize-copilot/configure-mcp-servers>
+- GitHub Copilot code review MCP availability:
+  <https://github.blog/changelog/2026-07-29-copilot-code-review-agent-skills-and-mcp-now-generally-available/>

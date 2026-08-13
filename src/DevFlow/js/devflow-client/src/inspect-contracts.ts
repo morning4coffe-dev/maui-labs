@@ -43,11 +43,16 @@ export function isInspectorSnapshot(value: unknown): value is InspectorSnapshot 
     snapshot.projection === "activeVisual" &&
     typeof snapshot.snapshotId === "string" &&
     typeof snapshot.revision === "string" &&
+    typeof snapshot.capturedAt === "string" &&
     typeof snapshot.screenshotUrl === "string" &&
     Array.isArray(snapshot.roots) &&
+    !!snapshot.target &&
+    (snapshot.target.agentId == null || typeof snapshot.target.agentId === "string") &&
     !!snapshot.viewport &&
     Number.isFinite(snapshot.viewport.width) &&
-    Number.isFinite(snapshot.viewport.height);
+    Number.isFinite(snapshot.viewport.height) &&
+    Number.isFinite(snapshot.viewport.rootOffsetX) &&
+    Number.isFinite(snapshot.viewport.rootOffsetY);
 }
 
 export function isInspectorQueryResult(value: unknown): value is InspectorQueryResult {

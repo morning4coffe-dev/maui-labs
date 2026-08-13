@@ -4,7 +4,6 @@
   "description": "MAUI DevFlow Inspector host for VS Code — embeds the existing DevFlow Web Inspector for a running .NET MAUI app.",
   "version": "0.1.0",
   "publisher": "maui-labs",
-  "private": true,
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -24,14 +23,44 @@
     }
   },
   "engines": {
-    "vscode": "^1.98.0"
+    "vscode": "^1.125.0"
   },
   "categories": [
     "Debuggers",
     "Other"
   ],
   "main": "./dist/extension.js",
+  "activationEvents": [
+    "onUri"
+  ],
   "contributes": {
+    "chatParticipants": [
+      {
+        "id": "mauiDevflow.devflow",
+        "name": "devflow",
+        "fullName": "MAUI DevFlow",
+        "description": "Inspect and diagnose a running .NET MAUI app through the shared DevFlow Inspector.",
+        "isSticky": true,
+        "commands": [
+          {
+            "name": "inspect",
+            "description": "Open the Inspector for an exact running MAUI app."
+          },
+          {
+            "name": "diagnose-selection",
+            "description": "Explain Problems and layout findings for the selected live element."
+          },
+          {
+            "name": "explain-problem",
+            "description": "Explain a current DevFlow runtime Problem."
+          },
+          {
+            "name": "create-test",
+            "description": "Open the human-reviewed DevFlow Test Workbench."
+          }
+        ]
+      }
+    ],
     "commands": [
       {
         "command": "mauiDevflow.openInspector",
@@ -70,6 +99,102 @@
           "type": "object",
           "properties": {}
         }
+      },
+      {
+        "name": "maui-devflow_openInspector",
+        "tags": [
+          "maui",
+          "devflow"
+        ],
+        "displayName": "MAUI DevFlow: Open Inspector",
+        "modelDescription": "Open or focus the MAUI DevFlow Inspector for a running app. Use when the user explicitly asks to inspect the live app.",
+        "canBeReferencedInPrompt": false,
+        "icon": "$(open-preview)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "agent": {
+              "type": "string",
+              "description": "Exact broker agent ID when known."
+            },
+            "element": {
+              "type": "string",
+              "description": "Optional current element ID to focus."
+            },
+            "view": {
+              "type": "string",
+              "enum": [
+                "inspector",
+                "problems",
+                "layout",
+                "tests",
+                "trace",
+                "evidence"
+              ]
+            }
+          }
+        }
+      },
+      {
+        "name": "maui-devflow_resolveActiveApp",
+        "tags": [
+          "maui",
+          "devflow"
+        ],
+        "displayName": "MAUI DevFlow: Active App",
+        "modelDescription": "Resolve the exact running MAUI app currently attached to the DevFlow Inspector, including its agent instance and platform.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "mauiApp",
+        "icon": "$(device-mobile)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      },
+      {
+        "name": "maui-devflow_getProblems",
+        "tags": [
+          "maui",
+          "devflow",
+          "diagnostics"
+        ],
+        "displayName": "MAUI DevFlow: Runtime Problems",
+        "modelDescription": "Return bounded current MAUI runtime Problems such as binding failures, optionally filtered to one live element.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "mauiProblems",
+        "icon": "$(warning)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "elementId": {
+              "type": "string",
+              "description": "Optional current live element ID."
+            }
+          }
+        }
+      },
+      {
+        "name": "maui-devflow_getCurrentEvidence",
+        "tags": [
+          "maui",
+          "devflow",
+          "evidence"
+        ],
+        "displayName": "MAUI DevFlow: Current Evidence",
+        "modelDescription": "Return only the bounded evidence preview, imported safe projection, flow-run reference, or Data snapshot the user explicitly displayed or attached.",
+        "canBeReferencedInPrompt": true,
+        "toolReferenceName": "mauiEvidence",
+        "icon": "$(file-zip)",
+        "inputSchema": {
+          "type": "object",
+          "properties": {}
+        }
+      }
+    ],
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "mauiDevflow.localMcp",
+        "label": "MAUI DevFlow"
       }
     ],
     "configuration": {
@@ -94,21 +219,27 @@
           ],
           "default": "auto",
           "description": "Where to place the MAUI DevFlow Inspector panel when it opens."
+        },
+        "mauiDevflow.publishDiagnostics": {
+          "type": "boolean",
+          "default": false,
+          "description": "Preview: publish current DevFlow runtime Problems and explicit layout findings into VS Code Diagnostics."
         }
       }
     }
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "build": "npm run typecheck && esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js",
-    "test": "node --test test/extension-state.test.mjs",
+    "build:test": "tsc -p tsconfig.test.json",
+    "build": "tsc -p tsconfig.json --noEmit && esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js",
+    "test": "tsc -p tsconfig.test.json && node --test \"test/**/*.test.mjs\"",
     "watch": "esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js --watch",
-    "package:vsix": "npm run build && vsce package --pre-release --no-dependencies --out dist/maui-devflow-inspector.vsix"
+    "package:vsix": "tsc -p tsconfig.json --noEmit && esbuild src/extension.ts --bundle --platform=node --format=cjs --target=node18 --external:vscode --outfile=dist/extension.js && vsce package --pre-release --no-dependencies --out dist/maui-devflow-inspector.vsix"
   },
   "devDependencies": {
     "@maui-devflow/client": "0.1.0-preview.12",
     "@types/node": "^20.16.0",
-    "@types/vscode": "^1.90.0",
+    "@types/vscode": "^1.125.0",
     "@vscode/vsce": "^3.9.2",
     "esbuild": "^0.28.1",
     "typescript": "^5.6.3"

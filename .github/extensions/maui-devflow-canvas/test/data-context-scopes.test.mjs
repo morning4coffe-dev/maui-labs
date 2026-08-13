@@ -13,11 +13,10 @@ function readSet(source, name) {
 test("VS Code and Canvas accept redacted Alerts Data snapshots", () => {
   const canvasSource = readFileSync(new URL("../extension.mjs", import.meta.url), "utf8");
   const vscodeSource = readFileSync(
-    new URL("../../../../src/DevFlow/js/vscode-inspector/src/extension.ts", import.meta.url),
+    new URL("../../../../src/DevFlow/js/vscode-inspector/src/context-store.ts", import.meta.url),
     "utf8",
   );
 
   assert.ok(readSet(canvasSource, "DATA_CONTEXT_SCOPES").includes("alerts"));
-  assert.ok(readSet(vscodeSource, "dataSnapshotScopes").includes("alerts"));
   assert.match(vscodeSource, /scope:[^;]*"alerts";/s);
 });

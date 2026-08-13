@@ -43,6 +43,37 @@ export {
   isInspectorQueryResult,
   isInspectorSnapshot,
 } from "./inspect-contracts.js";
+export { DevFlowWorkspaceSession } from "./workspace-session.js";
+export type {
+  DevFlowAgentSelector,
+  DevFlowWorkspaceSessionOptions,
+  InspectorQuery,
+  ProblemsRequest,
+  WorkspaceAgentIdentity,
+  WorkspaceCaptureReference,
+  WorkspaceLifecycleEvent,
+  WorkspaceLifecycleEventType,
+  WorkspaceLifecycleHandle,
+  WorkspaceRead,
+} from "./workspace-session.js";
+export {
+  isDiagnosticProblems,
+  isEvidencePreview,
+  isLayoutDiagnosticsResponse,
+} from "./workspace-contracts.js";
+export type {
+  DiagnosticProblem,
+  DiagnosticProblems,
+  EvidenceEntryMetadata,
+  EvidencePreview,
+  EvidencePreviewPlan,
+  EvidencePreviewRequest,
+  LayoutDiagnosticsReport,
+  LayoutElementReference,
+  LayoutFinding,
+  LayoutInspectionRequest,
+  LayoutInspectionScope,
+} from "./workspace-contracts.js";
 export type {
   InspectorQueryResult,
   InspectorSnapshot,
@@ -604,6 +635,6 @@ function randomLeaseId(): string {
   return randomBytes(16).toString("hex");
 }
 export type { Transport, TransportClient, TransportOptions, SeamOp, SeamPermissions } from "./transport.js";
-export { brokerStatePath, readBrokerState, discoverBroker } from "./broker.js";
+export { brokerStatePath, readBrokerState, discoverBroker, resolveMauiCli } from "./broker.js";
 export type { BrokerDiscovery } from "./broker.js";
 export { isConnError } from "./http.js";

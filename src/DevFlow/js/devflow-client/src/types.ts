@@ -74,10 +74,14 @@ export interface AgentStatus {
 /** One entry from the broker's `GET /api/agents` registry. */
 export interface AgentRegistration {
   id: string;
+  /** Opaque broker-assigned generation; changes on every registration/reconnect. */
+  instanceId?: string;
   project: string;
   tfm: string;
   platform: string;
   appName: string;
+  packageId?: string | null;
+  deviceId?: string | null;
   port: number;
   version?: string | null;
   sessionId?: string | null;
@@ -137,6 +141,8 @@ export type DevFlowErrorKind =
   | "invalid-argument"
   | "permission-denied"
   | "lease-held"
+  | "stale-agent"
+  | "stale-snapshot"
   | "disposed"
   | "unknown";
 

@@ -21,6 +21,8 @@ export interface RawRequestOptions {
    * Host other than "localhost".
    */
   hostHeader?: string;
+  /** Maximum accepted response body. Default is unbounded for backward compatibility. */
+  maxResponseBytes?: number;
 }
 
 /** Perform a single loopback HTTP request. Never throws; failures come back as `{ ok:false }`. */
@@ -30,7 +32,14 @@ export function httpRaw(
   path: string,
   opts: RawRequestOptions = {},
 ): Promise<RawResponse> {
-  const { json = null, timeoutMs = 8000, host = "127.0.0.1", hostHeader, headers = {} } = opts;
+  const {
+    json = null,
+    timeoutMs = 8000,
+    host = "127.0.0.1",
+    hostHeader,
+    maxResponseBytes,
+    headers = {},
+  } = opts;
   return new Promise<RawResponse>((resolve) => {
     const data = json != null ? Buffer.from(JSON.stringify(json)) : null;
     const req = http.request(
@@ -50,8 +59,21 @@ export function httpRaw(
       },
       (res) => {
         const chunks: Buffer[] = [];
-        res.on("data", (c: Buffer) => chunks.push(c));
+        let bytes = 0;
+        let exceeded = false;
+        res.on("data", (c: Buffer) => {
+          if (exceeded) return;
+          bytes += c.length;
+          if (maxResponseBytes != null && bytes > maxResponseBytes) {
+            exceeded = true;
+            res.destroy();
+            resolve({ ok: false, status: res.statusCode ?? 0, error: "response-too-large" });
+            return;
+          }
+          chunks.push(c);
+        });
         res.on("end", () => {
+          if (exceeded) return;
           const status = res.statusCode ?? 0;
           resolve({ ok: status >= 200 && status < 300, status, buffer: Buffer.concat(chunks) });
         });

@@ -3,6 +3,34 @@ import * as path from "path";
 import { createHash, randomBytes } from "crypto";
 import { createInspectorHostManifest } from "@maui-devflow/client";
 import type { AgentRegistration } from "@maui-devflow/client";
+import {
+  agentRuntimeIdentity,
+  selectRefreshedAgent,
+} from "./agent-identity";
+import {
+  isBridgeResultMessage,
+  requiresBridgeRequestId,
+} from "./bridge-contract";
+import type {
+  DataSnapshot,
+  InspectorPanelContext,
+  SelectedElement,
+} from "./context-store";
+import type { InspectorOpenHints } from "./host-services";
+import type {
+  DevFlowActiveApp,
+  DevFlowHostServices,
+  DevFlowLayoutReport,
+  DevFlowProblemBatch,
+  DevFlowEvidenceContext,
+} from "./host-services";
+import type { DevFlowWorkspaceSession } from "@maui-devflow/client";
+import { registerDevFlowParticipant } from "./copilot-participant";
+import { DevFlowDiagnosticsController } from "./diagnostics";
+import { registerLanguageModelTools } from "./language-model-tools";
+import { registerDevFlowMcpProvider } from "./mcp-provider";
+import { registerDevFlowUriHandler } from "./uri-handler";
+import type { DevFlowUriTarget } from "./uri-contract";
 
 /**
  * MAUI DevFlow Inspector — VS Code host shell.
@@ -15,39 +43,22 @@ import type { AgentRegistration } from "@maui-devflow/client";
  * Send-to-Copilot into Chat, opening a XAML source file, and saving a recorded test.
  */
 export function activate(context: vscode.ExtensionContext): void {
+  const services = createHostServices();
   context.subscriptions.push(
     vscode.commands.registerCommand(
       "mauiDevflow.openInspector",
       (startupHints?: InspectorStartupHints) => openInspector(startupHints),
-    )
+    ),
+    services,
   );
-  registerSelectionTool(context, () => activePanelState);
-  registerDataSnapshotTool(context, () => activePanelState);
+  const diagnostics = new DevFlowDiagnosticsController(context, services);
+  services.setDiagnosticsController?.(diagnostics);
+  registerLanguageModelTools(context, services);
+  registerDevFlowParticipant(context, services);
+  registerDevFlowUriHandler(context, services);
+  registerDevFlowMcpProvider(context);
 }
 
-// The element the human currently has selected in the inspector (fed by devflow:selectionChanged over
-// the host bridge). Powers both the one-shot Send-to-Copilot query and the language-model tool below.
-type SelectedElement = { id?: string | null; type?: string; automationId?: string | null; text?: string | null; hasSource?: boolean };
-interface DataSnapshot {
-  kind: "dataSnapshot";
-  scope: "logs" | "network" | "preferences" | "device" | "sensors" | "files" | "alerts";
-  title: string;
-  appName?: string | null;
-  capturedAt: string;
-  itemCount?: number | null;
-  truncated?: boolean;
-  redacted?: boolean;
-  dataFormat?: string;
-  data: unknown;
-  agent?: {
-    id?: string | null;
-    appName?: string | null;
-    platform?: string | null;
-    port?: number | null;
-  };
-  metadata?: Record<string, unknown>;
-  followUpTools?: string[];
-}
 interface BridgeResult {
   ok: boolean;
   message?: string;
@@ -86,11 +97,7 @@ interface TestBundle {
   flowDigest?: unknown;
   planDigest?: unknown;
 }
-interface PanelBridgeState {
-  bridgeId: string;
-  selection: SelectedElement | null;
-  dataSnapshot: DataSnapshot | null;
-}
+type PanelBridgeState = InspectorPanelContext;
 const panelStates = new WeakMap<vscode.WebviewPanel, PanelBridgeState>();
 let activePanelState: PanelBridgeState | null = null;
 const VSCODE_HOST_CAPABILITIES = [
@@ -100,61 +107,152 @@ const VSCODE_HOST_CAPABILITIES = [
   "applyCSharpSourceProposal", "getCSharpSourceSelection",
 ] as const;
 
-function registerSelectionTool(context: vscode.ExtensionContext, getState: () => PanelBridgeState | null): void {
-  // A Language Model Tool lets Copilot (agent mode) resolve "the selected element" / "fix the selected
-  // item" to the control the human highlighted in the inspector — the VS Code equivalent of the canvas
-  // get_selection action. Typed via `any` so we don't require a newer @types/vscode; the runtime API
-  // is present in VS Code 1.95+ and simply no-ops on older builds.
-  const lm: any = (vscode as any).lm;
-  if (!lm || typeof lm.registerTool !== "function") return;
-  try {
-    context.subscriptions.push(
-      lm.registerTool("maui-devflow_getSelectedElement", {
-        invoke: async () => {
-          const ToolResult = (vscode as any).LanguageModelToolResult;
-          const TextPart = (vscode as any).LanguageModelTextPart;
-          const state = getState();
-          const text = state?.selection
-            ? "The user has this .NET MAUI element selected in the MAUI DevFlow Inspector:\n" + JSON.stringify(state.selection, null, 2)
-            : "No element is currently selected in the MAUI DevFlow Inspector. Ask the user to click an element in the Inspector (or open it via 'MAUI DevFlow: Open Inspector').";
-          return new ToolResult([new TextPart(text)]);
-        },
-      })
-    );
-  } catch {
-    // Tool API unavailable — the one-shot Send-to-Copilot button still carries the element context.
-  }
+type HostServicesWithDiagnostics = DevFlowHostServices & vscode.Disposable & {
+  setDiagnosticsController(controller: DevFlowDiagnosticsController): void;
+};
+
+function createHostServices(): HostServicesWithDiagnostics {
+  let session: DevFlowWorkspaceSession | null = null;
+  let sessionKey = "";
+  let diagnostics: DevFlowDiagnosticsController | null = null;
+  let disposed = false;
+  let refreshBusy = false;
+
+  const ensureSession = async (): Promise<DevFlowWorkspaceSession> => {
+    const state = activePanelState;
+    const config = vscode.workspace.getConfiguration("mauiDevflow");
+    const configured = config.get<number>("brokerPort");
+    const brokerPort = state?.brokerPort ??
+      (typeof configured === "number" && configured > 0 ? configured : undefined);
+    const agent = state?.agent;
+    const key = [
+      brokerPort ?? "",
+      agent?.id ?? "",
+      agent?.instanceId ?? agent?.sessionId ?? "",
+      agent?.port ?? "",
+    ].join("|");
+    if (session && key === sessionKey) return session;
+
+    session?.dispose();
+    const client = await import("@maui-devflow/client");
+    session = new client.DevFlowWorkspaceSession({
+      brokerPort,
+      bootstrapBroker: "never",
+      agent: agent
+        ? {
+            agentId: agent.id,
+            agentInstanceId: agent.instanceId ?? undefined,
+            port: agent.port,
+          }
+        : undefined,
+    });
+    sessionKey = key;
+    return session;
+  };
+
+  const resolveActiveApp = async (): Promise<DevFlowActiveApp | null> => {
+    const state = activePanelState;
+    if (state?.agent && state.brokerPort) {
+      return { agent: state.agent, brokerPort: state.brokerPort };
+    }
+    const workspaceSession = await ensureSession();
+    const connected = await workspaceSession.connect();
+    if (!connected.ok) return null;
+    const identity = connected.value;
+    return {
+      brokerPort: identity.brokerPort,
+      agent: {
+        id: identity.agentId,
+        instanceId: identity.agentInstanceId,
+        sessionId: identity.agentInstanceId,
+        project: identity.project ?? "",
+        tfm: identity.tfm ?? "",
+        platform: identity.platform ?? "unknown",
+        appName: identity.appName ?? identity.agentId,
+        port: identity.port,
+        connectedAt: identity.connectedAt,
+      },
+    };
+  };
+
+  const services: HostServicesWithDiagnostics = {
+    getPanelContext: () => activePanelState,
+    getDataSnapshot: () => activePanelState?.dataSnapshot ?? null,
+    getSelectedElement: () => activePanelState?.selection ?? null,
+    getCurrentEvidence: async (): Promise<DevFlowEvidenceContext | null> => {
+      const snapshot = activePanelState?.dataSnapshot;
+      if (snapshot) return { kind: "dataSnapshot", value: snapshot };
+      const workspaceSession = await ensureSession();
+      const preview = await workspaceSession.previewEvidence({
+        includeScreenshot: false,
+        includeWorkflow: false,
+      });
+      return preview.ok
+        ? { kind: "evidencePreview", value: preview.value.value }
+        : null;
+    },
+    openInspector,
+    openUriTarget: async (target: DevFlowUriTarget) => {
+      const app = await resolveActiveApp();
+      if (target.instance && app &&
+          target.instance !== (app.agent.instanceId ?? app.agent.sessionId)) {
+        vscode.window.showWarningMessage(
+          "This DevFlow link targets an app instance that is no longer running.",
+        );
+        return;
+      }
+      await openInspector({
+        agent: target.agent,
+        instance: target.instance,
+        element: target.element,
+        problem: target.problem,
+        run: target.run,
+        view: target.view,
+      });
+    },
+    resolveActiveApp,
+    getProblems: async (elementId?: string): Promise<DevFlowProblemBatch | null> => {
+      const workspaceSession = await ensureSession();
+      const result = await workspaceSession.getProblems({ limit: 100, elementId });
+      if (!result.ok) return null;
+      return result.value.value;
+    },
+    getLayoutDiagnostics: async (): Promise<DevFlowLayoutReport | null> => {
+      const workspaceSession = await ensureSession();
+      const result = await workspaceSession.analyzeLayout({ maxElements: 2000 });
+      if (!result.ok) return null;
+      await diagnostics?.publishLayout(result.value.value);
+      return result.value.value;
+    },
+    setDiagnosticsController: (controller) => {
+      diagnostics = controller;
+    },
+    dispose: () => {
+      disposed = true;
+      session?.dispose();
+      session = null;
+      clearInterval(refreshTimer);
+    },
+  };
+
+  const refreshTimer = setInterval(async () => {
+    if (disposed || refreshBusy || !activePanelState ||
+        !vscode.workspace.getConfiguration("mauiDevflow").get<boolean>("publishDiagnostics", false)) {
+      return;
+    }
+    refreshBusy = true;
+    try {
+      await diagnostics?.refreshProblems();
+    } finally {
+      refreshBusy = false;
+    }
+  }, 5000);
+  refreshTimer.unref?.();
+
+  return services;
 }
 
-function registerDataSnapshotTool(context: vscode.ExtensionContext, getState: () => PanelBridgeState | null): void {
-  const lm: any = (vscode as any).lm;
-  if (!lm || typeof lm.registerTool !== "function") return;
-  try {
-    context.subscriptions.push(
-      lm.registerTool("maui-devflow_getDataSnapshot", {
-        invoke: async () => {
-          const ToolResult = (vscode as any).LanguageModelToolResult;
-          const TextPart = (vscode as any).LanguageModelTextPart;
-          const state = getState();
-          const text = state?.dataSnapshot
-            ? "The user attached this point-in-time, redacted .NET MAUI DevFlow Data snapshot. " +
-              "Use followUpTools when deeper or fresher data is needed:\n" +
-              JSON.stringify(state.dataSnapshot, null, 2)
-            : "No DevFlow Data snapshot is currently attached. Ask the user to open Data in the MAUI DevFlow Inspector and use the paperclip button.";
-          return new ToolResult([new TextPart(text)]);
-        },
-      })
-    );
-  } catch {
-    // Tool API unavailable — the bridge falls back to partial text or the clipboard.
-  }
-}
-
-interface InspectorStartupHints {
-  test?: unknown;
-  trace?: unknown;
-  agentRequest?: unknown;
-}
+type InspectorStartupHints = InspectorOpenHints;
 
 async function openInspector(startupHints?: InspectorStartupHints): Promise<void> {
   // The client is ESM; this extension is CommonJS — load it via a dynamic import.
@@ -172,7 +270,17 @@ async function openInspector(startupHints?: InspectorStartupHints): Promise<void
     return;
   }
 
-  const selectedAgent = await pickAgent(discovery.agents);
+  const requestedAgentId = typeof startupHints?.agent === "string"
+    ? startupHints.agent.trim()
+    : "";
+  const selectedAgent = requestedAgentId
+    ? discovery.agents.find((candidate) => candidate.id === requestedAgentId)
+    : await pickAgent(discovery.agents);
+  if (requestedAgentId && !selectedAgent) {
+    vscode.window.showWarningMessage(
+      `MAUI DevFlow: agent '${requestedAgentId}' is not connected.`,
+    );
+  }
   if (!selectedAgent) return;
   let agent: AgentRegistration = selectedAgent;
 
@@ -215,6 +323,8 @@ async function openInspector(startupHints?: InspectorStartupHints): Promise<void
     bridgeId,
     selection: null,
     dataSnapshot: null,
+    agent,
+    brokerPort: activeBrokerPort,
   };
   panelStates.set(panel, panelState);
   activePanelState = panelState;
@@ -281,6 +391,8 @@ async function openInspector(startupHints?: InspectorStartupHints): Promise<void
 
       agent = nextAgent;
       activeBrokerPort = refreshed.port;
+      panelState.agent = nextAgent;
+      panelState.brokerPort = refreshed.port;
       runtimeIdentity = nextRuntimeIdentity;
       connectionSignature = nextSignature;
       title = nextAgent.appName ?? nextAgent.id;
@@ -315,15 +427,6 @@ async function openInspector(startupHints?: InspectorStartupHints): Promise<void
   });
 }
 
-function agentRuntimeIdentity(agent: AgentRegistration): string {
-  return [
-    agent.id,
-    agent.sessionId ?? "",
-    agent.processId ?? "",
-    agent.connectedAt ?? "",
-  ].join("|");
-}
-
 function withInspectorStartupHints(
   inspectorUrl: string,
   hints: InspectorStartupHints | undefined,
@@ -333,6 +436,10 @@ function withInspectorStartupHints(
     ["test", hints?.test],
     ["trace", hints?.trace],
     ["agentRequest", hints?.agentRequest],
+    ["element", hints?.element],
+    ["problem", hints?.problem],
+    ["run", hints?.run],
+    ["view", hints?.view],
   ] as const) {
     if (typeof value !== "string") continue;
     const bounded = value.trim();
@@ -352,58 +459,6 @@ function inspectorConnectionSignature(
     embedToken ?? "",
     agentRuntimeIdentity(agent),
   ].join("|");
-}
-
-function normalizeAgentIdentityPart(value: string | null | undefined): string | null {
-  const trimmed = typeof value === "string" ? value.trim() : "";
-  return trimmed ? trimmed : null;
-}
-
-function sameAgentIdentity(current: AgentRegistration, candidate: AgentRegistration): boolean {
-  const identityParts = [
-    normalizeAgentIdentityPart(current.project),
-    normalizeAgentIdentityPart(current.tfm),
-    normalizeAgentIdentityPart(current.platform),
-    normalizeAgentIdentityPart(current.appName),
-  ];
-  if (identityParts.some((part) => part == null)) return false;
-  return identityParts[0] === normalizeAgentIdentityPart(candidate.project) &&
-    identityParts[1] === normalizeAgentIdentityPart(candidate.tfm) &&
-    identityParts[2] === normalizeAgentIdentityPart(candidate.platform) &&
-    identityParts[3] === normalizeAgentIdentityPart(candidate.appName);
-}
-
-function selectRefreshedAgent(agents: AgentRegistration[], current: AgentRegistration): AgentRegistration | null {
-  const sameIdentityMatches = agents.filter((candidate) => sameAgentIdentity(current, candidate));
-  const currentId = normalizeAgentIdentityPart(current.id);
-  if (currentId) {
-    const exactIdMatches = sameIdentityMatches.filter((candidate) => normalizeAgentIdentityPart(candidate.id) === currentId);
-    if (exactIdMatches.length === 1) return exactIdMatches[0];
-    if (exactIdMatches.length > 1) return null;
-  }
-
-  return sameIdentityMatches.length === 1 ? sameIdentityMatches[0] : null;
-}
-
-function requiresBridgeRequestId(type: string | undefined): boolean {
-  return type === "devflow:sendToCopilot" ||
-    type === "devflow:attachCopilot" ||
-    type === "devflow:requestTestProposal" ||
-    type === "devflow:pickWorkflow" ||
-    type === "devflow:attachData" ||
-    type === "devflow:openSource" ||
-    type === "devflow:recordingComplete" ||
-    type === "devflow:saveTestBundle" ||
-    type === "devflow:loadTestBundle" ||
-    type === "devflow:pickTrace" ||
-    type === "devflow:openSourceDiff" ||
-    type === "devflow:applySourceProposal" ||
-    type === "devflow:applyCSharpSourceProposal" ||
-    type === "devflow:getCSharpSourceSelection";
-}
-
-function isBridgeResultMessage(type: string | undefined): boolean {
-  return requiresBridgeRequestId(type);
 }
 
 // ── Host bridge handlers (the shared inspector calls these via postMessage → relay → extension) ──

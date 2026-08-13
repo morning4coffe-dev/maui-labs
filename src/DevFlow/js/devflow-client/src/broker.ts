@@ -46,7 +46,25 @@ export async function fetchAgents(
   }
   if (!r.ok || !r.buffer) return null;
   const data = parseJsonSafe(r.buffer.toString("utf8"));
-  return Array.isArray(data) ? (data as AgentRegistration[]) : null;
+  return Array.isArray(data) && data.every(isAgentRegistration)
+    ? data
+    : null;
+}
+
+/** Runtime guard for the broker registry, including compatibility with pre-instanceId brokers. */
+export function isAgentRegistration(value: unknown): value is AgentRegistration {
+  if (!value || typeof value !== "object") return false;
+  const agent = value as Partial<AgentRegistration>;
+  return typeof agent.id === "string" &&
+    agent.id.length > 0 &&
+    Number.isInteger(agent.port) &&
+    (agent.port ?? 0) >= 1 &&
+    (agent.port ?? 0) <= 65535 &&
+    (agent.instanceId == null || typeof agent.instanceId === "string") &&
+    (agent.project == null || typeof agent.project === "string") &&
+    (agent.tfm == null || typeof agent.tfm === "string") &&
+    (agent.platform == null || typeof agent.platform === "string") &&
+    (agent.appName == null || typeof agent.appName === "string");
 }
 
 /** Resolve the `maui` CLI path: explicit override → ~/.dotnet/tools/maui → PATH. */

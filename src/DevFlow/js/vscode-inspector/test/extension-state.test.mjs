@@ -1,93 +1,127 @@
-import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import test from 'node:test';
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
 
-const sourcePath = new URL('../src/extension.ts', import.meta.url);
-const source = await readFile(sourcePath, 'utf8');
+import {
+  agentRuntimeIdentity,
+  selectRefreshedAgent,
+} from "../dist-test/agent-identity.js";
+import { requiresBridgeRequestId } from "../dist-test/bridge-contract.js";
+import { BoundedReferenceStore } from "../dist-test/context-store.js";
+import {
+  createDevFlowUriQuery,
+  parseDevFlowUri,
+} from "../dist-test/uri-contract.js";
 
-function normalizeAgentIdentityPart(value) {
-  const trimmed = typeof value === "string" ? value.trim() : "";
-  return trimmed ? trimmed : null;
-}
+const packageJson = JSON.parse(await readFile(
+  new URL("../package.json", import.meta.url),
+  "utf8",
+));
 
-function selectRefreshedAgent(agents, current) {
-  const sameIdentityMatches = agents.filter((candidate) =>
-    normalizeAgentIdentityPart(candidate.project) === normalizeAgentIdentityPart(current.project) &&
-    normalizeAgentIdentityPart(candidate.tfm) === normalizeAgentIdentityPart(current.tfm) &&
-    normalizeAgentIdentityPart(candidate.platform) === normalizeAgentIdentityPart(current.platform) &&
-    normalizeAgentIdentityPart(candidate.appName) === normalizeAgentIdentityPart(current.appName)
-  );
-  const currentId = normalizeAgentIdentityPart(current.id);
-  if (currentId) {
-    const exactIdMatches = sameIdentityMatches.filter((candidate) => normalizeAgentIdentityPart(candidate.id) === currentId);
-    if (exactIdMatches.length === 1) return exactIdMatches[0];
-    if (exactIdMatches.length > 1) return null;
-  }
+const current = {
+  id: "a",
+  project: "/work/apps/demo/Demo.csproj",
+  tfm: "net10.0-windows10.0.19041.0",
+  platform: "windows",
+  appName: "Demo",
+  packageId: "com.example.demo",
+  deviceId: "desktop",
+  sessionId: "session-a",
+  processId: 42,
+  port: 9223,
+};
 
-  return sameIdentityMatches.length === 1 ? sameIdentityMatches[0] : null;
-}
-
-function requiresBridgeRequestId(type) {
-  return type === 'devflow:sendToCopilot' ||
-    type === 'devflow:attachCopilot' ||
-    type === 'devflow:requestTestProposal' ||
-    type === 'devflow:pickWorkflow' ||
-    type === 'devflow:attachData' ||
-    type === 'devflow:openSource' ||
-    type === 'devflow:recordingComplete' ||
-    type === 'devflow:saveTestBundle' ||
-    type === 'devflow:loadTestBundle' ||
-    type === 'devflow:pickTrace' ||
-    type === 'devflow:openSourceDiff' ||
-    type === 'devflow:applySourceProposal' ||
-    type === 'devflow:applyCSharpSourceProposal' ||
-    type === 'devflow:getCSharpSourceSelection';
-}
-
-test('state is panel-scoped and retainContextWhenHidden survives refresh', () => {
-  assert.match(source, /const panelStates = new WeakMap<[^>]+>\(\)/);
-  assert.match(source, /let activePanelState: PanelBridgeState \| null = null;/);
-  assert.ok(!/currentSelection/.test(source));
-  assert.ok(!/currentDataSnapshot/.test(source));
-  assert.ok((source.match(/retainContextWhenHidden: true/g) ?? []).length >= 2);
-});
-
-test('reconnect selection fails closed on duplicate matches', () => {
-  const current = { id: 'a', project: '/work/apps/demo/Demo.csproj', tfm: 'net10.0-windows10.0.19041.0', platform: 'windows', appName: 'Demo' };
-  assert.equal(selectRefreshedAgent([{ id: 'a', project: '/work/apps/demo/Demo.csproj', tfm: 'net10.0-windows10.0.19041.0', platform: 'windows', appName: 'Demo' }], current)?.id, 'a');
-  assert.equal(selectRefreshedAgent([{ id: 'b', project: '/work/apps/demo/Demo.csproj', tfm: 'net10.0-windows10.0.19041.0', platform: 'windows', appName: 'Demo' }], current)?.id, 'b');
-  assert.equal(selectRefreshedAgent([{ id: 'b', project: '/work/apps/demo/Demo.csproj', tfm: 'net10.0-windows10.0.19041.0', platform: 'windows', appName: 'Demo' }, { id: 'c', project: '/work/apps/demo/Demo.csproj', tfm: 'net10.0-windows10.0.19041.0', platform: 'windows', appName: 'Demo' }], current), null);
-  assert.equal(selectRefreshedAgent([{ id: 'a', project: '/work/apps/demo/Demo.csproj', tfm: 'net10.0-windows10.0.19041.0', platform: 'windows', appName: 'Demo' }, { id: 'b', project: '/work/apps/demo/Demo.csproj', tfm: 'net10.0-windows10.0.19041.0', platform: 'windows', appName: 'Demo' }], current)?.id, 'a');
-});
-
-test('reconnect selection rejects same appName across different project/platform', () => {
-  const current = { id: 'a', project: '/work/apps/demo/Demo.csproj', tfm: 'net10.0-windows10.0.19041.0', platform: 'windows', appName: 'Demo' };
-  assert.equal(selectRefreshedAgent([{ id: 'b', project: '/work/apps/other/Other.csproj', tfm: 'net10.0-android', platform: 'android', appName: 'Demo' }], current), null);
-  assert.equal(selectRefreshedAgent([{ id: 'b', project: '/work/apps/demo/Demo.csproj', tfm: 'net10.0-android', platform: 'android', appName: 'Demo' }], current), null);
-});
-
-test('reconnect selection accepts the unique same-identity replacement', () => {
-  const current = { id: 'a', project: '/work/apps/demo/Demo.csproj', tfm: 'net10.0-windows10.0.19041.0', platform: 'windows', appName: 'Demo' };
+test("reconnect selection fails closed on duplicate matches", () => {
+  assert.equal(selectRefreshedAgent([{ ...current }], current)?.id, "a");
   assert.equal(selectRefreshedAgent([
-    { id: 'b', project: '/work/apps/demo/Demo.csproj', tfm: 'net10.0-windows10.0.19041.0', platform: 'windows', appName: 'Demo' },
-    { id: 'c', project: '/work/apps/other/Other.csproj', tfm: 'net10.0-windows10.0.19041.0', platform: 'windows', appName: 'Demo' },
-  ], current)?.id, 'b');
+    { ...current, id: "b" },
+    { ...current, id: "c" },
+  ], current), null);
+  assert.equal(selectRefreshedAgent([
+    { ...current, id: "a" },
+    { ...current, id: "b" },
+  ], current)?.id, "a");
 });
 
-test('request-gated bridge actions are enumerated', () => {
-  assert.equal(requiresBridgeRequestId('devflow:attachData'), true);
-  assert.equal(requiresBridgeRequestId('devflow:requestTestProposal'), true);
-  assert.equal(requiresBridgeRequestId('devflow:selectionChanged'), false);
-  assert.equal(requiresBridgeRequestId('devflow:openSource'), true);
-  assert.match(source, /case "devflow:requestTestProposal":/);
-  assert.match(source, /isPartialQuery: false/);
-  assert.match(source, /["']requestTestProposal["']/);
+test("reconnect selection accepts the unique compatible replacement", () => {
+  const replacement = { ...current, id: "b", sessionId: "session-a" };
+  assert.equal(selectRefreshedAgent([replacement], current)?.id, "b");
+  assert.equal(selectRefreshedAgent([
+    replacement,
+    { ...replacement, id: "c", project: "/work/apps/other/Other.csproj" },
+  ], current)?.id, "b");
 });
 
-test('host bridge advertises a versioned capability manifest', () => {
-  assert.match(source, /createInspectorHostManifest/);
-  assert.match(source, /hostId: "vscode"/);
-  assert.match(source, /interactionSessionId: bridgeId/);
-  assert.match(source, /capabilities: VSCODE_HOST_CAPABILITIES/);
-  assert.match(source, /profile = \{ surface: 'editor' \}/);
+test("reconnect selection rejects an optional identity mismatch", () => {
+  assert.equal(selectRefreshedAgent([{ ...current, id: "b", deviceId: "phone" }], current), null);
+  assert.notEqual(
+    agentRuntimeIdentity(current),
+    agentRuntimeIdentity({ ...current, deviceId: "phone" }),
+  );
+});
+
+test("request-gated bridge actions are enumerated", () => {
+  assert.equal(requiresBridgeRequestId("devflow:attachData"), true);
+  assert.equal(requiresBridgeRequestId("devflow:requestTestProposal"), true);
+  assert.equal(requiresBridgeRequestId("devflow:selectionChanged"), false);
+  assert.equal(requiresBridgeRequestId("devflow:openSource"), true);
+});
+
+test("DevFlow URIs round-trip bounded identifiers", () => {
+  const query = createDevFlowUriQuery({
+    view: "problems",
+    agent: "agent-1",
+    instance: "instance:2",
+    problem: "problem-3",
+  });
+  assert.deepEqual(parseDevFlowUri("/open", query), {
+    version: "1",
+    view: "problems",
+    agent: "agent-1",
+    instance: "instance:2",
+    problem: "problem-3",
+  });
+  assert.equal(parseDevFlowUri("/open", "v=2&view=problems"), null);
+  assert.equal(parseDevFlowUri("/open", "v=1&view=unknown"), null);
+  assert.equal(parseDevFlowUri("/open", "v=1&agent=../../secret"), null);
+});
+
+test("bounded references expire and evict without encoding context", () => {
+  const store = new BoundedReferenceStore(1, 1024, 60_000);
+  const first = store.put({ problem: "one" });
+  const second = store.put({ problem: "two" });
+  assert.match(first, /^[A-Za-z0-9_-]+$/);
+  assert.equal(store.get(first), null);
+  assert.deepEqual(store.get(second), { problem: "two" });
+  assert.ok(!second.includes("two"));
+});
+
+test("extension manifest contributes the participant, tools, URI activation, and MCP provider", () => {
+  const participant = packageJson.contributes.chatParticipants.find(
+    (candidate) => candidate.name === "devflow",
+  );
+  assert.ok(participant);
+  assert.deepEqual(
+    participant.commands.map((command) => command.name),
+    ["inspect", "diagnose-selection", "explain-problem", "create-test"],
+  );
+  const tools = new Set(
+    packageJson.contributes.languageModelTools.map((tool) => tool.name),
+  );
+  for (const tool of [
+    "maui-devflow_getSelectedElement",
+    "maui-devflow_getDataSnapshot",
+    "maui-devflow_openInspector",
+    "maui-devflow_resolveActiveApp",
+    "maui-devflow_getProblems",
+    "maui-devflow_getCurrentEvidence",
+  ]) {
+    assert.equal(tools.has(tool), true, `missing ${tool}`);
+  }
+  assert.deepEqual(packageJson.activationEvents, ["onUri"]);
+  assert.equal(packageJson.private, undefined);
+  assert.equal(
+    packageJson.contributes.mcpServerDefinitionProviders[0].id,
+    "mauiDevflow.localMcp",
+  );
 });

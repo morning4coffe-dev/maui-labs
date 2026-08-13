@@ -11,7 +11,7 @@ editing, workflow recording, and click-to-XAML navigation.
 3. Launch the app so it registers with the local DevFlow broker.
 4. Run **MAUI DevFlow: Open Inspector** from the Command Palette.
 
-The extension requires VS Code 1.98 or later. It runs in the workspace extension host so local,
+The extension requires VS Code 1.125 or later. It runs in the workspace extension host so local,
 Remote, and WSL workspaces connect to the broker beside the app tooling.
 
 ## Configuration
@@ -20,9 +20,16 @@ Remote, and WSL workspaces connect to the broker beside the app tooling.
   `~/.mauidevflow/broker.json`.
 - `mauiDevflow.openLocation` — where the Inspector panel opens: `auto` (default, opens beside the
   active editor when one is open, otherwise in the active group), `beside`, or `active`.
+- `mauiDevflow.publishDiagnostics` — preview option that publishes current runtime Problems and
+  findings from explicit Layout scans at uniquely resolved workspace source locations.
 
 ## Copilot and source integration
 
+- Use the `@devflow` Chat Participant:
+  - `@devflow /inspect`
+  - `@devflow /diagnose-selection`
+  - `@devflow /explain-problem`
+  - `@devflow /create-test`
 - **Copilot** opens a context menu for the selected MAUI element, the loaded workflow, both
   together, or the current Data snapshot. Selected elements use the
   `maui-devflow_getSelectedElement` language-model tool.
@@ -33,5 +40,14 @@ Remote, and WSL workspaces connect to the broker beside the app tooling.
 - **Record** creates a portable Markdown workflow that can be replayed by DevFlow.
 - **Workflow** loads saved tests from the project's `maui-tests` directory or an OS-selected
   Markdown file and shows replay results in the shared Inspector panel.
+- The extension contributes the local `maui devflow mcp` server to compatible VS Code hosts, so
+  the broader DevFlow automation tools are available without duplicating them as extension tools.
+- Versioned `vscode://maui-labs.maui-devflow-inspector/open?...` links can focus a current local
+  agent, element, Problem, run, or Inspector view. Links never carry broker tokens or evidence
+  payloads and fail closed when their target is stale.
+
+When preview diagnostics are enabled, DevFlow diagnostics offer **Inspect live control**,
+**Explain with Copilot**, and **Open selected runtime element** Code Actions. Clearing editor
+diagnostics does not clear the running app's bounded Problems history.
 
 See the [DevFlow Web Inspector documentation](https://github.com/dotnet/maui-labs/blob/main/docs/DevFlow/inspector.md).

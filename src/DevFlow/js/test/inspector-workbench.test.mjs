@@ -627,6 +627,10 @@ test("toolbar keeps toggle semantics when actions move into More", () => {
 
 test("VS Code host advertises implemented capabilities and refreshes after broker restarts", () => {
   const extension = readVscodeHost();
+  const identity = readFileSync(
+    new URL("../vscode-inspector/src/agent-identity.ts", import.meta.url),
+    "utf8",
+  );
   const capabilities = extension.match(/const VSCODE_HOST_CAPABILITIES = \[([^\]]+)\]/)?.[1] || "";
 
   assert.notEqual(capabilities, "");
@@ -637,15 +641,15 @@ test("VS Code host advertises implemented capabilities and refreshes after broke
   assert.match(extension, /isPartialQuery: false/);
   assert.match(extension, /const restartWatcher = setInterval/);
   assert.match(extension, /inspectorConnectionSignature/);
-  assert.match(extension, /function normalizeAgentIdentityPart/);
-  assert.match(extension, /function sameAgentIdentity/);
-  assert.match(extension, /sameAgentIdentity\(current, candidate\)/);
-  assert.match(extension, /normalizeAgentIdentityPart\(current\.project\)/);
-  assert.match(extension, /normalizeAgentIdentityPart\(current\.tfm\)/);
-  assert.match(extension, /normalizeAgentIdentityPart\(current\.platform\)/);
-  assert.match(extension, /normalizeAgentIdentityPart\(current\.appName\)/);
-  assert.match(extension, /normalizeAgentIdentityPart\(candidate\.id\) === currentId/);
-  assert.doesNotMatch(extension, /sameAppMatches|candidate\.appName === current\.appName/);
+  assert.match(identity, /function normalizeAgentIdentityPart/);
+  assert.match(identity, /function sameAgentIdentity/);
+  assert.match(identity, /sameAgentIdentity\(current, candidate\)/);
+  assert.match(identity, /normalizeAgentIdentityPart\(current\.project\)/);
+  assert.match(identity, /normalizeAgentIdentityPart\(current\.tfm\)/);
+  assert.match(identity, /normalizeAgentIdentityPart\(current\.platform\)/);
+  assert.match(identity, /normalizeAgentIdentityPart\(current\.appName\)/);
+  assert.match(identity, /normalizeAgentIdentityPart\(candidate\.id\) === currentId/);
+  assert.doesNotMatch(identity, /sameAppMatches|candidate\.appName === current\.appName/);
   assert.match(extension, /panel\.webview\.options =/);
   assert.match(extension, /function withInspectorStartupHints/);
   assert.match(extension, /\["test", hints\?\.test\]/);

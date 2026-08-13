@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace Microsoft.Maui.Cli.DevFlow.Mcp.Tools;
@@ -16,17 +17,28 @@ public sealed class LayoutDiagnosticsTool
          "mismatches, and geometry it could not read is returned as 'incomplete' — never as a pass. " +
          "Read the 'coverage' and 'limitations' fields before drawing conclusions. There is no watch mode: " +
          "call this again after you change the UI.")]
-    public static async Task<string> GetLayoutDiagnostics(
+    public static async Task<CallToolResult> GetLayoutDiagnostics(
         McpAgentSession session,
         [Description("Agent HTTP port (optional if only one agent connected)")] int? agentPort = null,
         [Description("Restrict the scan to this element id and its descendants")] string? elementId = null,
         [Description("0-based window index (optional; defaults to every window)")] int? window = null,
-        [Description("Element budget for the scan (default: 2000, maximum: 5000)")] int? maxElements = null)
+        [Description("Element budget for the scan (default: 2000, maximum: 5000)")] int? maxElements = null,
+        RequestContext<CallToolRequestParams>? requestContext = null)
     {
         using var agent = await session.GetAgentClientAsync(agentPort);
         var report = await agent.GetLayoutDiagnosticsAsync(elementId, window, maxElements);
-        return report is null
+        var text = report is null
             ? "Layout diagnostics are unavailable on the connected agent, or the requested element does not exist."
             : CliJson.SerializeUntyped(report, indented: false);
+        return McpAppMetadata.Result(
+            text,
+            new
+            {
+                kind = "mauiLayoutDiagnostics",
+                available = report is not null,
+                instruction = "Read coverage and limitations before drawing conclusions.",
+                report,
+            },
+            McpAppMetadata.IsNegotiated(requestContext?.Server.ClientCapabilities));
     }
 }

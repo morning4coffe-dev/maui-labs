@@ -1,6 +1,7 @@
 using System.ComponentModel;
 using Microsoft.Maui.Cli.DevFlow.Evidence;
 using Microsoft.Maui.Cli.DevFlow.Mcp;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 
 namespace Microsoft.Maui.Cli.DevFlow.Mcp.Tools;
@@ -17,7 +18,7 @@ public sealed class EvidenceTools
                  "Returns the included entries with item counts, the excluded entries with reasons, the data classes that are never captured, " +
                  "the applied limits, the screenshot status, the redaction ruleset version, and the path a capture would write to. " +
                  "Always call this before maui_evidence_capture when a human will share the bundle, so they can see what leaves the machine.")]
-    public static async Task<string> Preview(
+    public static async Task<CallToolResult> Preview(
         McpAgentSession session,
         [Description("Agent HTTP port (optional if only one agent connected)")] int? agentPort = null,
         [Description("Whether the capture would include a screenshot. Screenshots are opt-in because they can show on-screen data. Default: false")] bool includeScreenshot = false,
@@ -25,6 +26,7 @@ public sealed class EvidenceTools
         [Description("Maximum log entries to include (1-500, default 200)")] int? logLimit = null,
         [Description("Maximum network request summaries to include (1-500, default 100)")] int? networkLimit = null,
         [Description("Bundle path a capture would use, echoed back in the plan. Default: ./maui-traces/<app>-<timestamp>.mauitrace under the project root")] string? outputPath = null,
+        RequestContext<CallToolRequestParams>? requestContext = null,
         CancellationToken cancellationToken = default)
     {
         using var agent = await session.GetAgentClientAsync(agentPort);
@@ -38,7 +40,16 @@ public sealed class EvidenceTools
             Source = "mcp",
         }, cancellationToken);
 
-        return EvidenceJson.Serialize(plan, indented: true);
+        var text = EvidenceJson.Serialize(plan, indented: true);
+        return McpAppMetadata.Result(
+            text,
+            new
+            {
+                kind = "mauiEvidencePreview",
+                instruction = "This is a bounded preview. It does not capture or upload evidence.",
+                plan,
+            },
+            McpAppMetadata.IsNegotiated(requestContext?.Server.ClientCapabilities));
     }
 
     [McpServerTool(Name = "maui_evidence_capture"),

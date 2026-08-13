@@ -4,6 +4,7 @@ using System.Text.Json;
 using Microsoft.Maui.Cli.DevFlow.Mcp;
 using Microsoft.Maui.Cli.DevFlow.Mcp.Tools;
 using Microsoft.Maui.DevFlow.Driver;
+using ModelContextProtocol.Protocol;
 using ModelContextProtocol.Server;
 using Xunit;
 
@@ -63,7 +64,10 @@ public class DiagnosticsMcpToolTests
             foreach (var method in toolType.GetMethods(BindingFlags.Public | BindingFlags.Static)
                 .Where(m => m.GetCustomAttribute<McpServerToolAttribute>() is not null))
             {
-                foreach (var parameter in method.GetParameters().Where(p => p.ParameterType != typeof(McpAgentSession)))
+                foreach (var parameter in method.GetParameters().Where(p =>
+                    p.ParameterType != typeof(McpAgentSession) &&
+                    p.ParameterType != typeof(RequestContext<CallToolRequestParams>) &&
+                    p.ParameterType != typeof(CancellationToken)))
                 {
                     Assert.True(
                         parameter.GetCustomAttribute<DescriptionAttribute>() is not null,
@@ -80,9 +84,10 @@ public class DiagnosticsMcpToolTests
         await server.StartAsync();
         var session = new McpAgentSession { DefaultAgentHost = "localhost" };
 
-        var json = await LayoutDiagnosticsTool.GetLayoutDiagnostics(session, server.Port, maxElements: 50);
+        var result = await LayoutDiagnosticsTool.GetLayoutDiagnostics(session, server.Port, maxElements: 50);
+        var json = Assert.IsType<TextContentBlock>(Assert.Single(result.Content)).Text;
 
-        using var document = JsonDocument.Parse(json);
+        using var document = JsonDocument.Parse(json!);
         Assert.Equal("1.0", document.RootElement.GetProperty("schemaVersion").GetString());
         Assert.Equal(1, document.RootElement.GetProperty("summary").GetProperty("violations").GetInt32());
         Assert.NotEmpty(document.RootElement.GetProperty("coverage").GetProperty("limitations").EnumerateArray());

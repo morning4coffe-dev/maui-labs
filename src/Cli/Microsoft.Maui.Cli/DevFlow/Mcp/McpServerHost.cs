@@ -16,7 +16,7 @@ public static class McpServerHost
 {
 	private static readonly string[] FullToolNames =
 	[
-		"maui_app_info", "maui_assert", "maui_back", "maui_batch", "maui_battery_info",
+		"maui_app_info", "maui_artifact_inspect", "maui_assert", "maui_back", "maui_batch", "maui_battery_info",
 		"maui_capabilities", "maui_cdp_evaluate", "maui_cdp_screenshot", "maui_cdp_source",
 		"maui_cdp_webviews", "maui_clear", "maui_connectivity", "maui_device_info",
 		"maui_display_info", "maui_element", "maui_evidence_capture", "maui_evidence_preview",
@@ -151,8 +151,10 @@ public static class McpServerHost
 				.WithTools<InvokeTools>()
 				.WithTools<ExtensionTools>()
 				.WithTools<DeviceTools>()
+				.WithTools<ArtifactTools>()
 				.WithTools<Flows.FlowTools>()
-				.WithTools<Flows.FlowRecordTools>();
+				.WithTools<Flows.FlowRecordTools>()
+				.WithResources<McpAppResources>();
 		}
 		else
 		{

@@ -2587,8 +2587,8 @@ public partial class BrokerServer : IDisposable
                 ObserveRepairCheckpointAsync(connection, cancellationToken),
             restoreRoute: (route, cancellationToken) =>
                 RestoreRepairRouteAsync(connection, route, cancellationToken),
-            replay: (flow, plan, cancellationToken) =>
-                ReplayTransientRepairFlowAsync(connection, flow, plan, cancellationToken),
+            replay: (flow, plan, context, cancellationToken) =>
+                ReplayTransientRepairFlowAsync(connection, flow, plan, context, cancellationToken),
             // Seed, backend-state, and collection-item facts require a lifecycle host that builds,
             // resets, and seeds outside the broker. None is registered, so a reset attestation is
             // never fabricated and validation fails closed with an explicit reason.
@@ -2616,7 +2616,8 @@ public partial class BrokerServer : IDisposable
             return new MauiFlowCheckpoint
             {
                 AppBuildFingerprint = SafeCheckpointText(status.App?.Build),
-                AgentInstanceId = SafeCheckpointText(status.Agent?.InstanceId),
+                // The broker's own registration record, not the app's self-report.
+                AgentInstanceId = SafeCheckpointText(connection.Registration.InstanceId),
                 Route = SafeCheckpointText(status.Route),
                 Window = SafeCheckpointText(status.Window),
                 Modal = SafeCheckpointText(status.Modal),
@@ -2646,9 +2647,18 @@ public partial class BrokerServer : IDisposable
 
         try
         {
+            // An implicit lease would be claimed under a fresh id this scope never releases, and
+            // would then collide with the mutation lease the paired replay run acquires.
             using var client = new Microsoft.Maui.DevFlow.Driver.AgentClient(
                 "localhost",
-                connection.Registration.Port);
+                connection.Registration.Port)
+            {
+                AutoAcquireMutationLease = false,
+            };
+            using var leaseScope = client.UseMutationLease(
+                $"repair-validation-{Guid.NewGuid():N}",
+                "repair-validation",
+                "route-restore");
             if (!await client.NavigateAsync(route).WaitAsync(cancellationToken).ConfigureAwait(false))
                 return false;
             var observed = await client.GetStatusAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -2658,7 +2668,7 @@ public partial class BrokerServer : IDisposable
         {
             throw;
         }
-        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Net.Sockets.SocketException)
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Net.Sockets.SocketException or InvalidOperationException)
         {
             return false;
         }
@@ -2668,12 +2678,21 @@ public partial class BrokerServer : IDisposable
         AgentConnection connection,
         MauiFlow flow,
         MauiTestPlan? plan,
+        MauiFlowRunContext context,
         CancellationToken cancellationToken)
     {
         if (!IsCurrentAgentConnection(connection))
             return new WorkflowRepairTransientReplayOutcome { FailureCode = "agent-instance-replaced" };
 
         var registration = connection.Registration;
+        // The plan keeps every requirement, oracle, and checkpoint it was reviewed with; only its
+        // flow binding is rebound to the verified selector-only patch actually being replayed.
+        var transientPlan = RebindPlanToTransientFlow(plan, flow);
+        var capabilities = RequiresWorkflowRunCapabilities(transientPlan)
+            ? await ReadWorkflowRunCapabilitiesAsync(registration).ConfigureAwait(false)
+            : null;
+        // This run is authorized by the reviewer's repair grant, which the Inspector re-checks
+        // before any device-visible work, rather than by the ordinary workflow-run authorization.
         var started = _workflowRuns.Start(
             new WorkflowRunStartRequest
             {
@@ -2681,17 +2700,37 @@ public partial class BrokerServer : IDisposable
                 AgentInstanceId = registration.InstanceId,
                 IdempotencyKey = $"repair-validation-{Guid.NewGuid():N}",
                 Flow = flow,
-                Plan = plan,
+                Plan = transientPlan,
+                Context = context,
+                AvailableCapabilities = capabilities,
                 TimeoutMs = 120_000,
             },
             CreateWorkflowRunTarget(registration),
             () => IsCurrentAgentConnection(connection));
         if (!started.Ok || started.Run is null || string.IsNullOrWhiteSpace(started.CapabilityToken))
-            return new WorkflowRepairTransientReplayOutcome { FailureCode = "transient-replay-rejected" };
+        {
+            return new WorkflowRepairTransientReplayOutcome
+            {
+                FailureCode = string.IsNullOrWhiteSpace(started.Error)
+                    ? "transient-replay-rejected"
+                    : $"transient-replay-rejected: {started.Error}",
+            };
+        }
 
-        var snapshot = await _workflowRuns
-            .WaitForTerminalAsync(started.Run.RunId, started.CapabilityToken, cancellationToken)
-            .ConfigureAwait(false);
+        WorkflowRunSnapshot snapshot;
+        try
+        {
+            snapshot = await _workflowRuns
+                .WaitForTerminalAsync(started.Run.RunId, started.CapabilityToken, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            // Never abandon a still-running device-mutating run to a cancelled caller.
+            _workflowRuns.Cancel(started.Run.RunId, started.CapabilityToken);
+            throw;
+        }
+
         return new WorkflowRepairTransientReplayOutcome
         {
             RunId = snapshot.RunId,
@@ -2701,22 +2740,32 @@ public partial class BrokerServer : IDisposable
         };
     }
 
+    /// <summary>
+    /// Rebinds a reviewed plan onto the transient patched flow. The coordinator refuses a plan whose
+    /// flow digest is stale, and the selector-only patch necessarily changes that digest.
+    /// </summary>
+    private static MauiTestPlan? RebindPlanToTransientFlow(MauiTestPlan? plan, MauiFlow flow)
+    {
+        if (plan?.Flow is null)
+            return plan;
+
+        var digest = MauiFlowRunReportSerializer.ComputeFlowDigest(flow);
+        if (string.Equals(plan.Flow.Digest, digest, StringComparison.Ordinal))
+            return plan;
+
+        var node = System.Text.Json.JsonSerializer
+            .SerializeToNode(plan, MauiTestingJsonContext.Default.MauiTestPlan)?
+            .AsObject();
+        if (node?["flow"]?.AsObject() is not { } flowNode)
+            return plan;
+
+        flowNode["digest"] = digest;
+        return node.Deserialize(MauiTestingJsonContext.Default.MauiTestPlan) ?? plan;
+    }
+
     /// <summary>Normalizes an observed status value the same way the Inspector classifies one.</summary>
     private static string? SafeCheckpointText(string? value, int maximum = 256)
-    {
-        if (string.IsNullOrWhiteSpace(value))
-            return null;
-        var builder = new StringBuilder(Math.Min(value.Length, maximum));
-        foreach (var character in value)
-        {
-            if (!char.IsControl(character) || character is '\t' or '\n')
-                builder.Append(character);
-            if (builder.Length == maximum)
-                break;
-        }
-        var text = builder.ToString();
-        return string.IsNullOrEmpty(text) ? null : text;
-    }
+        => InspectorServer.SafeInspectorText(value, maximum);
 
     private async Task<FlowReplayReport> ReplayInspectorWorkflowAsync(
         AgentConnection connection,

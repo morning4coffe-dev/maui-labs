@@ -4,10 +4,10 @@ using Microsoft.Maui.DevFlow.Testing;
 namespace Microsoft.Maui.Cli.DevFlow.Broker;
 
 /// <summary>
-/// Trusted attestation of the reset, seed, and backend facts a broker cannot observe from a
-/// running app. Implementations build, reset, and seed outside the broker and attest only the
-/// state they actually applied. A broker never synthesises these facts and never echoes them
-/// from a request.
+/// Trusted attestation of the reset, seed, backend, and independent-oracle facts a broker cannot
+/// observe from a running app. Implementations build, reset, and seed outside the broker and attest
+/// only the state they actually applied. A broker never synthesises these facts and never echoes
+/// them from a request.
 /// </summary>
 internal interface IWorkflowRepairResetAttester
 {
@@ -16,13 +16,26 @@ internal interface IWorkflowRepairResetAttester
         CancellationToken cancellationToken);
 }
 
-/// <summary>Reset, seed, and backend facts attested by a lifecycle-capable host.</summary>
+/// <summary>Reset, seed, backend, and oracle facts attested by a lifecycle-capable host.</summary>
 internal sealed class WorkflowRepairResetAttestation
 {
     public bool Succeeded { get; init; }
-    public string? SeedFingerprint { get; init; }
-    public string? BackendStateFingerprint { get; init; }
+
+    /// <summary>
+    /// The canonical reset evidence. Its seed and backend fingerprints are the only trustworthy
+    /// source for the two checkpoint fields a connected app cannot report about itself.
+    /// </summary>
+    public MauiFlowResetResult? Reset { get; init; }
+
+    /// <summary>The seeded collection identity, when the classified checkpoint pins one.</summary>
     public string? CollectionItemKey { get; init; }
+
+    /// <summary>
+    /// Outcomes for the independent business oracles the plan declares. The broker cannot evaluate
+    /// them because they are, by definition, not observable through the UI it drives.
+    /// </summary>
+    public List<MauiIndependentBusinessOracleResult> BusinessOracles { get; init; } = [];
+
     public List<string> EvidenceIds { get; init; } = [];
     public string? FailureCode { get; init; }
 }
@@ -46,12 +59,15 @@ internal delegate Task<bool> WorkflowRepairRouteRestore(string route, Cancellati
 internal delegate Task<WorkflowRepairTransientReplayOutcome?> WorkflowRepairTransientReplayRunner(
     MauiFlow flow,
     MauiTestPlan? plan,
+    MauiFlowRunContext context,
     CancellationToken cancellationToken);
 
 /// <summary>
 /// Broker-side lifecycle host for bounded transient repair validation. It composes existing
 /// broker primitives — live checkpoint observation, route restore, and the retained workflow run
-/// path — and never writes a flow, a plan, or a proposed selector to a workspace.
+/// path — and never writes a flow, a plan, or a proposed selector to a workspace. The retained run
+/// report does contain the candidate selector; that is broker evidence for the reviewer, not an
+/// applied repair, and it is what <see cref="WorkflowRepairValidationRecord.EvidenceIds"/> cites.
 /// </summary>
 internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValidationHost
 {
@@ -59,6 +75,8 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
     private readonly WorkflowRepairRouteRestore _restoreRoute;
     private readonly WorkflowRepairTransientReplayRunner _replay;
     private readonly IWorkflowRepairResetAttester? _resetAttester;
+    private readonly Lock _gate = new();
+    private AttestedReset? _lastReset;
 
     internal BrokerWorkflowRepairValidationHost(
         WorkflowRepairCheckpointObserver observeCheckpoint,
@@ -141,30 +159,40 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
         if (observed is null)
             return ResetFailed("post-reset-observation-unavailable", attestation.EvidenceIds);
 
+        var merged = new MauiFlowCheckpoint
+        {
+            AppBuildFingerprint = observed.AppBuildFingerprint,
+            AgentInstanceId = observed.AgentInstanceId,
+            SeedFingerprint = attestation.Reset?.SeedFingerprint,
+            BackendStateFingerprint = attestation.Reset?.BackendStateFingerprint,
+            Route = observed.Route,
+            Window = observed.Window,
+            Modal = observed.Modal,
+            Locale = observed.Locale,
+            Theme = observed.Theme,
+            Orientation = observed.Orientation,
+            DisplayProfile = observed.DisplayProfile,
+            CollectionItemKey = attestation.CollectionItemKey,
+        };
+        var evidence = Bounded(attestation.EvidenceIds);
+        lock (_gate)
+        {
+            _lastReset = new AttestedReset(
+                request.Proposal.ProposalId,
+                request.Proposal.PatchDigest,
+                classified,
+                merged,
+                attestation.Reset,
+                attestation.BusinessOracles,
+                DateTimeOffset.UtcNow);
+        }
+
         return new WorkflowRepairLifecycleValidation
         {
             Succeeded = true,
             ExpectedCheckpoint = classified,
-            ObservedCheckpoint = new MauiFlowCheckpoint
-            {
-                AppBuildFingerprint = observed.AppBuildFingerprint,
-                AgentInstanceId = observed.AgentInstanceId,
-                SeedFingerprint = attestation.SeedFingerprint,
-                BackendStateFingerprint = attestation.BackendStateFingerprint,
-                Route = observed.Route,
-                Window = observed.Window,
-                Modal = observed.Modal,
-                Locale = observed.Locale,
-                Theme = observed.Theme,
-                Orientation = observed.Orientation,
-                DisplayProfile = observed.DisplayProfile,
-                CollectionItemKey = attestation.CollectionItemKey,
-            },
-            EvidenceIds = attestation.EvidenceIds
-                .Where(static id => !string.IsNullOrWhiteSpace(id))
-                .Distinct(StringComparer.Ordinal)
-                .Take(32)
-                .ToList(),
+            ObservedCheckpoint = merged,
+            EvidenceIds = evidence,
         };
     }
 
@@ -215,10 +243,31 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
         if (!downstreamAllowed)
             transient.Steps.RemoveAll(step => step.Seq > repairedStep.Seq);
 
+        // Replay is admitted against the reset the host just attested, not against caller-supplied
+        // state. Without a matching attestation there is no honest precondition or oracle evidence.
+        AttestedReset? reset;
+        lock (_gate)
+            reset = _lastReset;
+        if (reset is null || !reset.Matches(proposal))
+            return ReplayFailed("repair-reset-attestation-required");
+
+        var context = new MauiFlowRunContext
+        {
+            Intent = MauiFlowReplayIntents.RepairValidation,
+            Preconditions = new MauiFlowReplayPreconditions
+            {
+                Expected = reset.Expected,
+                Observed = reset.Observed,
+                CheckedAt = reset.AttestedAt,
+            },
+            Reset = reset.Reset,
+            BusinessOracles = [.. reset.BusinessOracles],
+        };
+
         WorkflowRepairTransientReplayOutcome? outcome;
         try
         {
-            outcome = await _replay(transient, request.SourcePlan, cancellationToken).ConfigureAwait(false);
+            outcome = await _replay(transient, request.SourcePlan, context, cancellationToken).ConfigureAwait(false);
         }
         catch (OperationCanceledException)
         {
@@ -240,15 +289,19 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
         var fingerprintMatches = MauiRepairFingerprintComparer.SemanticallyMatches(
             proposal.Candidate.Fingerprint,
             attempt?.Fingerprint);
-        // The proof is re-derived from the transient flow rather than trusted from the proposal,
-        // and the replay must also show every observed assertion still holding.
+        // The proof is re-derived from the transient flow rather than trusted from the proposal.
+        // The replay must also show every hard assertion the executed prefix declares actually
+        // observed and passing — a prefix whose assertions were never evaluated proves nothing.
+        var declaredAssertions = transient.Steps
+            .SelectMany(static step => step.Asserts)
+            .Count(IsHardAssertion);
+        var observedAssertions = report.Steps.SelectMany(static step => step.Assertions).ToList();
         var assertionsUnchanged = patched.Proof?.Unchanged == true &&
             patched.Proof.ActionsUnchanged == true &&
             patched.Proof.ValuesUnchanged == true &&
             patched.Proof.OrderUnchanged == true &&
-            report.Steps
-                .SelectMany(static step => step.Assertions)
-                .All(static assertion => assertion.Passed == true && assertion.Skipped != true);
+            observedAssertions.All(static assertion => assertion.Passed == true && assertion.Skipped != true) &&
+            observedAssertions.Count >= declaredAssertions;
         // Verified is the run path's own answer to "did an oracle independent of the UI selector
         // confirm the effect", and any recorded oracle must itself be independent and successful.
         var oracleSucceeded = report.Verification?.Verified == true &&
@@ -260,12 +313,14 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
             report.Outcome?.Status,
             MauiFlowRunOutcomes.Passed,
             StringComparison.Ordinal);
-        var evidence = new[] { outcome.EvidenceId, report.ReportPath, report.ReportDigest }
-            .Where(static id => !string.IsNullOrWhiteSpace(id))
-            .Select(static id => id!)
-            .Distinct(StringComparer.Ordinal)
-            .Take(32)
-            .ToList();
+        var evidence = Bounded([outcome.EvidenceId, report.ReportPath, report.ReportDigest]);
+        var passed = reached &&
+            matchCount == 1 &&
+            fingerprintMatches &&
+            assertionsUnchanged &&
+            oracleSucceeded &&
+            outcomePassed &&
+            (!continuedDownstream || downstreamAllowed);
 
         return new WorkflowRepairReplayValidation
         {
@@ -278,16 +333,15 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
             IndependentOracleSucceeded = oracleSucceeded,
             ContinuedDownstream = continuedDownstream,
             EvidenceIds = evidence,
-            Passed = reached &&
-                matchCount == 1 &&
-                fingerprintMatches &&
-                assertionsUnchanged &&
-                oracleSucceeded &&
-                outcomePassed &&
-                (!continuedDownstream || downstreamAllowed),
-            FailureCode = reached && outcomePassed ? null : "transient-replay-failed",
+            Passed = passed,
+            FailureCode = passed ? null : "transient-replay-failed",
         };
     }
+
+    /// <summary>A declared assertion the runner is expected to evaluate and report.</summary>
+    private static bool IsHardAssertion(FlowAssert assertion)
+        => assertion.Verify &&
+           !string.Equals(assertion.Kind, "pageChanged", StringComparison.Ordinal);
 
     /// <summary>Mirrors the canonical step identity so retained ids resolve to executable steps.</summary>
     private static FlowStep? FindStep(MauiFlow flow, string stepId)
@@ -300,16 +354,12 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
 
     private static WorkflowRepairLifecycleValidation ResetFailed(
         string failureCode,
-        IEnumerable<string>? evidenceIds = null)
+        IEnumerable<string?>? evidenceIds = null)
         => new()
         {
             Succeeded = false,
             FailureCode = failureCode,
-            EvidenceIds = (evidenceIds ?? [])
-                .Where(static id => !string.IsNullOrWhiteSpace(id))
-                .Distinct(StringComparer.Ordinal)
-                .Take(32)
-                .ToList(),
+            EvidenceIds = Bounded(evidenceIds),
         };
 
     private static WorkflowRepairReplayValidation ReplayFailed(string failureCode, string? runId = null)
@@ -318,4 +368,32 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
             FailureCode = failureCode,
             RunId = runId,
         };
+
+    private static List<string> Bounded(IEnumerable<string?>? values)
+        => (values ?? [])
+            .Where(static id => !string.IsNullOrWhiteSpace(id))
+            .Select(static id => id!)
+            .Distinct(StringComparer.Ordinal)
+            .Take(32)
+            .ToList();
+
+    /// <summary>
+    /// The reset the host itself attested and observed, retained only long enough for the paired
+    /// replay. It is bound to the proposal so a later replay can never inherit an unrelated reset.
+    /// </summary>
+    private sealed record AttestedReset(
+        string? ProposalId,
+        string? PatchDigest,
+        MauiFlowCheckpoint Expected,
+        MauiFlowCheckpoint Observed,
+        MauiFlowResetResult? Reset,
+        List<MauiIndependentBusinessOracleResult> BusinessOracles,
+        DateTimeOffset AttestedAt)
+    {
+        public bool Matches(MauiFlowRepairProposal proposal)
+            => !string.IsNullOrWhiteSpace(ProposalId) &&
+               string.Equals(ProposalId, proposal.ProposalId, StringComparison.Ordinal) &&
+               !string.IsNullOrWhiteSpace(PatchDigest) &&
+               string.Equals(PatchDigest, proposal.PatchDigest, StringComparison.Ordinal);
+    }
 }

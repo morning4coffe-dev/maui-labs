@@ -14,7 +14,7 @@ public sealed class BrokerWorkflowRepairValidationHostTests
         var host = new BrokerWorkflowRepairValidationHost(
             observeCheckpoint: _ => Task.FromResult<MauiFlowCheckpoint?>(Checkpoint()),
             restoreRoute: (_, _) => Task.FromResult(true),
-            replay: (_, _, _) => Task.FromResult<WorkflowRepairTransientReplayOutcome?>(null),
+            replay: (_, _, _, _) => Task.FromResult<WorkflowRepairTransientReplayOutcome?>(null),
             resetAttester: null);
 
         var reset = await host.HardResetAsync(Request(proposal, flow), CancellationToken.None);
@@ -49,7 +49,7 @@ public sealed class BrokerWorkflowRepairValidationHostTests
                 routes.Add(route);
                 return Task.FromResult(true);
             },
-            replay: (_, _, _) => Task.FromResult<WorkflowRepairTransientReplayOutcome?>(null),
+            replay: (_, _, _, _) => Task.FromResult<WorkflowRepairTransientReplayOutcome?>(null),
             resetAttester: new FakeResetAttester(classified));
 
         var reset = await host.HardResetAsync(Request(proposal, flow), CancellationToken.None);
@@ -87,7 +87,7 @@ public sealed class BrokerWorkflowRepairValidationHostTests
         var host = new BrokerWorkflowRepairValidationHost(
             observeCheckpoint: _ => Task.FromResult<MauiFlowCheckpoint?>(classified),
             restoreRoute: (_, _) => Task.FromResult(true),
-            replay: (_, _, _) => Task.FromResult<WorkflowRepairTransientReplayOutcome?>(null),
+            replay: (_, _, _, _) => Task.FromResult<WorkflowRepairTransientReplayOutcome?>(null),
             resetAttester: new FakeResetAttester(classified) { SeedFingerprint = null });
 
         var record = await new WorkflowRepairValidationService(new LifecycleOnlyHost(host))
@@ -108,7 +108,7 @@ public sealed class BrokerWorkflowRepairValidationHostTests
         var host = new BrokerWorkflowRepairValidationHost(
             observeCheckpoint: _ => Task.FromResult<MauiFlowCheckpoint?>(Checkpoint()),
             restoreRoute: (_, _) => Task.FromResult(true),
-            replay: (transient, _, _) =>
+            replay: (transient, _, _, _) =>
             {
                 replayed = transient;
                 return Task.FromResult<WorkflowRepairTransientReplayOutcome?>(
@@ -120,6 +120,7 @@ public sealed class BrokerWorkflowRepairValidationHostTests
             },
             resetAttester: new FakeResetAttester(Checkpoint()));
 
+        await host.HardResetAsync(Request(proposal, flow), CancellationToken.None);
         var replay = await host.ReplayWithInMemorySelectorOverrideAsync(
             Request(proposal, flow),
             CancellationToken.None);
@@ -149,7 +150,7 @@ public sealed class BrokerWorkflowRepairValidationHostTests
         var host = new BrokerWorkflowRepairValidationHost(
             observeCheckpoint: _ => Task.FromResult<MauiFlowCheckpoint?>(Checkpoint()),
             restoreRoute: (_, _) => Task.FromResult(true),
-            replay: (_, _, _) =>
+            replay: (_, _, _, _) =>
             {
                 replayCalls++;
                 return Task.FromResult<WorkflowRepairTransientReplayOutcome?>(null);
@@ -175,10 +176,11 @@ public sealed class BrokerWorkflowRepairValidationHostTests
         var host = new BrokerWorkflowRepairValidationHost(
             observeCheckpoint: _ => Task.FromResult<MauiFlowCheckpoint?>(Checkpoint()),
             restoreRoute: (_, _) => Task.FromResult(true),
-            replay: (_, _, _) => Task.FromResult<WorkflowRepairTransientReplayOutcome?>(
+            replay: (_, _, _, _) => Task.FromResult<WorkflowRepairTransientReplayOutcome?>(
                 new WorkflowRepairTransientReplayOutcome { RunId = "ambiguous-run", Report = report }),
             resetAttester: new FakeResetAttester(Checkpoint()));
 
+        await host.HardResetAsync(Request(proposal, flow), CancellationToken.None);
         var replay = await host.ReplayWithInMemorySelectorOverrideAsync(
             Request(proposal, flow),
             CancellationToken.None);
@@ -207,7 +209,7 @@ public sealed class BrokerWorkflowRepairValidationHostTests
         var host = new BrokerWorkflowRepairValidationHost(
             observeCheckpoint: _ => Task.FromResult<MauiFlowCheckpoint?>(Checkpoint()),
             restoreRoute: (_, _) => Task.FromResult(true),
-            replay: (transient, _, _) =>
+            replay: (transient, _, _, _) =>
             {
                 replayed = transient;
                 return Task.FromResult<WorkflowRepairTransientReplayOutcome?>(
@@ -219,6 +221,7 @@ public sealed class BrokerWorkflowRepairValidationHostTests
             },
             resetAttester: new FakeResetAttester(Checkpoint()));
 
+        await host.HardResetAsync(Request(proposal, flow), CancellationToken.None);
         var replay = await host.ReplayWithInMemorySelectorOverrideAsync(
             Request(proposal, flow),
             CancellationToken.None);
@@ -226,6 +229,68 @@ public sealed class BrokerWorkflowRepairValidationHostTests
         Assert.False(replay.ContinuedDownstream);
         Assert.Equal("stable-save-step", Assert.Single(replayed!.Steps).StepId);
         Assert.Equal(2, flow.Steps.Count);
+    }
+
+    [Fact]
+    public async Task ReplayAsync_WithoutTheHostsOwnPairedResetAttestation_FailsClosed()
+    {
+        var flow = Flow();
+        var proposal = Proposal(flow);
+        var replayCalls = 0;
+        var host = new BrokerWorkflowRepairValidationHost(
+            observeCheckpoint: _ => Task.FromResult<MauiFlowCheckpoint?>(Checkpoint()),
+            restoreRoute: (_, _) => Task.FromResult(true),
+            replay: (_, _, _, _) =>
+            {
+                replayCalls++;
+                return Task.FromResult<WorkflowRepairTransientReplayOutcome?>(null);
+            },
+            resetAttester: new FakeResetAttester(Checkpoint()));
+
+        var replay = await host.ReplayWithInMemorySelectorOverrideAsync(
+            Request(proposal, flow),
+            CancellationToken.None);
+
+        Assert.False(replay.Passed);
+        Assert.Equal("repair-reset-attestation-required", replay.FailureCode);
+        Assert.Equal(0, replayCalls);
+    }
+
+    [Fact]
+    public async Task ReplayAsync_AdmitsTheTransientRunAgainstTheAttestedResetAndReportsAPass()
+    {
+        var flow = Flow();
+        var proposal = Proposal(flow);
+        var classified = Checkpoint();
+        MauiFlowRunContext? admitted = null;
+        var host = new BrokerWorkflowRepairValidationHost(
+            observeCheckpoint: _ => Task.FromResult<MauiFlowCheckpoint?>(Checkpoint()),
+            restoreRoute: (_, _) => Task.FromResult(true),
+            replay: (_, _, context, _) =>
+            {
+                admitted = context;
+                return Task.FromResult<WorkflowRepairTransientReplayOutcome?>(
+                    new WorkflowRepairTransientReplayOutcome
+                    {
+                        RunId = "verified-run",
+                        Report = PassingReport(proposal),
+                    });
+            },
+            resetAttester: new FakeResetAttester(classified));
+
+        var record = await new WorkflowRepairValidationService(host)
+            .ValidateAsync(Request(proposal, flow), CancellationToken.None);
+
+        Assert.True(record.Passed);
+        Assert.Empty(record.FailureFacts);
+        Assert.NotNull(admitted);
+        Assert.Equal(MauiFlowReplayIntents.RepairValidation, admitted!.Intent);
+        // The run is admitted against what the host itself reset and observed, not the request.
+        Assert.Equal(classified.SeedFingerprint, admitted.Reset?.SeedFingerprint);
+        Assert.Equal(classified.BackendStateFingerprint, admitted.Reset?.BackendStateFingerprint);
+        Assert.Equal(classified.Route, admitted.Preconditions?.Expected?.Route);
+        Assert.Equal(classified.Route, admitted.Preconditions?.Observed?.Route);
+        Assert.True(Assert.Single(admitted.BusinessOracles).Independent);
     }
 
     private static WorkflowRepairTransientValidationRequest Request(
@@ -428,9 +493,26 @@ public sealed class BrokerWorkflowRepairValidationHostTests
             => Task.FromResult<WorkflowRepairResetAttestation?>(new WorkflowRepairResetAttestation
             {
                 Succeeded = true,
-                SeedFingerprint = SeedFingerprint,
-                BackendStateFingerprint = _attested.BackendStateFingerprint,
+                Reset = new MauiFlowResetResult
+                {
+                    Requested = true,
+                    Succeeded = true,
+                    AppStateSucceeded = true,
+                    BackendTestDataSucceeded = true,
+                    Strategy = "fake-lifecycle-reset",
+                    SeedFingerprint = SeedFingerprint,
+                    BackendStateFingerprint = _attested.BackendStateFingerprint,
+                },
                 CollectionItemKey = _attested.CollectionItemKey,
+                BusinessOracles =
+                [
+                    new MauiIndependentBusinessOracleResult
+                    {
+                        OracleId = "fake-oracle",
+                        Independent = true,
+                        Succeeded = true,
+                    },
+                ],
                 EvidenceIds = ["reset-evidence-1"],
             });
     }

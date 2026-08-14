@@ -7388,6 +7388,13 @@ public sealed partial class InspectorServer : IDisposable
     }
 
     private static string? SafeWorkbenchText(string? value, int maximum = 256)
+        => SafeInspectorText(value, maximum);
+
+    /// <summary>
+    /// Normalizes an untrusted display string to bounded, control-character-free text. Input that
+    /// normalizes away entirely is reported as missing rather than as an empty observation.
+    /// </summary>
+    internal static string? SafeInspectorText(string? value, int maximum = 256)
     {
         if (string.IsNullOrWhiteSpace(value))
             return null;
@@ -7399,7 +7406,8 @@ public sealed partial class InspectorServer : IDisposable
             if (builder.Length == maximum)
                 break;
         }
-        return builder.ToString();
+        var text = builder.ToString();
+        return string.IsNullOrEmpty(text) ? null : text;
     }
 
     private static Testing.MauiFlowCheckpoint CloneWorkbenchCheckpoint(

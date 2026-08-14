@@ -276,6 +276,30 @@ public class WindowsAppDriver : AppDriverBase, IAlertDriver
         return Task.FromResult<AlertInfo?>(info);
     }
 
+    public Task<AlertActionResult> HandleAlertAsync(
+        string? buttonLabel = null,
+        string? expectedRevision = null)
+    {
+        EnsureWindows();
+        var windows = ResolveTargetWindows();
+        var candidate = FindDialogCandidate(windows);
+        if (candidate is null || candidate.Buttons.Count == 0)
+            return Task.FromResult(new AlertActionResult(null, MatchesExpected: true, Dismissed: false));
+
+        var info = new AlertInfo(
+            candidate.Title ?? candidate.Texts.FirstOrDefault(),
+            candidate.Buttons.Select(ToAlertButton).ToList());
+        if (!string.IsNullOrEmpty(expectedRevision) &&
+            !string.Equals(expectedRevision, AlertRevision.Create(info), StringComparison.Ordinal))
+        {
+            return Task.FromResult(new AlertActionResult(info, MatchesExpected: false, Dismissed: false));
+        }
+
+        var target = PickButton(candidate.Buttons, buttonLabel);
+        var dismissed = UIAutomationInterop.InvokeElement(target.element) || ClickElementCenter(target.element);
+        return Task.FromResult(new AlertActionResult(info, MatchesExpected: true, Dismissed: dismissed));
+    }
+
     public Task<string> GetAccessibilityTreeAsync()
     {
         EnsureWindows();
@@ -356,6 +380,7 @@ public class WindowsAppDriver : AppDriverBase, IAlertDriver
     public Task<AlertInfo?> DetectAlertAsync() => throw new PlatformNotSupportedException("Windows operations require Windows.");
     public Task DismissAlertAsync(string? buttonLabel = null) => throw new PlatformNotSupportedException("Windows operations require Windows.");
     public Task<AlertInfo?> HandleAlertIfPresentAsync(string? buttonLabel = null) => throw new PlatformNotSupportedException("Windows operations require Windows.");
+    public Task<AlertActionResult> HandleAlertAsync(string? buttonLabel = null, string? expectedRevision = null) => throw new PlatformNotSupportedException("Windows operations require Windows.");
     public Task<string> GetAccessibilityTreeAsync() => throw new PlatformNotSupportedException("Windows operations require Windows.");
 #endif
 

@@ -148,6 +148,24 @@ public class AndroidAppDriver : AppDriverBase, IAlertDriver
         return alert;
     }
 
+    public async Task<AlertActionResult> HandleAlertAsync(
+        string? buttonLabel = null,
+        string? expectedRevision = null)
+    {
+        var alert = await DetectAlertAsync().ConfigureAwait(false);
+        if (alert is null)
+            return new(null, MatchesExpected: true, Dismissed: false);
+        if (!string.IsNullOrEmpty(expectedRevision) &&
+            !string.Equals(expectedRevision, AlertRevision.Create(alert), StringComparison.Ordinal))
+        {
+            return new(alert, MatchesExpected: false, Dismissed: false);
+        }
+
+        var button = FindButtonToTap(alert, buttonLabel);
+        await RunAdbAsync($"shell input tap {button.CenterX} {button.CenterY}");
+        return new(alert, MatchesExpected: true, Dismissed: true);
+    }
+
     /// <summary>
     /// Returns the full UIAutomator hierarchy XML as a string for debugging.
     /// </summary>

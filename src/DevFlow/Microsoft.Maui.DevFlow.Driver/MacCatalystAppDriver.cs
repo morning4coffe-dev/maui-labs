@@ -105,6 +105,37 @@ public class MacCatalystAppDriver : AppDriverBase, IAlertDriver
         return Task.FromResult<AlertInfo?>(info);
     }
 
+    public Task<AlertActionResult> HandleAlertAsync(
+        string? buttonLabel = null,
+        string? expectedRevision = null)
+    {
+        EnsureMacOS();
+        var pid = ResolveProcessId();
+        using var app = AXElement.CreateForApplication(pid);
+
+        var (info, buttonEls) = FindDialogButtons(app);
+        if (info is null || buttonEls is null || buttonEls.Count == 0)
+        {
+            DisposeAll(buttonEls);
+            return Task.FromResult(new AlertActionResult(null, MatchesExpected: true, Dismissed: false));
+        }
+
+        try
+        {
+            if (!string.IsNullOrEmpty(expectedRevision) &&
+                !string.Equals(expectedRevision, AlertRevision.Create(info), StringComparison.Ordinal))
+            {
+                return Task.FromResult(new AlertActionResult(info, MatchesExpected: false, Dismissed: false));
+            }
+            var target = PickButton(buttonEls, buttonLabel);
+            return Task.FromResult(new AlertActionResult(
+                info,
+                MatchesExpected: true,
+                Dismissed: target.Press()));
+        }
+        finally { DisposeAll(buttonEls); }
+    }
+
     /// <summary>
     /// Returns the full macOS accessibility tree for the app as text.
     /// </summary>

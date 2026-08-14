@@ -2507,6 +2507,7 @@ public partial class BrokerServer : IDisposable
                     CreateWorkflowRunTarget(registration),
                     () => IsCurrentAgentConnection(connection),
                     _cts?.Token ?? CancellationToken.None),
+                repairValidationHost: CreateRepairValidationHost(connection),
                 testAgentSessions: _testAgentSessions,
                 testAgentTargetStateRefresh: supplied => GetLiveTestAgentTargetStateAsync(supplied),
                 previewFlags: _previewFlags,
@@ -2573,6 +2574,148 @@ public partial class BrokerServer : IDisposable
 
         var candidates = agents.Values.Take(2).ToArray();
         return candidates.Length == 1 ? candidates[0] : null;
+    }
+
+    /// <summary>
+    /// Builds the broker-side lifecycle host for bounded transient repair validation. It only
+    /// composes primitives the broker already owns: live checkpoint observation, route restore,
+    /// and one retained workflow run. No source file, flow, or plan is written.
+    /// </summary>
+    private BrokerWorkflowRepairValidationHost CreateRepairValidationHost(AgentConnection connection)
+        => new(
+            observeCheckpoint: cancellationToken =>
+                ObserveRepairCheckpointAsync(connection, cancellationToken),
+            restoreRoute: (route, cancellationToken) =>
+                RestoreRepairRouteAsync(connection, route, cancellationToken),
+            replay: (flow, plan, cancellationToken) =>
+                ReplayTransientRepairFlowAsync(connection, flow, plan, cancellationToken),
+            // Seed, backend-state, and collection-item facts require a lifecycle host that builds,
+            // resets, and seeds outside the broker. None is registered, so a reset attestation is
+            // never fabricated and validation fails closed with an explicit reason.
+            resetAttester: null);
+
+    private async Task<MauiFlowCheckpoint?> ObserveRepairCheckpointAsync(
+        AgentConnection connection,
+        CancellationToken cancellationToken)
+    {
+        if (!IsCurrentAgentConnection(connection))
+            return null;
+
+        try
+        {
+            using var client = new Microsoft.Maui.DevFlow.Driver.AgentClient(
+                "localhost",
+                connection.Registration.Port)
+            {
+                AutoAcquireMutationLease = false,
+            };
+            var status = await client.GetStatusAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            if (status is null)
+                return null;
+
+            return new MauiFlowCheckpoint
+            {
+                AppBuildFingerprint = SafeCheckpointText(status.App?.Build),
+                AgentInstanceId = SafeCheckpointText(status.Agent?.InstanceId),
+                Route = SafeCheckpointText(status.Route),
+                Window = SafeCheckpointText(status.Window),
+                Modal = SafeCheckpointText(status.Modal),
+                Locale = SafeCheckpointText(status.Locale),
+                Theme = SafeCheckpointText(status.Theme),
+                Orientation = SafeCheckpointText(status.Orientation),
+                DisplayProfile = SafeCheckpointText(status.DisplayProfile),
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Net.Sockets.SocketException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<bool> RestoreRepairRouteAsync(
+        AgentConnection connection,
+        string route,
+        CancellationToken cancellationToken)
+    {
+        if (!IsCurrentAgentConnection(connection) || string.IsNullOrWhiteSpace(route))
+            return false;
+
+        try
+        {
+            using var client = new Microsoft.Maui.DevFlow.Driver.AgentClient(
+                "localhost",
+                connection.Registration.Port);
+            if (!await client.NavigateAsync(route).WaitAsync(cancellationToken).ConfigureAwait(false))
+                return false;
+            var observed = await client.GetStatusAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+            return string.Equals(SafeCheckpointText(observed?.Route), route, StringComparison.Ordinal);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Net.Sockets.SocketException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<WorkflowRepairTransientReplayOutcome?> ReplayTransientRepairFlowAsync(
+        AgentConnection connection,
+        MauiFlow flow,
+        MauiTestPlan? plan,
+        CancellationToken cancellationToken)
+    {
+        if (!IsCurrentAgentConnection(connection))
+            return new WorkflowRepairTransientReplayOutcome { FailureCode = "agent-instance-replaced" };
+
+        var registration = connection.Registration;
+        var started = _workflowRuns.Start(
+            new WorkflowRunStartRequest
+            {
+                AgentId = registration.Id,
+                AgentInstanceId = registration.InstanceId,
+                IdempotencyKey = $"repair-validation-{Guid.NewGuid():N}",
+                Flow = flow,
+                Plan = plan,
+                TimeoutMs = 120_000,
+            },
+            CreateWorkflowRunTarget(registration),
+            () => IsCurrentAgentConnection(connection));
+        if (!started.Ok || started.Run is null || string.IsNullOrWhiteSpace(started.CapabilityToken))
+            return new WorkflowRepairTransientReplayOutcome { FailureCode = "transient-replay-rejected" };
+
+        var snapshot = await _workflowRuns
+            .WaitForTerminalAsync(started.Run.RunId, started.CapabilityToken, cancellationToken)
+            .ConfigureAwait(false);
+        return new WorkflowRepairTransientReplayOutcome
+        {
+            RunId = snapshot.RunId,
+            Report = snapshot.Report,
+            EvidenceId = snapshot.ReportPath ?? snapshot.ReportDigest,
+            FailureCode = snapshot.Report is null ? "transient-replay-unavailable" : null,
+        };
+    }
+
+    /// <summary>Normalizes an observed status value the same way the Inspector classifies one.</summary>
+    private static string? SafeCheckpointText(string? value, int maximum = 256)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        var builder = new StringBuilder(Math.Min(value.Length, maximum));
+        foreach (var character in value)
+        {
+            if (!char.IsControl(character) || character is '\t' or '\n')
+                builder.Append(character);
+            if (builder.Length == maximum)
+                break;
+        }
+        var text = builder.ToString();
+        return string.IsNullOrEmpty(text) ? null : text;
     }
 
     private async Task<FlowReplayReport> ReplayInspectorWorkflowAsync(

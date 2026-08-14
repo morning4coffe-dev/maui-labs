@@ -5803,6 +5803,25 @@ public sealed partial class InspectorServer : IDisposable
         var lookup = services.GetRepair(proposalId);
         if (!lookup.Ok || lookup.Proposal is null)
             return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        // A bounded transient replay drives the connected app, so the human validation grant is
+        // confirmed before any device-visible work — not only when the result is recorded.
+        if (!services.CanRedeemRepairGrant(
+                proposalId,
+                request!.ValidationGrant,
+                WorkflowRepairGrantKinds.Validation,
+                out var grantError))
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                code = "validation-grant-invalid",
+                error = grantError,
+                flowChanged = false,
+                repairValidationAvailable = _repairValidationAvailable,
+            });
+        }
+
+        var sourceWorkspace = historyStore.Load(lookup.Proposal.Proposal.BaseFlow?.Path);
         var validation = await _repairValidation.ValidateAsync(
             new WorkflowRepairTransientValidationRequest
             {
@@ -5810,8 +5829,10 @@ public sealed partial class InspectorServer : IDisposable
                 Eligibility = lookup.Proposal.TrustedContext.Eligibility,
                 ReplaySafety = lookup.Proposal.TrustedContext.ReplaySafety,
                 ClassifiedCheckpoint = lookup.Proposal.TrustedContext.ClassifiedCheckpoint,
-                ValidationGrantDigest = request!.ValidationGrant,
+                ValidationGrantDigest = request.ValidationGrant,
                 InMemorySelectorOverrideOnly = true,
+                SourceFlow = sourceWorkspace.Ok ? sourceWorkspace.Snapshot?.Flow : null,
+                SourcePlan = sourceWorkspace.Ok ? sourceWorkspace.Snapshot?.Plan : null,
                 AllowDownstreamContinuation =
                     lookup.Proposal.TrustedContext.ReplaySafety?.DownstreamContinuationAllowed == true,
             },

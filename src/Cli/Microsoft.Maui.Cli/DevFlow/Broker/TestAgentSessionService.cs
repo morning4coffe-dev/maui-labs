@@ -847,6 +847,52 @@ internal sealed class TestAgentSessionService
         }
     }
 
+    /// <summary>
+    /// Verifies, broker-side, that a workflow-run dispatch is backed by a live human-issued grant.
+    /// The calling client already checks this, but the broker must not rely on a client to enforce
+    /// its own authorization boundary. Each authorization dispatches at most one run.
+    /// </summary>
+    internal bool TryConsumeRunDispatchAuthorization(
+        string? authorizationId,
+        string? agentId,
+        string? agentInstanceId,
+        out string? error)
+    {
+        lock (_gate)
+        {
+            PurgeExpiredLocked();
+            if (string.IsNullOrWhiteSpace(authorizationId) ||
+                !_authorizations.TryGetValue(authorizationId, out var authorization))
+            {
+                error = "A human-issued mutation authorization is required to start a workflow run.";
+                return false;
+            }
+
+            if (authorization.RunDispatched)
+            {
+                error = "The mutation authorization was already used to start a workflow run.";
+                return false;
+            }
+
+            if (!_sessions.TryGetValue(authorization.SessionId, out var session))
+            {
+                error = "The authoring session for this authorization is no longer active.";
+                return false;
+            }
+
+            if (!string.Equals(session.Target?.AgentId, agentId, StringComparison.Ordinal) ||
+                !string.Equals(session.Target?.AgentInstanceId, agentInstanceId, StringComparison.Ordinal))
+            {
+                error = "The authorization is bound to a different agent instance.";
+                return false;
+            }
+
+            authorization.RunDispatched = true;
+            error = null;
+            return true;
+        }
+    }
+
     internal MauiTestAgentToolResult CompleteMutation(MauiTestAgentMutationCompletion completion)
     {
         ArgumentNullException.ThrowIfNull(completion);
@@ -3045,6 +3091,7 @@ internal sealed class TestAgentSessionService
         public DateTimeOffset CreatedAt { get; }
         public int RemainingActions { get; }
         public bool Consumed { get; set; }
+        public bool RunDispatched { get; set; }
         public bool Completed { get; set; }
         public string? Outcome { get; set; }
         public string? RunId { get; set; }

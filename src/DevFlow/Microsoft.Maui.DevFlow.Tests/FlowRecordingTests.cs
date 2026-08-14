@@ -999,7 +999,7 @@ public class FlowRecordingTests : System.IDisposable
     {
         var brokerPort = GetFreePort();
         var agentPort = GetFreePort();
-        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1), requireWorkflowRunAuthorization: false);
         using var brokerCancellation = new CancellationTokenSource();
         var brokerTask = broker.RunAsync(brokerCancellation.Token);
         await WaitForBrokerAsync(brokerPort);

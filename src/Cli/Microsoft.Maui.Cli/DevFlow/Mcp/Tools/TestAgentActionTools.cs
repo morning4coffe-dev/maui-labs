@@ -57,6 +57,7 @@ public sealed class TestAgentActionTool
 
         TestAgentSessionTargetResolution? sessionTarget = null;
         string? runJson = null;
+        WorkflowRunStartRequest? runRequest = null;
         if (request.Execute)
         {
             sessionTarget = await TestAgentToolSupport.ResolveSessionTargetAsync(session, envelope).ConfigureAwait(false);
@@ -65,7 +66,7 @@ public sealed class TestAgentActionTool
 
             var flowDigest = MauiFlowRunReportSerializer.ComputeFlowDigest(actionFlow!);
             var actionPlan = CreateActionPlan(sessionTarget.Snapshot!.Plan, flowDigest);
-            var runRequest = new WorkflowRunStartRequest
+            runRequest = new WorkflowRunStartRequest
             {
                 AgentId = sessionTarget.Target!.AgentId,
                 AgentInstanceId = sessionTarget.Target.AgentInstanceId,
@@ -79,9 +80,6 @@ public sealed class TestAgentActionTool
                 TimeoutMs = 30_000,
                 DeadlineMs = envelope.DeadlineMs,
             };
-            runJson = TestAgentBrokerClient.SerializeWorkflowRunRequest(
-                runRequest,
-                DevFlowCliJsonContext.Default.WorkflowRunStartRequest);
         }
 
         TestAgentBrokerResponse<MauiTestAgentMutationAuthorizationResult>? executeAuthorization = null;
@@ -100,6 +98,12 @@ public sealed class TestAgentActionTool
             {
                 return TestAgentToolSupport.BrokerFailure(envelope.RequestId, executeAuthorization);
             }
+
+            // The broker verifies this authorization itself before dispatching the run.
+            runRequest!.AuthorizationId = executeAuthorization.Value.AuthorizationId;
+            runJson = TestAgentBrokerClient.SerializeWorkflowRunRequest(
+                runRequest,
+                DevFlowCliJsonContext.Default.WorkflowRunStartRequest);
         }
 
         MauiTestAgentRequestEnvelope? appendEnvelope = null;

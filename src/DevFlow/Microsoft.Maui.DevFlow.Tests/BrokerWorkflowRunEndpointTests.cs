@@ -15,7 +15,7 @@ public class BrokerWorkflowRunEndpointTests
     public async Task WorkflowRunEndpoints_RequireExactInstanceAndCapabilityToken()
     {
         var port = FreePort();
-        using var broker = new BrokerServer(port, TimeSpan.FromMinutes(1));
+        using var broker = new BrokerServer(port, TimeSpan.FromMinutes(1), requireWorkflowRunAuthorization: false);
         using var brokerCancellation = new CancellationTokenSource();
         var brokerTask = broker.RunAsync(brokerCancellation.Token);
         await WaitForBrokerAsync(port);
@@ -168,6 +168,52 @@ public class BrokerWorkflowRunEndpointTests
         brokerCancellation.Cancel();
         broker.Dispose();
         await brokerTask.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    [Fact]
+    public async Task WorkflowRunStart_WithoutHumanAuthorization_IsRejected()
+    {
+        var port = FreePort();
+        using var broker = new BrokerServer(port, TimeSpan.FromMinutes(1));
+        using var brokerCancellation = new CancellationTokenSource();
+        var brokerTask = broker.RunAsync(brokerCancellation.Token);
+        await WaitForBrokerAsync(port);
+
+        var agentPort = FreePort();
+        using var agentServer = new AgentHttpServer(agentPort);
+        agentServer.Start();
+
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri($"ws://127.0.0.1:{port}/ws/agent"), CancellationToken.None);
+        await SendAsync(socket, $$"""
+            {"type":"register","project":"auth-test","tfm":"net10.0","platform":"test","appName":"Auth Test","currentPort":{{agentPort}}}
+            """);
+        await ReceiveAsync(socket);
+
+        using var http = new HttpClient();
+        using var agents = await ReadJsonAsync(await http.GetAsync($"http://127.0.0.1:{port}/api/agents"));
+        var agent = agents.RootElement[0];
+        var agentId = agent.GetProperty("id").GetString();
+        var instanceId = agent.GetProperty("instanceId").GetString();
+
+        var unauthorized = await http.PostAsync(
+            $"http://127.0.0.1:{port}/api/workflow-runs/start",
+            Json(new
+            {
+                agentId,
+                agentInstanceId = instanceId,
+                idempotencyKey = "unauthorized-key",
+                markdown = FlowMarkdown.Serialize(AssertOnlyFlow())
+            }));
+
+        Assert.Equal(HttpStatusCode.Forbidden, unauthorized.StatusCode);
+        Assert.Contains(
+            "authorization is required",
+            await unauthorized.Content.ReadAsStringAsync(),
+            StringComparison.OrdinalIgnoreCase);
+
+        brokerCancellation.Cancel();
+        await Task.WhenAny(brokerTask, Task.Delay(TimeSpan.FromSeconds(5)));
     }
 
     private static MauiFlow AssertOnlyFlow() => new()

@@ -2013,6 +2013,11 @@ internal sealed class WorkflowRunStartRequest
 {
     [JsonPropertyName("agentId")] public string? AgentId { get; set; }
     [JsonPropertyName("agentInstanceId")] public string? AgentInstanceId { get; set; }
+    /// <summary>
+    /// Identifier of the human-approved mutation authorization that permits this dispatch. The
+    /// broker verifies it before starting the run.
+    /// </summary>
+    [JsonPropertyName("authorizationId")] public string? AuthorizationId { get; set; }
     [JsonPropertyName("idempotencyKey")] public string? IdempotencyKey { get; set; }
     [JsonPropertyName("markdown")] public string? Markdown { get; set; }
     [JsonPropertyName("flow")] public Testing.MauiFlow? Flow { get; set; }

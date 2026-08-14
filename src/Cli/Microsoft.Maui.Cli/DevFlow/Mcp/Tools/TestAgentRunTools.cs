@@ -189,6 +189,12 @@ public sealed class TestAgentRunTool
         if (authorization.Value?.Ok != true || authorization.Value.AuthorizationId is null)
             return TestAgentToolSupport.BrokerFailure(envelope.RequestId, authorization);
 
+        // The broker verifies this authorization itself before dispatching the run.
+        startRequest.AuthorizationId = authorization.Value.AuthorizationId;
+        startJson = TestAgentBrokerClient.SerializeWorkflowRunRequest(
+            startRequest,
+            DevFlowCliJsonContext.Default.WorkflowRunStartRequest);
+
         var brokerPort = await session.GetBrokerPortAsync().ConfigureAwait(false);
         var started = await TestAgentBrokerClient.PostWorkflowRunJsonAsync(
             brokerPort,

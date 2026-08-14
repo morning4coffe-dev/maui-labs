@@ -38,6 +38,11 @@ public partial class BrokerServer : IDisposable
     private readonly RouteCheckpointCoordinator _checkpoints;
     private readonly WorkflowRunCoordinator _workflowRuns;
     private readonly TestAgentSessionService _testAgentSessions;
+
+    // A workflow run mutates the live app, so the broker verifies the human-issued grant itself
+    // instead of trusting the calling client to have done it. Only relaxed by tests that exercise
+    // unrelated endpoint mechanics.
+    private readonly bool _requireWorkflowRunAuthorization;
     private readonly ArtifactTrustImportService _artifactTrustImports;
     private readonly ArtifactTrustStore _artifactTrustStore;
     private readonly WorkflowRepairProposalStore _workflowRepairs;
@@ -76,6 +81,28 @@ public partial class BrokerServer : IDisposable
     {
     }
 
+    /// <summary>
+    /// Test-only overload for suites that exercise workflow-run endpoint mechanics unrelated to the
+    /// human-approval boundary. Production callers use the public constructor, which requires it.
+    /// </summary>
+    internal BrokerServer(
+        int port,
+        TimeSpan? idleTimeout,
+        bool requireWorkflowRunAuthorization)
+        : this(
+            port,
+            idleTimeout,
+            log: null,
+            checkpointStore: null,
+            recordingStorageRoot: null,
+            clock: null,
+            previewFlags: null,
+            trustedHostApprovalVerifier: null,
+            nativeApprovalToken: CreateNativeApprovalToken(),
+            requireWorkflowRunAuthorization: requireWorkflowRunAuthorization)
+    {
+    }
+
     internal BrokerServer(
         int port,
         TimeSpan? idleTimeout,
@@ -103,11 +130,13 @@ public partial class BrokerServer : IDisposable
         TimeProvider? clock,
         MauiPreviewFeatureFlags? previewFlags = null,
         Func<string?, bool>? trustedHostApprovalVerifier = null,
-        string? nativeApprovalToken = null)
+        string? nativeApprovalToken = null,
+        bool requireWorkflowRunAuthorization = true)
     {
         _port = port;
         _idleTimeout = idleTimeout ?? TimeSpan.FromMinutes(5);
         _log = log;
+        _requireWorkflowRunAuthorization = requireWorkflowRunAuthorization;
         _previewFlags = previewFlags ?? MauiPreviewFeatureFlagConfiguration.FromEnvironment();
         _nativeApprovalToken = nativeApprovalToken;
         _trustedHostApprovalVerifier = nativeApprovalToken is null
@@ -1872,13 +1901,26 @@ public partial class BrokerServer : IDisposable
                     return;
                 }
 
+                if (_requireWorkflowRunAuthorization &&
+                    !_testAgentSessions.TryConsumeRunDispatchAuthorization(
+                        request.AuthorizationId,
+                        request.AgentId,
+                        request.AgentInstanceId,
+                        out var runAuthorizationError))
+                {
+                    await WriteTypedJsonResponseAsync(
+                        context,
+                        403,
+                        WorkflowRunStartResult.Rejected(403, runAuthorizationError!, null, null));
+                    return;
+                }
+
                 if (RequiresWorkflowRunCapabilities(request.Plan) &&
                     request.AvailableCapabilities is null)
                 {
                     request.AvailableCapabilities = await ReadWorkflowRunCapabilitiesAsync(connection.Registration)
                         .ConfigureAwait(false);
                 }
-
                 var target = CreateWorkflowRunTarget(connection.Registration);
                 var result = _workflowRuns.Start(
                     request,

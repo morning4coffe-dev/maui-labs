@@ -27,6 +27,13 @@ internal interface IWorkflowRepairResetAttester
 /// The three checkpoint facts no running app can prove about itself, as attested by the component
 /// that applied them.
 /// </summary>
+/// <remarks>
+/// These values are compared against a checkpoint the same owner produced, so a match establishes
+/// that the owner re-applied the state it applied before — self-consistency, not independent
+/// corroboration. That is the strongest claim available here, and it is what the checkpoint fields
+/// are for: detecting that state drifted between recording and replay. It is deliberately not
+/// evidence that the state is correct, only that it is unchanged.
+/// </remarks>
 internal sealed record WorkflowRepairAttestedState
 {
     public required string SeedFingerprint { get; init; }

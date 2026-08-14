@@ -76,6 +76,23 @@ internal sealed record FlowLifecycleResetOutcome
 /// re-seed it, and it can relaunch it. Ownership is the whole point — a component that merely talks
 /// to a running app cannot answer <see cref="GetAppliedStateAsync"/> without echoing the app.
 /// </summary>
+/// <remarks>
+/// <para>
+/// A conforming owner must reset app state <em>without restarting the app process</em>. The broker
+/// binds a repair validation to one agent instance: a re-registering agent is assigned a fresh
+/// instance id and the previous registration is marked unavailable, and every post-reset step
+/// (checkpoint observation, route restore, transient replay, and the checkpoint's own
+/// agent-instance comparison) is fenced on the instance that was live when validation started.
+/// An owner that force-stops and relaunches the app therefore invalidates the validation it was
+/// asked to enable — after having destroyed user state. This is why no owner ships today: the
+/// obvious Android implementation (<c>am force-stop</c> + <c>pm clear</c> + <c>am start</c>)
+/// necessarily restarts the process, so it can never satisfy this contract.
+/// </para>
+/// <para>
+/// A viable owner needs either an in-app reset surface that survives the process, or broker support
+/// for re-binding a validation across a deliberate, owner-announced restart. Neither exists yet.
+/// </para>
+/// </remarks>
 internal interface IFlowLifecycleResetOwner
 {
     /// <summary>Stable identity of the owner, recorded in the reset identity.</summary>

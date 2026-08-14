@@ -491,9 +491,9 @@ public sealed class BrokerWorkflowRepairValidationHostTests
             CancellationToken cancellationToken)
             => Task.FromResult<WorkflowRepairAttestedState?>(new WorkflowRepairAttestedState
             {
-                SeedFingerprint = SeedFingerprint,
-                BackendStateFingerprint = _attested.BackendStateFingerprint,
-                CollectionItemKey = _attested.CollectionItemKey,
+                SeedFingerprint = SeedFingerprint ?? string.Empty,
+                BackendStateFingerprint = _attested.BackendStateFingerprint ?? string.Empty,
+                CollectionItemKey = _attested.CollectionItemKey ?? string.Empty,
             });
 
         public Task<WorkflowRepairResetAttestation?> AttestAsync(

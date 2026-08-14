@@ -5424,12 +5424,22 @@ public sealed partial class InspectorServer : IDisposable
             var status = await _client.GetStatusAsync().ConfigureAwait(false);
             // Seed, backend-state, and collection-item facts are invisible to the app itself, so they
             // come from the registered lifecycle owner or stay absent. They are never read back from
-            // the caller's request.
-            var attested = _repairValidationHost is null
-                ? null
-                : await _repairValidationHost
-                    .ObserveAttestedStateAsync(_lifetimeCts.Token)
-                    .ConfigureAwait(false);
+            // the caller's request. A slow owner degrades to "absent", it does not hang classify.
+            WorkflowRepairAttestedState? attested = null;
+            if (_repairValidationHost is not null)
+            {
+                using var attestationCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
+                attestationCts.CancelAfter(TimeSpan.FromSeconds(5));
+                try
+                {
+                    attested = await _repairValidationHost
+                        .ObserveAttestedStateAsync(attestationCts.Token)
+                        .ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (!_lifetimeCts.IsCancellationRequested)
+                {
+                }
+            }
             var current = new Testing.MauiFlowCheckpoint
             {
                 AppBuildFingerprint = SafeWorkbenchText(status?.App?.Build),

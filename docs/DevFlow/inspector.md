@@ -332,7 +332,13 @@ local run or `locally-reproduced` import can create an approvable proposal.
 Validation needs a human-issued, bounded grant and a lifecycle-capable host. It hard-resets app and
 backend/test data, verifies fingerprints, then replays to the failed step using an in-memory
 override only. If no lifecycle host is connected, the tab reports that honest fallback and does not
-consume or persist a candidate. Apply is absent for agent-originated proposals until a human
+consume or persist a candidate. **No lifecycle host ships in the CLI today**, so validation always
+takes that fallback in a shipped build: the broker exposes a registration seam
+(`IFlowLifecycleResetOwner`) and an attester that maps an owner's applied facts onto the checkpoint
+fields the app cannot report about itself, but nothing registers an owner. A conforming owner must
+also reset state *without restarting the app*, because a re-registering agent is assigned a fresh
+instance id and every post-reset step is fenced on the instance that was live when validation
+started. Apply is absent for agent-originated proposals until a human
 validation and approval grant complete. An applied repair requires three clean verification
 replays; a failed verification becomes `rollback-required`, and rollback creates a new flow
 revision. The tab never offers app-source changes or automatic repair.

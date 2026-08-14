@@ -388,6 +388,13 @@ public sealed class MauiFlowRunReportTests : IDisposable
         Assert.True(MauiRepairFingerprintComparer.SemanticallyMatches(
             redacted.Steps[0].Fingerprint,
             Redact("Microsoft.Maui.Controls.Button").Steps[0].Fingerprint));
+
+        // Only a value that is recognisably a type name earns a digest. Anything else is still
+        // dropped, so the digest never becomes an equality oracle for an arbitrary app-supplied
+        // string the redactor refused to publish.
+        Assert.Null(Redact("someone.private@contoso.example").Steps[0].Fingerprint!.Managed!.FullType);
+        Assert.Null(Redact("C:\\Users\\alice\\Secrets\\AppState").Steps[0].Fingerprint!.Managed!.FullType);
+        Assert.Null(Redact(new string('A', 80) + "b").Steps[0].Fingerprint!.Managed!.FullType);
     }
 
     [Fact]

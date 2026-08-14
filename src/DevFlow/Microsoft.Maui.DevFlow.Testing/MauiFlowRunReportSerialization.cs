@@ -534,20 +534,61 @@ public static class MauiFlowRunReportSerializer
     /// A managed type name is structural identity, not free text. The generic identifier rules
     /// classify any long mixed-case token as an opaque secret, which silently drops real type
     /// names such as <c>Microsoft.Maui.Controls.Button</c>; a dropped name then makes every later
-    /// fingerprint comparison read as "both sides missing", which is not a match. Such a name is
-    /// therefore retained as a stable digest: equal types stay equal, and no raw value is kept.
+    /// fingerprint comparison read as "both sides missing", which is not a match. A value that is
+    /// recognisably a managed type name is therefore retained as a stable digest, in the same shape
+    /// <see cref="MauiFlowReportRedactor.SafeReference"/> uses. A value that is not recognisably a
+    /// type name is still dropped, so the digest can never become a cross-report equality oracle
+    /// for an arbitrary app-supplied string the redactor deliberately refused to publish.
     /// </summary>
     private static string? SafeManagedTypeName(string? value)
     {
-        if (string.IsNullOrWhiteSpace(value))
-            return null;
-        return MauiFlowReportRedactor.SafeIdentifier(value) ??
-            "type_" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value.Trim())))
-                .ToLowerInvariant()[..16];
+        var safe = MauiFlowReportRedactor.SafeIdentifier(value);
+        if (safe is not null || string.IsNullOrWhiteSpace(value))
+            return safe;
+
+        var trimmed = value.Trim();
+        return LooksLikeManagedTypeName(trimmed)
+            ? "sha256:" + Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes("managed-type|" + trimmed))).ToLowerInvariant()
+            : null;
+    }
+
+    /// <summary>
+    /// Recognises a CLR type name: dot- or plus-separated identifier segments with an optional
+    /// generic arity suffix. Segment length is bounded well below what an encoded credential needs,
+    /// so a long opaque token cannot pass as a type name.
+    /// </summary>
+    private static bool LooksLikeManagedTypeName(string value)
+    {
+        if (value.Length is 0 or > 256)
+            return false;
+
+        foreach (var segment in value.Split('.', '+'))
+        {
+            var name = segment;
+            var arity = name.IndexOf('`', StringComparison.Ordinal);
+            if (arity >= 0)
+            {
+                var digits = name[(arity + 1)..];
+                if (digits.Length == 0 || !digits.All(char.IsAsciiDigit))
+                    return false;
+                name = name[..arity];
+            }
+
+            if (name.Length is 0 or > 64 ||
+                !(char.IsAsciiLetter(name[0]) || name[0] == '_') ||
+                !name.All(static character => char.IsAsciiLetterOrDigit(character) || character == '_'))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static void SanitizeSelectorEvidence(MauiFlowStepAttempt step)
-    {        if (step.Fingerprint is { } fingerprint)
+    {
+        if (step.Fingerprint is { } fingerprint)
         {
             fingerprint.ExtensionData = null;
             fingerprint.FingerprintId = MauiFlowReportRedactor.SafeIdentifier(fingerprint.FingerprintId);

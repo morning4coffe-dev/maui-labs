@@ -51,12 +51,17 @@ public sealed class BrokerRepairValidationIntegrationTests
                 },
             ]));
 
+        var storageRoot = Path.Combine(
+            Path.GetTempPath(),
+            $"devflow-repair-integration-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(storageRoot);
+
         using var broker = new BrokerServer(
             brokerPort,
             TimeSpan.FromMinutes(1),
             log: null,
             checkpointStore: null,
-            recordingStorageRoot: null,
+            recordingStorageRoot: storageRoot,
             clock: null,
             previewFlags: PreviewTestFeatures.AllEnabled(),
             trustedHostApprovalVerifier: null,
@@ -126,12 +131,13 @@ public sealed class BrokerRepairValidationIntegrationTests
 
             var record = await new WorkflowRepairValidationService(host!)
                 .ValidateAsync(request, CancellationToken.None);
+            var observed = agent.Snapshot();
 
             Assert.True(
                 record.Passed,
                 $"code={record.FailureCode} facts={string.Join(",", record.FailureFacts)} " +
-                $"taps={string.Join(",", agent.Taps)} rejections={string.Join(",", agent.LeaseRejections)} " +
-                $"navigations={string.Join(",", agent.Navigations)}");
+                $"taps={string.Join(",", observed.Taps)} rejections={string.Join(",", observed.LeaseRejections)} " +
+                $"navigations={string.Join(",", observed.Navigations)}");
 
             // The lifecycle owner performed the reset; the broker did not invent one.
             Assert.Equal(1, owner.ResetCount);
@@ -139,12 +145,12 @@ public sealed class BrokerRepairValidationIntegrationTests
             // The route restore must claim the agent lease explicitly. A caller that only sets the
             // lease identity header without claiming is rejected by the agent, so a successful
             // navigation proves the claim happened.
-            Assert.Contains(Route, agent.Navigations);
+            Assert.Contains(Route, observed.Navigations);
             var restoreClaim = Assert.Single(
-                agent.LeaseActions.Where(action =>
-                    action.Action == "claim" && action.HolderKind == "repair-validation"));
+                observed.LeaseActions,
+                action => action.Action == "claim" && action.HolderKind == "repair-validation");
             Assert.Contains(
-                agent.LeaseActions,
+                observed.LeaseActions,
                 action => action.Action == "release" && action.LeaseId == restoreClaim.LeaseId);
 
             // ...and it must release. A stale repair lease would block every later claim for the
@@ -155,25 +161,53 @@ public sealed class BrokerRepairValidationIntegrationTests
 
             // The replay really executed the patched selector against the live app, through the
             // agent's own workflow-command fence rather than around it.
-            Assert.Equal(RepairedSelector, Assert.Single(agent.Taps));
-            Assert.Contains("begin", agent.WorkflowRunControls);
-            Assert.Contains("end", agent.WorkflowRunControls);
-            Assert.Empty(agent.LeaseRejections);
+            Assert.Equal(RepairedSelector, Assert.Single(observed.Taps));
+            Assert.Contains("begin", observed.WorkflowRunControls);
+            Assert.Contains("end", observed.WorkflowRunControls);
+            Assert.Empty(observed.LeaseRejections);
             Assert.Single(record.RunIds);
 
-            // The proposed selector is evidence, never a stored flow: the trusted source flow is
-            // byte-identical afterwards and still carries the drifted selector.
+            // The proposed selector is evidence, never a stored flow. The trusted source flow and the
+            // reviewed plan are byte-identical afterwards and still carry the drifted selector.
             Assert.Equal(sourceDigest, MauiFlowRunReportSerializer.ComputeFlowDigest(sourceFlow));
             Assert.Equal(
                 DriftedSelector,
                 sourceFlow.Steps[0].Args?.Selector?.AutomationId);
             Assert.Equal(sourceDigest, plan.Flow!.Digest);
+
+            // On disk the repaired selector appears only inside a run report, which is what makes it
+            // reviewable. Anything else the broker persisted — recordings, spooled flows, checkpoints
+            // — must still describe the drifted flow the human actually trusted.
+            var evidenceRoot = Path.Combine(storageRoot, "workflow-runs");
+            var persisted = Directory.Exists(storageRoot)
+                ? Directory.GetFiles(storageRoot, "*", SearchOption.AllDirectories)
+                : [];
+            foreach (var written in persisted.Where(path => !path.StartsWith(evidenceRoot, StringComparison.Ordinal)))
+            {
+                Assert.False(
+                    File.ReadAllText(written).Contains(RepairedSelector, StringComparison.Ordinal),
+                    $"The repaired selector was persisted outside run evidence, in {Path.GetRelativePath(storageRoot, written)}.");
+            }
+
+            Assert.Contains(
+                persisted.Where(path => path.StartsWith(evidenceRoot, StringComparison.Ordinal)),
+                path => File.ReadAllText(path).Contains(RepairedSelector, StringComparison.Ordinal));
+
         }
         finally
         {
             cancellation.Cancel();
+            await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None)
+                .ContinueWith(static _ => { }, TaskScheduler.Default);
             broker.Dispose();
             await brokerTask.WaitAsync(TimeSpan.FromSeconds(10));
+            try
+            {
+                Directory.Delete(storageRoot, recursive: true);
+            }
+            catch (IOException)
+            {
+            }
         }
     }
 
@@ -215,7 +249,7 @@ public sealed class BrokerRepairValidationIntegrationTests
             // No lifecycle owner registered, so the broker builds no host and the workbench keeps
             // reporting the capability as unavailable instead of promising an unattestable reset.
             Assert.Null(GetRepairValidationHost(inspector));
-            Assert.Empty(agent.Navigations);
+            Assert.Empty(agent.Snapshot().Navigations);
         }
         finally
         {
@@ -311,7 +345,9 @@ public sealed class BrokerRepairValidationIntegrationTests
         Reset = new MauiTestResetRequirement
         {
             Required = true,
-            Strategy = "android-clear-app-data",
+            // The plan's declared strategy must be the one the lifecycle owner actually applies; the
+            // attester refuses a reset performed by a different strategy than the reviewer approved.
+            Strategy = "test-reset",
         },
         Provenance = new MauiActorProvenance
         {
@@ -446,7 +482,7 @@ public sealed class BrokerRepairValidationIntegrationTests
     {
         var field = typeof(BrokerServer).GetField("_inspectors", BindingFlags.Instance | BindingFlags.NonPublic)!;
         var inspectors = (IReadOnlyDictionary<string, InspectorServer>)field.GetValue(broker)!;
-        for (var attempt = 0; attempt < 80; attempt++)
+        for (var attempt = 0; attempt < 400; attempt++)
         {
             if (inspectors.TryGetValue(agentId, out var inspector))
                 return inspector;
@@ -459,7 +495,7 @@ public sealed class BrokerRepairValidationIntegrationTests
     private static async Task WaitForBrokerAsync(int port)
     {
         using var http = new HttpClient();
-        for (var attempt = 0; attempt < 80; attempt++)
+        for (var attempt = 0; attempt < 400; attempt++)
         {
             try
             {
@@ -630,11 +666,29 @@ public sealed class BrokerRepairValidationIntegrationTests
         public int BrokerPort { get; set; }
         public string AgentId { get; set; } = string.Empty;
         public string AgentInstanceId { get; set; } = string.Empty;
-        public List<string> Taps { get; } = [];
-        public List<string> Navigations { get; } = [];
-        public List<string> LeaseRejections { get; } = [];
-        public List<string> WorkflowRunControls { get; } = [];
-        public List<LeaseAction> LeaseActions { get; } = [];
+
+        private List<string> Taps { get; } = [];
+        private List<string> Navigations { get; } = [];
+        private List<string> LeaseRejections { get; } = [];
+        private List<string> WorkflowRunControls { get; } = [];
+        private List<LeaseAction> LeaseActions { get; } = [];
+
+        /// <summary>
+        /// A point-in-time copy of everything the agent recorded. Assertions run on the snapshot so
+        /// a late request from a background task cannot mutate a collection mid-enumeration.
+        /// </summary>
+        public AgentObservations Snapshot()
+        {
+            lock (_gate)
+            {
+                return new AgentObservations(
+                    [.. Taps],
+                    [.. Navigations],
+                    [.. LeaseRejections],
+                    [.. WorkflowRunControls],
+                    [.. LeaseActions]);
+            }
+        }
 
         public void Start() => _server.Start();
 
@@ -663,7 +717,7 @@ public sealed class BrokerRepairValidationIntegrationTests
             })));
             _server.MapPost("/api/v1/agent/lease", HandleLease, requiresMutationLease: false);
             _server.MapPost("/api/v1/agent/workflow-runs", HandleWorkflowRunControl, requiresMutationLease: false);
-            _server.MapGet("/api/v1/ui/tree", _ => Task.FromResult(HttpResponse.Json(Snapshot())));
+            _server.MapGet("/api/v1/ui/tree", _ => Task.FromResult(HttpResponse.Json(SnapshotElements())));
             _server.MapGet("/api/v1/ui/elements", HandleQuery);
             _server.MapGet("/api/v1/ui/elements/{id}", HandleElement);
             _server.MapPost("/api/v1/ui/actions/tap", HandleTap);
@@ -760,7 +814,7 @@ public sealed class BrokerRepairValidationIntegrationTests
 
         private Task<HttpResponse> HandleQuery(HttpRequest request)
         {
-            IEnumerable<ElementInfo> matches = Snapshot();
+            IEnumerable<ElementInfo> matches = SnapshotElements();
             if (request.QueryParams.TryGetValue("automationId", out var automationId))
                 matches = matches.Where(element => element.AutomationId == automationId);
             else if (request.QueryParams.TryGetValue("text", out var text))
@@ -773,7 +827,7 @@ public sealed class BrokerRepairValidationIntegrationTests
         private Task<HttpResponse> HandleElement(HttpRequest request)
         {
             var id = request.RouteParams.TryGetValue("id", out var value) ? value : string.Empty;
-            var element = Snapshot().FirstOrDefault(candidate => candidate.Id == id);
+            var element = SnapshotElements().FirstOrDefault(candidate => candidate.Id == id);
             return Task.FromResult(element is null
                 ? HttpResponse.NotFound("No such element")
                 : HttpResponse.Json(element));
@@ -782,7 +836,7 @@ public sealed class BrokerRepairValidationIntegrationTests
         private Task<HttpResponse> HandleTap(HttpRequest request)
         {
             var id = ReadString(request.Body, "elementId");
-            var element = Snapshot().FirstOrDefault(candidate => candidate.Id == id);
+            var element = SnapshotElements().FirstOrDefault(candidate => candidate.Id == id);
             lock (_gate)
                 Taps.Add(element?.AutomationId ?? id ?? string.Empty);
             return Task.FromResult(HttpResponse.Json(new { success = true }));
@@ -829,7 +883,7 @@ public sealed class BrokerRepairValidationIntegrationTests
             };
         }
 
-        private List<ElementInfo> Snapshot()
+        private List<ElementInfo> SnapshotElements()
         {
             lock (_gate)
                 return [.. _elements];
@@ -849,5 +903,12 @@ public sealed class BrokerRepairValidationIntegrationTests
         public void Dispose() => _server.Dispose();
 
         internal sealed record LeaseAction(string Action, string? LeaseId, string? HolderKind);
+
+        internal sealed record AgentObservations(
+            IReadOnlyList<string> Taps,
+            IReadOnlyList<string> Navigations,
+            IReadOnlyList<string> LeaseRejections,
+            IReadOnlyList<string> WorkflowRunControls,
+            IReadOnlyList<LeaseAction> LeaseActions);
     }
 }

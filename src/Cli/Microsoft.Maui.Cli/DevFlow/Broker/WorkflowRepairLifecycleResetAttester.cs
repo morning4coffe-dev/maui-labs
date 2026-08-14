@@ -45,8 +45,14 @@ internal sealed class WorkflowRepairLifecycleResetAttester : IWorkflowRepairRese
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(request);
-        var checkpoint = request.SourcePlan?.Checkpoint;
-        var requiresBackendSeed = RequiresBackendSeed(checkpoint);
+        // Without a reviewed plan there is nothing to attest against: the attester would be free to
+        // decide for itself which facts matter, which is the opposite of the point.
+        if (request.SourcePlan is null)
+            return Failed("repair-reviewed-plan-unavailable", []);
+
+        var checkpoint = request.SourcePlan.Checkpoint;
+        var reset = request.SourcePlan.Reset;
+        var requiresBackendSeed = RequiresBackendSeed(checkpoint, reset);
         var pinnedCollectionItem = PinnedCollectionItem(checkpoint, request.ClassifiedCheckpoint);
 
         var outcome = await _owner.ResetAsync(
@@ -64,22 +70,31 @@ internal sealed class WorkflowRepairLifecycleResetAttester : IWorkflowRepairRese
         var applied = outcome.Applied;
         if (!applied.AppStateSucceeded)
             return Failed("repair-app-state-reset-unattested", outcome.EvidenceIds);
+        // A reset the plan did not ask for is not the reset the plan was reviewed against.
+        var declaredStrategy = reset?.Strategy?.Trim();
+        if (!string.IsNullOrWhiteSpace(declaredStrategy) &&
+            !string.Equals(declaredStrategy, applied.Strategy?.Trim(), StringComparison.Ordinal))
+        {
+            return Failed("repair-reset-strategy-unattested", outcome.EvidenceIds);
+        }
         // "No backend seed was applied" is only an acceptable answer where the reviewed plan says no
         // backend seed is required. Where the plan requires one, the absence is a refusal, not a fact.
-        if (requiresBackendSeed &&
-            (!applied.BackendTestDataSucceeded ||
-             string.Equals(
-                 applied.BackendStateFingerprint,
-                 FlowLifecycleResetFingerprints.NoBackendApplied,
-                 StringComparison.Ordinal)))
-        {
+        var appliedNoBackend = string.Equals(
+            applied.BackendStateFingerprint,
+            FlowLifecycleResetFingerprints.NoBackendApplied,
+            StringComparison.Ordinal);
+        if (requiresBackendSeed && (!applied.BackendTestDataSucceeded || appliedNoBackend))
             return Failed("repair-backend-seed-unattested", outcome.EvidenceIds);
-        }
         if (pinnedCollectionItem is not null &&
             !string.Equals(pinnedCollectionItem, applied.CollectionItemKey, StringComparison.Ordinal))
         {
             return Failed("repair-collection-item-unattested", outcome.EvidenceIds);
         }
+
+        // The backend step counts as satisfied only when the owner says it seeded a backend, or when
+        // the owner explicitly states it applied none and the plan requires none. Plan silence alone
+        // is not a substitute for the owner's statement.
+        var backendSucceeded = applied.BackendTestDataSucceeded || (appliedNoBackend && !requiresBackendSeed);
 
         var oracles = _oracles is null
             ? []
@@ -93,7 +108,7 @@ internal sealed class WorkflowRepairLifecycleResetAttester : IWorkflowRepairRese
                 Requested = true,
                 Succeeded = true,
                 AppStateSucceeded = applied.AppStateSucceeded,
-                BackendTestDataSucceeded = applied.BackendTestDataSucceeded || !requiresBackendSeed,
+                BackendTestDataSucceeded = backendSucceeded,
                 Strategy = applied.Strategy,
                 ResetIdentity = applied.ResetIdentity,
                 SeedFingerprint = applied.SeedFingerprint,
@@ -114,7 +129,7 @@ internal sealed class WorkflowRepairLifecycleResetAttester : IWorkflowRepairRese
                     Requested = true,
                     Succeeded = true,
                     AppStateSucceeded = applied.AppStateSucceeded,
-                    BackendTestDataSucceeded = applied.BackendTestDataSucceeded || !requiresBackendSeed,
+                    BackendTestDataSucceeded = backendSucceeded,
                     CompletedAt = DateTimeOffset.UtcNow,
                 },
             },
@@ -134,10 +149,13 @@ internal sealed class WorkflowRepairLifecycleResetAttester : IWorkflowRepairRese
             CollectionItemKey = applied.CollectionItemKey,
         };
 
-    private static bool RequiresBackendSeed(MauiFlowCheckpointRequirements? checkpoint)
+    private static bool RequiresBackendSeed(MauiFlowCheckpointRequirements? checkpoint, MauiTestResetRequirement? reset)
         => !string.IsNullOrWhiteSpace(checkpoint?.BackendStateFingerprint) ||
            !string.IsNullOrWhiteSpace(checkpoint?.BackendTestDataSeed?.Fingerprint) ||
-           !string.IsNullOrWhiteSpace(checkpoint?.BackendTestDataSeed?.SeedId);
+           !string.IsNullOrWhiteSpace(checkpoint?.BackendTestDataSeed?.SeedId) ||
+           !string.IsNullOrWhiteSpace(reset?.BackendStateFingerprint) ||
+           !string.IsNullOrWhiteSpace(reset?.BackendTestDataSeed?.Fingerprint) ||
+           !string.IsNullOrWhiteSpace(reset?.BackendTestDataSeed?.SeedId);
 
     /// <summary>
     /// The collection identity the reviewed plan or the classified checkpoint pins, ignoring the

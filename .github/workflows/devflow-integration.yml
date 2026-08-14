@@ -252,7 +252,7 @@ jobs:
 
       - name: Warm up AVD snapshot
         if: steps.avd-cache.outputs.cache-hit != 'true'
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           avd-name: ${{ env.DEVFLOW_TEST_ANDROID_AVD }}
           api-level: ${{ env.DEVFLOW_TEST_ANDROID_API }}
@@ -264,7 +264,7 @@ jobs:
           script: echo "Generated AVD snapshot."
 
       - name: Run DevFlow integration tests (android)
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           avd-name: ${{ env.DEVFLOW_TEST_ANDROID_AVD }}
           api-level: ${{ env.DEVFLOW_TEST_ANDROID_API }}
@@ -339,7 +339,7 @@ jobs:
 
       - name: Warm up AVD snapshot
         if: steps.flow-pilot-avd-cache.outputs.cache-hit != 'true'
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           avd-name: ${{ env.DEVFLOW_TEST_ANDROID_AVD }}
           api-level: ${{ env.DEVFLOW_TEST_ANDROID_API }}
@@ -351,7 +351,7 @@ jobs:
           script: echo "Generated AVD snapshot."
 
       - name: Run Android Tier-1 flow pilot
-        uses: reactivecircus/android-emulator-runner@v2
+        uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           avd-name: ${{ env.DEVFLOW_TEST_ANDROID_AVD }}
           api-level: ${{ env.DEVFLOW_TEST_ANDROID_API }}
@@ -381,6 +381,53 @@ jobs:
           --artifact-manifest "${DEVFLOW_FLOW_PILOT_ARTIFACT_ROOT}/manifest.json"
           --output "${DEVFLOW_FLOW_PILOT_ARTIFACT_ROOT}/qualification.json"
           --json
+
+      # This pilot is an emulator lane, so the handoff producer intentionally no-ops today.
+      # Future physical-device lanes may emit diagnostic handoffs, but the privileged publisher
+      # accepts only same-repository default-branch schedule/workflow_dispatch runs, never PR runs.
+      - name: Produce bounded DevFlow failure handoff
+        if: always()
+        shell: pwsh
+        env:
+          DEVFLOW_FAILURE_HANDOFF_REPOSITORY: ${{ github.repository }}
+          DEVFLOW_FAILURE_HANDOFF_WORKFLOW_NAME: ${{ github.workflow }}
+          DEVFLOW_FAILURE_HANDOFF_WORKFLOW_PATH: .github/workflows/devflow-integration.yml
+          DEVFLOW_FAILURE_HANDOFF_SOURCE_EVENT: ${{ github.event_name }}
+          DEVFLOW_FAILURE_HANDOFF_HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          DEVFLOW_FAILURE_HANDOFF_HEAD_REF: ${{ github.event.pull_request.head.ref || github.ref_name }}
+          DEVFLOW_FAILURE_HANDOFF_RUN_ID: ${{ github.run_id }}
+          DEVFLOW_FAILURE_HANDOFF_RUN_ATTEMPT: ${{ github.run_attempt }}
+          DEVFLOW_FAILURE_HANDOFF_COMMIT_SHA: ${{ github.sha }}
+          DEVFLOW_FAILURE_HANDOFF_PR_NUMBER: ${{ github.event.pull_request.number || 0 }}
+        run: |
+          & ./eng/devflow/New-DevFlowFailureHandoff.ps1 `
+            -SourceManifestPath "${env:DEVFLOW_FLOW_PILOT_ARTIFACT_ROOT}/manifest.json" `
+            -QualificationPath "${env:DEVFLOW_FLOW_PILOT_ARTIFACT_ROOT}/qualification.json" `
+            -OutputDirectory ./artifacts/devflow/failure-handoff `
+            -Repository $env:DEVFLOW_FAILURE_HANDOFF_REPOSITORY `
+            -WorkflowName $env:DEVFLOW_FAILURE_HANDOFF_WORKFLOW_NAME `
+            -WorkflowPath $env:DEVFLOW_FAILURE_HANDOFF_WORKFLOW_PATH `
+            -SourceEvent $env:DEVFLOW_FAILURE_HANDOFF_SOURCE_EVENT `
+            -HeadRepository $env:DEVFLOW_FAILURE_HANDOFF_HEAD_REPOSITORY `
+            -HeadRef $env:DEVFLOW_FAILURE_HANDOFF_HEAD_REF `
+            -RunId ([Int64] $env:DEVFLOW_FAILURE_HANDOFF_RUN_ID) `
+            -RunAttempt ([Int32] $env:DEVFLOW_FAILURE_HANDOFF_RUN_ATTEMPT) `
+            -CommitSha $env:DEVFLOW_FAILURE_HANDOFF_COMMIT_SHA `
+            -PullRequestNumber ([Int32] $env:DEVFLOW_FAILURE_HANDOFF_PR_NUMBER) `
+            -LaneKind android-emulator-pilot
+
+      # Upload the canonical JSON entry bytes. GitHub creates the outer artifact ZIP, so only
+      # manifest.json and handoff.json bytes—not the service-generated ZIP container—are stable.
+      - name: Upload canonical DevFlow failure handoff entries
+        if: ${{ always() && hashFiles(format('artifacts/devflow/failure-handoff/devflow-failure-handoff-{0}-{1}.zip', github.run_id, github.run_attempt)) != '' }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: devflow-failure-handoff-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ./artifacts/devflow/failure-handoff/devflow-failure-handoff-${{ github.run_id }}-${{ github.run_attempt }}/manifest.json
+            ./artifacts/devflow/failure-handoff/devflow-failure-handoff-${{ github.run_id }}-${{ github.run_attempt }}/handoff.json
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload Android flow-pilot artifacts
         if: always()

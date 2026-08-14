@@ -530,9 +530,24 @@ public static class MauiFlowRunReportSerializer
         SanitizeArtifacts(report.Artifacts, maxTextLength);
     }
 
-    private static void SanitizeSelectorEvidence(MauiFlowStepAttempt step)
+    /// <summary>
+    /// A managed type name is structural identity, not free text. The generic identifier rules
+    /// classify any long mixed-case token as an opaque secret, which silently drops real type
+    /// names such as <c>Microsoft.Maui.Controls.Button</c>; a dropped name then makes every later
+    /// fingerprint comparison read as "both sides missing", which is not a match. Such a name is
+    /// therefore retained as a stable digest: equal types stay equal, and no raw value is kept.
+    /// </summary>
+    private static string? SafeManagedTypeName(string? value)
     {
-        if (step.Fingerprint is { } fingerprint)
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        return MauiFlowReportRedactor.SafeIdentifier(value) ??
+            "type_" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value.Trim())))
+                .ToLowerInvariant()[..16];
+    }
+
+    private static void SanitizeSelectorEvidence(MauiFlowStepAttempt step)
+    {        if (step.Fingerprint is { } fingerprint)
         {
             fingerprint.ExtensionData = null;
             fingerprint.FingerprintId = MauiFlowReportRedactor.SafeIdentifier(fingerprint.FingerprintId);
@@ -546,8 +561,8 @@ public static class MauiFlowRunReportSerializer
             fingerprint.Context.Theme = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.Theme);
             fingerprint.Context.Orientation = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.Orientation);
             fingerprint.Context.DisplayProfile = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Context.DisplayProfile);
-            fingerprint.Managed.Type = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Managed.Type);
-            fingerprint.Managed.FullType = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Managed.FullType);
+            fingerprint.Managed.Type = SafeManagedTypeName(fingerprint.Managed.Type);
+            fingerprint.Managed.FullType = SafeManagedTypeName(fingerprint.Managed.FullType);
             fingerprint.Managed.Framework = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Managed.Framework);
             fingerprint.Managed.Role = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Managed.Role);
             fingerprint.Managed.AutomationId = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Managed.AutomationId);

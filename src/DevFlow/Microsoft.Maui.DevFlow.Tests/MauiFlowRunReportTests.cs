@@ -323,6 +323,74 @@ public sealed class MauiFlowRunReportTests : IDisposable
     }
 
     [Fact]
+    public void ApplyLimits_RealManagedTypeName_SurvivesAsAStableDigestSoFingerprintsStillCompare()
+    {
+        // The generic identifier rules treat any long mixed-case token as an opaque secret, and
+        // "Microsoft.Maui.Controls.Button" is exactly that shape. Dropping it made a redacted
+        // fingerprint fail to match itself, because the comparer requires both sides to be present.
+        static MauiFlowRunReport Redact(string fullType)
+        {
+            var report = new MauiFlowRunReport
+            {
+                RunId = "run-managed-type",
+                Steps =
+                [
+                    new MauiFlowStepAttempt
+                    {
+                        StepId = "step-1",
+                        Sequence = 1,
+                        Fingerprint = new MauiElementFingerprint
+                        {
+                            FingerprintId = "fp1_managed",
+                            Context = new MauiElementFingerprintContext
+                            {
+                                AppId = "com.example.app",
+                                Platform = "android",
+                                Route = "//checkout",
+                                Window = "main",
+                                Modal = "none",
+                                Locale = "en-US",
+                                Theme = "light",
+                                Orientation = "portrait",
+                                DisplayProfile = "phone",
+                            },
+                            Managed = new MauiManagedElementIdentity
+                            {
+                                Type = "Button",
+                                FullType = fullType,
+                                Role = "button",
+                                AutomationId = "save",
+                            },
+                            Topology = new MauiTopologySignature
+                            {
+                                AncestorHash = "4528a7b8b310ec23cad92096",
+                                SiblingHash = "e4874adab5ee70e7fc282772",
+                            },
+                        },
+                    },
+                ],
+            };
+            MauiFlowRunReportSerializer.ApplyLimits(report, new MauiFlowRunReportLimits());
+            return report;
+        }
+
+        var redacted = Redact("Microsoft.Maui.Controls.Button");
+        var managed = redacted.Steps[0].Fingerprint!.Managed!;
+
+        Assert.False(string.IsNullOrWhiteSpace(managed.FullType));
+        Assert.DoesNotContain("Microsoft.Maui.Controls.Button", managed.FullType, StringComparison.Ordinal);
+        Assert.Equal(
+            managed.FullType,
+            Redact("Microsoft.Maui.Controls.Button").Steps[0].Fingerprint!.Managed!.FullType);
+        Assert.NotEqual(
+            managed.FullType,
+            Redact("Microsoft.Maui.Controls.Editor").Steps[0].Fingerprint!.Managed!.FullType);
+        Assert.True(MauiRepairFingerprintComparer.SemanticallyMatches(
+            redacted.Steps[0].Fingerprint,
+            Redact("Microsoft.Maui.Controls.Button").Steps[0].Fingerprint));
+    }
+
+    [Fact]
     public async Task RunAsync_UnknownCompletion_UsesTypedFailureAndLegacyMapping()
     {
         var receipt = new WorkflowCommandReceipt

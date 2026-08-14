@@ -52,6 +52,13 @@ internal sealed class WorkflowRepairLifecycleResetAttester : IWorkflowRepairRese
 
         var checkpoint = request.SourcePlan.Checkpoint;
         var reset = request.SourcePlan.Reset;
+        // The reset a reviewer approved is a named strategy. A plan that names none leaves the
+        // attester deciding for itself what an acceptable reset is, which is the same hole as
+        // having no reviewed plan — so it is refused before anything destructive happens.
+        var declaredStrategy = reset?.Strategy?.Trim();
+        if (string.IsNullOrWhiteSpace(declaredStrategy))
+            return Failed("repair-reset-strategy-undeclared", []);
+
         var requiresBackendSeed = RequiresBackendSeed(checkpoint, reset);
         var pinnedCollectionItem = PinnedCollectionItem(checkpoint, request.ClassifiedCheckpoint);
 
@@ -59,7 +66,12 @@ internal sealed class WorkflowRepairLifecycleResetAttester : IWorkflowRepairRese
             new FlowLifecycleResetRequest
             {
                 Reason = request.Proposal.ProposalId,
-                ExpectedSeedIdentity = checkpoint?.AppStateSeed?.SeedId,
+                // The plan may declare its app-state seed under either the checkpoint or the reset
+                // requirement, and admission reads both, so the pin has to read both too.
+                ExpectedSeedIdentity = checkpoint?.AppStateSeed?.SeedId ?? reset?.AppStateSeed?.SeedId,
+                // Named up front so an owner that cannot perform this exact strategy refuses before
+                // wiping anything, rather than being caught by the post-check below.
+                RequiredStrategy = declaredStrategy,
                 RequiresBackendSeed = requiresBackendSeed,
                 RequiresCollectionItemKey = pinnedCollectionItem is not null,
             },
@@ -68,15 +80,12 @@ internal sealed class WorkflowRepairLifecycleResetAttester : IWorkflowRepairRese
             return Failed(outcome.FailureCode ?? "repair-reset-attestation-failed", outcome.EvidenceIds);
 
         var applied = outcome.Applied;
+        var appliedStrategy = applied.Strategy?.Trim();
         if (!applied.AppStateSucceeded)
             return Failed("repair-app-state-reset-unattested", outcome.EvidenceIds);
         // A reset the plan did not ask for is not the reset the plan was reviewed against.
-        var declaredStrategy = reset?.Strategy?.Trim();
-        if (!string.IsNullOrWhiteSpace(declaredStrategy) &&
-            !string.Equals(declaredStrategy, applied.Strategy?.Trim(), StringComparison.Ordinal))
-        {
+        if (!string.Equals(declaredStrategy, appliedStrategy, StringComparison.Ordinal))
             return Failed("repair-reset-strategy-unattested", outcome.EvidenceIds);
-        }
         // "No backend seed was applied" is only an acceptable answer where the reviewed plan says no
         // backend seed is required. Where the plan requires one, the absence is a refusal, not a fact.
         var appliedNoBackend = string.Equals(
@@ -84,6 +93,10 @@ internal sealed class WorkflowRepairLifecycleResetAttester : IWorkflowRepairRese
             FlowLifecycleResetFingerprints.NoBackendApplied,
             StringComparison.Ordinal);
         if (requiresBackendSeed && (!applied.BackendTestDataSucceeded || appliedNoBackend))
+            return Failed("repair-backend-seed-unattested", outcome.EvidenceIds);
+        // An owner claiming a backend seed succeeded while naming the "applied none" fingerprint is
+        // contradicting itself; neither half of that answer can be trusted.
+        if (applied.BackendTestDataSucceeded && appliedNoBackend)
             return Failed("repair-backend-seed-unattested", outcome.EvidenceIds);
         if (pinnedCollectionItem is not null &&
             !string.Equals(pinnedCollectionItem, applied.CollectionItemKey, StringComparison.Ordinal))
@@ -109,7 +122,7 @@ internal sealed class WorkflowRepairLifecycleResetAttester : IWorkflowRepairRese
                 Succeeded = true,
                 AppStateSucceeded = applied.AppStateSucceeded,
                 BackendTestDataSucceeded = backendSucceeded,
-                Strategy = applied.Strategy,
+                Strategy = appliedStrategy,
                 ResetIdentity = applied.ResetIdentity,
                 SeedFingerprint = applied.SeedFingerprint,
                 BackendStateFingerprint = applied.BackendStateFingerprint,

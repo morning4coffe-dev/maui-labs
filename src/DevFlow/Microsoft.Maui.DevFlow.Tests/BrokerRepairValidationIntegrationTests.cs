@@ -176,36 +176,36 @@ public sealed class BrokerRepairValidationIntegrationTests
             Assert.Equal(sourceDigest, plan.Flow!.Digest);
 
             // On disk the repaired selector appears only inside a run report, which is what makes it
-            // reviewable. Anything else the broker persisted — recordings, spooled flows, checkpoints
-            // — must still describe the drifted flow the human actually trusted.
-            var evidenceRoot = Path.Combine(storageRoot, "workflow-runs");
+            // reviewable. The run report is in fact the *only* thing this run persisted: no
+            // recording, spooled flow, or checkpoint was written that could carry the proposal
+            // forward as if it were trusted.
+            var evidenceRoot = Path.Combine(storageRoot, "workflow-runs") + Path.DirectorySeparatorChar;
             var persisted = Directory.Exists(storageRoot)
                 ? Directory.GetFiles(storageRoot, "*", SearchOption.AllDirectories)
                 : [];
-            foreach (var written in persisted.Where(path => !path.StartsWith(evidenceRoot, StringComparison.Ordinal)))
-            {
-                Assert.False(
-                    File.ReadAllText(written).Contains(RepairedSelector, StringComparison.Ordinal),
-                    $"The repaired selector was persisted outside run evidence, in {Path.GetRelativePath(storageRoot, written)}.");
-            }
-
-            Assert.Contains(
-                persisted.Where(path => path.StartsWith(evidenceRoot, StringComparison.Ordinal)),
-                path => File.ReadAllText(path).Contains(RepairedSelector, StringComparison.Ordinal));
+            var report = Assert.Single(persisted);
+            Assert.StartsWith(evidenceRoot, report, StringComparison.OrdinalIgnoreCase);
+            Assert.Contains(RepairedSelector, File.ReadAllText(report), StringComparison.Ordinal);
 
         }
         finally
         {
+            try
+            {
+                await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None);
+            }
+            catch (Exception)
+            {
+            }
+
             cancellation.Cancel();
-            await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, null, CancellationToken.None)
-                .ContinueWith(static _ => { }, TaskScheduler.Default);
             broker.Dispose();
             await brokerTask.WaitAsync(TimeSpan.FromSeconds(10));
             try
             {
                 Directory.Delete(storageRoot, recursive: true);
             }
-            catch (IOException)
+            catch (Exception)
             {
             }
         }

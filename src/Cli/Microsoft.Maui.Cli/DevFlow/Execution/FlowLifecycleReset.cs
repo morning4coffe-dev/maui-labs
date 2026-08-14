@@ -22,6 +22,12 @@ internal sealed record FlowLifecycleResetRequest
     /// <summary>Whether the reviewed plan requires a backend/test-data seed to be re-applied.</summary>
     public bool RequiresBackendSeed { get; init; }
 
+    /// <summary>
+    /// The reset strategy the reviewed plan declares. An owner that cannot perform exactly this
+    /// strategy must refuse rather than substitute its own, so an unapproved reset never runs.
+    /// </summary>
+    public string? RequiredStrategy { get; init; }
+
     /// <summary>Whether the reviewed plan pins a collection-item identity.</summary>
     public bool RequiresCollectionItemKey { get; init; }
 }

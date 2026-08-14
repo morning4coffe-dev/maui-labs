@@ -535,11 +535,17 @@ public static class MauiFlowRunReportSerializer
     /// classify any long mixed-case token as an opaque secret, which silently drops real type
     /// names such as <c>Microsoft.Maui.Controls.Button</c>; a dropped name then makes every later
     /// fingerprint comparison read as "both sides missing", which is not a match. A value that is
-    /// recognisably a managed type name is therefore retained as a stable digest, in the same shape
-    /// <see cref="MauiFlowReportRedactor.SafeReference"/> uses. A value that is not recognisably a
-    /// type name is still dropped, so the digest can never become a cross-report equality oracle
-    /// for an arbitrary app-supplied string the redactor deliberately refused to publish.
+    /// recognisably a namespace-qualified type name is therefore kept as a stable digest, in the
+    /// same shape <see cref="MauiFlowReportRedactor.SafeReference"/> uses.
     /// </summary>
+    /// <remarks>
+    /// The shape test narrows the digest branch, it does not make it exact. A dotted, identifier-
+    /// shaped, short-segmented value that is not a type name would still be digested, and a digest
+    /// is a commitment to the value: it confirms a guess and links reports. That residual is
+    /// accepted only because the alternative — publishing the raw value or dropping type identity
+    /// entirely — is worse, and because every value reaching here is already a type-name field.
+    /// Values with a sensitive-looking name are dropped outright rather than digested.
+    /// </remarks>
     private static string? SafeManagedTypeName(string? value)
     {
         var safe = MauiFlowReportRedactor.SafeIdentifier(value);
@@ -547,23 +553,29 @@ public static class MauiFlowRunReportSerializer
             return safe;
 
         var trimmed = value.Trim();
-        return LooksLikeManagedTypeName(trimmed)
-            ? "sha256:" + Convert.ToHexString(
-                SHA256.HashData(Encoding.UTF8.GetBytes("managed-type|" + trimmed))).ToLowerInvariant()
-            : null;
+        if (FlowSecretReference.LooksSensitive(trimmed) || !LooksLikeManagedTypeName(trimmed))
+            return null;
+
+        return "sha256:" + Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes("managed-type|" + trimmed))).ToLowerInvariant();
     }
 
     /// <summary>
-    /// Recognises a CLR type name: dot- or plus-separated identifier segments with an optional
-    /// generic arity suffix. Segment length is bounded well below what an encoded credential needs,
-    /// so a long opaque token cannot pass as a type name.
+    /// Recognises a namespace-qualified CLR type name: two or more dot- or plus-separated
+    /// identifier segments with an optional generic arity suffix. Requiring a separator is what
+    /// excludes single-token credentials, which are the common shape for API keys and access
+    /// tokens; the segment cap excludes encoded blobs.
     /// </summary>
     private static bool LooksLikeManagedTypeName(string value)
     {
         if (value.Length is 0 or > 256)
             return false;
 
-        foreach (var segment in value.Split('.', '+'))
+        var segments = value.Split('.', '+');
+        if (segments.Length < 2)
+            return false;
+
+        foreach (var segment in segments)
         {
             var name = segment;
             var arity = name.IndexOf('`', StringComparison.Ordinal);
@@ -575,7 +587,7 @@ public static class MauiFlowRunReportSerializer
                 name = name[..arity];
             }
 
-            if (name.Length is 0 or > 64 ||
+            if (name.Length is 0 or > 40 ||
                 !(char.IsAsciiLetter(name[0]) || name[0] == '_') ||
                 !name.All(static character => char.IsAsciiLetterOrDigit(character) || character == '_'))
             {

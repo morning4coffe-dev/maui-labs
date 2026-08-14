@@ -5424,20 +5424,28 @@ public sealed partial class InspectorServer : IDisposable
             var status = await _client.GetStatusAsync().ConfigureAwait(false);
             // Seed, backend-state, and collection-item facts are invisible to the app itself, so they
             // come from the registered lifecycle owner or stay absent. They are never read back from
-            // the caller's request. A slow owner degrades to "absent", it does not hang classify.
+            // the caller's request. An owner that does not answer within the budget — including one
+            // that ignores its cancellation token — is abandoned rather than allowed to hang classify.
             WorkflowRepairAttestedState? attested = null;
             if (_repairValidationHost is not null)
             {
                 using var attestationCts = CancellationTokenSource.CreateLinkedTokenSource(_lifetimeCts.Token);
                 attestationCts.CancelAfter(TimeSpan.FromSeconds(5));
-                try
+                var observe = _repairValidationHost.ObserveAttestedStateAsync(attestationCts.Token);
+                var completed = await Task.WhenAny(
+                    observe,
+                    Task.Delay(TimeSpan.FromSeconds(5), _lifetimeCts.Token)).ConfigureAwait(false);
+                if (ReferenceEquals(completed, observe))
                 {
-                    attested = await _repairValidationHost
-                        .ObserveAttestedStateAsync(attestationCts.Token)
-                        .ConfigureAwait(false);
+                    attested = await observe.ConfigureAwait(false);
                 }
-                catch (OperationCanceledException) when (!_lifetimeCts.IsCancellationRequested)
+                else
                 {
+                    _ = observe.ContinueWith(
+                        static abandoned => _ = abandoned.Exception,
+                        CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted,
+                        TaskScheduler.Default);
                 }
             }
             var current = new Testing.MauiFlowCheckpoint

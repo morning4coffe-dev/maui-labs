@@ -392,51 +392,61 @@ public sealed class MauiFlowRunReportTests : IDisposable
         // Only a value that is recognisably a type name earns a digest. Anything else is still
         // dropped, so the digest never becomes an equality oracle for an arbitrary app-supplied
         // string the redactor refused to publish.
+        // Only a value that is recognisably a namespace-qualified type name earns a digest, so the
+        // single-token shape that API keys and access tokens take is dropped rather than committed
+        // to. A digest is a commitment: it confirms a guessed value and links reports.
         Assert.Null(Redact("someone.private@contoso.example").Steps[0].Fingerprint!.Managed!.FullType);
         Assert.Null(Redact("C:\\Users\\alice\\Secrets\\AppState").Steps[0].Fingerprint!.Managed!.FullType);
         Assert.Null(Redact(new string('A', 80) + "b").Steps[0].Fingerprint!.Managed!.FullType);
+        Assert.Null(Redact("sk" + "_live_" + "4eC39HqLyjWDarjtT1zdp7dc").Steps[0].Fingerprint!.Managed!.FullType);
+        Assert.Null(Redact("Ab3xK9mQ2pL7wR4tY8uZ").Steps[0].Fingerprint!.Managed!.FullType);
+        Assert.Null(Redact("Contoso.SessionTokenForCheckoutFlow").Steps[0].Fingerprint!.Managed!.FullType);
     }
 
     /// <summary>
     /// Pins a known, unresolved gap rather than asserting a desired behaviour. The opaque-secret
     /// heuristic classifies any whitespace-free mixed-case token of twenty or more alphanumeric
     /// characters as a secret, so a realistic PascalCase AutomationId is dropped from the report.
-    /// A managed type name recovers as a digest because a digest is still comparable; an
-    /// AutomationId cannot, because a selector has to stay executable. Repair therefore still
-    /// abstains for apps whose AutomationIds are that long. Loosening the classifier is a
-    /// redaction-safety change and is deliberately not made here.
+    /// A managed type name recovers as a digest because a type only needs to be <em>comparable</em>;
+    /// an AutomationId cannot, because a selector must stay <em>executable</em>, which means the raw
+    /// value has to survive. Repair therefore still abstains for apps whose AutomationIds are that
+    /// long. Loosening the classifier would change what every report may publish, so it is a
+    /// separate, deliberate decision rather than a side effect of enabling repair.
     /// </summary>
     [Fact]
     public void ApplyLimits_RealisticLongAutomationId_IsStillDroppedWhichBlocksSelectorRepair()
     {
-        var report = new MauiFlowRunReport
+        static MauiFlowRunReport Redact(string automationId)
         {
-            RunId = "run-automation-id",
-            Steps =
-            [
-                new MauiFlowStepAttempt
-                {
-                    StepId = "step-1",
-                    Sequence = 1,
-                    Fingerprint = new MauiElementFingerprint
+            var report = new MauiFlowRunReport
+            {
+                RunId = "run-automation-id",
+                Steps =
+                [
+                    new MauiFlowStepAttempt
                     {
-                        FingerprintId = "fp1_automation",
-                        Managed = new MauiManagedElementIdentity
+                        StepId = "step-1",
+                        Sequence = 1,
+                        Fingerprint = new MauiElementFingerprint
                         {
-                            Type = "Button",
-                            AutomationId = "CheckoutSaveOrderButton",
+                            FingerprintId = "fp1_automation",
+                            Managed = new MauiManagedElementIdentity
+                            {
+                                Type = "Button",
+                                AutomationId = automationId,
+                            },
                         },
                     },
-                },
-            ],
-        };
+                ],
+            };
+            MauiFlowRunReportSerializer.ApplyLimits(report, new MauiFlowRunReportLimits());
+            return report;
+        }
 
-        MauiFlowRunReportSerializer.ApplyLimits(report, new MauiFlowRunReportLimits());
-
-        Assert.Null(report.Steps[0].Fingerprint!.Managed!.AutomationId);
-        // A shorter id in the same position survives, which is what makes this a length artefact
-        // rather than a deliberate policy about AutomationIds.
-        Assert.Equal("SaveOrder", MauiFlowReportRedactor.SafeIdentifier("SaveOrder"));
+        Assert.Null(Redact("CheckoutSaveOrderButton").Steps[0].Fingerprint!.Managed!.AutomationId);
+        // The same id in the same position survives when it is shorter, which is what makes this a
+        // length artefact rather than a deliberate policy about AutomationIds.
+        Assert.Equal("SaveOrder", Redact("SaveOrder").Steps[0].Fingerprint!.Managed!.AutomationId);
     }
 
     [Fact]

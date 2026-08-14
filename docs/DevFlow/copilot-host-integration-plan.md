@@ -459,7 +459,7 @@ The compact app reads an already retained flow-run projection. It never invokes
 ### Scope
 
 Create a separate read-only cloud diagnostic path. Do not weaken or repurpose the deterministic
-`devflow-failure-publisher` or its restricted `devflow-investigate` workflow.
+`devflow-failure-publisher` or the non-agent selected-issue guidance workflow.
 
 ### Artifact contract
 

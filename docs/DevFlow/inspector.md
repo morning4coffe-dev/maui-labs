@@ -53,6 +53,11 @@ snapshot projection/contracts live in `InspectorSnapshotService` and broker cons
 
 Add and start the DevFlow agent in a Debug build, launch the app, then:
 
+For the Tests preview, set `DEVFLOW_PREVIEW_WORKBENCH=true` in the broker environment.
+Set `DEVFLOW_PREVIEW_AGENT_AUTHORING=true` for agent handoffs and
+`DEVFLOW_PREVIEW_TRACE_IMPORT_EXPORT=true` for diagnostic imports, then restart the broker before
+opening the Inspector.
+
 ```bash
 # Select one connected app, start/focus the broker, and open its authenticated
 # per-agent Inspector route in the system browser.
@@ -93,7 +98,7 @@ in GitHub Copilot Canvas.
 ### Test Workbench human authoring (preview)
 
 The prominent **Tests** toolbar action opens the shared Tests pane with one Data-style tab row:
-**1 Goal**, **2 Steps**, **3 Review**, **4 Run**, **5 Results**, **Agent requests**, **Repair**,
+**1 Goal**, **2 Steps**, **3 Review**, **4 Run**, **5 Results & import**, **Agent requests**, **Repair**,
 **Improve**, and **Source**. The first five tabs retain progress state, while the remaining tabs are
 stable peer destinations rather than stacked modes or an inline Advanced-tools disclosure. The
 existing Workflow timeline remains passive active-test status; Interact/Inspect, the tree,
@@ -111,14 +116,20 @@ screenshot, properties/source, Data dock, and Evidence controls remain unchanged
    to append another demonstration, then select **Save test**.
 4. Select **Run**. Review the concise target, safety, and side-effect summary, then choose
    **Review and start** and confirm. Saving never runs a test automatically.
-5. DevFlow opens **Results** for every terminal outcome. Use the pass/fail banner and next actions
+5. DevFlow opens **Results & import** for every terminal outcome. Use the pass/fail banner and next actions
    to check and run again, improve the test, inspect a failed step, or review an eligible repair.
+6. To continue later, open **Tests**, choose **Open saved test**, select the project Markdown flow,
+   and choose **Open test**. A local Markdown file can be selected with **Choose Markdown file**.
 
-The Goal page also includes a **Create this test with your agent** button. In VS Code and GitHub
+The Goal page also includes a **Prepare a draft with your agent** button. In VS Code and GitHub
 Copilot Canvas it sends the bounded request directly to the host agent through the authenticated
 bridge. In a standalone browser it copies the same ready-to-paste prompt. Saving and running remain
-separate human decisions. Failed Results and Improve expose equivalent direct buttons for diagnosis
-and read-only quality review; agent repair suggestions are never applied directly.
+separate human decisions. Trusted approval is available only when a VS Code or Copilot Canvas host
+advertises `nativeApproval` and the broker reports approval available. A standalone browser is
+read-only and cannot approve, narrow, reject, or issue a grant. Do not call `maui_test_author await-approval`, poll for an
+approval, or attempt a grant-dependent save/run from this preview; browser or chat confirmation
+cannot authorize a save or run. Failed Results and Improve expose equivalent direct buttons for
+diagnosis and read-only quality review; agent repair suggestions are never applied directly.
 
 For a failed local run, selecting **Diagnose this failure with your agent** creates a ten-minute,
 run-bound restricted-agent handoff and sends it directly to a capable host agent (or copies it in a
@@ -133,16 +144,17 @@ verified pre-dispatch missing-selector failure eligible.
 Each workflow tab uses progressive disclosure. **Steps** shows only Goal recovery, active recording,
 or the captured-step summary that is currently relevant. **Review** withholds save/run actions until
 steps and an expected result exist. **Run** sends unsaved work back to Review and exposes one
-current readiness action at a time. **Results** unlocks only when a result exists; technical
-evidence, compatibility, and local study controls remain collapsed until explicitly opened.
+current readiness action at a time. **Results & import** is available before a run for bounded,
+read-only diagnostic import; a terminal local run marks it complete. Technical evidence,
+compatibility, and local study controls remain collapsed until explicitly opened.
 
 Unavailable destinations are disabled in the tab row instead of opening premature empty screens:
 Goal unlocks Steps; captured steps unlock Review; a saved test with an expected result unlocks
 Run; a pending/recent request unlocks Agent requests; a failed local result unlocks Repair; a
 loaded test unlocks Improve; and a selected source-mapped control unlocks Source. Hover/focus text
-states the missing prerequisite, and arrow/Home/End navigation skips disabled tabs. Results unlocks
-after a run produces a result. **Import result** is the separate toolbar entry for read-only
-diagnostic-result import, so an empty Results tab cannot bypass a disabled workflow stage.
+states the missing prerequisite, and arrow/Home/End navigation skips disabled tabs. **Results &
+import** can open at any time, but an imported diagnostic remains isolated and cannot bypass a
+disabled workflow stage or acquire local-run authority.
 
 The managed Tests path requires a Goal, keeps the plan bound to the recorded flow, and saves the
 Markdown flow plus its plan together. Raw quick-record and plan-sidecar maintenance are not exposed
@@ -164,7 +176,7 @@ run, import a trace, invoke a provider, apply a repair, or write app source.
   blocking issue selects the affected step and replaces the save actions with **Resolve step**.
   Review can query bounded live matches, highlight candidates, and apply only a unique
   AutomationId or scoped stable-item selector.
-- **Add expected result** creates `exists`, `propEquals`, or `routeIs` verification, or an
+- **Add expected result** creates `exists`, `notExists`, `propEquals`, or `routeIs` verification, or an
   observation-only `pageChanged` note, for the selected step. It never pre-fills or persists
   secret-shaped values. Optional current-app checking uses the same strict runner semantics.
 - **Check test**, **Review changes**, and **Save test** appear sequentially. A new recording can be
@@ -214,11 +226,12 @@ is waiting. An approval deep link opens **Tests > Agent requests**, scrolls to t
 and moves focus into it; returning to Goal, Steps, Review, Run, Results, or a tool is a normal tab
 selection rather than closing an overlay.
 
-The human can uncheck permissions or reduce numeric limits, confirms the reviewed scope, then
-selects **Approve exact scope** or **Reject**. The Inspector revalidates the connected app instance
-and broker draft before issuing any grant. The browser never receives the host-approval token or
-grant; the restricted agent retrieves an approved grant only through its read-capability-protected
-authoring status. Typing `approved` in chat has no security meaning.
+Trusted native approval is available in the VS Code Inspector and GitHub Copilot Canvas when both
+the broker and host advertise it. The human may narrow the reviewed scope and issue a short-lived,
+exact-scope grant after the connected app instance and broker draft are revalidated. The standalone
+browser and chat are read-only and non-authoritative. The browser never receives the host-approval
+token, confirmation capability, or grant; the restricted agent retrieves an approved grant only
+through its read-capability-protected authoring status.
 
 Approved requests become `consumed` when their bounded action count is exhausted. Rejected,
 expired, stale, and consumed requests cannot be reused. A changed app instance, build, plan/flow
@@ -235,8 +248,9 @@ mint ambient credentials.
 
 Canvas reports source apply unsupported. VS Code can open a native reviewed diff and ask its local
 human to confirm a bounded source apply, but it cannot approve itself, apply a flow repair, or
-start an unapproved mutation. Browser hosts can download a patch and can apply only when they
-explicitly advertise a bounded local-host action. See [Restricted test-agent protocol](test-agent.md).
+start an unapproved mutation. This is not the unavailable test-agent approval client. Browser hosts
+can download a patch and can apply only when they explicitly advertise a bounded local-host action.
+See [Restricted test-agent protocol](test-agent.md).
 
 ### Improve (selector health)
 

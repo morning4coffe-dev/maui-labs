@@ -43,6 +43,10 @@
       "type": "string",
       "format": "date-time"
     },
+    "Fingerprint": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
     "ImportedIdentity": {
       "type": "object",
       "required": [
@@ -257,22 +261,25 @@
           "type": "string"
         },
         "flowFingerprint": {
-          "type": "string"
+          "$ref": "#/$defs/Fingerprint"
         },
         "appBuildFingerprint": {
-          "type": "string"
+          "$ref": "#/$defs/Fingerprint"
         },
         "appSourceFingerprint": {
-          "type": "string"
+          "$ref": "#/$defs/Fingerprint"
         },
         "packageFingerprint": {
-          "type": "string"
+          "$ref": "#/$defs/Fingerprint"
         },
         "platformFingerprint": {
-          "type": "string"
+          "$ref": "#/$defs/Fingerprint"
         },
         "deviceProfileFingerprint": {
-          "type": "string"
+          "$ref": "#/$defs/Fingerprint"
+        },
+        "runtimeProfileFingerprint": {
+          "$ref": "#/$defs/Fingerprint"
         },
         "capturedAt": {
           "$ref": "#/$defs/Timestamp"
@@ -316,13 +323,13 @@
           "type": "string"
         },
         "stepFingerprint": {
-          "type": "string"
+          "$ref": "#/$defs/Fingerprint"
         },
         "expectedCheckpointFingerprint": {
-          "type": "string"
+          "$ref": "#/$defs/Fingerprint"
         },
         "observedCheckpointFingerprint": {
-          "type": "string"
+          "$ref": "#/$defs/Fingerprint"
         }
       },
       "additionalProperties": true

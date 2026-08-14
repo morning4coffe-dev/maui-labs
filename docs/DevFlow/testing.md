@@ -3,6 +3,10 @@
 > Experimental preview. A plan describes intent and safety; only a committed Markdown flow is
 > executable.
 
+For an agent-facing, ambiguity-aware conversation layer over this lifecycle, see
+[conversational collaborative testing](conversational-testing.md). It does not
+expand the restricted test-agent profile or replace human grants.
+
 For release-like/uninstrumented builds and OS-owned UI, use the separate
 [Appium black-box smoke lane](appium-smoke-testing.md). It is not a DevFlow flow executor and
 cannot qualify or repair a semantic flow.
@@ -14,7 +18,11 @@ Apple Test Agent
 status is explicitly reported as pending until a returned macOS capability and Tier-1 artifact set
 is reviewed; it is never reported as a passing platform result from Windows or source-only checks.
 
-Open `maui devflow inspect`, select **Tests**, then follow **Goal**, **Steps**, and **Review**.
+Before opening the Inspector, set `DEVFLOW_PREVIEW_WORKBENCH=true` in the broker process
+environment. Set `DEVFLOW_PREVIEW_AGENT_AUTHORING=true` for agent handoffs and
+`DEVFLOW_PREVIEW_TRACE_IMPORT_EXPORT=true` for diagnostic imports, then restart the broker.
+Open `maui devflow inspect`, confirm **Tests** is visible, then follow **Goal**, **Steps**, and
+**Review**.
 
 1. Enter the required Goal, then choose **Record steps**. This is the only required field before
    recording. Optional metadata is separated into collapsed identity, outcome, setup/safety, and
@@ -30,13 +38,13 @@ Open `maui devflow inspect`, select **Tests**, then follow **Goal**, **Steps**, 
 
 ### Work with your coding agent
 
-From **Goal**, select **Create this test with your agent**. VS Code and GitHub Copilot Canvas send
+From **Goal**, select **Prepare a draft with your agent**. VS Code and GitHub Copilot Canvas send
 the bounded request directly to the host agent; a standalone browser copies it for pasting into
-agent chat. The agent prepares the complete draft and expected results, then its request appears
-under **Requests**. Review the test before choosing **Save test**; running it is always a second,
-separate **Allow one run** decision.
+agent chat. The agent can prepare a complete draft and expected results, then its request appears
+under **Agent requests**. This preview can review or reject the request, but cannot grant trusted
+approval. Browser or chat confirmation never authorizes a save or run.
 
-After a failure, **Results** offers **Diagnose this failure with your agent**. The agent can explain
+After a failure, **Results & import** offers **Diagnose this failure with your agent**. The agent can explain
 the bounded failure and prepare an inert control-update suggestion, but it cannot apply the
 repair. Copying the prompt creates a ten-minute, run-bound handoff containing the exact failed run,
 target, and read capabilities. The agent calls `maui_test_failure` directly; it does not create a
@@ -46,7 +54,9 @@ inert selector proposal. **Repair** keeps review, validation, approval, and appl
 **Improve**, the equivalent agent prompt asks for a read-only quality review of fragile controls,
 missing expected results, and incomplete coverage.
 
-The five workflow tabs reveal only the current usable action. Missing prerequisites link back to
+The five workflow tabs reveal only the current usable action. **Results & import** remains
+available before a run so a bounded diagnostic result can be imported without pretending it was
+executed locally. Missing prerequisites link back to
 the tab that can satisfy them instead of showing disabled future controls. Recording/recovery,
 additional outcome checks, run/evidence details, compatibility replay, diagnostic import, and
 technical trace data stay collapsed until they become relevant or the user explicitly opens them.
@@ -55,8 +65,8 @@ The tab row also enforces prerequisites: Steps requires a Goal; Review requires 
 requires a saved test with an expected result; Agent requests requires request history; Repair
 requires a failed local result; Improve requires a loaded flow; and Source requires a selected
 source-mapped control. Disabled tabs explain their unlock condition and are skipped by keyboard tab
-navigation. Results unlocks only after a run produces a result. Use the separate **Import result** toolbar action for
-read-only diagnostic-result import; it cannot unlock or bypass Goal, Steps, Review, or Run.
+navigation. A terminal local run completes **Results & import**; importing a diagnostic result uses
+the file action inside that tab and cannot unlock or bypass Goal, Steps, Review, or Run.
 
 The plan sidecar is:
 
@@ -87,14 +97,129 @@ flow/plan digest binding must be reviewed and saved again before Run unlocks. A 
 business oracle is non-blocking for ordinary replay: the run may execute, but its result is reported
 as not independently verified.
 
+## Production command-line execution
+
+`maui devflow flow run` executes a committed Markdown flow and its matching
+`.maui-plan.json` sidecar through the canonical `MauiFlowRunner`. Each adapter validates its host,
+artifact/runtime contract, exact target, and launch capability before install or launch:
+
+| `--platform` | Status | Supported artifact and host |
+|---|---|---|
+| `android` | v1 | APK on one exact connected Android target; use `--device` when multiple are online |
+| `windows` (`winui`) | v1 | Explicitly unpackaged official WinUI `.exe` on an active, connected, unlocked Windows desktop |
+| `ios` (`ios-simulator`) | v1 | `ios-simulator` `.app` on macOS; `--device` is the exact Simulator UDID when multiple are available |
+| `maccatalyst` (`mac-catalyst`) | v1 | `mac-catalyst` desktop `.app` launched directly on macOS |
+| `macos` (`appkit`) | Experimental | Distinct `macos-appkit` desktop `.app`; never counts as Mac Catalyst |
+| `wpf` | Experimental | Distinct unpackaged WPF `.exe`; never counts as official WinUI |
+
+```powershell
+maui devflow flow run maui-tests\checkout.md --project src\MyApp\MyApp.csproj --platform android --device emulator-5554 --output artifacts\devflow\checkout
+
+maui devflow flow run maui-tests\checkout.md --project src\MyApp\MyApp.csproj --platform windows --framework net10.0-windows10.0.19041.0
+
+maui devflow flow run maui-tests/checkout.md --project src/MyApp/MyApp.csproj --platform ios --device A1B2C3D4-E5F6-47A8-9B01-23456789ABCD
+
+maui devflow flow run maui-tests/checkout.md --project src/MyApp/MyApp.csproj --platform maccatalyst
+```
+
+The output directory contains `execution-manifest.json`, `flow-run.json`, and
+`report.junit.xml`. The default cleanup terminates only the exact package/process launched by this
+invocation. `--cleanup uninstall` removes an Android or iOS Simulator package only when this
+invocation installed it; desktop adapters terminate their owned process but never install or remove
+a package. AAB, physical iOS/IPA, MSIX, AppInstaller, packaged Windows, cloud farms, and automatic
+pick-first device selection remain unsupported. Plans requiring reset or compensation fail closed
+unless a matching allow-listed state evidence provider is registered; missing independent
+business-oracle evidence produces `unverified`, never a certified pass.
+
+### Deterministic triage
+
+`flow triage` reads only bounded schema-1 execution output and calls the shared
+`MauiFlowTriageAnalyzer`. Supplied files are treated as imported evidence, so the result always
+remains diagnostic-only and can never report `repairEligible: true`.
+
+```powershell
+maui devflow flow triage `
+  --manifest artifacts\devflow\checkout\execution-manifest.json `
+  --report artifacts\devflow\checkout\flow-run.json `
+  --format json `
+  --output artifacts\devflow\checkout\triage.json
+
+maui devflow flow triage `
+  --manifest artifacts\devflow\checkout\execution-manifest.json `
+  --report artifacts\devflow\checkout\flow-run.json `
+  --format markdown
+```
+
+JSON uses the versioned flow-triage contract. Markdown is generated only from that safe projection;
+neither format copies logs, exception text, app text, prompts, secrets, absolute paths, or device
+serials.
+
+### Local reproduction handoff
+
+`flow reproduce` imports one `flow-run.json` or `.mauitrace` through
+`ArtifactTrustImportService`, then invokes the same production `FlowExecutionCoordinator` used by
+`flow run`. It does not contain a second runner.
+
+```powershell
+maui devflow flow reproduce maui-tests\checkout.md `
+  --plan maui-tests\checkout.maui-plan.json `
+  --project src\MyApp\MyApp.csproj `
+  --platform android `
+  --device emulator-5554 `
+  --import downloaded\flow-run.json `
+  --output artifacts\devflow\checkout-reproduction
+```
+
+The platform, framework, configuration, device, cleanup, agent-wait, and failure-evidence options
+match `flow run`. `--output` is required and must be new or empty. The directory receives the normal
+`execution-manifest.json`, `flow-run.json`, and `report.junit.xml`, plus the bounded
+`local-reproduction.json`. The latter contains only the imported digest and fresh opaque identity,
+local manifest/report digests, match reason codes, missing-fact codes, failure/step/checkpoint
+fingerprints, and relative local artifact references.
+
+Matching is fail-closed. A stale flow/plan binding, unsupported import, flow/app build/app source/
+package/platform/device-profile/failure/checkpoint mismatch, missing comparison fact, infrastructure
+failure, unknown completion, unsupported target, invalid configuration, or a missing independent
+oracle for a selector-repair handoff cannot establish a match. Missing facts are reported as
+insufficient; they are not guessed to be mismatches. Current app-source identity is emitted only
+for a clean Git project source tree with a verifiable commit. A dirty or unverifiable project tree
+deliberately omits that fact. `.mauitrace` v1 is accepted for safe diagnostics, but it normally cannot establish
+an exact match because it does not retain the flow, source, and checkpoint facts required by the
+evaluator.
+
+The command stops immediately after evaluation. It cannot create, approve, apply, validate, or
+rollback a selector or source proposal. Even an exact CLI match is diagnostic-only: its
+CLI-to-broker binding and capability are memory-only and cannot unlock repair. Continue in this
+order:
+
+1. Open the Inspector with the committed test and original diagnostic:
+
+```powershell
+maui devflow inspect --test maui-tests\checkout.md --trace downloaded\flow-run.json
+```
+
+2. Import the original diagnostic through the Workbench **Trace** path.
+3. Choose **Reproduce locally** to prepare the broker-owned run check. Approve it only through a
+   trusted VS Code or Copilot Canvas native host when `nativeApproval` is available; otherwise keep
+   it inert and do not promise that it can run.
+4. Verify that the broker-owned reproduction matches the current flow, app, target, failure, and
+   checkpoint facts.
+5. Only then open **Repair** review.
+
+`local-reproduction.json` therefore records `brokerBindingPersisted: false`,
+`approvalGranted: false`, and `proposalCreated: false`; it is not broker or repair authority.
+
 ## Restricted AI test authoring
 
 `maui devflow mcp --profile test-agent` can create broker-owned drafts through a restricted typed
 protocol. It never receives broad app automation, SecureStorage, raw files/network/CDP/source
 access, generic action invocation, or repair/source apply authority. Every effectful request names
 the exact agent process and uses a human-issued grant bound to the target/build/seed and current
-plan/flow revision/digest. The agent may request bounded exploration, but only a human Workbench or
-host action can issue a grant. See [test-agent.md](test-agent.md).
+plan/flow revision/digest. The agent may request bounded exploration, but the trusted native-host
+approval backend/client required to issue a usable grant is currently unavailable. Until it exists,
+the agent can only produce inert drafts, diagnostics, and pending/rejected/expired requests. A
+trusted VS Code or Copilot Canvas host can complete the explicit native confirmation; browser and
+chat cannot. See [test-agent.md](test-agent.md).
 
 ## Selector health
 
@@ -164,7 +289,9 @@ isolated projection in captured/read-only mode. It never preserves raw bytes, ad
 or starts a replay. **Reproduce locally** opens a separate broker preflight and requires normal
 human confirmation; it does not auto-start or bind trust. A browser-only host that cannot establish
 current source fingerprints says so rather than fabricating a locally-reproduced state. Repair
-candidate generation, source proposals, and apply remain unavailable.
+candidate generation, source proposals, and apply remain unavailable. The host-side
+`flow reproduce` command above can produce a separate review handoff, but its binding is not
+inserted into this memory-only broker store.
 
 ## Human-approved selector repair
 

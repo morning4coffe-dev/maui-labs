@@ -4,6 +4,9 @@
 > and running reviewable DevFlow tests. It is not a general-purpose app automation or source-editing
 > interface.
 
+For the conversational skill that guides this protocol without granting
+authority, see [conversational collaborative testing](conversational-testing.md).
+
 Start it with:
 
 ```text
@@ -70,20 +73,25 @@ read-only structure using the session's read capability. It cannot issue a mutat
 
 A submitted `approval-request` is persisted by the broker and appears in **Tests > Agent requests**
 for the exact running app. The inbox shows the user-visible intent, target, actions, selectors,
-routes, side-effect classes, action/value limits, and expiration. The human may remove permissions
-or reduce limits, but neither the browser nor the agent can broaden the requested scope.
-The default pending-review window is ten minutes; the issued grant has its own shorter expiration.
+routes, side-effect classes, action/value limits, and expiration. The default pending-review window
+is ten minutes; a future issued grant would have its own shorter expiration.
 
-Selecting **Approve exact scope** issues an opaque, short-lived grant server-side only after the
-Workbench revalidates the live app instance and current plan/flow revision. The browser never
-receives the broker host-approval token or the opaque grant. The agent retrieves the grant through
-`maui_test_author status` using the authoring session's read capability. Typing `approved` in agent
-chat has no authorization meaning and never creates a grant.
+> **Current approval availability:** trusted native approval is available in the VS Code Inspector
+> and GitHub Copilot Canvas only when the broker reports approval available and the embedding host
+> advertises `nativeApproval`. The standalone browser and chat remain read-only and
+> non-authoritative; they cannot approve, narrow, reject, or issue a usable grant.
+
+A trusted native host lets a human reduce the requested scope and issues an opaque, short-lived
+grant server-side only after revalidating the live app instance and current plan/flow revision. The
+browser never receives the host-approval token, confirmation capability, or opaque grant. The agent
+retrieves the grant through `maui_test_author status` using its read capability. Typing `approved`
+in agent chat has no authorization meaning and never creates a grant.
 
 For a new agent-authored test, send the complete inert plan, steps, and assertions in
-`maui_test_author begin`. The preferred flow then has only two human decisions: approve the reviewed
-commit, then separately approve one run. Draft-change and assertion approvals remain available for
-incremental edits to an existing human demonstration or recorded draft.
+`maui_test_author begin`. The flow has two human decisions: approve the reviewed commit, then
+separately approve one run. When native approval is unavailable, authoring stops at the inert draft
+or pending request. Draft-change and assertion requests remain inert records for an existing human
+demonstration or recorded draft.
 
 Request grants one stage at a time. Draft changes alter `flowDigest`, and commit advances the plan
 and flow revisions, so future-stage grants requested against an earlier snapshot become stale by
@@ -123,16 +131,14 @@ a reused idempotency key fails before app dispatch. A lost response is reported 
    runtime IDs, bounds, or screenshots. Read-only discovery needs no mutation grant.
 4. Present the complete draft, then submit one `commit` approval request. Use the returned
    `reviewUrl`; it opens the Inspector Workbench directly on Agent requests.
-5. The human opens **Tests > Agent requests**, reviews or narrows the exact scope, then approves or
-   rejects it. No chat response, prompt, or model output can substitute for this step.
-6. Call `maui_test_author await-approval` with the request ID. It waits in bounded chunks of up to
-   150 seconds while the human reviews. If it returns still pending, repeat `await-approval` for the
-   same request instead of submitting a duplicate. An approved request appears in
-   `snapshot.approvalRequests` with its opaque `grantId`; rejected, expired, stale, and consumed
-   states never provide reusable authority.
-7. Commit with the human-issued grant, refresh status, then request a separate `run` approval.
-8. Await and consume the run approval, start once, and use its run capability for status, trace,
-   failure classification, or cancellation.
+5. The human opens **Tests > Agent requests** and reviews the exact scope. In a trusted VS Code or
+   Canvas host they explicitly confirm it natively; browser and chat cannot substitute for that step.
+6. Use `maui_test_author await-approval` only after the native confirmation request is presented.
+   If native approval is unavailable, keep the draft inert and do not poll or attempt a grant-dependent flow.
+7. Only after a bound native-issued commit grant may the agent commit, refresh status, and request a
+   separate run approval.
+8. Only after that distinct native-issued run grant may it start exactly one run and use its
+   run capability for status, trace, failure classification, or cancellation.
 
 After each driven step, hard assertions use bounded settlement polling (up to roughly 2.25 seconds
 with the default runner settings) so asynchronous MAUI layout, collection, and binding updates are

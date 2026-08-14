@@ -31,6 +31,9 @@ intentionally about the contract, not device qualification.
 | Broker workflow run | [broker-workflow-run-v1.json](schemas/broker-workflow-run-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/broker-workflow-run-v1.json` | Preview contract |
 | Test plan | [maui-test-plan-v1.json](schemas/maui-test-plan-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-test-plan-v1.json` | Preview contract; plan data never grants lifecycle authority |
 | Flow run report | [maui-flow-run-report-v1.json](schemas/maui-flow-run-report-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-run-report-v1.json` | Preview contract; bounded/redacted diagnostics |
+| Test execution manifest | [maui-test-execution-manifest-v1.json](schemas/maui-test-execution-manifest-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-test-execution-manifest-v1.json` | Preview contract; provider-neutral host/build/artifact/device/lifecycle facts |
+| Flow triage | [maui-flow-triage-v1.json](schemas/maui-flow-triage-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-triage-v1.json` | Preview contract; deterministic safe diagnosis and inert next actions |
+| Local reproduction | [maui-local-reproduction-v1.json](schemas/maui-local-reproduction-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-local-reproduction-v1.json` | Preview contract; bounded imported-to-local match decision with no repair authority |
 | Artifact trust | [maui-artifact-trust-v1.json](schemas/maui-artifact-trust-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-artifact-trust-v1.json` | Preview contract; imports remain diagnostic-only until local reproduction |
 | Broker artifact trust | [broker-artifact-trust-v1.json](schemas/broker-artifact-trust-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/broker-artifact-trust-v1.json` | Preview contract; bounded, capability-gated broker projection |
 | Selector repair proposal | [maui-flow-repair-proposal-v1.json](schemas/maui-flow-repair-proposal-v1.json) — `https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-repair-proposal-v1.json` | Preview contract; proposal only, never auto-apply |
@@ -51,6 +54,18 @@ intentionally about the contract, not device qualification.
   outcome, ordered actionability/command/assertion step evidence, typed failure, and artifact
   facts. Failure evidence links back through additive `manifest.flowRun` metadata in `.mauitrace`
   v1; it never adds a ZIP entry or changes the evidence allow-list.
+- [Test execution manifest v1](schemas/maui-test-execution-manifest-v1.json) — provider-neutral,
+  redacted host, build, artifact, device, lifecycle, ownership, and occurrence facts. Artifact
+  references are relative to the artifact root; the contract has no raw-log, prompt, secret,
+  machine-name, user-name, absolute-path, or device-serial fields.
+- [Flow triage v1](schemas/maui-flow-triage-v1.json) — deterministic classification, evidence
+  sufficiency, retryability, repair policy, local-reproduction requirement, inert allowed next
+  actions, stable fingerprints, fixed-code explanation, and a safe execution-manifest projection.
+  It never copies arbitrary exception, log, prompt, app, or device text into trusted output.
+- [Local reproduction v1](schemas/maui-local-reproduction-v1.json) — the imported artifact digest
+  and broker-minted opaque identity, local manifest/report digests, failure and checkpoint
+  fingerprints, exact-match reasons, and confined local artifact references. It explicitly records
+  that no broker binding, proposal, approval, apply, validation, or rollback authority was persisted.
 - [Preview qualification report v1](schemas/maui-preview-qualification-v1.json) — redacted
   Android engineering-preview gate evidence: corpus/package/tool/policy fingerprints, declared
   device/build/seed profiles, static/generated/device-backed sample separation, first-attempt
@@ -90,6 +105,20 @@ can be preview-normalized to schema 2 without writing a file or inventing finger
 anchors, IDs, revisions, or live validation facts. Schema 3 is intentionally not defined yet.
 Compatible readers and writers preserve unknown extension fields. Plans, reports, and repair
 documents are data contracts only: a plan never authorizes reset or device lifecycle execution.
+
+Flow schema 2 includes an optional stable `stepId`. Current recorders assign and preserve it;
+legacy flows continue to identify steps by `seq`. Report, selector-health, repair, and triage
+references prefer `stepId` and retain the sequence fallback. Fingerprint rule
+`maui-flow-fingerprints-v1` defines:
+
+- `testIdentityFingerprint` for stable test and step identity;
+- `incidentFingerprint` for the recurring failure identity, excluding run ID, timestamps, source
+  revision, app-build occurrence facts, and report digest; and
+- `occurrenceFingerprint` for one run/commit/report occurrence.
+
+Reordering steps that retain stable `stepId` values does not change incident identity. Imported
+evidence is always diagnostic-only in triage: it reports `repairEligible: false` and requires a
+fresh matching local reproduction before the existing repair policy may be evaluated as eligible.
 
 Required capabilities and semantics are declared by a plan rather than changing flow schema 2.
 Hosts must reject an unsupported required semantic before any mutation is attempted.

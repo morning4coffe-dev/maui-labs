@@ -285,6 +285,7 @@
                 "enum": [
                   "propEquals",
                   "exists",
+                  "notExists",
                   "routeIs"
                 ]
               }
@@ -319,6 +320,32 @@
             "required": [
               "selector",
               "name"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "verify": {
+                "const": true
+              },
+              "kind": {
+                "const": "notExists"
+              }
+            },
+            "required": [
+              "verify",
+              "kind"
+            ]
+          },
+          "then": {
+            "properties": {
+              "selector": {
+                "$ref": "#/$defs/FlowSelector"
+              }
+            },
+            "required": [
+              "selector"
             ]
           }
         },
@@ -430,11 +457,27 @@
     "FlowStep": {
       "type": "object",
       "required": [
+        "seq",
         "action"
       ],
       "properties": {
         "seq": {
-          "type": "integer"
+          "type": "integer",
+          "minimum": 1
+        },
+        "stepId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^(?![0-9]+$)[A-Za-z0-9][A-Za-z0-9._:-]*$"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Optional unique stable step identity. Numeric values are reserved for legacy seq lookup; sequence-shaped IDs use the recorder's canonical step-NNNN form for their own seq."
         },
         "action": {
           "enum": [
@@ -473,6 +516,19 @@
         },
         "asserts": {
           "$ref": "#/$defs/NullableFlowAssertList"
+        },
+        "acceptanceCriterionIds": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*$"
+          }
         }
       },
       "allOf": [

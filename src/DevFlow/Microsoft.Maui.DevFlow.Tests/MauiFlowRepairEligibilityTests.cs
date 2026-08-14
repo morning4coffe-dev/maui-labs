@@ -177,6 +177,7 @@ public sealed class MauiFlowRepairEligibilityTests
                 new FlowStep
                 {
                     Seq = 1,
+                    StepId = "save-order",
                     Action = FlowActions.Tap,
                     Args = new FlowStepArgs { Selector = new FlowSelector { AutomationId = "old-save" } },
                     Value = "unchanged",
@@ -231,6 +232,43 @@ public sealed class MauiFlowRepairEligibilityTests
         Assert.True(proposal.UnchangedAssertionsProof.OrderUnchanged);
         Assert.Contains("live:resolution", proposal.Candidate!.EvidenceRefs);
         Assert.Equal(MauiSelectorHealthRules.Uncalibrated, proposal.Candidate.CalibrationStatus);
+        Assert.Equal("save-order", proposal.SourceStepId);
+        Assert.Equal("save-order", proposal.Diff!.StepId);
+    }
+
+    [Fact]
+    public void Build_IntegerStepSequence_CannotBeOverriddenByNumericStableId()
+    {
+        var flow = new MauiFlow
+        {
+            Steps =
+            [
+                new FlowStep
+                {
+                    Seq = 1,
+                    StepId = "first-step",
+                    Action = FlowActions.Tap,
+                    Target = new FlowSelector { AutomationId = "first-old" },
+                },
+                new FlowStep
+                {
+                    Seq = 2,
+                    StepId = "1",
+                    Action = FlowActions.Tap,
+                    Target = new FlowSelector { AutomationId = "second-old" },
+                },
+            ],
+        };
+
+        var result = MauiFlowRepairPatchBuilder.Build(
+            flow,
+            stepSequence: 1,
+            proposedSelector: new FlowSelector { AutomationId = "first-new" });
+
+        Assert.True(result.Ok, result.Error);
+        Assert.Equal("first-new", result.PatchedFlow!.Steps[0].Target!.AutomationId);
+        Assert.Equal("second-old", result.PatchedFlow.Steps[1].Target!.AutomationId);
+        Assert.Equal("first-step", result.Diff!.StepId);
     }
 
     [Fact]
@@ -273,6 +311,46 @@ public sealed class MauiFlowRepairEligibilityTests
         Assert.Empty(result.Proposals);
         Assert.Contains(result.Abstentions, item => item.Code == "candidate-scores-too-close");
         Assert.Equal("old-save", flow.Steps[0].Target!.AutomationId);
+    }
+
+    [Fact]
+    public void Generate_DuplicateCurrentCandidateResolution_AbstainsWithoutSelectingByOrder()
+    {
+        var fingerprint = Fingerprint();
+        var candidate = Candidate("new-save", .9, fingerprint);
+        var result = MauiFlowRepairProposalGenerator.Generate(new MauiFlowRepairProposalGenerationInput
+        {
+            Eligibility = new MauiFlowRepairEligibilityDecision { Eligible = true },
+            Flow = new MauiFlow
+            {
+                Steps =
+                [
+                    new FlowStep
+                    {
+                        Seq = 1,
+                        Action = FlowActions.Tap,
+                        Target = new FlowSelector { AutomationId = "old-save" },
+                    },
+                ],
+            },
+            BaseFlow = new MauiFlowReference { Path = "repair.md", Digest = new string('a', 64) },
+            SourceRunId = "run-local",
+            SourceStepId = "1",
+            SourceFailureCode = MauiFlowFailureClasses.LocatorNotFound,
+            PriorFingerprint = fingerprint,
+            PriorActiveSelectorResolution = Prior(fingerprint),
+            SelectorHealthCandidates = [candidate],
+            CurrentResolutions =
+            [
+                Resolution(candidate, fingerprint),
+                Resolution(candidate, fingerprint),
+            ],
+        });
+
+        Assert.Empty(result.Proposals);
+        Assert.Contains(result.Abstentions, item =>
+            item.Code == "candidate-current-resolution-duplicate" &&
+            item.CandidateId == candidate.CandidateId);
     }
 
     [Fact]

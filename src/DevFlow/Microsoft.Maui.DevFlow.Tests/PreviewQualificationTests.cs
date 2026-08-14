@@ -27,6 +27,7 @@ public sealed class PreviewQualificationTests
                 Assert.False(sample.FalseHeal);
                 Assert.False(sample.RealDevice);
                 Assert.NotEqual(MauiQualificationSampleSources.DeviceBacked, sample.Source);
+                Assert.Equal("generated-no-repair-production-pipeline", sample.Category);
             });
     }
 

@@ -164,6 +164,137 @@ public class MauiArtifactTrustEvaluatorTests
     }
 
     [Fact]
+    public void EvaluateLocalReproduction_MissingImportedFact_IsInsufficientNotMismatch()
+    {
+        var imported = CreateImportedFailure();
+        imported.Projection!.AppSourceFingerprint = null;
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(
+            imported,
+            CreateMatchingLocalRun(imported.ImportedAt!.Value),
+            CreateExpectation());
+
+        Assert.False(evaluation.Binding.Matched);
+        Assert.Contains(
+            evaluation.Verification.Omissions,
+            omission => omission.Field == "imported.appSourceFingerprint");
+        Assert.Contains(
+            evaluation.Verification.Reasons,
+            reason => reason.Code == "missing-imported.appSourceFingerprint");
+        Assert.DoesNotContain(
+            evaluation.Verification.Reasons,
+            reason => reason.Code == "appSourceFingerprint-mismatch");
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_CheckpointIgnoresOccurrenceAgentInstance()
+    {
+        var imported = CreateImportedFailure();
+        var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
+        local.Failure!.ExpectedCheckpoint!.AgentInstanceId = "new-agent-instance";
+        local.Failure.ObservedCheckpoint!.AgentInstanceId = "new-agent-instance";
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(
+            imported,
+            local,
+            CreateExpectation());
+
+        Assert.True(evaluation.Binding.Matched);
+        Assert.Equal(MauiArtifactTrustStates.LocallyReproduced, evaluation.Verification.State);
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_ExactDeviceLabelMayDifferWhenCanonicalRuntimeMatches()
+    {
+        var imported = CreateImportedFailure();
+        var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
+        local.DeviceProfile = "different-device-label";
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(
+            imported,
+            local,
+            CreateExpectation());
+
+        Assert.True(evaluation.Binding.Matched);
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_RuntimeProfileMismatch_FailsClosed()
+    {
+        var imported = CreateImportedFailure();
+        var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
+        local.RuntimeProfileFingerprint = MauiTestExecutionRuntimeProfile.CreateFingerprint(
+            new MauiTestExecutionBuildFacts { TargetFramework = "net10.0-android" },
+            new MauiTestExecutionDeviceFacts
+            {
+                Platform = "android",
+                RuntimeKind = "physical",
+                Profile = "pixel",
+                Architecture = "arm64",
+                ApiLevel = "35",
+                OsVersion = "15",
+                FormFactor = "phone",
+            });
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(
+            imported,
+            local,
+            CreateExpectation());
+
+        Assert.False(evaluation.Binding.Matched);
+        Assert.Contains(
+            evaluation.Verification.Reasons,
+            reason => reason.Code == "runtimeProfile-mismatch");
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_MauiTraceUnavailableFacts_AreMissingNotMismatched()
+    {
+        var imported = CreateImportedFailure();
+        imported.ArtifactKind = "mauitrace";
+        imported.Projection!.Kind = "mauitrace";
+        imported.Projection.DeviceProfileFingerprint =
+            MauiArtifactTrustRedactor.Fingerprint("||");
+        imported.Projection.RuntimeProfileFingerprint = null;
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(
+            imported,
+            CreateMatchingLocalRun(imported.ImportedAt!.Value),
+            CreateExpectation());
+
+        Assert.False(evaluation.Binding.Matched);
+        Assert.Contains(
+            evaluation.Verification.Omissions,
+            omission => omission.Field == "imported.appBuildFingerprint");
+        Assert.Contains(
+            evaluation.Verification.Omissions,
+            omission => omission.Field == "imported.runtimeProfile");
+        Assert.DoesNotContain(
+            evaluation.Verification.Reasons,
+            reason => reason.Code is
+                "appBuildFingerprint-mismatch" or
+                "packageDigest-mismatch" or
+                "deviceProfile-mismatch");
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_MalformedImportedFingerprint_IsRejected()
+    {
+        var imported = CreateImportedFailure();
+        imported.Projection!.Failure!.StepFingerprint = "sha256:not-a-digest";
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(
+            imported,
+            CreateMatchingLocalRun(imported.ImportedAt!.Value),
+            CreateExpectation());
+
+        Assert.False(evaluation.Binding.Matched);
+        Assert.Contains(
+            evaluation.Verification.Reasons,
+            reason => reason.Code == "imported-projection-identifiers-invalid");
+    }
+
+    [Fact]
     public void CanCreateProposal_RequiresLocalReproduction_NotEmbeddedLocalLookingIds()
     {
         var identity = MauiImportedArtifactIdentity.Create();
@@ -237,9 +368,10 @@ public class MauiArtifactTrustEvaluatorTests
             PackageFingerprint = MauiArtifactTrustRedactor.Fingerprint("package-current"),
             PlatformFingerprint = MauiArtifactTrustRedactor.Fingerprint("android"),
             DeviceProfileFingerprint = MauiArtifactTrustRedactor.Fingerprint("pixel"),
+            RuntimeProfileFingerprint = RuntimeProfileFingerprint(),
             Failure = new MauiImportedFailureProjection
             {
-                FailureKey = "if_test",
+                FailureKey = "if_" + new string('f', 64),
                 Code = MauiFlowFailureClasses.LocatorNotFound,
                 Class = MauiFlowFailureClasses.LocatorNotFound,
                 StepFingerprint = MauiArtifactTrustRedactor.Fingerprint("tap-save"),
@@ -273,6 +405,7 @@ public class MauiArtifactTrustEvaluatorTests
             PackageDigest = "package-current",
             Platform = "android",
             DeviceProfile = "pixel",
+            RuntimeProfileFingerprint = RuntimeProfileFingerprint(),
             Failure = new MauiLocalFailureFacts
             {
                 Code = MauiFlowFailureClasses.LocatorNotFound,
@@ -292,7 +425,25 @@ public class MauiArtifactTrustEvaluatorTests
             PackageDigest = "package-current",
             Platform = "android",
             DeviceProfile = "pixel",
+            RuntimeProfileFingerprint = RuntimeProfileFingerprint(),
         };
+
+    private static string RuntimeProfileFingerprint()
+        => MauiTestExecutionRuntimeProfile.CreateFingerprint(
+            new MauiTestExecutionBuildFacts
+            {
+                TargetFramework = "net10.0-android",
+            },
+            new MauiTestExecutionDeviceFacts
+            {
+                Platform = "android",
+                RuntimeKind = "emulator",
+                Profile = "pixel",
+                Architecture = "arm64",
+                ApiLevel = "35",
+                OsVersion = "15",
+                FormFactor = "phone",
+            })!;
 
     private static MauiFlowCheckpoint CreateCheckpoint()
         => new()

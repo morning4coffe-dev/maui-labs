@@ -8,6 +8,21 @@ namespace Microsoft.Maui.DevFlow.Tests;
 public sealed class MauiFlowReplaySafetyEvaluatorTests
 {
     [Fact]
+    public void PublicApi_UsesDistinctFlowAwareNameAndRetainsCompatibilityOverload()
+    {
+        var type = typeof(MauiFlowReplaySafetyEvaluator);
+
+        Assert.NotNull(type.GetMethod(
+            nameof(MauiFlowReplaySafetyEvaluator.EvaluateWithFlow),
+            [typeof(MauiFlowRunRequest), typeof(MauiFlow)]));
+        var compatibility = type.GetMethod(
+            nameof(MauiFlowReplaySafetyEvaluator.Evaluate),
+            [typeof(MauiFlowRunRequest), typeof(MauiFlow)]);
+        Assert.NotNull(compatibility);
+        Assert.NotNull(compatibility!.GetCustomAttributes(typeof(ObsoleteAttribute), inherit: false).Single());
+    }
+
+    [Fact]
     public void Evaluate_NonePolicy_WithMatchingPreconditions_AllowsReplayAndVerifiedRepairEligibility()
     {
         var decision = MauiFlowReplaySafetyEvaluator.Evaluate(Request(
@@ -112,6 +127,123 @@ public sealed class MauiFlowReplaySafetyEvaluatorTests
     }
 
     [Fact]
+    public void Evaluate_InvalidPlanAndNonIndependentOracleEvidence_FailClosed()
+    {
+        var invalidPlan = Plan(MauiFlowSideEffectPolicies.None);
+        invalidPlan.IndependentBusinessOracles[0].Independent = false;
+
+        var invalid = MauiFlowReplaySafetyEvaluator.Evaluate(Request(
+            invalidPlan,
+            Context(includeReset: false, includeOracle: true)));
+
+        Assert.False(invalid.OrdinaryReplayAllowed);
+        Assert.Contains(invalid.Reasons, reason => reason.Code == "test-plan-invalid");
+
+        var context = Context(includeReset: false, includeOracle: true);
+        context.BusinessOracles[0].Independent = null;
+        var nonIndependent = MauiFlowReplaySafetyEvaluator.Evaluate(Request(
+            Plan(MauiFlowSideEffectPolicies.None),
+            context));
+
+        Assert.True(nonIndependent.OrdinaryReplayAllowed);
+        Assert.False(nonIndependent.RunVerificationAllowed);
+        Assert.Contains(
+            nonIndependent.Reasons,
+            reason => reason.Code == "independent-oracle-missing");
+    }
+
+    [Fact]
+    public void Evaluate_ContradictoryOracleOutcomes_PreventVerification()
+    {
+        var context = Context(includeReset: false, includeOracle: true);
+        context.BusinessOracles.Add(new MauiIndependentBusinessOracleResult
+        {
+            OracleId = "order-recorded",
+            Succeeded = false,
+            Independent = true,
+        });
+
+        var decision = MauiFlowReplaySafetyEvaluator.Evaluate(Request(
+            Plan(MauiFlowSideEffectPolicies.None),
+            context));
+
+        Assert.False(decision.RunVerificationAllowed);
+        Assert.False(decision.RepairEligibility);
+        Assert.Contains(
+            decision.Reasons,
+            reason => reason.Code == "independent-oracle-outcome-conflict");
+    }
+
+    [Fact]
+    public void Evaluate_RequiredScenarioCriterionAndOracleCoverage_AllowsVerification()
+    {
+        var plan = CoveragePlan();
+        var decision = MauiFlowReplaySafetyEvaluator.EvaluateWithFlow(
+            Request(plan, Context(includeReset: false, includeOracle: true)),
+            CoveredFlow());
+
+        Assert.True(decision.RunVerificationAllowed);
+        Assert.True(decision.RepairEligibility);
+        Assert.DoesNotContain(
+            decision.Reasons,
+            reason => reason.Code is
+                "required-scenario-uncovered" or
+                "required-acceptance-criterion-uncovered" or
+                "acceptance-criterion-oracle-undeclared");
+    }
+
+    [Fact]
+    public void Evaluate_UncoveredScenarioAndCriterion_PreventsVerificationWithoutBlockingReplay()
+    {
+        var plan = CoveragePlan();
+        var flow = CoveredFlow();
+        flow.Steps[0].AcceptanceCriterionIds = null;
+
+        var decision = MauiFlowReplaySafetyEvaluator.EvaluateWithFlow(
+            Request(plan, Context(includeReset: false, includeOracle: true)),
+            flow);
+
+        Assert.True(decision.OrdinaryReplayAllowed);
+        Assert.False(decision.RunVerificationAllowed);
+        Assert.False(decision.RepairEligibility);
+        Assert.Contains(decision.Reasons, reason => reason.Code == "required-scenario-uncovered");
+        Assert.Contains(decision.Reasons, reason => reason.Code == "required-acceptance-criterion-uncovered");
+    }
+
+    [Fact]
+    public void Evaluate_RequiredCriterionOracleMustBeDeclaredRequiredAndIndependent()
+    {
+        var plan = CoveragePlan();
+        plan.AcceptanceCriteria[0] = new MauiAcceptanceCriterion
+        {
+            CriterionId = "order-visible",
+            Required = true,
+            BusinessOracleId = "inventory-updated",
+        };
+
+        var decision = MauiFlowReplaySafetyEvaluator.EvaluateWithFlow(
+            Request(plan, Context(includeReset: false, includeOracle: true)),
+            CoveredFlow());
+
+        Assert.False(decision.OrdinaryReplayAllowed);
+        Assert.False(decision.RunVerificationAllowed);
+        Assert.Contains(
+            decision.Reasons,
+            reason => reason.Code == "test-plan-invalid");
+    }
+
+    [Fact]
+    public void Evaluate_RequiredCoverageWithoutFlow_PreventsVerification()
+    {
+        var decision = MauiFlowReplaySafetyEvaluator.Evaluate(
+            Request(CoveragePlan(), Context(includeReset: false, includeOracle: true)));
+
+        Assert.True(decision.OrdinaryReplayAllowed);
+        Assert.False(decision.RunVerificationAllowed);
+        Assert.Contains(decision.Reasons, reason => reason.Code == "verification-flow-missing");
+    }
+
+    [Fact]
     public void Evaluate_DeclaredCheckpointMismatchForEverySafetyField_DeniesAdmission()
     {
         var fieldMutations = new (string Code, Action<MauiFlowCheckpoint> Mutate)[]
@@ -192,6 +324,38 @@ public sealed class MauiFlowReplaySafetyEvaluatorTests
     }
 
     [Fact]
+    public async Task Runner_PassedExecutionWithUncoveredPlan_RemainsUnverified()
+    {
+        var result = await new MauiFlowRunner(
+            new NoMutationDriver(),
+            new MauiFlowRunnerOptions
+            {
+                Plan = CoveragePlan(),
+                RunContext = Context(includeReset: false, includeOracle: true),
+            }).RunWithLegacyAsync(new MauiFlow
+            {
+                Name = "coverage-gap",
+                Steps =
+                [
+                    new FlowStep
+                    {
+                        Seq = 1,
+                        StepId = "run-without-proof",
+                        Action = FlowActions.Assert,
+                    },
+                ],
+            });
+
+        Assert.Equal(MauiFlowRunOutcomes.Passed, result.Report.Outcome!.Status);
+        Assert.False(result.Report.Outcome.Verified);
+        Assert.False(result.Report.Verification!.Verified);
+        Assert.Contains(
+            "required-acceptance-criterion-uncovered",
+            result.Report.Verification.Reason,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RunReport_RoundTripsSafetyEvidenceAndRedactsSensitiveNestedMessages()
     {
         const string secret = "CorrectHorseBatteryStaple";
@@ -230,6 +394,7 @@ public sealed class MauiFlowReplaySafetyEvaluatorTests
                 {
                     OracleId = "order-recorded",
                     Succeeded = true,
+                    Independent = true,
                     Message = $"token={secret}",
                 },
             ],
@@ -260,6 +425,13 @@ public sealed class MauiFlowReplaySafetyEvaluatorTests
     private static MauiTestPlan Plan(string policy) => new()
     {
         PlanId = "plan",
+        Revision = 1,
+        Flow = new MauiFlowReference
+        {
+            Path = "flow.md",
+            Digest = new string('a', 64),
+        },
+        Goal = "Verify the declared behavior.",
         SideEffectPolicy = policy,
         Checkpoint = new MauiFlowCheckpointRequirements
         {
@@ -287,6 +459,52 @@ public sealed class MauiFlowReplaySafetyEvaluatorTests
                 OracleId = "order-recorded",
                 Required = true,
                 Independent = true,
+            },
+        ],
+        Provenance = new MauiActorProvenance
+        {
+            ActorKind = "human",
+            Channel = "unit-test",
+        },
+    };
+
+    private static MauiTestPlan CoveragePlan()
+    {
+        var plan = Plan(MauiFlowSideEffectPolicies.None);
+        plan.Scenarios.Add(new MauiTestScenario
+        {
+            ScenarioId = "checkout",
+            AcceptanceCriterionIds = ["order-visible"],
+        });
+        plan.AcceptanceCriteria.Add(new MauiAcceptanceCriterion
+        {
+            CriterionId = "order-visible",
+            Required = true,
+            BusinessOracleId = "order-recorded",
+        });
+        return plan;
+    }
+
+    private static MauiFlow CoveredFlow() => new()
+    {
+        Name = "covered",
+        Steps =
+        [
+            new FlowStep
+            {
+                Seq = 1,
+                StepId = "verify-order",
+                Action = FlowActions.Assert,
+                AcceptanceCriterionIds = ["order-visible"],
+                Asserts =
+                [
+                    new FlowAssert
+                    {
+                        Kind = "exists",
+                        Verify = true,
+                        Selector = new FlowSelector { AutomationId = "order-row" },
+                    },
+                ],
             },
         ],
     };

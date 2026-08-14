@@ -49,7 +49,13 @@ public sealed class CSharpSourceInspectorRouteTests
 
         var brokerPort = FreePort();
         var agentPort = FreePort();
-        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        var hostApprovalToken = Guid.NewGuid().ToString("N");
+        using var broker = new BrokerServer(
+            brokerPort,
+            TimeSpan.FromMinutes(1),
+            previewFlags: PreviewTestFeatures.AllEnabled(),
+            trustedHostApprovalVerifier: supplied =>
+                string.Equals(supplied, hostApprovalToken, StringComparison.Ordinal));
         using var cancellation = new CancellationTokenSource();
         var brokerTask = broker.RunAsync(cancellation.Token);
         await WaitForBrokerAsync(brokerPort);
@@ -181,8 +187,37 @@ public sealed class CSharpSourceInspectorRouteTests
                     humanConfirmed = true,
                     hostCapability = vscode,
                 });
-            Assert.Equal(HttpStatusCode.OK, approved.StatusCode);
-            using var approvalBody = JsonDocument.Parse(await approved.Content.ReadAsStringAsync());
+            Assert.Equal(HttpStatusCode.Forbidden, approved.StatusCode);
+
+            using var confirmation = await PostTrustedJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/approval-confirmations/issue",
+                hostApprovalToken,
+                new
+                {
+                    action = "csharp-source-grant",
+                    subjectId = proposalId,
+                    kind = "apply",
+                    reviewer = "route-test-human",
+                    hostCapability = vscode,
+                });
+            Assert.Equal(HttpStatusCode.Created, confirmation.StatusCode);
+            using var confirmationBody = JsonDocument.Parse(await confirmation.Content.ReadAsStringAsync());
+            var confirmationCapability = confirmationBody.RootElement
+                .GetProperty("confirmationCapability")
+                .GetString()!;
+            using var confirmedApproval = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/source/csharp/{Uri.EscapeDataString(proposalId)}/approve",
+                new
+                {
+                    reviewer = "route-test-human",
+                    humanConfirmed = true,
+                    confirmationCapability,
+                    hostCapability = vscode,
+                });
+            Assert.Equal(HttpStatusCode.OK, confirmedApproval.StatusCode);
+            using var approvalBody = JsonDocument.Parse(await confirmedApproval.Content.ReadAsStringAsync());
             var grant = approvalBody.RootElement.GetProperty("grant").GetString()!;
 
             using var canvasDenied = await PostJsonAsync(
@@ -208,12 +243,33 @@ public sealed class CSharpSourceInspectorRouteTests
                 });
             Assert.Equal(HttpStatusCode.OK, begun.StatusCode);
 
+            using var applyAckConfirmation = await PostTrustedJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/approval-confirmations/issue",
+                hostApprovalToken,
+                new
+                {
+                    action = "csharp-source-apply-ack",
+                    subjectId = proposalId,
+                    hostKind = "vscode",
+                    preContentDigest = baseDigest,
+                    contentDigest = afterDigest,
+                    patchDigest,
+                });
+            Assert.Equal(HttpStatusCode.Created, applyAckConfirmation.StatusCode);
+            using var applyAckConfirmationBody = JsonDocument.Parse(
+                await applyAckConfirmation.Content.ReadAsStringAsync());
+            var applyAckCapability = applyAckConfirmationBody.RootElement
+                .GetProperty("confirmationCapability")
+                .GetString()!;
+
             using var acknowledged = await PostJsonAsync(
                 http,
                 $"{inspectorBase}/api/workbench/source/csharp/{Uri.EscapeDataString(proposalId)}/apply-ack",
                 new
                 {
                     applied = true,
+                    confirmationCapability = applyAckCapability,
                     hostKind = "vscode",
                     preContentDigest = baseDigest,
                     appliedContentDigest = afterDigest,
@@ -243,6 +299,18 @@ public sealed class CSharpSourceInspectorRouteTests
 
     private static async Task<HttpResponseMessage> PostJsonAsync(HttpClient client, string url, object value)
         => await client.PostAsync(url, new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json"));
+
+    private static async Task<HttpResponseMessage> PostTrustedJsonAsync(
+        HttpClient client,
+        string url,
+        string hostApprovalToken,
+        object value)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.TryAddWithoutValidation("X-DevFlow-Host-Approval-Token", hostApprovalToken);
+        request.Content = new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json");
+        return await client.SendAsync(request);
+    }
 
     private static async Task<InspectorServer> GetInspectorAsync(BrokerServer broker, string agentId)
     {

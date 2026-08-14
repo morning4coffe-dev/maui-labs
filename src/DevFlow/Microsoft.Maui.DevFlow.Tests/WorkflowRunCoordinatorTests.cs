@@ -127,10 +127,8 @@ public class WorkflowRunCoordinatorTests
         Assert.False(executed);
 
         var stale = Request("stale-plan", "stale-plan-key");
-        stale.Plan = new MauiTestPlan
-        {
-            Flow = new MauiFlowReference { Digest = new string('0', 64) },
-        };
+        stale.Plan = ValidPlan(stale, flowDigest: new string('0', 64));
+        stale.Context = MatchingContext();
         var rejected = coordinator.Preflight(stale, Target(), static () => true);
 
         Assert.False(rejected.Ok);
@@ -153,10 +151,10 @@ public class WorkflowRunCoordinatorTests
                 return Task.FromResult(PassingReport());
             });
         var request = Request("requirements", "requirements-key");
-        request.Plan = new MauiTestPlan
-        {
-            RequiredPlatforms = ["windows"],
-            Requirements = new MauiFlowRequirements
+        request.Plan = ValidPlan(
+            request,
+            requiredPlatforms: ["windows"],
+            requirements: new MauiFlowRequirements
             {
                 RequiredCapabilities =
                 [
@@ -166,8 +164,8 @@ public class WorkflowRunCoordinatorTests
                 [
                     new MauiRequiredSemantic { Name = "future.checkpoint.v9", Required = true },
                 ],
-            },
-        };
+            });
+        request.Context = MatchingContext();
         request.AvailableCapabilities = new MauiFlowCapabilitySet
         {
             Capabilities =
@@ -203,10 +201,10 @@ public class WorkflowRunCoordinatorTests
                 return Task.FromResult(PassingReport());
             });
         var request = Request("requirements-ok", "requirements-ok-key");
-        request.Plan = new MauiTestPlan
-        {
-            RequiredPlatforms = ["windows"],
-            Requirements = new MauiFlowRequirements
+        request.Plan = ValidPlan(
+            request,
+            requiredPlatforms: ["windows"],
+            requirements: new MauiFlowRequirements
             {
                 RequiredCapabilities =
                 [
@@ -216,8 +214,8 @@ public class WorkflowRunCoordinatorTests
                 [
                     new MauiRequiredSemantic { Name = "canonical-run", Required = true },
                 ],
-            },
-        };
+            });
+        request.Context = MatchingContext();
         request.AvailableCapabilities = new MauiFlowCapabilitySet
         {
             Capabilities =
@@ -302,15 +300,14 @@ public class WorkflowRunCoordinatorTests
                 return Task.FromResult(PassingReport());
             });
         var request = Request("unsafe", "unsafe-key");
-        request.Plan = new MauiTestPlan
-        {
-            SideEffectPolicy = MauiFlowSideEffectPolicies.TestTenantResettable,
-            Checkpoint = new MauiFlowCheckpointRequirements
+        request.Plan = ValidPlan(
+            request,
+            sideEffectPolicy: MauiFlowSideEffectPolicies.TestTenantResettable,
+            checkpoint: new MauiFlowCheckpointRequirements
             {
                 AppBuildFingerprint = "build-1",
                 Route = "/home",
-            },
-        };
+            });
         request.Context = new MauiFlowRunContext
         {
             Preconditions = new MauiFlowReplayPreconditions
@@ -732,7 +729,7 @@ public class WorkflowRunCoordinatorTests
     }
 
     [Fact]
-    public async Task LocalReproductionFacts_AreDerivedFromTerminalBrokerRunAndHostFingerprints()
+    public async Task LocalReproductionFacts_DoNotBackfillUnobservedCallerExpectations()
     {
         var request = Request("reproduction", "reproduction-key");
         var flowDigest = MauiFlowRunReportSerializer.ComputeFlowDigest(request.Flow!);
@@ -803,9 +800,9 @@ public class WorkflowRunCoordinatorTests
         Assert.Equal(start.Run.RunId, local.Facts!.LocalRunId);
         Assert.True(local.Facts.IsNewLocalRun);
         Assert.Equal(flowDigest, local.Facts.FlowDigest);
-        Assert.Equal("source-current", local.Facts.AppSourceFingerprint);
-        Assert.Equal("package-current", local.Facts.PackageDigest);
-        Assert.Equal("test-device", local.Facts.DeviceProfile);
+        Assert.Null(local.Facts.AppSourceFingerprint);
+        Assert.Null(local.Facts.PackageDigest);
+        Assert.Null(local.Facts.DeviceProfile);
         Assert.Equal(MauiFlowFailureClasses.LocatorNotFound, local.Facts.Failure!.Code);
         Assert.Equal("/todos", local.Facts.Failure.ObservedCheckpoint!.Route);
     }
@@ -848,6 +845,48 @@ public class WorkflowRunCoordinatorTests
 
     private static WorkflowRunTarget Target(string agentId = "agent", string instanceId = "instance")
         => new(agentId, instanceId, 12345, "test", "Test app");
+
+    private static MauiTestPlan ValidPlan(
+        WorkflowRunStartRequest request,
+        string sideEffectPolicy = MauiFlowSideEffectPolicies.None,
+        string? flowDigest = null,
+        List<string>? requiredPlatforms = null,
+        MauiFlowRequirements? requirements = null,
+        MauiFlowCheckpointRequirements? checkpoint = null)
+        => new()
+        {
+            PlanId = "plan-" + request.IdempotencyKey,
+            Revision = 1,
+            Flow = new MauiFlowReference
+            {
+                Path = (request.Flow?.Name ?? "flow") + ".md",
+                Revision = 1,
+                Digest = flowDigest ?? MauiFlowRunReportSerializer.ComputeFlowDigest(request.Flow!),
+            },
+            Title = "Workflow coordinator test",
+            Goal = "Validate broker workflow coordination",
+            Reset = new MauiTestResetRequirement { Required = false, Strategy = "host-owned" },
+            Provenance = new MauiActorProvenance
+            {
+                ActorKind = "human",
+                ActorId = "test",
+                Channel = "unit-test",
+                Provider = "xunit",
+            },
+            SideEffectPolicy = sideEffectPolicy,
+            RequiredPlatforms = requiredPlatforms ?? [],
+            Requirements = requirements,
+            Checkpoint = checkpoint,
+        };
+
+    private static MauiFlowRunContext MatchingContext() => new()
+    {
+        Preconditions = new MauiFlowReplayPreconditions
+        {
+            Expected = new MauiFlowCheckpoint { Route = "/test" },
+            Observed = new MauiFlowCheckpoint { Route = "/test" },
+        },
+    };
 
     private static async Task<WorkflowRunSnapshot> WaitForTerminalAsync(
         WorkflowRunCoordinator coordinator,

@@ -31,8 +31,13 @@ public sealed class WorkflowRepairValidationServiceTests
             {
                 Proposal = proposal,
                 InMemorySelectorOverrideOnly = true,
+                Eligibility = Eligible(checkpoint),
+                ClassifiedCheckpoint = checkpoint,
                 ReplaySafety = new MauiFlowReplayEligibilityDecision
                 {
+                    SideEffectPolicy = MauiFlowSideEffectPolicies.None,
+                    RepairValidationAllowed = true,
+                    RepairEligibility = true,
                     DownstreamContinuationAllowed = false,
                 },
             },
@@ -68,8 +73,13 @@ public sealed class WorkflowRepairValidationServiceTests
             {
                 Proposal = Proposal(fingerprint),
                 InMemorySelectorOverrideOnly = true,
+                Eligibility = Eligible(checkpoint),
+                ClassifiedCheckpoint = checkpoint,
                 ReplaySafety = new MauiFlowReplayEligibilityDecision
                 {
+                    SideEffectPolicy = MauiFlowSideEffectPolicies.None,
+                    RepairValidationAllowed = true,
+                    RepairEligibility = true,
                     DownstreamContinuationAllowed = false,
                 },
             },
@@ -77,6 +87,34 @@ public sealed class WorkflowRepairValidationServiceTests
 
         Assert.False(result.Passed);
         Assert.Contains("downstream-continuation-prohibited", result.FailureFacts);
+    }
+
+    [Fact]
+    public async Task ValidateAsync_NonReplayableOrUnclassifiedRequestsNeverReachHost()
+    {
+        var fingerprint = Fingerprint();
+        var checkpoint = Checkpoint();
+        var host = new FakeHost(checkpoint, fingerprint);
+
+        var result = await new WorkflowRepairValidationService(host).ValidateAsync(
+            new WorkflowRepairTransientValidationRequest
+            {
+                Proposal = Proposal(fingerprint),
+                Eligibility = Eligible(checkpoint),
+                ClassifiedCheckpoint = new MauiFlowCheckpoint { Route = "/other" },
+                ReplaySafety = new MauiFlowReplayEligibilityDecision
+                {
+                    SideEffectPolicy = MauiFlowSideEffectPolicies.NonReplayable,
+                    RepairValidationAllowed = true,
+                    RepairEligibility = true,
+                },
+            },
+            CancellationToken.None);
+
+        Assert.False(result.Passed);
+        Assert.Contains("repair-replay-safety-required", result.FailureFacts);
+        Assert.Contains("classified-checkpoint-required", result.FailureFacts);
+        Assert.Equal(0, host.ResetCalls);
     }
 
     private static MauiFlowRepairProposal Proposal(MauiElementFingerprint fingerprint) => new()
@@ -107,6 +145,12 @@ public sealed class WorkflowRepairValidationServiceTests
         Orientation = "portrait",
         DisplayProfile = "320x640",
         CollectionItemKey = "order-1",
+    };
+
+    private static MauiFlowRepairEligibilityDecision Eligible(MauiFlowCheckpoint checkpoint) => new()
+    {
+        Eligible = true,
+        CurrentCheckpoint = checkpoint,
     };
 
     private static MauiElementFingerprint Fingerprint() => new()
@@ -146,17 +190,21 @@ public sealed class WorkflowRepairValidationServiceTests
 
         public WorkflowRepairReplayValidation Replay { get; set; } = new();
         public int PersistCalls { get; private set; }
+        public int ResetCalls { get; private set; }
 
         public Task<WorkflowRepairLifecycleValidation> HardResetAsync(
             WorkflowRepairTransientValidationRequest request,
             CancellationToken cancellationToken)
-            => Task.FromResult(new WorkflowRepairLifecycleValidation
+        {
+            ResetCalls++;
+            return Task.FromResult(new WorkflowRepairLifecycleValidation
             {
                 Succeeded = true,
                 ExpectedCheckpoint = _checkpoint,
                 ObservedCheckpoint = _checkpoint,
                 ObservedFingerprint = _fingerprint,
             });
+        }
 
         public Task<WorkflowRepairReplayValidation> ReplayWithInMemorySelectorOverrideAsync(
             WorkflowRepairTransientValidationRequest request,

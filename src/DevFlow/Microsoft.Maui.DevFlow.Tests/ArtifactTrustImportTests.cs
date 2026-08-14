@@ -8,6 +8,8 @@ namespace Microsoft.Maui.DevFlow.Tests;
 
 public class ArtifactTrustImportTests
 {
+    private const string RuntimeProfile = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
     [Fact]
     public void ImportFlowRun_GeneratesFreshImportedIdentityAndRedactsHostileContent()
     {
@@ -173,6 +175,7 @@ public class ArtifactTrustImportTests
                 PackageDigest = "package-current",
                 Platform = "android",
                 DeviceProfile = "pixel",
+                RuntimeProfileFingerprint = RuntimeProfile,
                 Failure = new MauiLocalFailureFacts
                 {
                     Code = MauiFlowFailureClasses.LocatorNotFound,
@@ -198,11 +201,34 @@ public class ArtifactTrustImportTests
                 PackageDigest = "package-current",
                 Platform = "android",
                 DeviceProfile = "pixel",
+                RuntimeProfileFingerprint = RuntimeProfile,
             });
 
         Assert.Equal(200, binding.StatusCode);
-        Assert.True(binding.Evaluation!.Binding.Matched);
+        Assert.True(
+            binding.Evaluation!.Binding.Matched,
+            string.Join(
+                "; ",
+                binding.Evaluation.Verification.Reasons.Select(static reason => reason.Code)));
         Assert.Equal(MauiArtifactTrustStates.LocallyReproduced, binding.Status!.Verification!.State);
+        Assert.Equal(
+            200,
+            store.GetRepairTrust(
+                imported.Artifact.Identity.Id!,
+                added.CapabilityToken,
+                "run_local_new").StatusCode);
+        Assert.Equal(
+            409,
+            store.GetRepairTrust(
+                imported.Artifact.Identity.Id!,
+                added.CapabilityToken,
+                "run_attacker_supplied").StatusCode);
+        Assert.Equal(
+            403,
+            store.GetRepairTrust(
+                imported.Artifact.Identity.Id!,
+                "wrong-capability",
+                "run_local_new").StatusCode);
 
         var record = new MauiArtifactTrustRecord
         {
@@ -359,7 +385,8 @@ public class ArtifactTrustImportTests
                 "appSourceFingerprint": "source-current",
                 "packageDigest": "package-current",
                 "platform": "android",
-                "deviceProfile": "pixel"
+                "deviceProfile": "pixel",
+                "runtimeProfileFingerprint": "{{RuntimeProfile}}"
               },
               "startedAt": "2026-08-01T08:00:00Z",
               "endedAt": "2026-08-01T08:00:01Z",

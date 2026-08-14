@@ -172,6 +172,40 @@ public class FlowReplayTests
     }
 
     [Fact]
+    public async Task Replay_NotExists_PassesWhenTargetIsAbsent()
+    {
+        await using var agentSrv = new RoutingAgent();
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        var flow = new MauiFlow
+        {
+            Name = "assert-absent",
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = "assert",
+                    Asserts = new()
+                    {
+                        new FlowAssert
+                        {
+                            Kind = "notExists",
+                            Selector = new FlowSelector { AutomationId = "missing" },
+                            Verify = true,
+                        },
+                    },
+                },
+            },
+        };
+
+        var report = await new FlowReplayer(client, pollTries: 1, pollGapMs: 0).ReplayAsync(flow);
+
+        Assert.True(report.Ok, JsonSerializer.Serialize(report));
+        Assert.True(report.Results[0].Asserts[0].Ok);
+        Assert.Equal("0", report.Results[0].Asserts[0].Actual);
+    }
+
+    [Fact]
     public async Task Replay_TargetAppearingAfterPreviousAction_IsRetried()
     {
         await using var agentSrv = new RoutingAgent();

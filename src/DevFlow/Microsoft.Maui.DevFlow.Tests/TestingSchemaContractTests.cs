@@ -406,6 +406,7 @@ public class TestingSchemaContractTests
                 new FlowStep
                 {
                     Seq = 1,
+                    StepId = "submit-credentials",
                     Action = FlowActions.Tap,
                     Label = "Submit credentials",
                     Intent = "Complete the sign-in action.",
@@ -419,9 +420,38 @@ public class TestingSchemaContractTests
 
         Assert.True(parsed.Ok, parsed.Error);
         var step = Assert.Single(parsed.Flow!.Steps);
+        Assert.Equal("submit-credentials", step.StepId);
         Assert.Equal("Submit credentials", step.Label);
         Assert.Equal("Complete the sign-in action.", step.Intent);
         Assert.Equal("session-created", Assert.Single(step.AcceptanceCriterionIds!));
+    }
+
+    [Fact]
+    public void FlowMarkdown_LegacyFlowWithoutStepId_PreservesSequenceFallback()
+    {
+        const string markdown = """
+            ```json maui-test
+            {
+              "schema": 2,
+              "name": "legacy-step-identity",
+              "steps": [
+                {
+                  "seq": 7,
+                  "action": "assert",
+                  "asserts": []
+                }
+              ]
+            }
+            ```
+            """;
+
+        var parsed = FlowMarkdown.Parse(markdown);
+
+        Assert.True(parsed.Ok, parsed.Error);
+        var step = Assert.Single(parsed.Flow!.Steps);
+        Assert.Null(step.StepId);
+        Assert.Equal(7, step.Seq);
+        Assert.DoesNotContain("\"stepId\"", FlowMarkdown.Serialize(parsed.Flow), StringComparison.Ordinal);
     }
 
     [Fact]

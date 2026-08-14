@@ -130,6 +130,9 @@ public sealed partial class TestingPackageSurfaceTests
         {
             "maui-test-plan-v1.json",
             "maui-flow-run-report-v1.json",
+            "maui-test-execution-manifest-v1.json",
+            "maui-flow-triage-v1.json",
+            "maui-local-reproduction-v1.json",
             "broker-workflow-run-v1.json",
             "maui-artifact-trust-v1.json",
             "broker-artifact-trust-v1.json",
@@ -217,6 +220,41 @@ public sealed partial class TestingPackageSurfaceTests
                     File.Exists(linkedPath) || Directory.Exists(linkedPath),
                     $"{relativePath} links to missing local target '{target}'.");
             }
+        }
+    }
+
+    [Fact]
+    public void ApprovalPreviewDocumentation_ProhibitsPollingOrActionableBrowserApproval()
+    {
+        var testAgentGuide = ReadRepositoryFile("docs/DevFlow/test-agent.md");
+        var inspectorGuide = ReadRepositoryFile("docs/DevFlow/inspector.md");
+
+        Assert.Contains("approve, narrow, or issue a usable grant", testAgentGuide, StringComparison.Ordinal);
+        Assert.Contains("Do **not** call `maui_test_author await-approval`", testAgentGuide, StringComparison.Ordinal);
+        Assert.Contains("cannot approve, narrow, or issue a grant", inspectorGuide, StringComparison.Ordinal);
+        Assert.Contains("Do not call `maui_test_author await-approval`", inspectorGuide, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TestingPackageReadme_UsesNuGetResolvableLinks()
+    {
+        const string relativePath = "src/DevFlow/Microsoft.Maui.DevFlow.Testing/README.md";
+        var text = ReadRepositoryFile(relativePath);
+
+        foreach (Match match in MarkdownLinkRegex().Matches(text))
+        {
+            if (IsInsideInlineCode(text, match.Index))
+                continue;
+
+            var target = match.Groups["target"].Value;
+            if (target.StartsWith("#", StringComparison.Ordinal))
+                continue;
+
+            Assert.True(
+                Uri.TryCreate(target, UriKind.Absolute, out var uri) &&
+                uri.Scheme == "https" &&
+                uri.Host is "github.com" or "raw.githubusercontent.com",
+                $"{relativePath} contains package-broken repository-relative link '{target}'.");
         }
     }
 

@@ -216,6 +216,7 @@ public sealed class SelectorHealthTests
                 new FlowStep
                 {
                     Seq = 1,
+                    StepId = "orders-save",
                     Action = FlowActions.Tap,
                     Args = new FlowStepArgs
                     {
@@ -265,6 +266,7 @@ public sealed class SelectorHealthTests
         Assert.Contains(analysis.Findings, finding => finding.DiagnosticId == MauiSelectorHealthDiagnosticIds.SourceAnchor);
         Assert.Contains(analysis.Findings, finding => finding.DiagnosticId == MauiSelectorHealthDiagnosticIds.MissingHardPostcondition);
         Assert.All(analysis.Findings, finding => Assert.StartsWith("DFSH", finding.DiagnosticId));
+        Assert.Contains(analysis.Findings, finding => finding.StepId == "orders-save");
     }
 
     [Fact]

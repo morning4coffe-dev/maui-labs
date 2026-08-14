@@ -25,7 +25,7 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
     {
         var proposal = Proposal("repair.md", new string('a', 64));
         var store = new WorkflowRepairProposalStore();
-        var proposed = store.Propose(proposal);
+        var proposed = store.Propose(proposal, trustedContext: TrustedContext(proposal));
         Assert.True(proposed.Ok);
         var previewed = store.Preview(proposal.ProposalId!);
         Assert.True(previewed.Ok);
@@ -79,9 +79,37 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
         var flowPath = Path.Combine(workflowRoot, "repair.md");
         File.WriteAllText(flowPath, markdown);
         var digest = MauiFlowRunReportSerializer.ComputeFlowDigest(flow);
+        File.WriteAllText(
+            Path.Combine(workflowRoot, "repair.maui-plan.json"),
+            JsonSerializer.Serialize(
+                new MauiTestPlan
+                {
+                    PlanId = "plan-repair",
+                    Revision = 1,
+                    Flow = new MauiFlowReference
+                    {
+                        Path = "repair.md",
+                        FlowId = "flow-repair",
+                        Revision = 1,
+                        Digest = digest,
+                    },
+                    Title = "Repair",
+                    Goal = "Verify repair lifecycle",
+                    Reset = new MauiTestResetRequirement { Required = false, Strategy = "host-owned" },
+                    SideEffectPolicy = MauiFlowSideEffectPolicies.None,
+                    Provenance = new MauiActorProvenance
+                    {
+                        ActorKind = "human",
+                        ActorId = "reviewer",
+                        Channel = "test",
+                        Provider = "unit-test",
+                    },
+                },
+                MauiTestingJsonContext.Default.MauiTestPlan));
         var proposal = Proposal("repair.md", digest);
         proposal.Candidate!.RiskFlags.Add("CorrectHorseBatteryStaple");
         var store = new WorkflowPlanStore(_root);
+        var baseline = store.Load("repair.md").Snapshot!;
         var proposedHistory = store.AppendRepairHistory(new WorkflowRepairHistoryAppendRequest
         {
             Proposal = proposal,
@@ -89,19 +117,42 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
             Reviewer = "reviewer",
         });
         Assert.True(proposedHistory.Ok, proposedHistory.Error);
+        var duplicateHistory = store.AppendRepairHistory(new WorkflowRepairHistoryAppendRequest
+        {
+            Proposal = proposal,
+            State = MauiFlowRepairOutcomeStates.Proposed,
+            Reviewer = "reviewer",
+        });
+        Assert.True(duplicateHistory.Ok, duplicateHistory.Error);
+        Assert.Single(File.ReadAllLines(proposedHistory.HistoryPath!));
+
+        var stalePlan = store.ApplySelectorRepair(new WorkflowRepairFlowApplyRequest
+        {
+            Proposal = proposal,
+            ExpectedFlowDigest = digest,
+            ExpectedFlowRevision = 1,
+            ExpectedPlanDigest = "sha256:" + new string('f', 64),
+            ExpectedPlanRevision = baseline.Plan!.Revision,
+            ExpectedSafetyPolicy = baseline.Plan.SideEffectPolicy,
+        });
+        Assert.False(stalePlan.Ok);
+        Assert.True(stalePlan.Stale);
 
         var applied = store.ApplySelectorRepair(new WorkflowRepairFlowApplyRequest
         {
             Proposal = proposal,
             ExpectedFlowDigest = digest,
-            ExpectedFlowRevision = null,
+            ExpectedFlowRevision = 1,
+            ExpectedPlanDigest = baseline.PlanDigest,
+            ExpectedPlanRevision = baseline.Plan!.Revision,
+            ExpectedSafetyPolicy = baseline.Plan.SideEffectPolicy,
             Reviewer = "reviewer",
             GrantDigest = "sha256:grant",
             ValidationRunIds = ["validation-run"],
         });
 
         Assert.True(applied.Ok, applied.Error);
-        Assert.Equal(1, applied.FlowRevision);
+        Assert.Equal(2, applied.FlowRevision);
         var afterApply = FlowMarkdown.Parse(File.ReadAllText(flowPath));
         Assert.True(afterApply.Ok, afterApply.Error);
         Assert.Equal("new-save", afterApply.Flow!.Steps[0].Args!.Selector!.AutomationId);
@@ -113,17 +164,21 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
             Proposal = proposal,
             ExpectedAppliedFlowDigest = applied.FlowDigest,
             ExpectedAppliedFlowRevision = applied.FlowRevision,
+            ExpectedPlanDigest = applied.PlanDigest,
+            ExpectedPlanRevision = applied.PlanRevision,
+            ExpectedSafetyPolicy = applied.SafetyPolicy,
             Reviewer = "reviewer",
             GrantDigest = "sha256:rollback",
             VerificationRunIds = ["verify-1", "verify-2", "verify-3"],
         });
 
         Assert.True(reverted.Ok, reverted.Error);
-        Assert.Equal(2, reverted.FlowRevision);
+        Assert.Equal(3, reverted.FlowRevision);
         var afterRollback = FlowMarkdown.Parse(File.ReadAllText(flowPath));
         Assert.True(afterRollback.Ok, afterRollback.Error);
         var rolledBackStep = Assert.Single(afterRollback.Flow!.Steps);
         Assert.Equal("old-save", rolledBackStep.Args!.Selector!.AutomationId);
+        Assert.Equal("stable-save-step", rolledBackStep.StepId);
         Assert.Equal(1, rolledBackStep.Seq);
         Assert.Equal(FlowActions.Tap, rolledBackStep.Action);
         Assert.Equal("CorrectHorseBatteryStaple", rolledBackStep.Value);
@@ -154,7 +209,7 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
     {
         var proposal = Proposal("repair.md", new string('a', 64));
         var store = new WorkflowRepairProposalStore();
-        Assert.True(store.Propose(proposal).Ok);
+        Assert.True(store.Propose(proposal, trustedContext: TrustedContext(proposal)).Ok);
         Assert.True(store.Preview(proposal.ProposalId!).Ok);
         var binding = Binding(store.Get(proposal.ProposalId!).Proposal!);
         var validationGrant = store.IssueGrant(new WorkflowRepairGrantIssueRequest
@@ -180,13 +235,16 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
             Applied = true,
             NewFlowRevision = 2,
             AppliedFlowDigest = new string('b', 64),
+            AppliedPlanDigest = "sha256:" + new string('d', 64),
+            AppliedPlanRevision = 2,
+            AppliedSafetyPolicy = MauiFlowSideEffectPolicies.None,
         }).Ok);
 
         var result = store.RecordVerification(proposal.ProposalId,
         [
             VerifiedRun("verify-1"),
             VerifiedRun("verify-2"),
-            new WorkflowRepairVerificationRun { RunId = "verify-3", Passed = false },
+            VerifiedRun("verify-2"),
         ]);
 
         Assert.True(result.Ok);
@@ -201,6 +259,9 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
             PatchDigest = result.Proposal.PatchDigest,
             TargetId = "agent:instance",
             Policy = "repair-policy-v1",
+            PlanDigest = result.Proposal.AppliedPlanDigest,
+            PlanRevision = result.Proposal.AppliedPlanRevision,
+            SafetyPolicy = result.Proposal.AppliedSafetyPolicy,
         };
         var rollbackGrant = store.IssueGrant(new WorkflowRepairGrantIssueRequest
         {
@@ -264,7 +325,7 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
                 MaximumGrantLifetime = TimeSpan.FromMinutes(5),
             },
             clock);
-        Assert.True(store.Propose(proposal).Ok);
+        Assert.True(store.Propose(proposal, trustedContext: TrustedContext(proposal)).Ok);
         Assert.True(store.Preview(proposal.ProposalId!).Ok);
         var binding = Binding(store.Get(proposal.ProposalId!).Proposal!);
         var validation = store.IssueGrant(new WorkflowRepairGrantIssueRequest
@@ -293,9 +354,175 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
         Assert.False(store.BeginApply(proposal.ProposalId, approval.Grant, binding).Ok);
     }
 
+    [Fact]
+    public void LatestValidationAndPlanSafetyBinding_AreAuthoritative()
+    {
+        var proposal = Proposal("repair.md", new string('a', 64));
+        var store = new WorkflowRepairProposalStore();
+        Assert.True(store.Propose(proposal, trustedContext: TrustedContext(proposal)).Ok);
+        Assert.True(store.Preview(proposal.ProposalId!).Ok);
+        var snapshot = store.Get(proposal.ProposalId!).Proposal!;
+        var binding = Binding(snapshot);
+
+        WorkflowRepairGrantIssueResult ValidationGrant() => store.IssueGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposal.ProposalId,
+            Kind = WorkflowRepairGrantKinds.Validation,
+            Reviewer = "reviewer",
+            HumanConfirmed = true,
+            Binding = binding,
+        });
+        var passedGrant = ValidationGrant();
+        Assert.True(store.RecordValidation(
+            proposal.ProposalId,
+            passedGrant.Grant,
+            new WorkflowRepairValidationRecord { Passed = true, RunIds = ["pass"] }).Ok);
+        var failedGrant = ValidationGrant();
+        Assert.True(store.RecordValidation(
+            proposal.ProposalId,
+            failedGrant.Grant,
+            new WorkflowRepairValidationRecord
+            {
+                Passed = false,
+                RunIds = ["fail"],
+                FailureCode = "checkpoint-drift",
+            }).Ok);
+
+        var applyAfterLatestFailure = store.IssueGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposal.ProposalId,
+            Kind = WorkflowRepairGrantKinds.Apply,
+            Reviewer = "reviewer",
+            HumanConfirmed = true,
+            Binding = binding,
+        });
+        Assert.False(applyAfterLatestFailure.Ok);
+        Assert.Equal("grant-state-invalid", applyAfterLatestFailure.Code);
+
+        var tamperedBinding = new WorkflowRepairGrantBinding
+        {
+            FlowPath = binding.FlowPath,
+            FlowDigest = binding.FlowDigest,
+            FlowRevision = binding.FlowRevision,
+            PatchDigest = binding.PatchDigest,
+            TargetId = binding.TargetId,
+            Policy = binding.Policy,
+            PlanDigest = "sha256:" + new string('f', 64),
+            PlanRevision = binding.PlanRevision,
+            SafetyPolicy = binding.SafetyPolicy,
+        };
+        var tampered = store.IssueGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposal.ProposalId,
+            Kind = WorkflowRepairGrantKinds.Validation,
+            Reviewer = "reviewer",
+            HumanConfirmed = true,
+            Binding = tamperedBinding,
+        });
+        Assert.False(tampered.Ok);
+        Assert.Equal("grant-binding-mismatch", tampered.Code);
+    }
+
+    [Fact]
+    public void Reject_AllowsOnlyProposedOrPreviewedStates()
+    {
+        var proposal = Proposal("repair.md", new string('a', 64));
+        var store = new WorkflowRepairProposalStore();
+        Assert.True(store.Propose(proposal, trustedContext: TrustedContext(proposal)).Ok);
+        Assert.True(store.Preview(proposal.ProposalId!).Ok);
+        var binding = Binding(store.Get(proposal.ProposalId!).Proposal!);
+        var validationGrant = store.IssueGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposal.ProposalId,
+            Kind = WorkflowRepairGrantKinds.Validation,
+            Reviewer = "reviewer",
+            HumanConfirmed = true,
+            Binding = binding,
+        });
+        Assert.True(store.RecordValidation(
+            proposal.ProposalId,
+            validationGrant.Grant,
+            new WorkflowRepairValidationRecord { Passed = true }).Ok);
+        var applyGrant = store.IssueGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposal.ProposalId,
+            Kind = WorkflowRepairGrantKinds.Apply,
+            Reviewer = "reviewer",
+            HumanConfirmed = true,
+            Binding = binding,
+        });
+        Assert.True(applyGrant.Ok);
+
+        var rejected = store.Reject(proposal.ProposalId, "reviewer", "too-late");
+
+        Assert.False(rejected.Ok);
+        Assert.Equal("proposal-not-rejectable", rejected.Code);
+        Assert.Equal(
+            MauiFlowRepairOutcomeStates.Approved,
+            store.Get(proposal.ProposalId).Proposal!.State);
+    }
+
+    [Fact]
+    public void HistoryFailure_DoesNotPublishOrAdvanceLifecycleState()
+    {
+        var proposal = Proposal("repair.md", new string('a', 64));
+        var store = new WorkflowRepairProposalStore();
+        WorkflowRepairHistoryAppendResult FailHistory(
+            WorkflowRepairProposalSnapshot _,
+            string __)
+            => WorkflowRepairHistoryAppendResult.Failure("write-failed", "disk unavailable");
+
+        var failedProposal = store.Propose(
+            proposal,
+            trustedContext: TrustedContext(proposal),
+            historyWriter: FailHistory);
+        Assert.False(failedProposal.Ok);
+        Assert.Equal("history-persistence-failed", failedProposal.Code);
+        Assert.False(store.Get(proposal.ProposalId).Ok);
+
+        Assert.True(store.Propose(proposal, trustedContext: TrustedContext(proposal)).Ok);
+        var failedPreview = store.Preview(proposal.ProposalId, FailHistory);
+        Assert.False(failedPreview.Ok);
+        Assert.Equal("history-persistence-failed", failedPreview.Code);
+        Assert.Equal(
+            MauiFlowRepairOutcomeStates.Proposed,
+            store.Get(proposal.ProposalId).Proposal!.State);
+    }
+
+    [Fact]
+    public void Propose_CraftedProposalWithoutCandidateProof_FailsClosed()
+    {
+        var cases = new (string Name, Action<JsonObject> RemoveProof)[]
+        {
+            ("candidate", node => node["candidate"] = null),
+            ("candidate uniqueness", node => node["candidate"]!.AsObject()["unique"] = false),
+            ("candidate fingerprint", node => node["candidate"]!.AsObject()["fingerprint"] = null),
+            ("uniqueness proof", node => node["uniquenessProof"] = null),
+            ("unique match count", node => node["uniquenessProof"]!.AsObject()["matchCount"] = 2),
+        };
+
+        foreach (var testCase in cases)
+        {
+            var node = JsonSerializer.SerializeToNode(
+                Proposal("repair.md", new string('a', 64)),
+                MauiTestingJsonContext.Default.MauiFlowRepairProposal)!.AsObject();
+            testCase.RemoveProof(node);
+            var proposal = node.Deserialize(MauiTestingJsonContext.Default.MauiFlowRepairProposal)!;
+
+            var result = new WorkflowRepairProposalStore().Propose(
+                proposal,
+                trustedContext: TrustedContext(proposal));
+
+            Assert.False(result.Ok, testCase.Name);
+            Assert.Equal("proposal-invalid", result.Code);
+        }
+    }
+
     private static WorkflowRepairVerificationRun VerifiedRun(string id) => new()
     {
         RunId = id,
+        BrokerRetained = true,
+        StartedAt = DateTimeOffset.UtcNow.AddMinutes(1),
         CleanReset = true,
         CheckpointMatched = true,
         FingerprintMatched = true,
@@ -313,7 +540,49 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
         PatchDigest = snapshot.PatchDigest,
         TargetId = "agent:instance",
         Policy = "repair-policy-v1",
+        PlanDigest = snapshot.TrustedContext.PlanDigest,
+        PlanRevision = snapshot.TrustedContext.PlanRevision,
+        SafetyPolicy = snapshot.TrustedContext.SafetyPolicy,
     };
+
+    private static WorkflowRepairTrustedContext TrustedContext(MauiFlowRepairProposal proposal)
+    {
+        var checkpoint = new MauiFlowCheckpoint
+        {
+            AppBuildFingerprint = "build-a",
+            AgentInstanceId = "instance-a",
+            SeedFingerprint = "seed-a",
+            BackendStateFingerprint = "backend-a",
+            Route = "//home",
+            Window = "main",
+            Modal = "none",
+            Locale = "en-US",
+            Theme = "light",
+            Orientation = "portrait",
+            DisplayProfile = "phone",
+            CollectionItemKey = "none",
+        };
+        return new WorkflowRepairTrustedContext
+        {
+            Eligibility = new MauiFlowRepairEligibilityDecision
+            {
+                Eligible = true,
+                SourceRunId = proposal.SourceRunId,
+                SourceStepId = proposal.SourceStepId,
+                CurrentCheckpoint = checkpoint,
+            },
+            ReplaySafety = new MauiFlowReplayEligibilityDecision
+            {
+                SideEffectPolicy = MauiFlowSideEffectPolicies.None,
+                RepairValidationAllowed = true,
+                RepairEligibility = true,
+            },
+            ClassifiedCheckpoint = checkpoint,
+            PlanDigest = "sha256:" + new string('c', 64),
+            PlanRevision = 1,
+            SafetyPolicy = MauiFlowSideEffectPolicies.None,
+        };
+    }
 
     private static MauiFlowRepairProposal Proposal(string path, string digest)
     {
@@ -323,7 +592,13 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
         {
             Eligibility = new MauiFlowRepairEligibilityDecision { Eligible = true, FailureCode = MauiFlowFailureClasses.LocatorNotFound },
             Flow = flow,
-            BaseFlow = new MauiFlowReference { Path = path, Digest = digest },
+            BaseFlow = new MauiFlowReference
+            {
+                Path = path,
+                FlowId = "flow-repair",
+                Digest = digest,
+                Revision = 1,
+            },
             SourceRunId = "run-local",
             SourceStepId = "1",
             SourceFailureId = "failure-1",
@@ -374,12 +649,15 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
         ExtensionData = new Dictionary<string, JsonElement>
         {
             ["customReviewerMetadata"] = JsonSerializer.SerializeToElement("preserve-me"),
+            ["flowId"] = JsonSerializer.SerializeToElement("flow-repair"),
+            ["revision"] = JsonSerializer.SerializeToElement(1),
         },
         Steps =
         [
             new FlowStep
             {
                 Seq = 1,
+                StepId = "stable-save-step",
                 Action = FlowActions.Tap,
                 Args = new FlowStepArgs { Selector = new FlowSelector { AutomationId = "old-save" } },
                 Value = "CorrectHorseBatteryStaple",

@@ -321,6 +321,57 @@ public class FlowFormatTests
         Assert.Contains(v.Errors, e => e.Contains("requires a property name"));
     }
 
+    [Fact]
+    public void Validate_NotExistsHardAssert_RequiresSelector()
+    {
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = "assert",
+                    Asserts = new() { new FlowAssert { Kind = "notExists", Verify = true } },
+                },
+            },
+        };
+
+        var validation = FlowValidator.Validate(flow);
+
+        Assert.False(validation.Ok);
+        Assert.Contains(validation.Errors, error => error.Contains("notExists assertion requires a selector"));
+    }
+
+    [Fact]
+    public void Validate_NotExistsHardAssertWithSelector_IsAccepted()
+    {
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = "assert",
+                    Asserts = new()
+                    {
+                        new FlowAssert
+                        {
+                            Kind = "notExists",
+                            Verify = true,
+                            Selector = new FlowSelector { AutomationId = "dismissed-dialog" },
+                        },
+                    },
+                },
+            },
+        };
+
+        var validation = FlowValidator.Validate(flow);
+
+        Assert.True(validation.Ok, string.Join("; ", validation.Errors));
+    }
+
     [Theory]
     [InlineData("customCheck", "unknown assert kind")]
     [InlineData("routeIs", "requires an expected route")]
@@ -385,5 +436,125 @@ public class FlowFormatTests
         var v = FlowValidator.Validate(flow);
         Assert.True(v.Ok, string.Join("; ", v.Errors));
         Assert.Contains(v.Warnings, w => w.Contains("no-op"));
+    }
+
+    [Fact]
+    public void Validate_DuplicateStepId_IsError()
+    {
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep { Seq = 1, StepId = "save-order", Action = FlowActions.Assert },
+                new FlowStep { Seq = 2, StepId = "save-order", Action = FlowActions.Assert },
+            },
+        };
+
+        var validation = FlowValidator.Validate(flow);
+
+        Assert.False(validation.Ok);
+        Assert.Contains(validation.Errors, error => error.Contains("duplicate stepId", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("1", "numeric stepId")]
+    [InlineData(" save-order", "leading or trailing whitespace")]
+    [InlineData("save/order", "contain only")]
+    [InlineData("step-0001", "sequence-shaped stepId")]
+    public void Validate_UnsafeOrCollidingStepId_IsError(string stepId, string expectedError)
+    {
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep { Seq = 1, StepId = "first-step", Action = FlowActions.Assert },
+                new FlowStep { Seq = 2, StepId = stepId, Action = FlowActions.Assert },
+            },
+        };
+
+        var validation = FlowValidator.Validate(flow);
+
+        Assert.False(validation.Ok);
+        Assert.Contains(validation.Errors, error => error.Contains(expectedError, StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Validate_DuplicateSequence_IsError()
+    {
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep { Seq = 1, StepId = "first-step", Action = FlowActions.Assert },
+                new FlowStep { Seq = 1, StepId = "second-step", Action = FlowActions.Assert },
+            },
+        };
+
+        var validation = FlowValidator.Validate(flow);
+
+        Assert.False(validation.Ok);
+        Assert.Contains(validation.Errors, error => error.Contains("duplicate seq", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData(0)]
+    [InlineData(-1)]
+    public void Validate_NonPositiveSequence_IsError(int sequence)
+    {
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep { Seq = sequence, Action = FlowActions.Assert },
+            },
+        };
+
+        var validation = FlowValidator.Validate(flow);
+
+        Assert.False(validation.Ok);
+        Assert.Contains(validation.Errors, error => error.Contains("positive integer", StringComparison.Ordinal));
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("criterion/unsafe")]
+    public void Validate_InvalidAcceptanceCriterionId_IsError(string criterionId)
+    {
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Assert,
+                    AcceptanceCriterionIds = [criterionId],
+                },
+            },
+        };
+
+        var validation = FlowValidator.Validate(flow);
+
+        Assert.False(validation.Ok);
+        Assert.Contains(
+            validation.Errors,
+            error => error.Contains("acceptanceCriterionIds", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Validate_CanonicalRecorderStepIds_AreAccepted()
+    {
+        var flow = new MauiFlow
+        {
+            Steps =
+            {
+                new FlowStep { Seq = 1, StepId = "step-0001", Action = FlowActions.Assert },
+                new FlowStep { Seq = 2, StepId = "step-0002", Action = FlowActions.Assert },
+            },
+        };
+
+        var validation = FlowValidator.Validate(flow);
+
+        Assert.True(validation.Ok, string.Join("; ", validation.Errors));
     }
 }

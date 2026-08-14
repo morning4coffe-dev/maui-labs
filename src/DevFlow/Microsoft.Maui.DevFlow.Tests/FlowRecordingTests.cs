@@ -36,6 +36,9 @@ public class FlowRecordingTests : System.IDisposable
         Assert.Equal(1, r.AppendStep("tap", Sel("a"), null, null, null, false, null));
         Assert.Equal(2, r.AppendStep("tap", Sel("b"), null, null, null, false, null));
         Assert.Equal(2, r.StepCount);
+        var steps = r.Snapshot().Steps;
+        Assert.Equal("step-0001", steps[0].StepId);
+        Assert.Equal("step-0002", steps[1].StepId);
     }
 
     [Theory]

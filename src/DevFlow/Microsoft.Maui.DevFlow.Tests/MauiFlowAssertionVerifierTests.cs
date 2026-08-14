@@ -52,6 +52,32 @@ public sealed class MauiFlowAssertionVerifierTests
     }
 
     [Fact]
+    public async Task VerifyAsync_NotExists_PassesOnlyWhenSelectorIsAbsent()
+    {
+        var absent = await MauiFlowAssertionVerifier.VerifyAsync(
+            new AssertionDriver(),
+            new FlowAssert
+            {
+                Kind = "notExists",
+                Verify = true,
+                Selector = new FlowSelector { AutomationId = "missing" },
+            });
+        var present = await MauiFlowAssertionVerifier.VerifyAsync(
+            new AssertionDriver(),
+            new FlowAssert
+            {
+                Kind = "notExists",
+                Verify = true,
+                Selector = new FlowSelector { AutomationId = "save" },
+            });
+
+        Assert.True(absent.Passed is true);
+        Assert.Equal(0, absent.MatchCount);
+        Assert.True(present.Passed is false);
+        Assert.Equal(1, present.MatchCount);
+    }
+
+    [Fact]
     public async Task VerifyAsync_PropEquals_RetriesUntilUiSettles()
     {
         var driver = new AssertionDriver();

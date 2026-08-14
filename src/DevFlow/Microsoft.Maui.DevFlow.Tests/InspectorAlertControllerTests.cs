@@ -34,10 +34,35 @@ public class InspectorAlertControllerTests
         Assert.True(detected.Ok);
         Assert.True(detected.Supported);
         Assert.Equal("Permission", detected.Alert?.Title);
+        Assert.False(string.IsNullOrWhiteSpace(detected.Revision));
         Assert.True(dismissed.Ok);
         Assert.True(dismissed.Dismissed);
         Assert.Equal("Allow", driver.DismissedLabel);
         Assert.Equal("emulator-5554", targetedSerial);
+    }
+
+    [Fact]
+    public async Task Dismiss_WhenAlertChanged_RejectsStaleChoice()
+    {
+        var original = new AlertInfo("Permission", [new AlertButton("Allow", 0, 0, 10, 10)]);
+        var changed = new AlertInfo("Delete item?", [new AlertButton("Delete", 0, 0, 10, 10)]);
+        var driver = new SequencedAlertDriver(original, changed);
+        var controller = new InspectorAlertController(
+            "localhost",
+            9223,
+            "Sample",
+            "android",
+            createDriver: (_, _, _, _, _) => driver,
+            resolveAndroidDevice: _ => Task.FromResult(AndroidDevFlowDeviceResolution.Resolved("emulator-5554")));
+
+        var detected = await controller.DetectAsync();
+        var dismissed = await controller.DismissAsync("Allow", detected.Revision);
+
+        Assert.False(dismissed.Ok);
+        Assert.False(dismissed.Dismissed);
+        Assert.Equal("Delete item?", dismissed.Alert?.Title);
+        Assert.Contains("changed", dismissed.Error, StringComparison.OrdinalIgnoreCase);
+        Assert.Null(driver.DismissedLabel);
     }
 
     [Fact]
@@ -161,6 +186,36 @@ public class InspectorAlertControllerTests
         public Task DismissAlertAsync(string? buttonLabel = null) => throw new System.ComponentModel.Win32Exception("platform tool missing");
 
         public Task<AlertInfo?> HandleAlertIfPresentAsync(string? buttonLabel = null) => throw new System.ComponentModel.Win32Exception("platform tool missing");
+
+        public void Dispose()
+        {
+        }
+    }
+
+    private sealed class SequencedAlertDriver(params AlertInfo?[] alerts) : IAlertDriver
+    {
+        private int _index;
+
+        public string? DismissedLabel { get; private set; }
+
+        public Task<AlertInfo?> DetectAlertAsync()
+        {
+            var alert = alerts[Math.Min(_index, alerts.Length - 1)];
+            _index++;
+            return Task.FromResult(alert);
+        }
+
+        public Task DismissAlertAsync(string? buttonLabel = null)
+        {
+            DismissedLabel = buttonLabel;
+            return Task.CompletedTask;
+        }
+
+        public Task<AlertInfo?> HandleAlertIfPresentAsync(string? buttonLabel = null)
+        {
+            DismissedLabel = buttonLabel;
+            return Task.FromResult(alerts.LastOrDefault());
+        }
 
         public void Dispose()
         {

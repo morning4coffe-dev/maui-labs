@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using Microsoft.Maui.DevFlow.Driver;
 using Microsoft.Maui.DevFlow.Testing;
@@ -33,6 +35,101 @@ public sealed class MauiFlowRunReportTests : IDisposable
     }
 
     [Fact]
+    public void Validate_PassedExecutionMayRemainIndependentlyUnverified()
+    {
+        var report = new MauiFlowRunReport
+        {
+            RunId = "run-unverified",
+            FlowDigest = new string('a', 64),
+            SideEffectPolicy = MauiFlowSideEffectPolicies.None,
+            StartedAt = DateTimeOffset.UnixEpoch,
+            EndedAt = DateTimeOffset.UnixEpoch,
+            Outcome = new MauiFlowRunOutcome
+            {
+                Status = MauiFlowRunOutcomes.Passed,
+                Terminal = true,
+                Verified = false,
+            },
+            Verification = new MauiFlowRunVerification { Verified = false },
+            ReplayEligibility = new MauiFlowReplayEligibilityDecision
+            {
+                SideEffectPolicy = MauiFlowSideEffectPolicies.None,
+                RunVerificationAllowed = false,
+            },
+        };
+
+        var validation = MauiFlowRunReportSerializer.Validate(report);
+
+        Assert.True(validation.IsValid, string.Join("; ", validation.Errors));
+    }
+
+    [Fact]
+    public void Validate_VerifiedStatusMustMatchPassedExecutionAndCompatibilityMirror()
+    {
+        var report = new MauiFlowRunReport
+        {
+            RunId = "run-invalid-verification",
+            FlowDigest = new string('a', 64),
+            SideEffectPolicy = MauiFlowSideEffectPolicies.None,
+            StartedAt = DateTimeOffset.UnixEpoch,
+            EndedAt = DateTimeOffset.UnixEpoch,
+            Outcome = new MauiFlowRunOutcome
+            {
+                Status = MauiFlowRunOutcomes.Failed,
+                Terminal = true,
+                Verified = false,
+            },
+            Verification = new MauiFlowRunVerification { Verified = true },
+            Failure = new MauiFlowFailure
+            {
+                Class = MauiFlowFailureClasses.AssertionFailed,
+                Code = MauiFlowFailureClasses.AssertionFailed,
+                Retryable = false,
+            },
+            ReplayEligibility = new MauiFlowReplayEligibilityDecision
+            {
+                SideEffectPolicy = MauiFlowSideEffectPolicies.None,
+                RunVerificationAllowed = true,
+            },
+        };
+
+        var validation = MauiFlowRunReportSerializer.Validate(report);
+
+        Assert.False(validation.IsValid);
+        Assert.Contains(validation.Errors, error => error.Contains("passed execution", StringComparison.Ordinal));
+        Assert.Contains(validation.Errors, error => error.Contains("must match", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void Validate_PreflightFailureWithoutFlowDigest_IsSchemaValid()
+    {
+        var report = new MauiFlowRunReport
+        {
+            RunId = "run-preflight",
+            StartedAt = DateTimeOffset.UnixEpoch,
+            EndedAt = DateTimeOffset.UnixEpoch.AddSeconds(1),
+            Outcome = new MauiFlowRunOutcome
+            {
+                Status = MauiFlowRunOutcomes.Failed,
+                Terminal = true,
+                Verified = false,
+            },
+            Failure = new MauiFlowFailure
+            {
+                Class = MauiFlowFailureClasses.FlowInvalid,
+                Code = "project-path-missing",
+                Category = "flow",
+                Phase = "validation",
+                Retryable = false,
+            },
+        };
+
+        var validation = MauiFlowRunReportSerializer.Validate(report);
+
+        Assert.True(validation.IsValid, string.Join("; ", validation.Errors));
+    }
+
+    [Fact]
     public async Task RunAsync_Mutation_RecordsOrderedActionabilityAndWorkflowReceipt()
     {
         var driver = new FakeDriver { EmitReceipt = true };
@@ -65,6 +162,21 @@ public sealed class MauiFlowRunReportTests : IDisposable
         Assert.Equal("cmd_1", step.Dispatch.CommandId);
         Assert.Equal("completed", step.Dispatch.CompletionCertainty);
         Assert.Equal("completed", step.CompletionCertainty);
+    }
+
+    [Fact]
+    public async Task RunAsync_StableStepId_PreservesIdentityAndLegacySequence()
+    {
+        var flow = TapFlow();
+        flow.Steps[0].StepId = "submit-order";
+
+        var result = await new MauiFlowRunner(
+            new FakeDriver(),
+            new MauiFlowRunnerOptions { PollTries = 1, PollGapMs = 0 })
+            .RunWithLegacyAsync(flow);
+
+        Assert.Equal("submit-order", Assert.Single(result.Report.Steps).StepId);
+        Assert.Equal(1, Assert.Single(result.LegacyReport.Results).Seq);
     }
 
     [Fact]
@@ -136,6 +248,78 @@ public sealed class MauiFlowRunReportTests : IDisposable
         Assert.Single(report.Events);
         Assert.Single(report.Steps[0].Actionability);
         Assert.Contains(report.Omissions, omission => omission.Kind is "events" or "actionability");
+    }
+
+    [Fact]
+    public void UnexpectedInfrastructureFailure_UsesFixedPublicSafeMessage()
+    {
+        Assert.Equal(
+            "The flow runner encountered an infrastructure error.",
+            MauiFlowRunner.InfrastructureErrorMessage);
+    }
+
+    [Fact]
+    public async Task RunAsync_StepObservationDelay_PausesOnlyBetweenSteps()
+    {
+        var flow = TapFlow();
+        flow.Steps.Add(new FlowStep
+        {
+            Seq = 2,
+            Action = FlowActions.Tap,
+            Target = new FlowSelector { AutomationId = "submit" },
+        });
+        var stopwatch = Stopwatch.StartNew();
+
+        var report = await new MauiFlowRunner(
+            new FakeDriver(),
+            new MauiFlowRunnerOptions
+            {
+                PollTries = 1,
+                PollGapMs = 0,
+                StepObservationDelayMs = 50,
+            }).RunAsync(flow);
+
+        Assert.Equal(MauiFlowRunOutcomes.Passed, report.Outcome!.Status);
+        Assert.True(stopwatch.ElapsedMilliseconds >= 40, $"Observed {stopwatch.ElapsedMilliseconds}ms.");
+    }
+
+    [Fact]
+    public void ApplyLimits_OversizedStepSet_RetainsBoundedTerminalSummary()
+    {
+        const int maximum = 16 * 1024;
+        var report = new MauiFlowRunReport
+        {
+            RunId = "run-size-limit",
+            DivergenceStepId = "step-399",
+            Outcome = new MauiFlowRunOutcome { Status = MauiFlowRunOutcomes.Failed, Terminal = true },
+            Steps = Enumerable.Range(1, 400)
+                .Select(index => new MauiFlowStepAttempt
+                {
+                    StepId = $"step-{index}",
+                    Sequence = index,
+                    Action = new string('a', 256),
+                    Intent = new string('i', 1024),
+                    Assertions =
+                    [
+                        new MauiFlowAssertionResult
+                        {
+                            Kind = "property",
+                            Message = new string('m', 1024),
+                        },
+                    ],
+                })
+                .ToList(),
+        };
+
+        MauiFlowRunReportSerializer.ApplyLimits(
+            report,
+            new MauiFlowRunReportLimits { MaxJsonBytes = maximum });
+        var bytes = MauiFlowRunReportSerializer.SerializeToUtf8Bytes(report);
+
+        Assert.True(bytes.Length <= maximum);
+        Assert.True(report.Truncated);
+        Assert.Single(report.Steps);
+        Assert.Equal("step-399", report.Steps[0].StepId);
     }
 
     [Fact]
@@ -257,6 +441,31 @@ public sealed class MauiFlowRunReportTests : IDisposable
     }
 
     [Fact]
+    public void LegacyAdapter_StableStepId_UsesRecordedSequenceFallback()
+    {
+        var report = new MauiFlowRunReport
+        {
+            Outcome = new MauiFlowRunOutcome { Status = MauiFlowRunOutcomes.Failed, Terminal = true },
+            DivergenceStepId = "save-order",
+            Steps =
+            [
+                new MauiFlowStepAttempt
+                {
+                    StepId = "save-order",
+                    Sequence = 4,
+                    Action = FlowActions.Tap,
+                    FailureClass = MauiFlowFailureClasses.LocatorNotFound,
+                },
+            ],
+        };
+
+        var legacy = FlowReplayReportAdapter.ToLegacy(report);
+
+        Assert.Equal(4, legacy.DivergencePoint);
+        Assert.Equal(4, Assert.Single(legacy.Results).Seq);
+    }
+
+    [Fact]
     public void LegacyAdapter_PreStepFailure_ExplainsWhyNoStepsRan()
     {
         var report = new MauiFlowRunReport
@@ -333,6 +542,59 @@ public sealed class MauiFlowRunReportTests : IDisposable
         Assert.DoesNotContain(secret, json, StringComparison.Ordinal);
         Assert.Contains("redacted", json, StringComparison.Ordinal);
         Assert.DoesNotContain("\"data\"", json, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void SerializeToUtf8Bytes_StripsExtensionsAbsolutePathsAndPersonalMessages()
+    {
+        const string email = "person@example.test";
+        const string jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123";
+        var report = new MauiFlowRunReport
+        {
+            RunId = "run-redaction",
+            FlowDigest = new string('a', 64),
+            StartedAt = DateTimeOffset.UnixEpoch,
+            EndedAt = DateTimeOffset.UnixEpoch.AddSeconds(1),
+            ReportPath = @"C:\Users\person\flow-run.json",
+            Outcome = new MauiFlowRunOutcome
+            {
+                Status = MauiFlowRunOutcomes.Failed,
+                Terminal = true,
+                Summary = $"Contact {email}; token={jwt}; path=C:\\Users\\person\\secret.txt",
+                ExtensionData = new Dictionary<string, JsonElement>
+                {
+                    ["prompt"] = JsonSerializer.SerializeToElement("untrusted"),
+                },
+            },
+            Failure = new MauiFlowFailure
+            {
+                Class = MauiFlowFailureClasses.AssertionFailed,
+                Code = MauiFlowFailureClasses.AssertionFailed,
+                Retryable = false,
+            },
+            Artifacts =
+            [
+                new MauiFlowArtifactReference
+                {
+                    Kind = "raw-log",
+                    Path = @"C:\Users\person\raw.log",
+                },
+            ],
+            ExtensionData = new Dictionary<string, JsonElement>
+            {
+                ["x-report"] = JsonSerializer.SerializeToElement(true),
+            },
+        };
+
+        var json = Encoding.UTF8.GetString(MauiFlowRunReportSerializer.SerializeToUtf8Bytes(report));
+
+        Assert.DoesNotContain(email, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(jwt, json, StringComparison.Ordinal);
+        Assert.DoesNotContain(@"C:\", json, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("\"prompt\"", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"x-report\"", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"reportPath\"", json, StringComparison.Ordinal);
+        Assert.DoesNotContain("\"path\"", json, StringComparison.Ordinal);
     }
 
     [Fact]

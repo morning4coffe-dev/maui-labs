@@ -207,6 +207,9 @@ public class ProtocolSpecTests
             "maui-flow-v2.json",
             "maui-test-plan-v1.json",
             "maui-flow-run-report-v1.json",
+            "maui-test-execution-manifest-v1.json",
+            "maui-flow-triage-v1.json",
+            "maui-local-reproduction-v1.json",
             "maui-preview-qualification-v1.json",
             "broker-workflow-run-v1.json",
             "maui-artifact-trust-v1.json",
@@ -239,6 +242,43 @@ public class ProtocolSpecTests
                     $"{schemaName} {reference.JsonPath}: '{reference.Value}' targets a missing JSON pointer.");
             }
         }
+    }
+
+    [Fact]
+    public void FlowSchemas_EncodePreflightAndPositiveSequenceContracts()
+    {
+        var flowSchema = LoadDocument(Path.Combine(SpecRoot.Value, "schemas", "maui-flow-v2.json"));
+        var step = flowSchema["$defs"]!["FlowStep"]!;
+        Assert.Equal(1, step["properties"]!["seq"]!["minimum"]!.GetValue<int>());
+        Assert.Contains("seq", step["required"]!.AsArray().Select(static value => value!.GetValue<string>()));
+        Assert.NotNull(step["properties"]!["acceptanceCriterionIds"]);
+        var assertions = flowSchema["$defs"]!["FlowAssert"]!;
+        var hardKinds = assertions["allOf"]![0]!["then"]!["properties"]!["kind"]!["enum"]!.AsArray();
+        Assert.Contains(hardKinds, value => value?.GetValue<string>() == "notExists");
+        var notExistsRule = assertions["allOf"]!.AsArray().Single(rule =>
+            rule?["if"]?["properties"]?["kind"]?["const"]?.GetValue<string>() == "notExists");
+        Assert.Equal(
+            "#/$defs/FlowSelector",
+            notExistsRule!["then"]!["properties"]!["selector"]!["$ref"]!.GetValue<string>());
+        Assert.Contains(
+            notExistsRule["then"]!["required"]!.AsArray(),
+            value => value?.GetValue<string>() == "selector");
+
+        var reportSchema = LoadDocument(
+            Path.Combine(SpecRoot.Value, "schemas", "maui-flow-run-report-v1.json"));
+        var required = reportSchema["required"]!
+            .AsArray()
+            .Select(static value => value!.GetValue<string>())
+            .ToArray();
+        Assert.DoesNotContain("flowDigest", required);
+
+        var manifestSchema = LoadDocument(
+            Path.Combine(SpecRoot.Value, "schemas", "maui-test-execution-manifest-v1.json"));
+        Assert.Equal(
+            1,
+            manifestSchema["$defs"]!["LifecycleStage"]!["properties"]!["sequence"]!["minimum"]!
+                .GetValue<int>());
+        Assert.NotNull(manifestSchema["$defs"]!["DeviceFacts"]!["properties"]!["apiLevel"]);
     }
 
     [Fact]

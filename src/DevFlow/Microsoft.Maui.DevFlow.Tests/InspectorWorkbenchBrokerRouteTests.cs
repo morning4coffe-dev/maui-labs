@@ -18,7 +18,10 @@ public sealed class InspectorWorkbenchBrokerRouteTests
     {
         var brokerPort = FreePort();
         var agentPort = FreePort();
-        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var broker = new BrokerServer(
+            brokerPort,
+            TimeSpan.FromMinutes(1),
+            previewFlags: PreviewTestFeatures.AllEnabled());
         using var cancellation = new CancellationTokenSource();
         var brokerTask = broker.RunAsync(cancellation.Token);
         await WaitForBrokerAsync(brokerPort);
@@ -68,10 +71,9 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             var embedToken = (string)typeof(BrokerServer)
                 .GetField("_embedToken", BindingFlags.Instance | BindingFlags.NonPublic)!
                 .GetValue(broker)!;
-            var hostApprovalToken = (string)typeof(BrokerServer)
-                .GetField("_hostApprovalToken", BindingFlags.Instance | BindingFlags.NonPublic)!
-                .GetValue(broker)!;
-            Assert.NotEqual(embedToken, hostApprovalToken);
+            Assert.Null(typeof(BrokerServer).GetField(
+                "_hostApprovalToken",
+                BindingFlags.Instance | BindingFlags.NonPublic));
 
             async Task<HttpResponseMessage> ProbeGrantIssueAsync(string token)
             {
@@ -84,9 +86,7 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             }
 
             using (var embedProbe = await ProbeGrantIssueAsync(embedToken))
-                Assert.Equal(HttpStatusCode.Forbidden, embedProbe.StatusCode);
-            using (var hostProbe = await ProbeGrantIssueAsync(hostApprovalToken))
-                Assert.NotEqual(HttpStatusCode.Forbidden, hostProbe.StatusCode);
+                Assert.Equal(HttpStatusCode.NotImplemented, embedProbe.StatusCode);
 
             using var agents = JsonDocument.Parse(await http.GetStringAsync($"http://127.0.0.1:{brokerPort}/api/agents"));
             var agentId = agents.RootElement[0].GetProperty("id").GetString()!;
@@ -147,7 +147,10 @@ public sealed class InspectorWorkbenchBrokerRouteTests
     {
         var brokerPort = FreePort();
         var agentPort = FreePort();
-        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var broker = new BrokerServer(
+            brokerPort,
+            TimeSpan.FromMinutes(1),
+            previewFlags: PreviewTestFeatures.AllEnabled());
         using var cancellation = new CancellationTokenSource();
         var brokerTask = broker.RunAsync(cancellation.Token);
         await WaitForBrokerAsync(brokerPort);
@@ -284,6 +287,47 @@ public sealed class InspectorWorkbenchBrokerRouteTests
                 Assert.NotNull(terminal);
                 Assert.True(terminal!.RootElement.GetProperty("run").GetProperty("terminal").GetBoolean());
                 Assert.Equal("failed", terminal.RootElement.GetProperty("run").GetProperty("state").GetString());
+
+                using var forgedTrust = await PostJsonAsync(
+                    http,
+                    $"{inspectorBase}/api/workbench/repair/classify",
+                    new
+                    {
+                        runId,
+                        runCapabilityToken = runToken,
+                        isCurrentLocalRun = true,
+                        artifactTrust = MauiArtifactTrustStates.LocallyReproduced,
+                    });
+                Assert.Equal(HttpStatusCode.BadRequest, forgedTrust.StatusCode);
+                Assert.Contains(
+                    "not trusted",
+                    await forgedTrust.Content.ReadAsStringAsync(),
+                    StringComparison.OrdinalIgnoreCase);
+
+                using var wrongRunCapability = await PostJsonAsync(
+                    http,
+                    $"{inspectorBase}/api/workbench/repair/classify",
+                    new
+                    {
+                        runId,
+                        runCapabilityToken = "forged-run-capability",
+                    });
+                Assert.Equal(HttpStatusCode.Forbidden, wrongRunCapability.StatusCode);
+
+                using var brokerClassified = await PostJsonAsync(
+                    http,
+                    $"{inspectorBase}/api/workbench/repair/classify",
+                    new
+                    {
+                        runId,
+                        runCapabilityToken = runToken,
+                    });
+                Assert.Equal(HttpStatusCode.OK, brokerClassified.StatusCode);
+                using var brokerClassification = JsonDocument.Parse(
+                    await brokerClassified.Content.ReadAsStringAsync());
+                Assert.Equal(
+                    "broker-current-local-run",
+                    brokerClassification.RootElement.GetProperty("evidenceSource").GetString());
             }
 
             using var handoffResponse = await PostJsonAsync(
@@ -319,6 +363,8 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             {
                 SessionId = handoffSessionId,
                 ReadCapabilityId = handoffReadCapability,
+                Envelope = failureEnvelope.Deserialize(
+                    MauiTestingJsonContext.Default.MauiTestAgentRequestEnvelope),
                 RunId = runId,
             });
             Assert.True(binding.Ok, binding.Error?.Message);
@@ -358,9 +404,33 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             var importedText = await imported.Content.ReadAsStringAsync();
             Assert.DoesNotContain(hostile, importedText, StringComparison.Ordinal);
             using var importedBody = JsonDocument.Parse(importedText);
+            var artifactId = importedBody.RootElement
+                .GetProperty("status")
+                .GetProperty("identity")
+                .GetProperty("id")
+                .GetString()!;
+            var artifactCapability = importedBody.RootElement
+                .GetProperty("capabilityToken")
+                .GetString()!;
             Assert.Equal(
                 "imported-artifact",
                 importedBody.RootElement.GetProperty("status").GetProperty("identity").GetProperty("namespace").GetString());
+
+            using var untrustedImportedRepair = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/repair/classify",
+                new
+                {
+                    runId,
+                    runCapabilityToken = runToken,
+                    artifactId,
+                    artifactCapabilityToken = artifactCapability,
+                });
+            Assert.Equal(HttpStatusCode.Conflict, untrustedImportedRepair.StatusCode);
+            Assert.Contains(
+                "not locally reproduced",
+                await untrustedImportedRepair.Content.ReadAsStringAsync(),
+                StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
@@ -375,7 +445,10 @@ public sealed class InspectorWorkbenchBrokerRouteTests
     {
         var brokerPort = FreePort();
         var agentPort = FreePort();
-        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var broker = new BrokerServer(
+            brokerPort,
+            TimeSpan.FromMinutes(1),
+            previewFlags: PreviewTestFeatures.AllEnabled());
         using var cancellation = new CancellationTokenSource();
         var brokerTask = broker.RunAsync(cancellation.Token);
         await WaitForBrokerAsync(brokerPort);
@@ -434,6 +507,8 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             Assert.Equal("landscape", observed.GetProperty("orientation").GetString());
             Assert.Equal("tablet", observed.GetProperty("displayProfile").GetString());
 
+            var preflightFlow = AssertOnlyFlow();
+            var preflightFlowDigest = MauiFlowRunReportSerializer.ComputeFlowDigest(preflightFlow);
             using var preflight = await PostJsonAsync(
                 http,
                 $"{inspectorBase}/api/workbench/run/preflight",
@@ -444,10 +519,22 @@ public sealed class InspectorWorkbenchBrokerRouteTests
                         agentId,
                         agentInstanceId = instanceId,
                         idempotencyKey = "workbench-preflight-checkpoint-key",
-                        markdown = FlowMarkdown.Serialize(AssertOnlyFlow()),
+                        markdown = FlowMarkdown.Serialize(preflightFlow),
                         plan = new
                         {
                             schema = 1,
+                            planId = "plan-workbench-checkpoint",
+                            revision = 1,
+                            flow = new { path = "checkpoint.md", revision = 1, digest = preflightFlowDigest },
+                            goal = "Validate observed checkpoint and target requirements",
+                            reset = new { required = false, strategy = "host-owned" },
+                            provenance = new
+                            {
+                                actorKind = "human",
+                                actorId = "test",
+                                channel = "unit-test",
+                                provider = "xunit",
+                            },
                             sideEffectPolicy = "none",
                             requiredPlatforms = new[] { "android" },
                             checkpoint = new
@@ -496,7 +583,10 @@ public sealed class InspectorWorkbenchBrokerRouteTests
     {
         var brokerPort = FreePort();
         var agentPort = FreePort();
-        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var broker = new BrokerServer(
+            brokerPort,
+            TimeSpan.FromMinutes(1),
+            previewFlags: PreviewTestFeatures.AllEnabled());
         using var cancellation = new CancellationTokenSource();
         var brokerTask = broker.RunAsync(cancellation.Token);
         await WaitForBrokerAsync(brokerPort);
@@ -536,6 +626,8 @@ public sealed class InspectorWorkbenchBrokerRouteTests
                 .GetValue(inspector)!;
             http.DefaultRequestHeaders.Add("X-DevFlow-Inspector-Token", inspectorToken);
 
+            var preflightFlow = AssertOnlyFlow();
+            var preflightFlowDigest = MauiFlowRunReportSerializer.ComputeFlowDigest(preflightFlow);
             using var preflight = await PostJsonAsync(
                 http,
                 $"{inspectorBase}/api/workbench/run/preflight",
@@ -546,10 +638,22 @@ public sealed class InspectorWorkbenchBrokerRouteTests
                         agentId,
                         agentInstanceId = instanceId,
                         idempotencyKey = "workbench-preflight-ledger-key",
-                        markdown = FlowMarkdown.Serialize(AssertOnlyFlow()),
+                        markdown = FlowMarkdown.Serialize(preflightFlow),
                         plan = new
                         {
                             schema = 1,
+                            planId = "plan-workbench-ledger",
+                            revision = 1,
+                            flow = new { path = "ledger.md", revision = 1, digest = preflightFlowDigest },
+                            goal = "Validate workflow command ledger capability",
+                            reset = new { required = false, strategy = "host-owned" },
+                            provenance = new
+                            {
+                                actorKind = "human",
+                                actorId = "test",
+                                channel = "unit-test",
+                                provider = "xunit",
+                            },
                             sideEffectPolicy = "none",
                             checkpoint = new
                             {
@@ -586,7 +690,10 @@ public sealed class InspectorWorkbenchBrokerRouteTests
     {
         var brokerPort = FreePort();
         var agentPort = FreePort();
-        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        using var broker = new BrokerServer(
+            brokerPort,
+            TimeSpan.FromMinutes(1),
+            previewFlags: PreviewTestFeatures.AllEnabled());
         using var cancellation = new CancellationTokenSource();
         var brokerTask = broker.RunAsync(cancellation.Token);
         await WaitForBrokerAsync(brokerPort);
@@ -697,7 +804,14 @@ public sealed class InspectorWorkbenchBrokerRouteTests
     {
         var brokerPort = FreePort();
         var agentPort = FreePort();
-        using var broker = new BrokerServer(brokerPort, TimeSpan.FromMinutes(1));
+        var previewFlags = PreviewTestFeatures.AllEnabled();
+        var hostApprovalToken = Guid.NewGuid().ToString("N");
+        using var broker = new BrokerServer(
+            brokerPort,
+            TimeSpan.FromMinutes(1),
+            previewFlags,
+            trustedHostApprovalVerifier: supplied =>
+                string.Equals(supplied, hostApprovalToken, StringComparison.Ordinal));
         using var cancellation = new CancellationTokenSource();
         var brokerTask = broker.RunAsync(cancellation.Token);
         await WaitForBrokerAsync(brokerPort);
@@ -728,7 +842,11 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             var registration = agents.RootElement[0];
             var agentId = registration.GetProperty("id").GetString()!;
             var instanceId = registration.GetProperty("instanceId").GetString()!;
-            var target = new { agentId, agentInstanceId = instanceId };
+            var target = new MauiTestAgentTarget
+            {
+                AgentId = agentId,
+                AgentInstanceId = instanceId,
+            };
             var provenance = new
             {
                 actorKind = "agent",
@@ -759,6 +877,9 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             Assert.Equal(HttpStatusCode.OK, beginResponse.StatusCode);
             using var begin = JsonDocument.Parse(await beginResponse.Content.ReadAsStringAsync());
             var snapshot = begin.RootElement.GetProperty("snapshot");
+            target.AppBuildFingerprint = snapshot.GetProperty("target")
+                .GetProperty("appBuildFingerprint")
+                .GetString();
             Assert.True(
                 !snapshot.GetProperty("target").TryGetProperty("seedFingerprint", out var echoedTargetSeed) ||
                 echoedTargetSeed.ValueKind == JsonValueKind.Null);
@@ -843,17 +964,128 @@ public sealed class InspectorWorkbenchBrokerRouteTests
                     },
                     grantDurationSeconds = 60,
                 });
-            Assert.Equal(HttpStatusCode.OK, approveResponse.StatusCode);
-            using var approved = JsonDocument.Parse(await approveResponse.Content.ReadAsStringAsync());
+            Assert.Equal(HttpStatusCode.Forbidden, approveResponse.StatusCode);
+
+            var approvedScope = new
+            {
+                allowedActions = new[] { MauiTestAgentActions.Tap },
+                allowedSelectors = new[] { "automationId:AddButton" },
+                allowedSideEffectClasses = new[] { "ui" },
+                maxActionCount = 1,
+                maxValueBytes = 0,
+            };
+            using var untrustedConfirmation = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/approval-confirmations/issue",
+                new
+                {
+                    action = "agent-request-approve",
+                    subjectId = approvalRequestId,
+                    approvedScope,
+                    grantDurationSeconds = 60,
+                });
+            Assert.Equal(HttpStatusCode.Forbidden, untrustedConfirmation.StatusCode);
+
+            using var confirmationResponse = await PostTrustedJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/approval-confirmations/issue",
+                hostApprovalToken,
+                new
+                {
+                    action = "agent-request-approve",
+                    subjectId = approvalRequestId,
+                    approvedScope,
+                    grantDurationSeconds = 60,
+                });
+            Assert.Equal(HttpStatusCode.Created, confirmationResponse.StatusCode);
+            using var confirmation = JsonDocument.Parse(await confirmationResponse.Content.ReadAsStringAsync());
+            var mismatchedConfirmationCapability = confirmation.RootElement
+                .GetProperty("confirmationCapability")
+                .GetString()!;
+
+            using var mismatchedApproval = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests/{Uri.EscapeDataString(approvalRequestId)}/approve",
+                new
+                {
+                    confirmationCapability = mismatchedConfirmationCapability,
+                    approvedScope = new
+                    {
+                        allowedActions = new[] { MauiTestAgentActions.Tap },
+                        allowedSelectors = new[] { "automationId:AddButton" },
+                        allowedSideEffectClasses = new[] { "ui" },
+                        maxActionCount = 1,
+                        maxValueBytes = 1,
+                    },
+                    grantDurationSeconds = 60,
+                });
+            Assert.Equal(HttpStatusCode.Forbidden, mismatchedApproval.StatusCode);
+
+            using var exactConfirmationResponse = await PostTrustedJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/approval-confirmations/issue",
+                hostApprovalToken,
+                new
+                {
+                    action = "agent-request-approve",
+                    subjectId = approvalRequestId,
+                    approvedScope,
+                    grantDurationSeconds = 60,
+                });
+            Assert.Equal(HttpStatusCode.Created, exactConfirmationResponse.StatusCode);
+            using var exactConfirmation = JsonDocument.Parse(
+                await exactConfirmationResponse.Content.ReadAsStringAsync());
+            var confirmationCapability = exactConfirmation.RootElement
+                .GetProperty("confirmationCapability")
+                .GetString()!;
+
+            using var confirmedApproveResponse = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests/{Uri.EscapeDataString(approvalRequestId)}/approve",
+                new
+                {
+                    humanConfirmed = true,
+                    confirmationCapability,
+                    approvedScope,
+                    grantDurationSeconds = 60,
+                });
+            Assert.Equal(HttpStatusCode.OK, confirmedApproveResponse.StatusCode);
+            using var approved = JsonDocument.Parse(await confirmedApproveResponse.Content.ReadAsStringAsync());
             Assert.True(approved.RootElement.GetProperty("ok").GetBoolean());
             Assert.True(
                 !approved.RootElement.GetProperty("request").TryGetProperty("grantId", out var responseGrant) ||
                 responseGrant.ValueKind == JsonValueKind.Null);
 
+            using var reusedConfirmation = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests/{Uri.EscapeDataString(approvalRequestId)}/approve",
+                new
+                {
+                    confirmationCapability,
+                    approvedScope,
+                    grantDurationSeconds = 60,
+                });
+            Assert.Equal(HttpStatusCode.Forbidden, reusedConfirmation.StatusCode);
+
             using var statusResponse = await PostJsonAsync(
                 http,
                 $"http://127.0.0.1:{brokerPort}/api/test-agent/sessions/status",
-                new { sessionId, readCapabilityId });
+                new
+                {
+                    sessionId,
+                    readCapabilityId,
+                    envelope = new
+                    {
+                        requestId = "status-approved-request",
+                        idempotencyKey = "status-approved-request",
+                        target,
+                        correlation,
+                        provenance,
+                        intent = "Read the approved request.",
+                        readCapabilityId,
+                        policyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+                    },
+                });
             using var status = JsonDocument.Parse(await statusResponse.Content.ReadAsStringAsync());
             var delivered = Assert.Single(status.RootElement
                 .GetProperty("snapshot")
@@ -862,6 +1094,124 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             Assert.Equal(MauiTestAgentApprovalStates.Approved, delivered.GetProperty("state").GetString());
             Assert.False(string.IsNullOrWhiteSpace(delivered.GetProperty("grantId").GetString()));
             Assert.Single(delivered.GetProperty("approvedScope").GetProperty("allowedActions").EnumerateArray());
+
+            using var pendingAfterKillResponse = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/test-agent/approvals/request",
+                new
+                {
+                    envelope = new
+                    {
+                        schema = 1,
+                        requestId = "request-approval-after-kill",
+                        idempotencyKey = "request-approval-after-kill",
+                        target,
+                        correlation,
+                        provenance,
+                        intent = "Tap AddButton after review",
+                        readCapabilityId,
+                        deadlineMs = 30_000,
+                        policyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+                    },
+                    kind = MauiTestAgentApprovalKinds.DraftChange,
+                    scope = new
+                    {
+                        allowedActions = new[] { MauiTestAgentActions.Tap },
+                        allowedSelectors = new[] { "automationId:AddButton" },
+                        allowedSideEffectClasses = new[] { "ui" },
+                        maxActionCount = 1,
+                        maxValueBytes = 0,
+                    },
+                });
+            Assert.Equal(HttpStatusCode.OK, pendingAfterKillResponse.StatusCode);
+            using var pendingAfterKill = JsonDocument.Parse(
+                await pendingAfterKillResponse.Content.ReadAsStringAsync());
+            var pendingAfterKillId = pendingAfterKill.RootElement
+                .GetProperty("request")
+                .GetProperty("approvalRequestId")
+                .GetString()!;
+
+            previewFlags.KillSwitches.Add("agent-authoring");
+
+            using var disabledBegin = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/test-agent/sessions/begin",
+                new { });
+            Assert.Equal(HttpStatusCode.NotFound, disabledBegin.StatusCode);
+            Assert.Contains(
+                "agent-authoring",
+                await disabledBegin.Content.ReadAsStringAsync(),
+                StringComparison.OrdinalIgnoreCase);
+
+            using var disabledGrant = await PostTrustedJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/test-agent/grants/issue",
+                hostApprovalToken,
+                new { });
+            Assert.Equal(HttpStatusCode.NotFound, disabledGrant.StatusCode);
+
+            using var safeStatus = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/test-agent/sessions/status",
+                new
+                {
+                    sessionId,
+                    readCapabilityId,
+                    envelope = new
+                    {
+                        requestId = "status-after-kill-switch",
+                        idempotencyKey = "status-after-kill-switch",
+                        target,
+                        correlation,
+                        provenance,
+                        intent = "Read the retained request after the kill switch.",
+                        readCapabilityId,
+                        policyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+                    },
+                });
+            Assert.Equal(HttpStatusCode.OK, safeStatus.StatusCode);
+
+            using var killedInbox = JsonDocument.Parse(
+                await http.GetStringAsync($"{inspectorBase}/api/workbench/agent-requests"));
+            Assert.Contains(
+                killedInbox.RootElement.GetProperty("requests").EnumerateArray(),
+                request => string.Equals(
+                    request.GetProperty("approvalRequestId").GetString(),
+                    pendingAfterKillId,
+                    StringComparison.Ordinal) &&
+                    string.Equals(
+                        request.GetProperty("state").GetString(),
+                        MauiTestAgentApprovalStates.Pending,
+                        StringComparison.Ordinal));
+
+            using var disabledApproval = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests/{Uri.EscapeDataString(pendingAfterKillId)}/approve",
+                new { humanConfirmed = true });
+            Assert.Equal(HttpStatusCode.NotFound, disabledApproval.StatusCode);
+
+            using var disabledConfirmation = await PostTrustedJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/approval-confirmations/issue",
+                hostApprovalToken,
+                new
+                {
+                    action = "agent-request-approve",
+                    subjectId = pendingAfterKillId,
+                    approvedScope,
+                    grantDurationSeconds = 60,
+                });
+            Assert.Equal(HttpStatusCode.NotFound, disabledConfirmation.StatusCode);
+
+            using var safeReject = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests/{Uri.EscapeDataString(pendingAfterKillId)}/reject",
+                new
+                {
+                    humanConfirmed = true,
+                    reasonCode = "feature-killed",
+                });
+            Assert.Equal(HttpStatusCode.OK, safeReject.StatusCode);
         }
         finally
         {
@@ -927,6 +1277,18 @@ public sealed class InspectorWorkbenchBrokerRouteTests
 
     private static async Task<HttpResponseMessage> PostJsonAsync(HttpClient client, string url, object value)
         => await client.PostAsync(url, new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json"));
+
+    private static async Task<HttpResponseMessage> PostTrustedJsonAsync(
+        HttpClient client,
+        string url,
+        string hostApprovalToken,
+        object value)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, url);
+        request.Headers.TryAddWithoutValidation("X-DevFlow-Host-Approval-Token", hostApprovalToken);
+        request.Content = new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json");
+        return await client.SendAsync(request);
+    }
 
     private static async Task<InspectorServer> GetInspectorAsync(BrokerServer broker, string agentId)
     {

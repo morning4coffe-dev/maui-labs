@@ -18,6 +18,8 @@ public sealed class FakeAdbRunner : AdbRunner
 	readonly HashSet<int> _reversePorts;
 	readonly IReadOnlyDictionary<string, HashSet<int>>? _forwardPortsBySerial;
 	readonly IReadOnlySet<string>? _forwardListFailures;
+	readonly IReadOnlyList<AdbPortRule>? _forwardRules;
+	readonly IReadOnlyList<AdbPortRule>? _reverseRules;
 
 	public List<string> Commands { get; } = [];
 
@@ -41,13 +43,17 @@ public sealed class FakeAdbRunner : AdbRunner
 		HashSet<int>? forwardPorts = null,
 		HashSet<int>? reversePorts = null,
 		IReadOnlyDictionary<string, HashSet<int>>? forwardPortsBySerial = null,
-		IReadOnlySet<string>? forwardListFailures = null)
+		IReadOnlySet<string>? forwardListFailures = null,
+		IReadOnlyList<AdbPortRule>? forwardRules = null,
+		IReadOnlyList<AdbPortRule>? reverseRules = null)
 		: base("adb")
 	{
 		_forwardPorts = forwardPorts ?? [];
 		_reversePorts = reversePorts ?? [];
 		_forwardPortsBySerial = forwardPortsBySerial;
 		_forwardListFailures = forwardListFailures;
+		_forwardRules = forwardRules;
+		_reverseRules = reverseRules;
 	}
 
 	public override Task<IReadOnlyList<AdbPortRule>> ListForwardPortsAsync(string serial, CancellationToken cancellationToken = default)
@@ -55,6 +61,8 @@ public sealed class FakeAdbRunner : AdbRunner
 		Commands.Add($"-s {serial} forward --list");
 		if (_forwardListFailures?.Contains(serial) == true)
 			throw new InvalidOperationException($"Could not inspect {serial}");
+		if (_forwardRules is not null)
+			return Task.FromResult(_forwardRules);
 		var ports = _forwardPortsBySerial is not null && _forwardPortsBySerial.TryGetValue(serial, out var serialPorts)
 			? serialPorts
 			: _forwardPorts;
@@ -64,6 +72,8 @@ public sealed class FakeAdbRunner : AdbRunner
 	public override Task<IReadOnlyList<AdbPortRule>> ListReversePortsAsync(string serial, CancellationToken cancellationToken = default)
 	{
 		Commands.Add($"-s {serial} reverse --list");
+		if (_reverseRules is not null)
+			return Task.FromResult(_reverseRules);
 		return Task.FromResult(ToRules(_reversePorts));
 	}
 

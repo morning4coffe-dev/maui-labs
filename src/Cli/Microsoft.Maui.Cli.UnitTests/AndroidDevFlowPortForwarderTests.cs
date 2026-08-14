@@ -1,6 +1,7 @@
 using Microsoft.Maui.Cli.DevFlow.Android;
 using Microsoft.Maui.Cli.Models;
 using Microsoft.Maui.Cli.UnitTests.Fakes;
+using Xamarin.Android.Tools;
 using Xunit;
 
 namespace Microsoft.Maui.Cli.UnitTests;
@@ -167,6 +168,41 @@ public class AndroidDevFlowPortForwarderTests
 		Assert.True(report.AgentForwards.Single(f => f.Port == 9223).PresentAfter);
 		Assert.Contains("-s emulator-5554 reverse tcp:19223 tcp:19223", runner.Commands);
 		Assert.Contains("-s emulator-5554 forward tcp:9223 tcp:9223", runner.Commands);
+	}
+
+	[Fact]
+	public async Task EnsureAsync_WithForeignMappings_RefusesReplacement()
+	{
+		var provider = CreateProvider(Device("emulator-5554"));
+		var runner = new FakeAdbRunner(
+			forwardRules:
+			[
+				new AdbPortRule(
+					new AdbPortSpec(AdbProtocol.Tcp, 8123),
+					new AdbPortSpec(AdbProtocol.Tcp, 9223)),
+			],
+			reverseRules:
+			[
+				new AdbPortRule(
+					new AdbPortSpec(AdbProtocol.Tcp, 19224),
+					new AdbPortSpec(AdbProtocol.Tcp, 19223)),
+			]);
+		var forwarder = new AndroidDevFlowPortForwarder(provider, "/android-sdk/platform-tools/adb", runner);
+
+		var report = await forwarder.EnsureAsync(new AndroidDevFlowForwardingRequest
+		{
+			AgentPorts = [9223],
+			EnsureBrokerReverse = true,
+			Repair = true,
+		});
+
+		Assert.Equal(AndroidDevFlowForwardingStatus.Error, report.Status);
+		Assert.Contains("Refusing to replace existing adb reverse", report.Message);
+		Assert.Contains("Refusing to replace existing adb forward", report.Message);
+		Assert.DoesNotContain(runner.Commands, command =>
+			command == "-s emulator-5554 reverse tcp:19223 tcp:19223");
+		Assert.DoesNotContain(runner.Commands, command =>
+			command == "-s emulator-5554 forward tcp:9223 tcp:9223");
 	}
 
 	[Fact]

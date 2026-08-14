@@ -12,7 +12,11 @@ public sealed class MockAgentServer : IAsyncDisposable
 {
     private readonly List<RecordedRequest> _recordedRequests = [];
     private readonly object _lock = new();
+    private readonly string _agentStatus;
     private WebApplication? _app;
+
+    public MockAgentServer(string? agentStatus = null)
+        => _agentStatus = agentStatus ?? MockAgentResponses.AgentStatus;
 
     public int Port { get; private set; }
 
@@ -86,9 +90,9 @@ public sealed class MockAgentServer : IAsyncDisposable
             _recordedRequests.Clear();
     }
 
-    private static void RegisterAgentEndpoints(WebApplication app)
+    private void RegisterAgentEndpoints(WebApplication app)
     {
-        app.MapGet("/api/v1/agent/status", () => Results.Content(MockAgentResponses.AgentStatus, "application/json"));
+        app.MapGet("/api/v1/agent/status", () => Results.Content(_agentStatus, "application/json"));
         app.MapGet("/api/v1/agent/capabilities", () => Results.Content(MockAgentResponses.AgentCapabilities, "application/json"));
     }
 

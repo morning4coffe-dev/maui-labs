@@ -172,6 +172,46 @@ public class CommandConstructionTests
 	}
 
 	[Fact]
+	public void FlowReproduceAndTriageCommands_ExposeBoundedHandoffOptions()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var flow = Assert.Single(devflowCommand.Subcommands, command => command.Name == "flow");
+		var run = Assert.Single(flow.Subcommands, command => command.Name == "run");
+		var reproduce = Assert.Single(flow.Subcommands, command => command.Name == "reproduce");
+		var triage = Assert.Single(flow.Subcommands, command => command.Name == "triage");
+
+		foreach (var optionName in new[]
+		{
+			"--plan",
+			"--project",
+			"--framework",
+			"--configuration",
+			"--output",
+			"--cleanup",
+			"--agent-wait-seconds",
+			"--evidence-on-failure",
+		})
+		{
+			Assert.Contains(run.Options, option => option.Name == optionName);
+			Assert.Contains(reproduce.Options, option => option.Name == optionName);
+		}
+
+		Assert.Contains(reproduce.Options, option => option.Name == "--import");
+		Assert.Contains(reproduce.Options, option => option.Name == "--kind");
+		Assert.Empty(reproduce.Parse(
+			"scenario.md --import failure.json --project App.csproj --output artifacts/reproduction").Errors);
+
+		Assert.Contains(triage.Options, option => option.Name == "--manifest");
+		Assert.Contains(triage.Options, option => option.Name == "--report");
+		Assert.Contains(triage.Options, option => option.Name == "--format");
+		Assert.Empty(triage.Parse(
+			"--manifest execution-manifest.json --report flow-run.json --format markdown").Errors);
+		Assert.NotEmpty(triage.Parse(
+			"--manifest execution-manifest.json --report flow-run.json --format html").Errors);
+	}
+
+	[Fact]
 	public void DevFlowCommand_UpdateSkillIsHiddenCompatibilityAliasForSkillsUpdate()
 	{
 		var jsonOption = new Option<bool>("--json");

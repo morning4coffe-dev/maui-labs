@@ -17,8 +17,9 @@ public class TestAgentSessionServiceTests
     [Fact]
     public void ToolInventory_TestAgentProfileHasOnlyRestrictedTools()
     {
+        var enabled = new MauiPreviewFeatureFlags { AgentAuthoringEnabled = true };
         var full = McpServerHost.GetToolInventory(McpServerProfile.Full);
-        var restricted = McpServerHost.GetToolInventory(McpServerProfile.TestAgent);
+        var restricted = McpServerHost.GetToolInventory(McpServerProfile.TestAgent, enabled);
 
         Assert.Contains("maui_secure_storage_set", full);
         Assert.Contains("maui_cdp_evaluate", full);
@@ -34,6 +35,47 @@ public class TestAgentSessionServiceTests
         Assert.DoesNotContain("maui_invoke_action", restricted);
         Assert.DoesNotContain("maui_set_property", restricted);
         Assert.DoesNotContain("maui_evidence_capture", restricted);
+    }
+
+    [Fact]
+    public async Task ToolInventory_DisabledAgentAuthoring_OmitsAndRefusesTestAgentProfile()
+    {
+        var disabled = MauiPreviewFeatureFlags.CreateDefault();
+
+        Assert.False(McpServerHost.IsProfileEnabled(McpServerProfile.TestAgent, disabled));
+        Assert.Empty(McpServerHost.GetToolInventory(McpServerProfile.TestAgent, disabled));
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+            () => McpServerHost.RunAsync(McpServerProfile.TestAgent, disabled));
+        Assert.Contains("agent-authoring", error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ProfileParsing_BlankOrUnsafeRestrictedProfilesFailClosed()
+    {
+        Assert.False(McpServerHost.TryParseProfile(null, out _));
+        Assert.False(McpServerHost.TryParseProfile("   ", out _));
+        Assert.False(McpServerHost.IsProfileEnabled(
+            McpServerProfile.TestAgent,
+            new MauiPreviewFeatureFlags
+            {
+                AgentAuthoringEnabled = true,
+                AutoApplyRepair = true,
+            }));
+    }
+
+    [Fact]
+    public void PreviewKillSwitches_AreCaseInsensitiveBeforeAllowListing()
+    {
+        var flags = MauiPreviewFeatureFlagConfiguration.FromEnvironment(name => name switch
+        {
+            "DEVFLOW_PREVIEW_AGENT_AUTHORING" => "true",
+            "DEVFLOW_PREVIEW_KILL_SWITCHES" => "AGENT-AUTHORING",
+            _ => null,
+        });
+
+        Assert.Contains("agent-authoring", flags.KillSwitches);
+        Assert.False(flags.IsEnabled("agent-authoring"));
+        Assert.False(McpServerHost.IsProfileEnabled(McpServerProfile.TestAgent, flags));
     }
 
     [Fact]
@@ -162,14 +204,31 @@ public class TestAgentSessionServiceTests
         Assert.True(oneShot.ManualOneShotAuthorization);
         Assert.Equal("build-a", oneShot.Preconditions?.Expected?.AppBuildFingerprint);
         Assert.Equal("build-a", oneShot.Preconditions?.Observed?.AppBuildFingerprint);
-        Assert.True(MauiFlowReplaySafetyEvaluator.Evaluate(new MauiFlowRunRequest
+        var admission = MauiFlowReplaySafetyEvaluator.Evaluate(new MauiFlowRunRequest
         {
             Plan = new MauiTestPlan
             {
+                PlanId = "one-shot-plan",
+                Revision = 1,
+                Flow = new MauiFlowReference
+                {
+                    Path = "flow.md",
+                    Digest = new string('a', 64),
+                },
+                Goal = "Run one explicitly authorized replay.",
                 SideEffectPolicy = MauiFlowSideEffectPolicies.NonReplayable,
+                Reset = new MauiTestResetRequirement(),
+                Provenance = new MauiActorProvenance
+                {
+                    ActorKind = "human",
+                    Channel = "unit-test",
+                },
             },
             Context = oneShot,
-        }).OrdinaryReplayAllowed);
+        });
+        Assert.True(
+            admission.OrdinaryReplayAllowed,
+            string.Join("; ", admission.Reasons.Select(static reason => reason.Code)));
         Assert.Null(resettable.ManualOneShotAuthorization);
     }
 
@@ -331,6 +390,45 @@ public class TestAgentSessionServiceTests
     }
 
     [Fact]
+    public void FailureDiagnostic_NonReplayableAdmissionNeverRecommendsReplayOrRepair()
+    {
+        using var document = JsonDocument.Parse(
+            """
+            {
+              "run": {
+                "state": "failed",
+                "admission": {
+                  "sideEffectPolicy": "non-replayable",
+                  "ordinaryReplayAllowed": true,
+                  "repairEligibility": false
+                },
+                "report": {
+                  "outcome": { "status": "failed" },
+                  "failure": {
+                    "class": "locator-not-found",
+                    "phase": "resolution",
+                    "stepId": "step-0001"
+                  },
+                  "steps": [{
+                    "stepId": "step-0001",
+                    "sequence": 1,
+                    "action": "tap",
+                    "targetResolution": { "status": "not-found", "matchCount": 0 },
+                    "expectedCheckpoint": { "route": "//native" },
+                    "observedCheckpoint": { "route": "//native" }
+                  }]
+                }
+              }
+            }
+            """);
+
+        var diagnostic = TestAgentFailureTool.ReadDiagnostic(document.RootElement);
+
+        Assert.False(diagnostic.SelectorRepair.Eligible);
+        Assert.Contains("does not allow another replay", diagnostic.NextSafeAction, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void AuthorRequest_AcceptsSelectorObjectsInApprovalScope()
     {
         const string json =
@@ -442,6 +540,46 @@ public class TestAgentSessionServiceTests
     }
 
     [Fact]
+    public async Task TestAgentRunTool_TransientBindFailureRetriesBindingWithoutRetryingRunStart()
+    {
+        var bindAttempts = 0;
+        var completionRecorded = false;
+        var response = await TestAgentRunTool.BindStartedRunAsync(
+            "request-run",
+            "run_accepted",
+            "capability_accepted",
+            () =>
+            {
+                bindAttempts++;
+                return Task.FromResult(bindAttempts == 1
+                    ? new TestAgentBrokerResponse<MauiTestAgentRunBindingResult>(
+                        503,
+                        new MauiTestAgentRunBindingResult
+                        {
+                            Error = TestAgentToolSupport.Error(
+                                MauiTestAgentErrorCodes.TargetUnavailable,
+                                MauiTestAgentErrorCategories.Transport,
+                                "The broker could not persist the run binding yet.",
+                                retryable: true),
+                        },
+                        null)
+                    : new TestAgentBrokerResponse<MauiTestAgentRunBindingResult>(
+                        200,
+                        new MauiTestAgentRunBindingResult { Ok = true, RunId = "run_accepted" },
+                        null));
+            },
+            () =>
+            {
+                completionRecorded = true;
+                return Task.CompletedTask;
+            });
+
+        Assert.Equal(2, bindAttempts);
+        Assert.False(completionRecorded);
+        Assert.Null(response);
+    }
+
+    [Fact]
     public async Task TestAgentActionTool_BindFailureAfterStartedRunReturnsTheSameManualRecoveryShape()
     {
         var completionRecorded = false;
@@ -489,6 +627,46 @@ public class TestAgentSessionServiceTests
 
         Assert.False(result.Ok);
         Assert.Equal(MauiTestAgentErrorCodes.InvalidRequest, result.Error?.Code);
+    }
+
+    [Fact]
+    public void Begin_IdenticalIdempotentRetryRecoversTheSameReadCapability()
+    {
+        var service = new TestAgentSessionService();
+        var request = new MauiTestAgentSessionBeginRequest
+        {
+            Envelope = Envelope(Target(), "recoverable-begin"),
+            TargetState = State(),
+        };
+
+        var first = service.Begin(request);
+        var retry = service.Begin(request);
+
+        Assert.True(first.Ok, first.Error?.Message);
+        Assert.True(retry.Ok, retry.Error?.Message);
+        Assert.Equal(first.Snapshot!.SessionId, retry.Snapshot!.SessionId);
+        Assert.Equal(first.Snapshot.ReadCapabilityId, retry.Snapshot.ReadCapabilityId);
+        Assert.False(string.IsNullOrWhiteSpace(retry.Snapshot.ReadCapabilityId));
+    }
+
+    [Fact]
+    public void ReadCapability_CannotBeReplayedAgainstAnotherTargetOrWithoutEnvelope()
+    {
+        var fixture = BeginFixture();
+        var wrongTarget = fixture.ReadAccess("wrong-target");
+        wrongTarget.Envelope!.Target!.AgentInstanceId = "other-instance";
+
+        var substituted = fixture.Service.Status(wrongTarget);
+        var missingEnvelope = fixture.Service.Status(new MauiTestAgentSessionAccessRequest
+        {
+            SessionId = fixture.SessionId,
+            ReadCapabilityId = fixture.ReadCapability,
+        });
+
+        Assert.False(substituted.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.TargetStale, substituted.Error?.Code);
+        Assert.False(missingEnvelope.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.InvalidRequest, missingEnvelope.Error?.Code);
     }
 
     [Fact]
@@ -673,6 +851,7 @@ public class TestAgentSessionServiceTests
         {
             SessionId = fixture.SessionId,
             ReadCapabilityId = fixture.ReadCapability,
+            Envelope = fixture.Envelope("bind-first", null),
             RunId = firstRunId,
             RunCapabilityToken = firstToken,
         }).Ok);
@@ -680,6 +859,7 @@ public class TestAgentSessionServiceTests
         {
             SessionId = fixture.SessionId,
             ReadCapabilityId = fixture.ReadCapability,
+            Envelope = fixture.Envelope("bind-second", null),
             RunId = secondRunId,
             RunCapabilityToken = secondToken,
         }).Ok);
@@ -688,6 +868,7 @@ public class TestAgentSessionServiceTests
         {
             SessionId = fixture.SessionId,
             ReadCapabilityId = fixture.ReadCapability,
+            Envelope = fixture.Envelope("validate-substituted", null),
             RunId = firstRunId,
             RunCapabilityToken = secondToken,
         });
@@ -698,6 +879,7 @@ public class TestAgentSessionServiceTests
         {
             SessionId = fixture.SessionId,
             ReadCapabilityId = fixture.ReadCapability,
+            Envelope = fixture.Envelope("validate-exact", null),
             RunId = firstRunId,
             RunCapabilityToken = firstToken,
         });
@@ -854,11 +1036,7 @@ public class TestAgentSessionServiceTests
     public void ReadCapability_AllowsStatusButCannotAuthorizeMutation()
     {
         var fixture = BeginFixture();
-        var status = fixture.Service.Status(new MauiTestAgentSessionAccessRequest
-        {
-            SessionId = fixture.SessionId,
-            ReadCapabilityId = fixture.ReadCapability,
-        });
+        var status = fixture.Service.Status(fixture.ReadAccess("status-read-capability"));
         Assert.True(status.Ok);
 
         var noGrant = fixture.Authorize(
@@ -874,12 +1052,13 @@ public class TestAgentSessionServiceTests
     public void DraftActionsAssertionsAndCommit_RequireSeparateHumanGrants()
     {
         var fixture = BeginFixture();
-        var actionGrant = fixture.IssueGrant(Scope(MauiTestAgentActions.Tap));
+        var actionGrant = fixture.IssueGrant(Scope(MauiTestAgentActions.DraftAppend));
         var actionAuthorization = fixture.Authorize(
             "draft-tap",
             actionGrant.GrantId!,
-            MauiTestAgentActions.Tap,
-            selector: new FlowSelector { AutomationId = "save" });
+            MauiTestAgentActions.DraftAppend,
+            selector: new FlowSelector { AutomationId = "save" },
+            sideEffectClass: "authoring");
         Assert.True(actionAuthorization.Ok);
 
         var appended = fixture.Service.AppendAction(
@@ -957,12 +1136,13 @@ public class TestAgentSessionServiceTests
     public void AuthorizedDraftAppend_CannotSubstituteActionSelectorOrValue()
     {
         var fixture = BeginFixture();
-        var grant = fixture.IssueGrant(Scope(MauiTestAgentActions.Tap));
+        var grant = fixture.IssueGrant(Scope(MauiTestAgentActions.DraftAppend));
         var authorization = fixture.Authorize(
             "approved-tap",
             grant.GrantId!,
-            MauiTestAgentActions.Tap,
-            selector: new FlowSelector { AutomationId = "save" });
+            MauiTestAgentActions.DraftAppend,
+            selector: new FlowSelector { AutomationId = "save" },
+            sideEffectClass: "authoring");
 
         var substituted = fixture.Service.AppendAction(
             fixture.SessionId,
@@ -986,12 +1166,13 @@ public class TestAgentSessionServiceTests
     public void AuthorizedDraftAppend_SameAuthorizationCannotMutateTwiceBeforeCompletion()
     {
         var fixture = BeginFixture();
-        var grant = fixture.IssueGrant(Scope(MauiTestAgentActions.Tap));
+        var grant = fixture.IssueGrant(Scope(MauiTestAgentActions.DraftAppend));
         var authorization = fixture.Authorize(
             "single-authorization",
             grant.GrantId!,
-            MauiTestAgentActions.Tap,
-            selector: new FlowSelector { AutomationId = "save" });
+            MauiTestAgentActions.DraftAppend,
+            selector: new FlowSelector { AutomationId = "save" },
+            sideEffectClass: "authoring");
         var request = new MauiTestAgentActionRequest
         {
             Envelope = fixture.Envelope("single-authorization", grant.GrantId!),
@@ -1014,11 +1195,7 @@ public class TestAgentSessionServiceTests
         Assert.True(first.Ok, first.Error?.Message);
         Assert.False(replay.Ok);
         Assert.Equal(MauiTestAgentErrorCodes.MutationGrantRequired, replay.Error?.Code);
-        Assert.Single(fixture.Service.Status(new MauiTestAgentSessionAccessRequest
-        {
-            SessionId = fixture.SessionId,
-            ReadCapabilityId = fixture.ReadCapability,
-        }).Snapshot!.Flow!.Steps);
+        Assert.Single(fixture.Service.Status(fixture.ReadAccess("status-after-append")).Snapshot!.Flow!.Steps);
         Assert.True(fixture.Service.CompleteMutation(new MauiTestAgentMutationCompletion
         {
             AuthorizationId = authorization.AuthorizationId,
@@ -1054,16 +1231,196 @@ public class TestAgentSessionServiceTests
         Assert.False(rollback.Ok);
         Assert.Equal(MauiTestAgentErrorCodes.PatchApplyForbidden, rollback.Error?.Code);
 
-        var audit = fixture.Service.Audit(new MauiTestAgentSessionAccessRequest
-        {
-            SessionId = fixture.SessionId,
-            ReadCapabilityId = fixture.ReadCapability,
-        });
+        var audit = fixture.Service.Audit(fixture.ReadAccess("audit-patch"));
         Assert.True(audit.Ok);
         Assert.True(audit.Entries.Count <= 3);
         var serialized = System.Text.Json.JsonSerializer.Serialize(audit, MauiTestingJsonContext.Default.MauiTestAgentAuditResult);
         Assert.DoesNotContain("do not expose this prompt", serialized, StringComparison.Ordinal);
         Assert.DoesNotContain("super-secret", serialized, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void PatchProposal_IsRunBoundSelectorOnlyIdempotentAndProvenanceChecked()
+    {
+        var service = new TestAgentSessionService(new TestAgentSessionServiceOptions
+        {
+            MaxPatchesPerSession = 1,
+        });
+        var flow = new MauiFlow
+        {
+            Name = "repairable",
+            Steps =
+            [
+                new FlowStep
+                {
+                    Seq = 1,
+                    StepId = "save-step",
+                    Action = FlowActions.Tap,
+                    Target = new FlowSelector { AutomationId = "old-save" },
+                    Args = new FlowStepArgs { Selector = new FlowSelector { AutomationId = "old-save" } },
+                },
+            ],
+        };
+        var begun = service.Begin(new MauiTestAgentSessionBeginRequest
+        {
+            Envelope = Envelope(Target(), "patch-session"),
+            TargetState = State(),
+            Flow = flow,
+            Plan = new MauiTestPlan
+            {
+                PlanId = "plan-patch",
+                Revision = 1,
+                Flow = new MauiFlowReference { Path = "repairable.md", Revision = 1 },
+                Title = "Repairable",
+                Goal = "Review one selector-only patch",
+                Reset = new MauiTestResetRequirement { Required = false, Strategy = "host-owned" },
+                SideEffectPolicy = MauiFlowSideEffectPolicies.None,
+            },
+        });
+        Assert.True(begun.Ok, begun.Error?.Message);
+        var snapshot = begun.Snapshot!;
+        MauiTestAgentRequestEnvelope ReadEnvelope(string key) => new()
+        {
+            RequestId = "req-" + key,
+            IdempotencyKey = "idem-" + key,
+            Target = snapshot.Target,
+            Correlation = new MauiTestAgentCorrelation
+            {
+                AuthoringSessionId = snapshot.SessionId,
+                PlanId = snapshot.Plan!.PlanId,
+                PlanRevision = snapshot.Plan.Revision,
+                PlanDigest = snapshot.PlanDigest,
+                FlowId = snapshot.Plan.Flow!.FlowId,
+                FlowRevision = snapshot.FlowRevision,
+                FlowDigest = snapshot.FlowDigest,
+            },
+            Provenance = new MauiActorProvenance
+            {
+                ActorKind = "agent",
+                ActorId = "agent-author",
+                Channel = "mcp",
+                Provider = "host-owned",
+            },
+            Intent = "Review an inert selector repair.",
+            ReadCapabilityId = snapshot.ReadCapabilityId,
+            PolicyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+        };
+        Assert.True(service.BindRun(new MauiTestAgentRunBindingRequest
+        {
+            SessionId = snapshot.SessionId,
+            ReadCapabilityId = snapshot.ReadCapabilityId,
+            Envelope = ReadEnvelope("bind-patch-run"),
+            RunId = "failed-run",
+            RunCapabilityToken = "run-capability",
+        }).Ok);
+
+        var built = MauiFlowRepairPatchBuilder.Build(
+            snapshot.Flow!,
+            "save-step",
+            new FlowSelector { AutomationId = "new-save" });
+        Assert.True(built.Ok, built.Error);
+        var proposal = new MauiFlowRepairProposal
+        {
+            SourceRunId = "failed-run",
+            SourceStepId = "save-step",
+            SourceFailureId = "failure-1",
+            SourceFailureCode = MauiFlowFailureClasses.LocatorNotFound,
+            PreDispatch = true,
+            BaseFlow = new MauiFlowReference
+            {
+                Path = snapshot.Plan!.Flow!.Path,
+                FlowId = snapshot.Plan.Flow.FlowId,
+                Revision = snapshot.FlowRevision,
+                Digest = snapshot.FlowDigest,
+            },
+            OldSelector = new FlowSelector { AutomationId = "old-save" },
+            ProposedSelector = new FlowSelector { AutomationId = "new-save" },
+            Patch = built.Patch,
+            PatchDigest = built.PatchDigest,
+            Diff = built.Diff,
+            UnchangedAssertionsProof = built.Proof,
+            Provenance = ReadEnvelope("proposal-provenance").Provenance,
+        };
+        var request = new MauiTestAgentPatchRequest
+        {
+            Envelope = ReadEnvelope("patch-proposal"),
+            Operation = "proposal",
+            Proposal = proposal,
+        };
+
+        var first = service.Patch(request);
+        var retry = service.Patch(request);
+        Assert.True(first.Ok, first.Error?.Message);
+        Assert.True(retry.Ok, retry.Error?.Message);
+        Assert.Equal(first.Record!.ProposalId, retry.Record!.ProposalId);
+        Assert.Null(first.Record.Proposal!.Candidate);
+        Assert.Null(first.Record.Proposal.ExtensionData);
+
+        var secondBuild = MauiFlowRepairPatchBuilder.Build(
+            snapshot.Flow!,
+            "save-step",
+            new FlowSelector { AutomationId = "another-save" });
+        var secondNode = JsonSerializer.SerializeToNode(
+            proposal,
+            MauiTestingJsonContext.Default.MauiFlowRepairProposal)!.AsObject();
+        secondNode["proposedSelector"] = JsonSerializer.SerializeToNode(
+            new FlowSelector { AutomationId = "another-save" },
+            MauiFlowJsonContext.Default.FlowSelector);
+        secondNode["patch"] = JsonSerializer.SerializeToNode(
+            secondBuild.Patch,
+            MauiTestingJsonContext.Default.MauiFlowPatch);
+        secondNode["patchDigest"] = secondBuild.PatchDigest;
+        secondNode["diff"] = JsonSerializer.SerializeToNode(
+            secondBuild.Diff,
+            MauiTestingJsonContext.Default.MauiRepairSelectorDiff);
+        secondNode["unchangedAssertionsProof"] = JsonSerializer.SerializeToNode(
+            secondBuild.Proof,
+            MauiTestingJsonContext.Default.MauiRepairAssertionProof);
+        var capped = service.Patch(new MauiTestAgentPatchRequest
+        {
+            Envelope = ReadEnvelope("patch-cap"),
+            Operation = "proposal",
+            Proposal = secondNode.Deserialize(MauiTestingJsonContext.Default.MauiFlowRepairProposal),
+        });
+        Assert.False(capped.Ok);
+        Assert.Equal(MauiTestAgentErrorCategories.Capability, capped.Error?.Category);
+
+        var hostileNode = JsonSerializer.SerializeToNode(
+            proposal,
+            MauiTestingJsonContext.Default.MauiFlowRepairProposal)!.AsObject();
+        hostileNode["provenance"] = JsonSerializer.SerializeToNode(new MauiActorProvenance
+        {
+            ActorKind = "agent",
+            ActorId = "other-agent",
+            Channel = "mcp",
+            Provider = "host-owned",
+        });
+        var rejected = service.Patch(new MauiTestAgentPatchRequest
+        {
+            Envelope = ReadEnvelope("patch-hostile-provenance"),
+            Operation = "proposal",
+            Proposal = hostileNode.Deserialize(MauiTestingJsonContext.Default.MauiFlowRepairProposal),
+        });
+        Assert.False(rejected.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.InvalidRequest, rejected.Error?.Code);
+    }
+
+    [Fact]
+    public void PatchRequest_EnforcesBoundedSerializedSizeBeforeRetention()
+    {
+        var fixture = BeginFixture(options: new TestAgentSessionServiceOptions
+        {
+            MaxPatchRequestBytes = 128,
+        });
+        var result = fixture.Service.Patch(new MauiTestAgentPatchRequest
+        {
+            Envelope = fixture.Envelope("oversized-patch", null),
+            Operation = "proposal",
+            Reason = new string('x', 512),
+        });
+
+        Assert.False(result.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.ValueLimitExceeded, result.Error?.Code);
     }
 
     [Fact]
@@ -1081,11 +1438,7 @@ public class TestAgentSessionServiceTests
             });
         clock.Advance(TimeSpan.FromSeconds(2));
 
-        var status = fixture.Service.Status(new MauiTestAgentSessionAccessRequest
-        {
-            SessionId = fixture.SessionId,
-            ReadCapabilityId = fixture.ReadCapability,
-        });
+        var status = fixture.Service.Status(fixture.ReadAccess("status-expired"));
         Assert.False(status.Ok);
         Assert.Equal(MauiTestAgentErrorCodes.SessionExpired, status.Error?.Code);
     }
@@ -1164,11 +1517,7 @@ public class TestAgentSessionServiceTests
         Assert.Equal(MauiTestAgentErrorCodes.MutationGrantReused, third.Error?.Code);
 
         clock.Advance(TimeSpan.FromSeconds(2));
-        var audit = fixture.Service.Audit(new MauiTestAgentSessionAccessRequest
-        {
-            SessionId = fixture.SessionId,
-            ReadCapabilityId = fixture.ReadCapability,
-        });
+        var audit = fixture.Service.Audit(fixture.ReadAccess("audit-expired"));
         Assert.True(audit.Ok);
         Assert.Empty(audit.Entries);
     }
@@ -1205,11 +1554,7 @@ public class TestAgentSessionServiceTests
         Assert.Equal(MauiTestAgentApprovalStates.Approved, approved.Request!.State);
         Assert.Null(approved.Request.GrantId);
 
-        var status = fixture.Service.Status(new MauiTestAgentSessionAccessRequest
-        {
-            SessionId = fixture.SessionId,
-            ReadCapabilityId = fixture.ReadCapability,
-        });
+        var status = fixture.Service.Status(fixture.ReadAccess("status-approved"));
         var delivered = Assert.Single(status.Snapshot!.ApprovalRequests);
         Assert.Equal(MauiTestAgentApprovalStates.Approved, delivered.State);
         Assert.False(string.IsNullOrWhiteSpace(delivered.GrantId));
@@ -1222,11 +1567,7 @@ public class TestAgentSessionServiceTests
             sideEffectClass: "authoring");
         Assert.True(authorization.Ok, authorization.Error?.Message);
 
-        var consumedStatus = fixture.Service.Status(new MauiTestAgentSessionAccessRequest
-        {
-            SessionId = fixture.SessionId,
-            ReadCapabilityId = fixture.ReadCapability,
-        });
+        var consumedStatus = fixture.Service.Status(fixture.ReadAccess("status-consumed"));
         var consumed = Assert.Single(consumedStatus.Snapshot!.ApprovalRequests);
         Assert.Equal(MauiTestAgentApprovalStates.Consumed, consumed.State);
         Assert.Null(consumed.GrantId);
@@ -1286,9 +1627,9 @@ public class TestAgentSessionServiceTests
             Kind = MauiTestAgentApprovalKinds.DraftChange,
             Scope = new MauiTestAgentMutationScope
             {
-                AllowedActions = [MauiTestAgentActions.Tap],
+                AllowedActions = [MauiTestAgentActions.DraftAppend],
                 AllowedSelectors = ["automationId:save"],
-                AllowedSideEffectClasses = ["ui"],
+                AllowedSideEffectClasses = ["authoring"],
                 MaxActionCount = 2,
                 MaxValueBytes = 0,
             },
@@ -1300,11 +1641,8 @@ public class TestAgentSessionServiceTests
             fixture.HumanDecision(approved: true),
             grantExpiresAt: null);
         Assert.True(approved.Ok, approved.Error?.Message);
-        var grantId = Assert.Single(fixture.Service.Status(new MauiTestAgentSessionAccessRequest
-        {
-            SessionId = fixture.SessionId,
-            ReadCapabilityId = fixture.ReadCapability,
-        }).Snapshot!.ApprovalRequests).GrantId!;
+        var grantId = Assert.Single(
+            fixture.Service.Status(fixture.ReadAccess("status-grant")).Snapshot!.ApprovalRequests).GrantId!;
         var originalCorrelation = fixture.Correlation();
 
         MauiTestAgentSessionResult Append(string key)
@@ -1323,7 +1661,7 @@ public class TestAgentSessionServiceTests
             var authorization = fixture.Service.AuthorizeMutation(new MauiTestAgentMutationAuthorizationRequest
             {
                 Envelope = envelope,
-                Action = MauiTestAgentActions.Tap,
+                Action = MauiTestAgentActions.DraftAppend,
                 Selector = new FlowSelector { AutomationId = "save" },
                 SideEffectClass = "authoring",
                 CurrentTargetState = fixture.State,
@@ -1397,6 +1735,37 @@ public class TestAgentSessionServiceTests
         Assert.Equal(
             MauiTestAgentApprovalStates.Stale,
             fixture.Service.GetApprovalRequest(submitted.Request.ApprovalRequestId, includeGrant: true).Request!.State);
+    }
+
+    [Fact]
+    public void ApprovalRequest_DefaultExpiryClampsToRemainingSessionLifetime()
+    {
+        var startedAt = DateTimeOffset.Parse("2026-01-01T00:00:00Z");
+        var clock = new MutableTimeProvider(startedAt);
+        var fixture = BeginFixture(
+            clock,
+            new TestAgentSessionServiceOptions
+            {
+                SessionLifetime = TimeSpan.FromMinutes(10),
+                ApprovalRequestLifetime = TimeSpan.FromMinutes(5),
+            });
+        clock.Advance(TimeSpan.FromMinutes(8));
+
+        var submitted = fixture.Service.SubmitApprovalRequest(new MauiTestAgentApprovalSubmitRequest
+        {
+            Envelope = fixture.Envelope("request-clamped-expiry", grantId: null),
+            Kind = MauiTestAgentApprovalKinds.Commit,
+            Scope = new MauiTestAgentMutationScope
+            {
+                AllowedActions = [MauiTestAgentActions.AuthorCommit],
+                AllowedSideEffectClasses = ["authoring"],
+                MaxActionCount = 1,
+                MaxValueBytes = 0,
+            },
+        });
+
+        Assert.True(submitted.Ok);
+        Assert.Equal(startedAt.AddMinutes(10), submitted.Request!.ExpiresAt);
     }
 
     [Fact]
@@ -1587,7 +1956,8 @@ public class TestAgentSessionServiceTests
     {
         AllowedActions = [action],
         AllowedSelectors = ["automationId:save"],
-        AllowedSideEffectClasses = ["ui"],
+        AllowedSideEffectClasses =
+            [action == MauiTestAgentActions.DraftAppend ? "authoring" : "ui"],
         MaxActionCount = 1,
         MaxValueBytes = 64,
     };
@@ -1608,11 +1978,33 @@ public class TestAgentSessionServiceTests
         public string ReadCapability => Snapshot.ReadCapabilityId!;
 
         private MauiTestAgentAuthoringSnapshot CurrentSnapshot()
-            => Service.Status(new MauiTestAgentSessionAccessRequest
+            => Service.Status(ReadAccess("current-snapshot")).Snapshot!;
+
+        public MauiTestAgentSessionAccessRequest ReadAccess(string key) => new()
+        {
+            SessionId = SessionId,
+            ReadCapabilityId = ReadCapability,
+            Envelope = new MauiTestAgentRequestEnvelope
             {
-                SessionId = SessionId,
+                RequestId = "req-" + key,
+                IdempotencyKey = "idem-" + key,
+                Target = Target(),
+                Correlation = new MauiTestAgentCorrelation
+                {
+                    AuthoringSessionId = SessionId,
+                },
+                Provenance = new MauiActorProvenance
+                {
+                    ActorKind = "agent",
+                    ActorId = "agent-author",
+                    Channel = "mcp",
+                    Provider = "host-owned",
+                },
+                Intent = "Read the canonical authoring session.",
                 ReadCapabilityId = ReadCapability,
-            }).Snapshot!;
+                PolicyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+            },
+        };
 
         public MauiTestAgentCorrelation Correlation()
         {

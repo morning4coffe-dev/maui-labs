@@ -31,6 +31,9 @@ internal static class ApprovalCommands
         "This command is operator convenience, not an authorization boundary: an agent running as " +
         "the same OS user can read the same broker token and call the same routes.";
 
+    private const int MaxDisplayLength = 240;
+    private static readonly Rune ReplacementRune = new('\uFFFD');
+
     public static Command Create(
         Option<bool> jsonOption,
         Option<bool> noJsonOption,
@@ -62,7 +65,7 @@ internal static class ApprovalCommands
         };
         var yesOption = new Option<bool>("--yes", "-y")
         {
-            Description = "Skip the interactive confirmation prompt. This is an ergonomic shortcut only; it removes no protection, because the prompt was never one.",
+            Description = "Skip the interactive confirmation prompt. This is an ergonomic shortcut only; it removes no protection, because the prompt was never one. The prompt is also skipped whenever output is JSON, including when stdout is redirected.",
         };
 
         var command = new Command(
@@ -96,7 +99,7 @@ internal static class ApprovalCommands
             var assumeYes = ctx.GetValue(yesOption);
             var requestedAgentPort = ctx.GetValue(agentPortOption);
 
-            if (!list && grantSeconds is < MinimumGrantSeconds or > MaximumGrantSeconds)
+            if (!list && !reject && grantSeconds is < MinimumGrantSeconds or > MaximumGrantSeconds)
             {
                 output.WriteError(
                     $"--grant-seconds must be between {MinimumGrantSeconds} and {MaximumGrantSeconds}.",
@@ -125,12 +128,17 @@ internal static class ApprovalCommands
                 return;
             }
 
-            if (!TryFindRequest(listing.Value, approvalRequestId!, out var record))
+            if (!TryFindRequest(listing.Value, approvalRequestId!, out var record, out var malformed))
             {
+                var (notFoundCode, notFoundMessage) = malformed
+                    ? ("ApprovalRequestMalformed",
+                       $"Approval request '{Display(approvalRequestId)}' carries no readable scope, so there is nothing safe to approve. Ask the agent to request approval again.")
+                    : ("ApprovalRequestNotFound",
+                       $"No approval request '{Display(approvalRequestId)}' is queued against the selected app. Run 'maui devflow approve --list' to see current request IDs; requests expire and disappear.");
                 output.WriteError(
-                    $"No approval request '{approvalRequestId}' is queued against the selected app. Run 'maui devflow approve --list' to see current request IDs; requests expire and disappear.",
+                    notFoundMessage,
                     json,
-                    "ApprovalRequestNotFound",
+                    notFoundCode,
                     suggestions: ["maui devflow approve --list"]);
                 onError();
                 return;
@@ -139,7 +147,7 @@ internal static class ApprovalCommands
             if (!string.Equals(record.State, "pending", StringComparison.Ordinal))
             {
                 output.WriteError(
-                    $"Approval request '{approvalRequestId}' is already '{record.State}'. Only a pending request can be decided.",
+                    $"Approval request '{Display(approvalRequestId)}' is already '{Display(record.State)}'. Only a pending request can be decided.",
                     json,
                     "ApprovalRequestNotPending");
                 onError();
@@ -179,7 +187,7 @@ internal static class ApprovalCommands
         // after every human-facing prompt has already returned.
         var issueBody = new StringBuilder()
             .Append("{\"action\":\"").Append(ApproveConfirmationAction).Append("\",\"subjectId\":")
-            .Append(JsonSerializer.Serialize(record.ApprovalRequestId))
+            .Append(JsonString(record.ApprovalRequestId))
             .Append(",\"approvedScope\":").Append(record.RequestedScopeJson)
             .Append(",\"grantDurationSeconds\":").Append(grantSeconds)
             .Append('}')
@@ -209,7 +217,7 @@ internal static class ApprovalCommands
         // never re-normalized here.
         var approveBody = new StringBuilder()
             .Append("{\"humanConfirmed\":true,\"confirmationCapability\":")
-            .Append(JsonSerializer.Serialize(capability.GetString()))
+            .Append(JsonString(capability.GetString()))
             .Append(",\"approvedScope\":").Append(record.RequestedScopeJson)
             .Append(",\"grantDurationSeconds\":").Append(grantSeconds)
             .Append(",\"decidedBy\":").Append(DecidedByJson())
@@ -247,7 +255,7 @@ internal static class ApprovalCommands
 
         var body = new StringBuilder()
             .Append("{\"humanConfirmed\":true,\"reasonCode\":")
-            .Append(JsonSerializer.Serialize(string.IsNullOrWhiteSpace(reason) ? "host-rejected" : reason))
+            .Append(JsonString(string.IsNullOrWhiteSpace(reason) ? "host-rejected" : reason))
             .Append(",\"decidedBy\":").Append(DecidedByJson())
             .Append('}')
             .ToString();
@@ -265,12 +273,22 @@ internal static class ApprovalCommands
     }
 
     /// <summary>
-    /// Bounded provenance labels recorded on the decision so an operator can later tell a CLI
-    /// decision from a Workbench one. Deliberately excludes the OS user name: the audit journal and
-    /// session status are readable by the agent, and the issuing surface is the useful fact.
+    /// Bounded provenance labels attached to the decision so an audit trail reads as a CLI decision
+    /// rather than a Workbench one. These are self-asserted, not attested: any holder of the broker
+    /// token can send any label, so they record intent rather than prove origin. The OS user name is
+    /// deliberately excluded, because the audit journal and session status are readable by the agent.
     /// </summary>
     private static string DecidedByJson()
         => "{\"actorId\":\"maui-cli-operator\",\"channel\":\"cli\",\"provider\":\"maui-cli\"}";
+
+    /// <summary>
+    /// Escapes one JSON string literal without the reflection-based serializer, so the hand-built
+    /// request bodies stay trim- and AOT-safe. Hand building is deliberate: the approved scope must
+    /// reach both confirmation calls byte-identically, and a serializer round trip could reorder or
+    /// re-shape it and silently break the confirmation digest.
+    /// </summary>
+    private static string JsonString(string? value)
+        => value is null ? "null" : $"\"{JsonEncodedText.Encode(value)}\"";
 
     private static bool Confirm(PendingApproval record, string verb, bool assumeYes, bool json)
     {
@@ -278,12 +296,12 @@ internal static class ApprovalCommands
             return true;
 
         Console.WriteLine();
-        Console.WriteLine($"Approval request : {record.ApprovalRequestId}");
-        Console.WriteLine($"Kind             : {record.Kind}");
-        Console.WriteLine($"Intent           : {record.Intent}");
-        Console.WriteLine($"Requested scope  : {record.ScopeSummary}");
+        Console.WriteLine($"Approval request : {Display(record.ApprovalRequestId)}");
+        Console.WriteLine($"Kind             : {Display(record.Kind)}");
+        Console.WriteLine($"Intent           : {Display(record.Intent)}");
+        Console.WriteLine($"Requested scope  : {Display(record.ScopeSummary)}");
         if (!string.IsNullOrEmpty(record.CorrelationSummary))
-            Console.WriteLine($"Bound to         : {record.CorrelationSummary}");
+            Console.WriteLine($"Bound to         : {Display(record.CorrelationSummary)}");
         Console.WriteLine();
         Console.WriteLine(NotABoundaryNotice);
         Console.WriteLine();
@@ -291,6 +309,36 @@ internal static class ApprovalCommands
         var answer = Console.ReadLine();
         return string.Equals(answer?.Trim(), "yes", StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// Renders broker-supplied text safely on a terminal. Intents, selectors, and routes are written
+    /// by the very agent whose request the operator is reviewing, and the broker bounds their length
+    /// without stripping control characters. Writing them raw would let that agent embed newlines
+    /// and ANSI cursor control and forge an entire plausible review block around the real one, so
+    /// every unsafe code point becomes a visible placeholder and the result is clamped to one line.
+    /// The <c>--json</c> path deliberately does not use this and emits the values unmodified.
+    /// </summary>
+    internal static string Display(string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+            return string.Empty;
+
+        var builder = new StringBuilder(Math.Min(value.Length, MaxDisplayLength));
+        foreach (var rune in value.EnumerateRunes())
+        {
+            if (builder.Length >= MaxDisplayLength)
+                return builder.Append("...").ToString();
+            builder.Append(IsDisplaySafe(rune) ? rune : ReplacementRune);
+        }
+        return builder.ToString();
+    }
+
+    private static bool IsDisplaySafe(Rune rune)
+        => !Rune.IsControl(rune) &&
+           rune.Value is not (0x061C or 0x2028 or 0x2029 or 0xFEFF) &&
+           rune.Value is not (>= 0x200B and <= 0x200F) &&
+           rune.Value is not (>= 0x202A and <= 0x202E) &&
+           rune.Value is not (>= 0x2066 and <= 0x2069);
 
     private static async Task<ApprovalContext?> ResolveContextAsync(
         IDevFlowOutputWriter output,
@@ -357,7 +405,7 @@ internal static class ApprovalCommands
             return true;
 
         var (code, message) = DescribeFailure(response, operation);
-        output.WriteError(message, json, code);
+        output.WriteError(message, json, code, retryable: response.StatusCode is 429 or 503);
         onError();
         return false;
     }
@@ -392,7 +440,11 @@ internal static class ApprovalCommands
             403 when code == "approval-confirmation-invalid" => (
                 "ApprovalConfirmationInvalid",
                 "The approval confirmation was rejected. It is single-use, expires two minutes after it is issued, and is bound to the exact scope and grant lifetime it was minted for. Retry the command."),
-            403 => ("Forbidden", $"The Inspector refused to {operation}: {Describe(error, "forbidden")}"),
+            // The read-token gate rejects a bad native-host token before any handler runs, and its
+            // body carries no code, so this arm and not the one above is what an operator sees.
+            403 => (
+                "TrustedHostRequired",
+                $"The broker refused this CLI's native-host approval token, so it could not {operation}. The broker was most likely restarted after this shell started; retry the command. Broker said: {Describe(error, "forbidden")}"),
             404 when error.Contains("does not target this Inspector", StringComparison.OrdinalIgnoreCase) => (
                 "ApprovalTargetMismatch",
                 "The approval request targets a different app instance than the one selected. Choose the right app with --agent-port."),
@@ -404,6 +456,7 @@ internal static class ApprovalCommands
                 "Agent authoring is disabled on this broker, so there is nothing to approve."),
             404 => ("ApprovalRequestNotFound", $"Could not {operation}: {Describe(error, "the approval request was not found")}"),
             409 => ("TargetChanged", $"Could not {operation}: {Describe(error, "the exact target app instance changed")}"),
+            429 => ("CapacityReached", $"Could not {operation}: {Describe(error, "the broker is at its bounded approval capacity")}"),
             400 => ("InvalidRequest", $"Could not {operation}: {Describe(error, "the request was rejected as invalid")}"),
             501 or 503 => ("ApprovalUnavailable", $"Could not {operation}: {Describe(error, "broker-owned approvals are unavailable")}"),
             _ => ("RuntimeError", $"Could not {operation}: {Describe(error, $"the Inspector returned HTTP {response.StatusCode}")}"),
@@ -411,11 +464,22 @@ internal static class ApprovalCommands
     }
 
     private static string Describe(string error, string fallback)
-        => string.IsNullOrWhiteSpace(error) ? fallback : error;
+        => string.IsNullOrWhiteSpace(error) ? fallback : Display(error);
 
-    private static bool TryFindRequest(JsonElement listing, string approvalRequestId, out PendingApproval record)
+    /// <summary>
+    /// Locates one pending request in the broker's listing. <paramref name="malformedScope"/>
+    /// separates "the id is not queued" from "the id is queued but its scope is unreadable", which
+    /// otherwise present identically. The scope must be a JSON object, because it is spliced
+    /// verbatim into both confirmation calls and must therefore be known-good JSON.
+    /// </summary>
+    private static bool TryFindRequest(
+        JsonElement listing,
+        string approvalRequestId,
+        out PendingApproval record,
+        out bool malformedScope)
     {
         record = default!;
+        malformedScope = false;
         if (listing.ValueKind != JsonValueKind.Object ||
             !listing.TryGetProperty("requests", out var requests) ||
             requests.ValueKind != JsonValueKind.Array)
@@ -433,7 +497,10 @@ internal static class ApprovalCommands
                 continue;
             }
             if (!candidate.TryGetProperty("requestedScope", out var scope) || scope.ValueKind != JsonValueKind.Object)
+            {
+                malformedScope = true;
                 return false;
+            }
 
             record = new PendingApproval(
                 approvalRequestId,
@@ -482,16 +549,16 @@ internal static class ApprovalCommands
         foreach (var request in pending)
         {
             Console.WriteLine();
-            Console.WriteLine($"  id     : {ReadString(request, "approvalRequestId")}");
-            Console.WriteLine($"  kind   : {ReadString(request, "kind")}");
-            Console.WriteLine($"  intent : {ReadString(request, "intent")}");
+            Console.WriteLine($"  id     : {Display(ReadString(request, "approvalRequestId"))}");
+            Console.WriteLine($"  kind   : {Display(ReadString(request, "kind"))}");
+            Console.WriteLine($"  intent : {Display(ReadString(request, "intent"))}");
             if (request.TryGetProperty("requestedScope", out var scope) && scope.ValueKind == JsonValueKind.Object)
-                Console.WriteLine($"  scope  : {SummarizeScope(scope)}");
+                Console.WriteLine($"  scope  : {Display(SummarizeScope(scope))}");
             var correlation = SummarizeCorrelation(request);
             if (!string.IsNullOrEmpty(correlation))
-                Console.WriteLine($"  bound  : {correlation}");
+                Console.WriteLine($"  bound  : {Display(correlation)}");
             if (ReadString(request, "expiresAt") is { Length: > 0 } expiresAt)
-                Console.WriteLine($"  expires: {expiresAt}");
+                Console.WriteLine($"  expires: {Display(expiresAt)}");
         }
         Console.WriteLine();
         Console.WriteLine("Approve with: maui devflow approve <id>");
@@ -511,19 +578,19 @@ internal static class ApprovalCommands
             return;
         }
 
-        Console.WriteLine($"{outcome}: {record.ApprovalRequestId} ({record.Kind})");
+        Console.WriteLine($"{outcome}: {Display(record.ApprovalRequestId)} ({Display(record.Kind)})");
         if (response.ValueKind == JsonValueKind.Object &&
             response.TryGetProperty("message", out var message) &&
             message.ValueKind == JsonValueKind.String)
         {
-            Console.WriteLine(message.GetString());
+            Console.WriteLine(Display(message.GetString()));
         }
         if (response.ValueKind == JsonValueKind.Object &&
             response.TryGetProperty("request", out var decided) &&
             decided.ValueKind == JsonValueKind.Object &&
             ReadString(decided, "grantExpiresAt") is { Length: > 0 } grantExpiresAt)
         {
-            Console.WriteLine($"Grant expires: {grantExpiresAt}");
+            Console.WriteLine($"Grant expires: {Display(grantExpiresAt)}");
         }
     }
 

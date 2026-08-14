@@ -801,10 +801,10 @@ public sealed partial class InspectorServer : IDisposable
                           "/api/workbench/agent-requests",
                           StringComparison.OrdinalIgnoreCase)) ||
                      (request.Method == "POST" &&
-                      request.Path.StartsWith(
+                      normalizedPath.StartsWith(
                           "/api/workbench/agent-requests/",
                           StringComparison.OrdinalIgnoreCase) &&
-                      request.Path.EndsWith("/reject", StringComparison.OrdinalIgnoreCase)));
+                      normalizedPath.EndsWith("/reject", StringComparison.OrdinalIgnoreCase)));
                 if (!trustedHostConfirmationIssue &&
                     !consumesTrustedHostConfirmation &&
                     !trustedHostAgentRequestReview &&
@@ -3869,10 +3869,17 @@ public sealed partial class InspectorServer : IDisposable
 
     /// <summary>
     /// Builds the decision recorded by the broker. A caller that presented the owner-only native
-    /// host approval token is recorded on the "host" channel with its own bounded provenance label,
-    /// so an operator can later tell a CLI decision from a Workbench one. The labels are provenance
-    /// only: both channels already satisfy the broker's human/host approval rule, so supplying them
-    /// neither widens nor narrows what the decision authorizes.
+    /// host approval token is recorded on the "host" channel and may attach its own bounded labels.
+    ///
+    /// <para>
+    /// Those labels are <b>self-asserted</b>, not attested. They are useful for reading intent out
+    /// of an audit trail, but they are not evidence of which surface decided: every holder of the
+    /// native host approval token can choose any label, and on a shared user account that includes
+    /// the agent itself. They are provenance only, excluded from the confirmation digest, and never
+    /// consulted by any authorization check, so supplying them neither widens nor narrows what the
+    /// decision authorizes. A browser caller cannot reach this path at all and is always recorded
+    /// as <c>workbench</c> by <see cref="WorkbenchHumanDecision"/>.
+    /// </para>
     /// </summary>
     private static Testing.MauiTestAgentHumanApproval HumanDecision(
         bool approved,
@@ -3891,8 +3898,10 @@ public sealed partial class InspectorServer : IDisposable
             {
                 ActorKind = "host",
                 ActorId = SafeProvenanceLabel(decidedBy?.ActorId, 128) ?? "native-host-user",
-                Channel = SafeProvenanceLabel(decidedBy?.Channel, 64) ?? "host",
-                Provider = SafeProvenanceLabel(decidedBy?.Provider, 128) ?? "native-host",
+                // Channel and provider are joined into a single 128-character audit label, so their
+                // budgets are chosen to fit that join and never truncate one mid-token.
+                Channel = SafeProvenanceLabel(decidedBy?.Channel, 32) ?? "host",
+                Provider = SafeProvenanceLabel(decidedBy?.Provider, 64) ?? "native-host",
             },
         };
     }

@@ -245,9 +245,10 @@ public sealed class MauiTestAgentApprovalRecord
     [JsonPropertyName("expiresAt")] public DateTimeOffset? ExpiresAt { get; set; }
     [JsonPropertyName("decidedAt")] public DateTimeOffset? DecidedAt { get; set; }
     /// <summary>
-    /// Bounded, non-secret label for the issuer that decided this request, such as
-    /// <c>workbench/inspector-server</c> or <c>cli/maui-cli</c>. Provenance only: it records which
-    /// human-owned surface issued the decision and never grants or widens any authority.
+    /// Bounded, non-secret label naming the issuer that claims to have decided this request, such as
+    /// <c>workbench/inspector-server</c> or <c>cli/maui-cli</c>. Self-asserted provenance only: it
+    /// records which surface says it issued the decision, is not attested, and never grants or
+    /// widens any authority.
     /// </summary>
     [JsonPropertyName("decidedBy")] public string? DecidedBy { get; set; }
     [JsonPropertyName("reasonCode")] public string? ReasonCode { get; set; }
@@ -525,8 +526,9 @@ public sealed class MauiTestAgentAuditEntry
     [JsonPropertyName("runId")] public string? RunId { get; set; }
     [JsonPropertyName("policyDecision")] public string? PolicyDecision { get; set; }
     /// <summary>
-    /// Bounded, non-secret label for the issuer that decided a human approval, such as
-    /// <c>workbench/inspector-server</c> or <c>cli/maui-cli</c>. Present only on approval entries.
+    /// Bounded, non-secret label naming the issuer that claims to have decided a human approval,
+    /// such as <c>workbench/inspector-server</c> or <c>cli/maui-cli</c>. Self-asserted provenance
+    /// only, not attested. Present only on approval entries.
     /// </summary>
     [JsonPropertyName("decidedBy")] public string? DecidedBy { get; set; }
     [JsonPropertyName("intentDigest")] public string? IntentDigest { get; set; }

@@ -163,7 +163,7 @@
         "decidedBy": {
           "type": "string",
           "maxLength": 128,
-          "description": "Bounded, non-secret label for the issuing surface that decided this request, such as 'workbench/inspector-server' or 'cli/maui-cli'. Provenance only: it never grants or widens authority and is excluded from the approval confirmation digest."
+          "description": "Bounded, non-secret label naming the issuing surface that claims to have decided this request, such as 'workbench/inspector-server' or 'cli/maui-cli'. Self-asserted provenance only: it is not attested, never grants or widens authority, and is excluded from the approval confirmation digest."
         },
         "reasonCode": { "type": "string", "maxLength": 128 },
         "grantId": {

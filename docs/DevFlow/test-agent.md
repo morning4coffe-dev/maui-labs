@@ -114,9 +114,11 @@ the `host` approval channel with `decidedBy: "cli/maui-cli"`.
 > exactly this reason: the prompt was never a protection, so hiding it behind a flag costs nothing.
 
 The `decidedBy` field on an approval record and its audit entry names the issuing *surface*
-(`workbench/inspector-server`, `cli/maui-cli`), never the operating-system user. It is provenance
-only and is deliberately excluded from the confirmation digest: it records which issuer decided, and
-participates in no authorization check.
+(`workbench/inspector-server`, `cli/maui-cli`), never the operating-system user. It is **self-asserted
+provenance, not attested evidence**: any holder of the broker's native-host approval token can send
+any label, and on a shared user account that includes the agent. Read it as a way to recover intent
+from an audit trail, not as proof of which surface decided. It is deliberately excluded from the
+confirmation digest and participates in no authorization check.
 
 A trusted native host lets a human reduce the requested scope and issues an opaque, short-lived
 grant server-side only after revalidating the live app instance and current plan/flow revision. The
@@ -224,7 +226,8 @@ grants a selector repair, and a flow-repair approval never grants source writing
 
 The broker retains a bounded append-only journal of intent digest, policy decision, grant digest,
 action/result digest, target, revision, and run IDs. Human approval and rejection entries also carry
-`decidedBy`, the bounded label of the issuing surface. Retention and capacity are bounded. Raw
+`decidedBy`, the self-asserted bounded label of the issuing surface. Retention and capacity are
+bounded. Raw
 secrets, prompts, source, screenshots, UI text, logs, network content, and imported artifact
 content are excluded. Imported data and UI/log/network observations are untrusted diagnostic input
 and never become policy instructions or execution authority.

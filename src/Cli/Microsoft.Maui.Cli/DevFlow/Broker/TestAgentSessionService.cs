@@ -1922,6 +1922,10 @@ internal sealed class TestAgentSessionService
                 "An author-commit grant must be single-purpose and single-use because commit advances the plan and flow revisions.",
                 retryable: false);
         }
+        // Unlike author-commit scopes, run scopes are also normalized before they reach here, so on
+        // the approval path NormalizeApprovalScope has already forced MaxActionCount to 1 and this
+        // check only rejects a bundled scope. It is still load-bearing for both halves of the rule
+        // on the direct IssueGrant path, which validates without normalizing.
         if (scope.AllowedActions.Contains(MauiTestAgentActions.Run, StringComparer.Ordinal) &&
             (scope.AllowedActions.Count != 1 || scope.MaxActionCount != 1))
         {
@@ -2095,10 +2099,15 @@ internal sealed class TestAgentSessionService
            decision.ApprovalChannel is "workbench" or "host";
 
     /// <summary>
-    /// Bounded, non-secret provenance label for the surface that issued a human decision, such as
-    /// <c>workbench/inspector-server</c> or <c>cli/maui-cli</c>. It is recorded so an operator can
-    /// tell after the fact which issuer approved, and never participates in any authorization check.
+    /// Bounded, non-secret provenance label naming the surface that claims to have issued a human
+    /// decision, such as <c>workbench/inspector-server</c> or <c>cli/maui-cli</c>.
+    ///
+    /// <para>
+    /// The label is <b>self-asserted</b> by the deciding caller, so it is a way to read intent out
+    /// of an audit trail, not evidence of which surface decided: any holder of the broker's native
+    /// host approval token can choose any label. It never participates in any authorization check.
     /// The actor identity is deliberately excluded so reading the record cannot reveal a local user.
+    /// </para>
     /// </summary>
     private static string? DescribeDecisionIssuer(MauiTestAgentHumanApproval? decision)
     {

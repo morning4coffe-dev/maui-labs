@@ -82,6 +82,7 @@ public static class MauiTestPlanValidator
             result);
         ValidateStringList(plan.RequiredPlatforms ?? [], "requiredPlatforms", result);
         ValidateRepairPolicy(plan.RepairPolicy, result);
+        ValidateBusinessOracles(plan, acceptanceCriteria, result);
 
         var criteria = new HashSet<string>(
             acceptanceCriteria
@@ -260,5 +261,68 @@ public static class MauiTestPlanValidator
             result.Errors.Add("repairPolicy.minimumScore must be between 0 and 1.");
         if (policy.MinimumScoreGap is < 0 or > 1)
             result.Errors.Add("repairPolicy.minimumScoreGap must be between 0 and 1.");
+    }
+
+    private static void ValidateBusinessOracles(
+        MauiTestPlan plan,
+        IEnumerable<MauiAcceptanceCriterion> acceptanceCriteria,
+        MauiTestPlanValidation result)
+    {
+        if ((plan.IndependentBusinessOracles ?? []).Any(static oracle => oracle is null))
+            result.Errors.Add("independentBusinessOracles cannot contain null entries.");
+        if ((plan.BusinessOracles ?? []).Any(static oracle => oracle is null))
+            result.Errors.Add("businessOracles cannot contain null entries.");
+        var declarations = (plan.IndependentBusinessOracles ?? [])
+            .Where(static oracle => oracle is not null)
+            .Select(static oracle => (
+                oracle.OracleId,
+                oracle.Required,
+                oracle.Independent,
+                Source: "independentBusinessOracles"))
+            .Concat((plan.BusinessOracles ?? [])
+                .Where(static oracle => oracle is not null)
+                .Select(static oracle => (
+                    oracle.OracleId,
+                    oracle.Required,
+                    oracle.Independent,
+                    Source: "businessOracles")))
+            .ToList();
+        var ids = new HashSet<string>(StringComparer.Ordinal);
+        var requiredIndependentIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var declaration in declarations)
+        {
+            if (string.IsNullOrWhiteSpace(declaration.OracleId))
+            {
+                result.Errors.Add($"{declaration.Source} entries require an oracleId.");
+                continue;
+            }
+            if (!ids.Add(declaration.OracleId))
+                result.Errors.Add($"oracleId '{declaration.OracleId}' is duplicated.");
+            if (declaration.Source == "independentBusinessOracles" &&
+                !declaration.Independent)
+            {
+                result.Errors.Add(
+                    $"independentBusinessOracles entry '{declaration.OracleId}' must set independent to true.");
+            }
+            if (declaration.Required && !declaration.Independent)
+            {
+                result.Errors.Add(
+                    $"required business oracle '{declaration.OracleId}' must set independent to true.");
+            }
+            if (declaration.Required && declaration.Independent)
+                requiredIndependentIds.Add(declaration.OracleId);
+        }
+
+        foreach (var criterion in acceptanceCriteria.Where(static criterion =>
+                     criterion is not null &&
+                     criterion.Required &&
+                     !string.IsNullOrWhiteSpace(criterion.BusinessOracleId)))
+        {
+            if (!requiredIndependentIds.Contains(criterion.BusinessOracleId!))
+            {
+                result.Errors.Add(
+                    $"required acceptance criterion '{criterion.CriterionId ?? "(unnamed)"}' references an oracle that is not required and independent.");
+            }
+        }
     }
 }

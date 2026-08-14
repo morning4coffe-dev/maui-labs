@@ -471,6 +471,17 @@ public sealed class FlowReplayer
                         return r;
                     }
                 }
+                else if (a.Kind == "notExists")
+                {
+                    var resolution = await _actionability.ResolveAsync(a.Selector, ct);
+                    r.Actual = resolution.MatchCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    if (!resolution.Ok &&
+                        string.Equals(resolution.Kind, FlowFailureKinds.NotFound, StringComparison.Ordinal))
+                    {
+                        r.Ok = true;
+                        return r;
+                    }
+                }
                 else if (a.Kind == "routeIs")
                 {
                     var route = (await _agent.GetStatusAsync())?.Route;

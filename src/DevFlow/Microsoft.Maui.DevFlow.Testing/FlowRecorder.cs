@@ -111,6 +111,7 @@ public sealed class FlowRecorder
             _flow.Steps.Add(new FlowStep
             {
                 Seq = seq,
+                StepId = MauiFlowStepIdentity.Create(seq),
                 Action = action,
                 Target = target,
                 Value = value,

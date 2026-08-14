@@ -68,7 +68,7 @@ public sealed class FlowTypeIndex
 }
 
 /// <summary>
-/// A recorded assertion. <c>propEquals</c>, <c>exists</c>, and <c>routeIs</c> can be verified;
+/// A recorded assertion. <c>propEquals</c>, <c>exists</c>, <c>notExists</c>, and <c>routeIs</c> can be verified;
 /// <c>pageChanged</c> remains report-only without authoritative before/after page data.
 /// </summary>
 public sealed class FlowAssert
@@ -113,6 +113,14 @@ public sealed class FlowStepArgs
 public sealed class FlowStep
 {
     [JsonPropertyName("seq")] public int Seq { get; set; }
+    /// <summary>
+    /// Optional stable identity for this step. Current recorders assign it once and compatible
+    /// readers preserve it; legacy flows continue to use <see cref="Seq"/> as their identity.
+    /// Values must be unique, bounded safe identifiers and cannot be numeric sequence aliases.
+    /// </summary>
+    [JsonPropertyName("stepId")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? StepId { get; set; }
     [JsonPropertyName("action")] public string Action { get; set; } = "";
     /// <summary>
     /// Human-facing text that describes the intent of this step. It never changes replay behavior.

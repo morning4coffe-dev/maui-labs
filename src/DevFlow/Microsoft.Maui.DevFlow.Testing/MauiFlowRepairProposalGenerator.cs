@@ -133,6 +133,7 @@ public static class MauiFlowRepairProposalGenerator
             Add(result, "source-step-missing", "The source repair step does not exist in the current flow.");
             return result;
         }
+        var resolvedStepId = MauiFlowStepIdentity.Get(step);
 
         var activeSelector = EffectiveSelector(step);
         if (activeSelector is null || activeSelector.IsEmpty)
@@ -165,10 +166,25 @@ public static class MauiFlowRepairProposalGenerator
             return result;
         }
 
-        var resolutions = input.CurrentResolutions
+        var resolutionGroups = (input.CurrentResolutions ?? [])
             .Where(static resolution => !string.IsNullOrWhiteSpace(resolution.CandidateId))
             .GroupBy(static resolution => resolution.CandidateId!, StringComparer.Ordinal)
-            .ToDictionary(static group => group.Key, static group => group.First(), StringComparer.Ordinal);
+            .ToArray();
+        foreach (var duplicate in resolutionGroups.Where(static group => group.Count() > 1))
+        {
+            Add(
+                result,
+                "candidate-current-resolution-duplicate",
+                "Multiple current resolution records exist for one candidate; no order-dependent resolution can be selected.",
+                duplicate.Key);
+        }
+        if (result.Abstentions.Count > 0)
+            return result;
+
+        var resolutions = resolutionGroups.ToDictionary(
+            static group => group.Key,
+            static group => group.Single(),
+            StringComparer.Ordinal);
         var safe = new List<(MauiSelectorCandidate Candidate, MauiRepairCandidateResolution Resolution)>();
         foreach (var candidate in input.SelectorHealthCandidates.Take(max))
         {
@@ -204,7 +220,10 @@ public static class MauiFlowRepairProposalGenerator
             return result;
         }
 
-        var patch = MauiFlowRepairPatchBuilder.Build(input.Flow, step.Seq, winner.Candidate.Selector!);
+        var patch = MauiFlowRepairPatchBuilder.Build(
+            input.Flow,
+            resolvedStepId,
+            winner.Candidate.Selector!);
         if (!patch.Ok)
         {
             Add(result, "selector-patch-invalid", patch.Error ?? "The selector-only patch could not be built.");
@@ -221,7 +240,7 @@ public static class MauiFlowRepairProposalGenerator
         var proposalId = "repair_" + Hash(string.Join(
             "\u001f",
             input.SourceRunId,
-            input.SourceStepId,
+            resolvedStepId,
             input.SourceFailureId,
             winningCandidate.CandidateId,
             patch.PatchDigest))[..24];
@@ -231,7 +250,7 @@ public static class MauiFlowRepairProposalGenerator
             Revision = 1,
             State = MauiFlowRepairOutcomeStates.Proposed,
             SourceRunId = input.SourceRunId,
-            SourceStepId = input.SourceStepId ?? step.Seq.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            SourceStepId = resolvedStepId,
             SourceFailureId = input.SourceFailureId,
             SourceFailureCode = input.SourceFailureCode ?? input.Eligibility.FailureCode,
             PreDispatch = true,
@@ -458,11 +477,7 @@ public static class MauiFlowRepairProposalGenerator
         => candidate.Score ?? candidate.Scores.DeterministicRankScore;
 
     private static FlowStep? FindStep(MauiFlow flow, string? sourceStepId)
-    {
-        if (int.TryParse(sourceStepId, out var sequence))
-            return flow.Steps.FirstOrDefault(step => step.Seq == sequence);
-        return null;
-    }
+        => MauiFlowStepIdentity.Find(flow, sourceStepId);
 
     private static FlowSelector? EffectiveSelector(FlowStep step)
         => step.Args?.Selector is { IsEmpty: false } selector ? selector : step.Target;
@@ -559,6 +574,28 @@ public static class MauiFlowRepairPatchBuilder
         MauiFlow? source,
         int stepSequence,
         FlowSelector? proposedSelector)
+        => BuildForStep(
+            source,
+            MauiFlowStepIdentity.FindBySequence(source, stepSequence),
+            proposedSelector);
+
+    /// <summary>
+    /// Builds an in-memory selector replacement for a stable step identity, with legacy sequence
+    /// strings retained as a compatibility fallback.
+    /// </summary>
+    public static MauiFlowRepairPatchBuildResult Build(
+        MauiFlow? source,
+        string? stepId,
+        FlowSelector? proposedSelector)
+        => BuildForStep(
+            source,
+            MauiFlowStepIdentity.Find(source, stepId),
+            proposedSelector);
+
+    private static MauiFlowRepairPatchBuildResult BuildForStep(
+        MauiFlow? source,
+        FlowStep? sourceStep,
+        FlowSelector? proposedSelector)
     {
         if (source is null)
             return Failure("A source flow is required.");
@@ -567,12 +604,14 @@ public static class MauiFlowRepairPatchBuilder
         if (!HasExactlyOneSelectorForm(proposedSelector))
             return Failure("The proposed selector must use exactly one selector form.");
 
+        if (sourceStep is null)
+            return Failure("The requested source step does not exist.");
+        var stepIndex = source.Steps.IndexOf(sourceStep);
+        var resolvedStepId = MauiFlowStepIdentity.Get(sourceStep);
         var original = MauiFlowClone.Clone(source);
         var patched = MauiFlowClone.Clone(source);
-        var originalStep = original.Steps.FirstOrDefault(step => step.Seq == stepSequence);
-        var patchedStep = patched.Steps.FirstOrDefault(step => step.Seq == stepSequence);
-        if (originalStep is null || patchedStep is null)
-            return Failure("The requested source step does not exist.");
+        var originalStep = original.Steps[stepIndex];
+        var patchedStep = patched.Steps[stepIndex];
 
         var usesArgsSelector = patchedStep.Args?.Selector is { IsEmpty: false };
         var oldSelector = usesArgsSelector ? originalStep.Args!.Selector : originalStep.Target;
@@ -596,8 +635,8 @@ public static class MauiFlowRepairPatchBuilder
         }
 
         var selectorPath = usesArgsSelector
-            ? $"/steps/{original.Steps.FindIndex(step => step.Seq == stepSequence)}/args/selector"
-            : $"/steps/{original.Steps.FindIndex(step => step.Seq == stepSequence)}/target";
+            ? $"/steps/{stepIndex}/args/selector"
+            : $"/steps/{stepIndex}/target";
         var beforeDigest = MauiFlowRunReportSerializer.ComputeFlowDigest(original);
         var afterDigest = MauiFlowRunReportSerializer.ComputeFlowDigest(patched);
         var patch = new MauiFlowPatch
@@ -630,7 +669,7 @@ public static class MauiFlowRepairPatchBuilder
             Method = "canonical-selector-only-v1",
         };
         var diff = CreateDiff(
-            stepSequence,
+            resolvedStepId,
             selectorPath,
             oldSelector,
             selectorClone,
@@ -656,13 +695,12 @@ public static class MauiFlowRepairPatchBuilder
         if (proposal?.Patch is null || proposal.Patch.SelectorOnly != true ||
             proposal.Patch.Operations.Count != 1 ||
             proposal.ProposedSelector is null ||
-            string.IsNullOrWhiteSpace(proposal.SourceStepId) ||
-            !int.TryParse(proposal.SourceStepId, out var sequence))
+            string.IsNullOrWhiteSpace(proposal.SourceStepId))
         {
             return Failure("The proposal is not a single selector-only patch.");
         }
 
-        var rebuilt = Build(source, sequence, proposal.ProposedSelector);
+        var rebuilt = Build(source, proposal.SourceStepId, proposal.ProposedSelector);
         if (!rebuilt.Ok)
             return rebuilt;
         if (!string.Equals(rebuilt.PatchDigest, proposal.PatchDigest, StringComparison.Ordinal))
@@ -682,7 +720,7 @@ public static class MauiFlowRepairPatchBuilder
     }
 
     private static MauiRepairSelectorDiff CreateDiff(
-        int stepSequence,
+        string stepId,
         string selectorPath,
         FlowSelector oldSelector,
         FlowSelector proposedSelector,
@@ -705,7 +743,7 @@ public static class MauiFlowRepairPatchBuilder
         var json = node.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
         var markdown = string.Join(
             "\n",
-            $"## Selector repair — step {stepSequence}",
+            $"## Selector repair — step {stepId}",
             string.Empty,
             $"```diff",
             $"- {oldJson}",
@@ -720,7 +758,7 @@ public static class MauiFlowRepairPatchBuilder
         {
             Json = json,
             Markdown = markdown,
-            StepId = stepSequence.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            StepId = stepId,
             SelectorPath = selectorPath,
             AssertionsUnchanged = true,
             ActionsUnchanged = true,

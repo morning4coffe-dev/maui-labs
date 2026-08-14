@@ -978,7 +978,7 @@ public static class MauiSelectorHealthAnalyzer
     {
         foreach (var step in flow.Steps.OrderBy(static step => step.Seq))
         {
-            var stepId = step.Seq.ToString(CultureInfo.InvariantCulture);
+            var stepId = MauiFlowStepIdentity.Get(step);
             var selector = FlowValidator.EffectiveSelector(step);
             var evidence = step.SelectorEvidence;
             var fingerprint = evidence?.Fingerprint;
@@ -1300,7 +1300,7 @@ public static class MauiSelectorHealthAnalyzer
     private static bool HasHardAssertion(FlowStep step)
         => (step.Asserts ?? []).Any(assertion =>
             assertion.Verify &&
-            assertion.Kind is "propEquals" or "exists" or "routeIs");
+            assertion.Kind is "propEquals" or "exists" or "notExists" or "routeIs");
 
     private static bool RequiresTarget(string? action)
         => action is FlowActions.Tap or FlowActions.Fill or FlowActions.SetProperty;

@@ -16,7 +16,7 @@ public static class FlowReplayReportAdapter
             Name = name ?? report.LegacyFlowIdentity ?? report.FlowId ?? "scenario",
             File = file,
             Total = report.Steps.Count,
-            DivergencePoint = TryParseStepSequence(report.DivergenceStepId),
+            DivergencePoint = FindStepSequence(report, report.DivergenceStepId),
             StoppedEarly = !string.Equals(report.Outcome?.Status, MauiFlowRunOutcomes.Passed, StringComparison.Ordinal),
             StructuredReport = report,
             ReportDigest = report.ReportDigest,
@@ -105,4 +105,9 @@ public static class FlowReplayReportAdapter
             : stepId;
         return int.TryParse(value, out var sequence) ? sequence : null;
     }
+
+    private static int? FindStepSequence(MauiFlowRunReport report, string? stepId)
+        => report.Steps.FirstOrDefault(step =>
+                string.Equals(step.StepId, stepId, StringComparison.Ordinal))?.Sequence
+            ?? TryParseStepSequence(stepId);
 }

@@ -45,12 +45,22 @@ public static class MauiFlowAssertionVerifier
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                if (assertion.Kind is "propEquals" or "exists")
+                if (assertion.Kind is "propEquals" or "exists" or "notExists")
                 {
                     var resolution = await new FlowActionabilityEngine(driver, 1, 0)
                         .ResolveAsync(assertion.Selector, cancellationToken)
                         .ConfigureAwait(false);
                     lastResolution = resolution;
+                    if (assertion.Kind == "notExists" &&
+                        !resolution.Ok &&
+                        string.Equals(resolution.Kind, FlowFailureKinds.NotFound, StringComparison.Ordinal))
+                    {
+                        return new MauiFlowAssertionVerification
+                        {
+                            Passed = true,
+                            MatchCount = 0,
+                        };
+                    }
                     if (resolution.Ok)
                     {
                         if (assertion.Kind == "exists")
@@ -62,6 +72,9 @@ public static class MauiFlowAssertionVerifier
                                 Quality = resolution.Quality,
                             };
                         }
+
+                        if (assertion.Kind == "notExists")
+                            continue;
 
                         actual = await driver.GetPropertyAsync(
                             resolution.Element!.Id,

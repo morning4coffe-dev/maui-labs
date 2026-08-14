@@ -274,6 +274,9 @@ public sealed class MauiImportedArtifactSafeProjection
     [JsonPropertyName("deviceProfileFingerprint")]
     public string? DeviceProfileFingerprint { get; set; }
 
+    [JsonPropertyName("runtimeProfileFingerprint")]
+    public string? RuntimeProfileFingerprint { get; set; }
+
     [JsonPropertyName("capturedAt")]
     public DateTimeOffset? CapturedAt { get; set; }
 
@@ -410,6 +413,9 @@ public sealed class MauiLocalReproductionFacts
     [JsonPropertyName("deviceProfile")]
     public string? DeviceProfile { get; set; }
 
+    [JsonPropertyName("runtimeProfileFingerprint")]
+    public string? RuntimeProfileFingerprint { get; set; }
+
     [JsonPropertyName("failure")]
     public MauiLocalFailureFacts? Failure { get; set; }
 
@@ -459,6 +465,9 @@ public sealed class MauiLocalReproductionExpectation
 
     [JsonPropertyName("deviceProfile")]
     public string? DeviceProfile { get; set; }
+
+    [JsonPropertyName("runtimeProfileFingerprint")]
+    public string? RuntimeProfileFingerprint { get; set; }
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? ExtensionData { get; set; }
@@ -717,6 +726,15 @@ public static class MauiArtifactTrustEvaluator
             binding.Verification = result;
             return new MauiLocalReproductionEvaluation { Verification = result, Binding = binding };
         }
+        if (!HasStrictImportedIdentifiers(artifact.Projection))
+        {
+            result.Reasons.Add(Reason(
+                "imported-projection-identifiers-invalid",
+                "The imported diagnostic projection contains an identifier or fingerprint with an invalid format.",
+                blocking: true));
+            binding.Verification = result;
+            return new MauiLocalReproductionEvaluation { Verification = result, Binding = binding };
+        }
 
         if (localRun?.IsNewLocalRun != true)
         {
@@ -753,13 +771,27 @@ public static class MauiArtifactTrustEvaluator
         }
 
         var projection = artifact.Projection;
-        if (!MatchesFingerprint("flowDigest", projection.FlowFingerprint, current!.FlowDigest, localRun.FlowDigest, result) ||
-            !MatchesFingerprint("appBuildFingerprint", projection.AppBuildFingerprint, current.AppBuildFingerprint, localRun.AppBuildFingerprint, result) ||
-            !MatchesFingerprint("appSourceFingerprint", projection.AppSourceFingerprint, current.AppSourceFingerprint, localRun.AppSourceFingerprint, result) ||
-            !MatchesFingerprint("packageDigest", projection.PackageFingerprint, current.PackageDigest, localRun.PackageDigest, result) ||
-            !MatchesFingerprint("platform", projection.PlatformFingerprint, current.Platform, localRun.Platform, result) ||
-            !MatchesFingerprint("deviceProfile", projection.DeviceProfileFingerprint, current.DeviceProfile, localRun.DeviceProfile, result) ||
-            !MatchesFailure(projection.Failure, localRun.Failure, result))
+        var isMauiTrace = string.Equals(
+            projection.Kind,
+            "mauitrace",
+            StringComparison.Ordinal);
+        var importedAppBuild = isMauiTrace ? null : projection.AppBuildFingerprint;
+        var importedAppSource = isMauiTrace ? null : projection.AppSourceFingerprint;
+        var importedPackage = isMauiTrace ? null : projection.PackageFingerprint;
+        var matched = true;
+        matched &= MatchesFingerprint("flowDigest", projection.FlowFingerprint, current!.FlowDigest, localRun.FlowDigest, result);
+        matched &= MatchesFingerprint("appBuildFingerprint", importedAppBuild, current.AppBuildFingerprint, localRun.AppBuildFingerprint, result);
+        matched &= MatchesFingerprint("appSourceFingerprint", importedAppSource, current.AppSourceFingerprint, localRun.AppSourceFingerprint, result);
+        matched &= MatchesFingerprint("packageDigest", importedPackage, current.PackageDigest, localRun.PackageDigest, result);
+        matched &= MatchesFingerprint("platform", projection.PlatformFingerprint, current.Platform, localRun.Platform, result);
+        matched &= MatchesPrecomputedFingerprint(
+            "runtimeProfile",
+            projection.RuntimeProfileFingerprint,
+            current.RuntimeProfileFingerprint,
+            localRun.RuntimeProfileFingerprint,
+            result);
+        matched &= MatchesFailure(projection.Failure, localRun.Failure, result);
+        if (!matched)
         {
             binding.Verification = result;
             return new MauiLocalReproductionEvaluation { Verification = result, Binding = binding };
@@ -790,6 +822,70 @@ public static class MauiArtifactTrustEvaluator
             Integrity = integrity,
             PolicyVersion = policyVersion,
         };
+
+    private static bool HasStrictImportedIdentifiers(MauiImportedArtifactSafeProjection projection)
+    {
+        if (projection.Kind is not ("flow-run" or "mauitrace"))
+            return false;
+        if (projection.SourceSchema is not null &&
+            MauiArtifactTrustRedactor.SafeFailureCode(projection.SourceSchema) != projection.SourceSchema)
+        {
+            return false;
+        }
+        if (projection.Outcome is not null &&
+            MauiArtifactTrustRedactor.SafeFailureCode(projection.Outcome) != projection.Outcome)
+        {
+            return false;
+        }
+        var fingerprints = new[]
+        {
+            projection.FlowFingerprint,
+            projection.AppBuildFingerprint,
+            projection.AppSourceFingerprint,
+            projection.PackageFingerprint,
+            projection.PlatformFingerprint,
+            projection.DeviceProfileFingerprint,
+            projection.RuntimeProfileFingerprint,
+            projection.Failure?.StepFingerprint,
+            projection.Failure?.ExpectedCheckpointFingerprint,
+            projection.Failure?.ObservedCheckpointFingerprint,
+        };
+        if (fingerprints.Any(value =>
+                value is not null &&
+                !string.Equals(
+                    MauiArtifactTrustRedactor.NormalizeFingerprint(value),
+                    value,
+                    StringComparison.Ordinal)))
+        {
+            return false;
+        }
+        if ((projection.EmbeddedIdentifierDigests ?? []).Any(value =>
+                !string.Equals(
+                    MauiArtifactTrustRedactor.NormalizeFingerprint(value),
+                    value,
+                    StringComparison.Ordinal)))
+        {
+            return false;
+        }
+        var failure = projection.Failure;
+        if (failure is null)
+            return true;
+        if (failure.FailureKey is not null &&
+            !IsStrictFailureKey(failure.FailureKey))
+        {
+            return false;
+        }
+        return (failure.Code is null ||
+                MauiArtifactTrustRedactor.SafeFailureCode(failure.Code) == failure.Code) &&
+            (failure.Class is null ||
+             MauiArtifactTrustRedactor.SafeFailureCode(failure.Class) == failure.Class);
+    }
+
+    private static bool IsStrictFailureKey(string value)
+        => value.Length == 67 &&
+           value.StartsWith("if_", StringComparison.Ordinal) &&
+           value.AsSpan(3).ToArray().All(static character =>
+               character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static bool HasRequiredExpectedPolicy(
         MauiArtifactProvenanceSubject? expected,
@@ -834,7 +930,7 @@ public static class MauiArtifactTrustEvaluator
         valid &= RequiredCurrent("appSourceFingerprint", current.AppSourceFingerprint, result);
         valid &= RequiredCurrent("packageDigest", current.PackageDigest, result);
         valid &= RequiredCurrent("platform", current.Platform, result);
-        valid &= RequiredCurrent("deviceProfile", current.DeviceProfile, result);
+        valid &= RequiredCurrent("runtimeProfileFingerprint", current.RuntimeProfileFingerprint, result);
         return valid;
     }
 
@@ -877,11 +973,91 @@ public static class MauiArtifactTrustEvaluator
         string? local,
         MauiArtifactTrustVerificationResult result)
     {
+        if (string.IsNullOrWhiteSpace(imported))
+        {
+            AddOmission(
+                result,
+                "imported." + field,
+                $"The imported diagnostic projection omitted {field}.");
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(current))
+        {
+            AddOmission(
+                result,
+                "current." + field,
+                $"The trusted current workspace omitted {field}.");
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(local))
+        {
+            AddOmission(
+                result,
+                "local." + field,
+                $"The newly executed local run omitted {field}.");
+            return false;
+        }
+
+        var importedFingerprint = MauiArtifactTrustRedactor.NormalizeFingerprint(imported);
         var currentFingerprint = MauiArtifactTrustRedactor.Fingerprint(current);
         var localFingerprint = MauiArtifactTrustRedactor.Fingerprint(local);
-        if (!string.IsNullOrWhiteSpace(imported) &&
-            string.Equals(imported, currentFingerprint, StringComparison.Ordinal) &&
-            string.Equals(imported, localFingerprint, StringComparison.Ordinal))
+        if (importedFingerprint is null)
+        {
+            AddOmission(
+                result,
+                "imported." + field,
+                $"The imported diagnostic projection contained an invalid {field} fingerprint.");
+            return false;
+        }
+        if (string.Equals(importedFingerprint, currentFingerprint, StringComparison.Ordinal) &&
+            string.Equals(importedFingerprint, localFingerprint, StringComparison.Ordinal))
+        {
+            return true;
+        }
+
+        result.Reasons.Add(Reason(
+            field + "-mismatch",
+            $"The imported, current, and local {field} facts did not all match.",
+            blocking: true));
+        return false;
+    }
+
+    private static bool MatchesPrecomputedFingerprint(
+        string field,
+        string? imported,
+        string? current,
+        string? local,
+        MauiArtifactTrustVerificationResult result)
+    {
+        var importedFingerprint = MauiArtifactTrustRedactor.NormalizeFingerprint(imported);
+        var currentFingerprint = MauiArtifactTrustRedactor.NormalizeFingerprint(current);
+        var localFingerprint = MauiArtifactTrustRedactor.NormalizeFingerprint(local);
+        if (importedFingerprint is null)
+        {
+            AddOmission(
+                result,
+                "imported." + field,
+                $"The imported diagnostic projection omitted a valid {field} fingerprint.");
+            return false;
+        }
+        if (currentFingerprint is null)
+        {
+            AddOmission(
+                result,
+                "current." + field,
+                $"The trusted current workspace omitted a valid {field} fingerprint.");
+            return false;
+        }
+        if (localFingerprint is null)
+        {
+            AddOmission(
+                result,
+                "local." + field,
+                $"The newly executed local run omitted a valid {field} fingerprint.");
+            return false;
+        }
+        if (string.Equals(importedFingerprint, currentFingerprint, StringComparison.Ordinal) &&
+            string.Equals(importedFingerprint, localFingerprint, StringComparison.Ordinal))
         {
             return true;
         }
@@ -927,7 +1103,39 @@ public static class MauiArtifactTrustEvaluator
         string? local,
         MauiArtifactTrustVerificationResult result)
     {
-        if (!string.IsNullOrWhiteSpace(imported) && string.Equals(imported, local, StringComparison.Ordinal))
+        if (string.IsNullOrWhiteSpace(imported))
+        {
+            AddOmission(
+                result,
+                "imported." + field,
+                $"The imported diagnostic projection omitted {field}.");
+            return false;
+        }
+        if (string.IsNullOrWhiteSpace(local))
+        {
+            AddOmission(
+                result,
+                "local." + field,
+                $"The newly executed local run omitted {field}.");
+            return false;
+        }
+        var codeField = field is "failureCode" or "failureClass";
+        var normalizedImported = codeField
+            ? MauiArtifactTrustRedactor.SafeFailureCode(imported)
+            : MauiArtifactTrustRedactor.NormalizeFingerprint(imported);
+        var normalizedLocal = codeField
+            ? MauiArtifactTrustRedactor.SafeFailureCode(local)
+            : MauiArtifactTrustRedactor.NormalizeFingerprint(local);
+        if (normalizedImported is null ||
+            normalizedLocal is null)
+        {
+            AddOmission(
+                result,
+                "imported." + field,
+                $"The imported diagnostic projection contained an invalid {field}.");
+            return false;
+        }
+        if (string.Equals(normalizedImported, normalizedLocal, StringComparison.Ordinal))
             return true;
 
         result.Reasons.Add(Reason(
@@ -971,6 +1179,23 @@ public static class MauiArtifactTrustRedactor
         return "sha256:" + Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(value))).ToLowerInvariant();
     }
 
+    /// <summary>Normalizes only strict SHA-256 fingerprints and rejects malformed digest claims.</summary>
+    public static string? NormalizeFingerprint(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        var trimmed = value.Trim();
+        if (trimmed.Length != 71 ||
+            !trimmed.StartsWith("sha256:", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+        var hex = trimmed[7..];
+        if (!hex.All(Uri.IsHexDigit))
+            return null;
+        return "sha256:" + hex.ToLowerInvariant();
+    }
+
     /// <summary>Returns a fingerprint only when a checkpoint contains meaningful comparison facts.</summary>
     public static string? CheckpointFingerprint(MauiFlowCheckpoint? checkpoint)
     {
@@ -980,7 +1205,6 @@ public static class MauiArtifactTrustRedactor
         var values = new[]
         {
             checkpoint.AppBuildFingerprint,
-            checkpoint.AgentInstanceId,
             checkpoint.SeedFingerprint,
             checkpoint.BackendStateFingerprint,
             checkpoint.Route,

@@ -17,7 +17,7 @@ The package targets `net9.0` and references `Microsoft.Maui.DevFlow.Driver`. It 
 `net9.0`, `net10.0`, and compatible MAUI test hosts.
 
 The public API is previewed with a committed compatibility baseline. See the
-[DevFlow preview compatibility policy](../../../docs/DevFlow/compatibility.md) before updating a
+[DevFlow preview compatibility policy](https://github.com/dotnet/maui-labs/blob/main/docs/DevFlow/compatibility.md) before updating a
 public signature or versioned contract.
 
 ## Test-framework-neutral quick start
@@ -104,6 +104,10 @@ theme, orientation, display profile, and (when applicable) collection-item key. 
 observed checkpoint in `MauiFlowRunContext`. A missing declared observation or a mismatch denies
 admission before the runner sends a mutating command.
 
+The public evaluator first runs `MauiTestPlanValidator.Validate`. An invalid plan cannot authorize
+replay. Oracle declarations require stable IDs, required oracles must set `Independent = true`, and
+observed oracle results count only when `Independent == true`.
+
 ```csharp
 var decision = MauiFlowReplaySafetyEvaluator.Evaluate(new MauiFlowRunRequest
 {
@@ -138,24 +142,48 @@ marked verified. `MauiFlowRunReport` retains the reset result, expected/observed
 compensator outcome, oracle results, and `replayEligibility` reasons. These values are redacted and
 bounded with the rest of the report.
 
+Independent verification also requires every declared scenario's acceptance criteria and every
+required acceptance criterion to be linked to a hard assertion in the executable flow. A required
+criterion that names a business oracle must reference an oracle declared as both required and
+independent; otherwise the plan is invalid. Use
+`MauiFlowReplaySafetyEvaluator.EvaluateWithFlow(request, flow)` for executable-flow coverage.
+Coverage gaps in an otherwise valid plan do not block ordinary execution; they keep a passing
+execution explicitly unverified. `outcome.status` records execution, while `verification.verified` records
+independent proof; `outcome.verified` remains the compatibility mirror and must agree.
+
 Legacy schema-1/schema-2 manual flows with no plan remain ordinary-replay compatible. Their report
 explicitly records `sideEffectPolicy: "unspecified"` and `repairEligibility: false`; hosts should
 surface that warning rather than treating the run as repair-verified.
+
+## Stable step identity
+
+`FlowStep.Seq` remains the ordered integer sequence and is the only identity used by APIs that
+accept an integer `stepSequence`. `FlowStep.StepId` is an optional stable identity used by newer
+reports and repair proposals. It must be unique, at most 128 characters, and contain only letters,
+digits, `-`, `_`, `.`, or `:` with no surrounding whitespace. Purely numeric IDs are reserved for
+legacy sequence lookup. Recorder-generated sequence-shaped IDs use the canonical `step-NNNN`
+value for their own `Seq`; a different step cannot claim that alias.
+
+Compatible readers preserve `StepId` when present and fall back to `Seq` for legacy flows. Repair
+generation resolves legacy sequence input but emits the stable ID when the target step has one.
+This prevents a user-authored `StepId="1"` from redirecting an integer `stepSequence: 1` request.
 
 ## Schemas and compatibility
 
 The formal contracts are maintained with the DevFlow protocol specification:
 
-- [Executable flow v2](../../../docs/DevFlow/spec/schemas/maui-flow-v2.json)
-- [Test plan v1](../../../docs/DevFlow/spec/schemas/maui-test-plan-v1.json)
-- [Flow run report v1](../../../docs/DevFlow/spec/schemas/maui-flow-run-report-v1.json)
-- [Preview qualification report v1](../../../docs/DevFlow/spec/schemas/maui-preview-qualification-v1.json)
-- [Artifact trust v1](../../../docs/DevFlow/spec/schemas/maui-artifact-trust-v1.json)
-- [Repair proposal v1](../../../docs/DevFlow/spec/schemas/maui-flow-repair-proposal-v1.json)
-  and [repair outcome v1](../../../docs/DevFlow/spec/schemas/maui-flow-repair-outcome-v1.json)
-- [XAML source proposal v1](../../../docs/DevFlow/spec/schemas/maui-xaml-source-proposal-v1.json)
-- [C# source proposal v1](../../../docs/DevFlow/spec/schemas/maui-csharp-source-proposal-v1.json)
-- [Restricted test-agent protocol v1](../../../docs/DevFlow/spec/schemas/maui-test-agent-protocol-v1.json)
+- [Executable flow v2](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-v2.json)
+- [Test plan v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-test-plan-v1.json)
+- [Flow run report v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-run-report-v1.json)
+- [Test execution manifest v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-test-execution-manifest-v1.json)
+- [Flow triage v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-triage-v1.json)
+- [Preview qualification report v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-preview-qualification-v1.json)
+- [Artifact trust v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-artifact-trust-v1.json)
+- [Repair proposal v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-repair-proposal-v1.json)
+  and [repair outcome v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-flow-repair-outcome-v1.json)
+- [XAML source proposal v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-xaml-source-proposal-v1.json)
+- [C# source proposal v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-csharp-source-proposal-v1.json)
+- [Restricted test-agent protocol v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-test-agent-protocol-v1.json)
 
 Schema 1 and schema 2 executable flows remain readable. Schema 2 is current; use
 `MauiFlowMigration.Preview` to inspect a schema-1-to-schema-2 normalization without writing a
@@ -197,6 +225,16 @@ patch with invariant proof. They do not query a device, call a model, activate a
 a flow, apply a patch, or weaken assertions/actions/values/order. Hosts own validation grants,
 lifecycle reset, compare-and-swap persistence, verification, and rollback.
 
+`MauiFlowTriageAnalyzer` combines the same classifier and repair policy with a redacted
+`MauiTestExecutionManifest`. It reports evidence sufficiency, stable test/incident/occurrence
+fingerprints, retryability, inert allowed next actions, and whether local reproduction is
+required. Imported evidence always remains diagnostic-only and cannot be repair-eligible.
+Execution-manifest fact objects such as `device`, `build`, or `lifecycle` are omitted when the
+corresponding stage has no facts; early and preflight failures do not serialize empty claims.
+Triage uses `failure.class` for canonical routing while retaining a more specific `failure.code`
+for diagnostics. Incident identity includes stable platform, runtime-kind, and broad device-profile
+facts, but excludes exact device identity, OS version, run ID, timestamps, and source revision.
+
 `MauiXamlSourceEligibilityAnalyzer` is also pure and provider-neutral. It accepts supplied
 source text, mapping, filesystem-safety, runtime-scope, and uniqueness facts and returns explicit
 ineligibility codes plus an exact declaration identity/span. It reads no workspace files, calls no
@@ -227,7 +265,7 @@ secrets, UI text, screenshots, raw logs, raw network content, or source.
 
 `MauiTestingJsonContext` includes source-generated metadata for every test-agent protocol contract
 and retains additive extension fields. See
-[Restricted test-agent protocol](../../../docs/DevFlow/test-agent.md) for the tool inventory and
+[Restricted test-agent protocol](https://github.com/dotnet/maui-labs/blob/main/docs/DevFlow/test-agent.md) for the tool inventory and
 approval workflow.
 
 ## Selector health and fingerprints
@@ -309,7 +347,7 @@ without connecting to or driving an app.
 
 The canonical executable artifact remains `maui-tests/<name>.md`. A local host may store its
 non-executable human plan next to it as `maui-tests/<name>.maui-plan.json`, using
-[test-plan-v1](../../../docs/DevFlow/spec/schemas/maui-test-plan-v1.json). A plan includes its
+[test-plan-v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-test-plan-v1.json). A plan includes its
 `planId`, revision, bound flow path/digest, goal, scenarios, assumptions, preconditions, reset and
 side-effect policy, acceptance criteria, requirements, provenance, and reviews.
 
@@ -343,7 +381,7 @@ does not launch an app, simulator, or device and is not runtime QA.
 All-platform completion requires Android, iOS, Mac Catalyst, and Windows to pass their declared
 runtime, reset, oracle, privacy, repair/source-review, and artifact gates. The Android engineering
 preview is not all-platform completion. The experimental AppKit host handoff is separately
-documented in [platform flow QA](../../../docs/DevFlow/flow-qa.md); its artifacts explicitly state
+documented in [platform flow QA](https://github.com/dotnet/maui-labs/blob/main/docs/DevFlow/flow-qa.md); its artifacts explicitly state
 `backend=appkit` and never qualify Mac Catalyst.
 
 The package deliberately does not publish reset, install, launch, broker, or device orchestration
@@ -366,7 +404,7 @@ deterministically creates at least 300 generated no-repair evaluations. Generate
 `source: "generated"` and `realDevice: false`; they are never treated as independent physical or
 device-backed executions.
 
-The versioned output is [preview qualification v1](../../../docs/DevFlow/spec/schemas/maui-preview-qualification-v1.json).
+The versioned output is [preview qualification v1](https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/maui-preview-qualification-v1.json).
 It records fingerprints, profiles, review/flag state, thresholds, sample counts, Wilson 95%
 intervals, ECE/Brier buckets when a probability-like confidence exists, report/trace/diagnosis
 sizes, host p50/p95 measurements, device-overhead absence, exclusions, and artifact hashes.

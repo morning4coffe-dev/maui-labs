@@ -75,6 +75,7 @@ C:Microsoft.Maui.DevFlow.Testing.MauiFlowDispatchReceipt()
 C:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure()
 C:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification()
 C:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts()
+C:Microsoft.Maui.DevFlow.Testing.MauiFlowFingerprintSet()
 C:Microsoft.Maui.DevFlow.Testing.MauiFlowJsonContext()
 C:Microsoft.Maui.DevFlow.Testing.MauiFlowJsonContext(options:System.Text.Json.JsonSerializerOptions)
 C:Microsoft.Maui.DevFlow.Testing.MauiFlowMigrationChange(Path:System.String,Kind:System.String,Description:System.String)
@@ -124,6 +125,11 @@ C:Microsoft.Maui.DevFlow.Testing.MauiFlowSelectorRequest()
 C:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicyJsonConverter()
 C:Microsoft.Maui.DevFlow.Testing.MauiFlowStepAttempt()
 C:Microsoft.Maui.DevFlow.Testing.MauiFlowTargetResolution()
+C:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage()
+C:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification()
+C:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceSufficiency()
+C:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts()
+C:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput()
 C:Microsoft.Maui.DevFlow.Testing.MauiFlowValueDisclosure()
 C:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactIdentity()
 C:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactSafeProjection()
@@ -135,6 +141,7 @@ C:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionBinding()
 C:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionEvaluation()
 C:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation()
 C:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts()
+C:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport()
 C:Microsoft.Maui.DevFlow.Testing.MauiManagedElementIdentity()
 C:Microsoft.Maui.DevFlow.Testing.MauiNativeAutomationIdentity()
 C:Microsoft.Maui.DevFlow.Testing.MauiNormalizedBounds()
@@ -245,6 +252,14 @@ C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentToolResult()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentTraceRequest()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentUntrustedInput()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentValidationRequest()
+C:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact()
+C:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts()
+C:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts()
+C:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionHostFacts()
+C:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts()
+C:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage()
+C:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest()
+C:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionOutcomeFacts()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestPlan()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidation()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestPrecondition()
@@ -369,6 +384,7 @@ F:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClasses.UnknownCompletion:System
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClasses.UnsafeValue:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClasses.UnstableBounds:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClasses.WorkflowCommandConflict:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowIncidentFingerprint.RuleVersion:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairOutcomeStates.Applied:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairOutcomeStates.Applying:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairOutcomeStates.ApprovalExpired:System.String
@@ -406,7 +422,24 @@ F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.None:Microsoft.Maui.De
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.TestTenantResettable:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.Unspecified:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.value__:System.Int32
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceStates.Insufficient:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceStates.Sufficient:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.CollectEvidence:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.CorrectFlow:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.FenceUnknownCompletion:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.InspectActionability:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.InspectInfrastructure:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.InspectSelectorEvidence:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.InvestigateAppRegression:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.InvestigateFailure:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.ProvideSensitiveInput:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.ReproduceLocally:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.RestorePreconditions:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.RetryRun:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.ReviewSelectorRepair:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.SelectSupportedTarget:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactIdentity.OpaqueIdPrefix:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReportSerializer.FileName:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiPreviewQualificationCorpusRunner.GeneratorVersion:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiPreviewQualificationStates.Fail:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiPreviewQualificationStates.NotQualified:System.String
@@ -488,6 +521,7 @@ F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.UntrustedPolicyInput:Sy
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.ValueLimitExceeded:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentProtocolVersions.PolicyVersion:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentProtocolVersions.Schema:System.Int32
+F:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionRuntimeProfile.RuleVersion:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiXamlAutomationIdGrammar.MaximumLength:System.Int32
 F:Microsoft.Maui.DevFlow.Testing.MauiXamlSourceIneligibilityCodes.AutomationIdDuplicateLive:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiXamlSourceIneligibilityCodes.AutomationIdDuplicateProject:System.String
@@ -594,6 +628,7 @@ M:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustEvaluator.EvaluateImport(polic
 M:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustEvaluator.EvaluateLocalReproduction(artifact:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustRecord,localRun:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts,current:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation,evaluatedAt:System.Nullable`1[System.DateTimeOffset]=null):Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionEvaluation
 M:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustRedactor.CheckpointFingerprint(checkpoint:Microsoft.Maui.DevFlow.Testing.MauiFlowCheckpoint):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustRedactor.Fingerprint(value:System.String):System.String
+M:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustRedactor.NormalizeFingerprint(value:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustRedactor.SafeFailureCode(value:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustStates.IsKnown(value:System.String):System.Boolean
 M:Microsoft.Maui.DevFlow.Testing.MauiAutomationIdProposalPolicy.ComputeContentDigest(bytes:System.ReadOnlySpan`1[System.Byte]):System.String
@@ -607,6 +642,10 @@ M:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerifier.VerifyAsync(driver:Mi
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.Classify(facts:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts):Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.FromLegacyFailureKind(legacyKind:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.ToFailure(classification:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification,failureId:System.String,legacyKind:System.String,stepId:System.String,at:System.DateTimeOffset,message:System.String=null):Microsoft.Maui.DevFlow.Testing.MauiFlowFailure
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowIncidentFingerprint.Create(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow,report:Microsoft.Maui.DevFlow.Testing.MauiFlowRunReport,manifest:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest,classification:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification=null):Microsoft.Maui.DevFlow.Testing.MauiFlowFingerprintSet
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowIncidentFingerprint.CreateIncidentFingerprint(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow,report:Microsoft.Maui.DevFlow.Testing.MauiFlowRunReport,manifest:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest,classification:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification=null,testIdentityFingerprint:System.String=null):System.String
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowIncidentFingerprint.CreateOccurrenceFingerprint(report:Microsoft.Maui.DevFlow.Testing.MauiFlowRunReport,manifest:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest,incidentFingerprint:System.String):System.String
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowIncidentFingerprint.CreateTestIdentityFingerprint(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow,report:Microsoft.Maui.DevFlow.Testing.MauiFlowRunReport):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowJsonContext.GetTypeInfo(type:System.Type):System.Text.Json.Serialization.Metadata.JsonTypeInfo
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowMigration.Preview(source:Microsoft.Maui.DevFlow.Testing.MauiFlow,targetSchema:System.Int32=2):Microsoft.Maui.DevFlow.Testing.MauiFlowMigrationResult
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowMigrationChange.<Clone>$():Microsoft.Maui.DevFlow.Testing.MauiFlowMigrationChange
@@ -617,6 +656,7 @@ M:Microsoft.Maui.DevFlow.Testing.MauiFlowMigrationChange.GetHashCode():System.In
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowMigrationChange.ToString():System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairEligibilityEvaluator.Evaluate(input:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairEligibilityInput):Microsoft.Maui.DevFlow.Testing.MauiFlowRepairEligibilityDecision
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairPatchBuilder.ApplyVerified(source:Microsoft.Maui.DevFlow.Testing.MauiFlow,proposal:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairProposal):Microsoft.Maui.DevFlow.Testing.MauiFlowRepairPatchBuildResult
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairPatchBuilder.Build(source:Microsoft.Maui.DevFlow.Testing.MauiFlow,stepId:System.String,proposedSelector:Microsoft.Maui.DevFlow.Testing.FlowSelector):Microsoft.Maui.DevFlow.Testing.MauiFlowRepairPatchBuildResult
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairPatchBuilder.Build(source:Microsoft.Maui.DevFlow.Testing.MauiFlow,stepSequence:System.Int32,proposedSelector:Microsoft.Maui.DevFlow.Testing.FlowSelector):Microsoft.Maui.DevFlow.Testing.MauiFlowRepairPatchBuildResult
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairProposalGenerator.Generate(input:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairProposalGenerationInput):Microsoft.Maui.DevFlow.Testing.MauiFlowRepairProposalGenerationResult
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowRepairProposalTrustPolicy.CanCreateProposal(artifact:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustRecord):Microsoft.Maui.DevFlow.Testing.MauiArtifactProposalDecision
@@ -625,12 +665,16 @@ M:Microsoft.Maui.DevFlow.Testing.MauiFlowReplayIntents.IsKnown(value:System.Stri
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReplaySafetyEvaluator.CanMarkRepairVerified(decision:Microsoft.Maui.DevFlow.Testing.MauiFlowReplayEligibilityDecision):System.Boolean
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReplaySafetyEvaluator.CanMarkRunVerified(decision:Microsoft.Maui.DevFlow.Testing.MauiFlowReplayEligibilityDecision):System.Boolean
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReplaySafetyEvaluator.Evaluate(request:Microsoft.Maui.DevFlow.Testing.MauiFlowRunRequest):Microsoft.Maui.DevFlow.Testing.MauiFlowReplayEligibilityDecision
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowReplaySafetyEvaluator.Evaluate(request:Microsoft.Maui.DevFlow.Testing.MauiFlowRunRequest,flow:Microsoft.Maui.DevFlow.Testing.MauiFlow):Microsoft.Maui.DevFlow.Testing.MauiFlowReplayEligibilityDecision
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowReplaySafetyEvaluator.EvaluateWithFlow(request:Microsoft.Maui.DevFlow.Testing.MauiFlowRunRequest,flow:Microsoft.Maui.DevFlow.Testing.MauiFlow):Microsoft.Maui.DevFlow.Testing.MauiFlowReplayEligibilityDecision
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.DescribeElement(type:System.String,automationId:System.String,id:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.DescribeSelector(selector:Microsoft.Maui.DevFlow.Testing.FlowSelector):Microsoft.Maui.DevFlow.Testing.MauiFlowSelectorRequest
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.DescribeValue(value:System.String,allowPlain:System.Boolean=false):Microsoft.Maui.DevFlow.Testing.MauiFlowValueDisclosure
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.SafeFileSegment(value:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.SafeIdentifier(value:System.String,maximumLength:System.Int32=128):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.SafeMessage(value:System.String,maximumLength:System.Int32=512):System.String
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.SafeReference(value:System.String):System.String
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.SafeRelativePath(value:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.SafeRoute(route:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.SanitizeSelector(selector:Microsoft.Maui.DevFlow.Testing.FlowSelector):Microsoft.Maui.DevFlow.Testing.FlowSelector
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowRequirementValidator.Validate(requirements:Microsoft.Maui.DevFlow.Testing.MauiFlowRequirements,available:Microsoft.Maui.DevFlow.Testing.MauiFlowCapabilitySet):Microsoft.Maui.DevFlow.Testing.MauiFlowRequirementValidation
@@ -653,9 +697,14 @@ M:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicies.Parse(value:System.S
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicies.ToWireValue(value:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicyJsonConverter.Read(reader:System.Text.Json.Utf8JsonReader&,typeToConvert:System.Type,options:System.Text.Json.JsonSerializerOptions):Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicyJsonConverter.Write(writer:System.Text.Json.Utf8JsonWriter,value:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy,options:System.Text.Json.JsonSerializerOptions):System.Void
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageAnalyzer.Analyze(input:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput):Microsoft.Maui.DevFlow.Testing.MauiFlowTriage
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageSerializer.CreateSafeProjection(triage:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage):Microsoft.Maui.DevFlow.Testing.MauiFlowTriage
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageSerializer.SerializeToUtf8Bytes(triage:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage):System.Byte[]
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowValidator.Validate(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow):Microsoft.Maui.DevFlow.Testing.FlowValidation
 M:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactIdentity.Create():Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactIdentity
 M:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactIdentity.IsImportedArtifactId(value:System.String):System.Boolean
+M:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReportSerializer.CreateSafeProjection(report:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport):Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport
+M:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReportSerializer.SerializeToUtf8Bytes(report:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport):System.Byte[]
 M:Microsoft.Maui.DevFlow.Testing.MauiPreviewFeatureFlagConfiguration.FromEnvironment(readEnvironment:System.Func`2[System.String,System.String]=null):Microsoft.Maui.DevFlow.Testing.MauiPreviewFeatureFlags
 M:Microsoft.Maui.DevFlow.Testing.MauiPreviewFeatureFlags.CreateDefault():Microsoft.Maui.DevFlow.Testing.MauiPreviewFeatureFlags
 M:Microsoft.Maui.DevFlow.Testing.MauiPreviewFeatureFlags.IsEnabled(feature:System.String):System.Boolean
@@ -698,6 +747,9 @@ M:Microsoft.Maui.DevFlow.Testing.MauiSourceProposalCommonEligibility.Analyze(inp
 M:Microsoft.Maui.DevFlow.Testing.MauiSourceProposalTrustPolicy.CanCreateProposal(artifact:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustRecord):Microsoft.Maui.DevFlow.Testing.MauiArtifactProposalDecision
 M:Microsoft.Maui.DevFlow.Testing.MauiTestAgentSelectorScopeKey.FromSelector(selector:Microsoft.Maui.DevFlow.Testing.FlowSelector):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiTestAgentSelectorScopeKey.ScopedItem(collectionScope:System.String,stableItemKey:System.String,automationId:System.String):System.String
+M:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifestSerializer.CreateSafeProjection(manifest:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest):Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest
+M:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifestSerializer.SerializeToUtf8Bytes(manifest:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest):System.Byte[]
+M:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionRuntimeProfile.CreateFingerprint(build:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts,device:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidator.Validate(plan:Microsoft.Maui.DevFlow.Testing.MauiTestPlan):Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidation
 M:Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidator.ValidateJson(json:System.String,plan:Microsoft.Maui.DevFlow.Testing.MauiTestPlan&):Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidation
 M:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.GetTypeInfo(type:System.Type):System.Text.Json.Serialization.Metadata.JsonTypeInfo
@@ -784,6 +836,7 @@ P:Microsoft.Maui.DevFlow.Testing.FlowStep.Page[]:System.String{get:public;set:pu
 P:Microsoft.Maui.DevFlow.Testing.FlowStep.Screenshot[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowStep.SelectorEvidence[]:Microsoft.Maui.DevFlow.Testing.MauiSelectorEvidence{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowStep.Seq[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.FlowStep.StepId[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowStep.Target[]:Microsoft.Maui.DevFlow.Testing.FlowSelector{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowStep.Value[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowStepArgs.Animated[]:System.Nullable`1[System.Boolean]{get:public;set:public}
@@ -1274,6 +1327,10 @@ P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts.RouteMatches[]:System.Null
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts.SchemaUnsupported[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts.TerminalOutcome[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts.TransportFailure[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowFingerprintSet.IncidentFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowFingerprintSet.OccurrenceFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowFingerprintSet.TestIdentityFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowFingerprintSet.Version[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowJsonContext.Boolean[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[System.Boolean]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowJsonContext.DateTimeOffset[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[System.DateTimeOffset]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowJsonContext.Default[]:Microsoft.Maui.DevFlow.Testing.MauiFlowJsonContext{get:public}
@@ -1634,6 +1691,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiFlowRunnerOptions.Reset[]:Microsoft.Maui.De
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowRunnerOptions.RunContext[]:Microsoft.Maui.DevFlow.Testing.MauiFlowRunContext{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowRunnerOptions.RunId[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowRunnerOptions.SelectorCandidateOptions[]:Microsoft.Maui.DevFlow.Testing.MauiSelectorCandidateGenerationOptions{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowRunnerOptions.StepObservationDelayMs[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowRunnerOptions.Target[]:Microsoft.Maui.DevFlow.Testing.MauiFlowRunTarget{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowRunnerOptions.ThrowOnCancellation[]:System.Boolean{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowSelectorHealthSummary.CalibrationState[]:System.String{get:public;set:public}
@@ -1683,6 +1741,57 @@ P:Microsoft.Maui.DevFlow.Testing.MauiFlowTargetResolution.FinalResolution[]:Syst
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowTargetResolution.MatchCount[]:System.Nullable`1[System.Int32]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowTargetResolution.Message[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowTargetResolution.Status[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.AllowedNextActions[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.Classification[]:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.Evidence[]:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceSufficiency{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.Execution[]:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.FingerprintVersion[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.ImportedEvidence[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.IncidentFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.LocalReproductionReason[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.LocalReproductionRequired[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.OccurrenceFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.RepairEligibilityCodes[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.RepairEligible[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.Retryable[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.Schema[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.SummaryCode[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.Summary[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.TestIdentityFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification.Category[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification.Code[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification.FailureClass[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification.Phase[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceSufficiency.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceSufficiency.MissingFacts[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceSufficiency.State[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts.Artifacts[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts.Build[]:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts.Device[]:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts.FlowId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts.Host[]:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionHostFacts{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts.Lifecycle[]:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts.ManifestId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts.Outcome[]:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionOutcomeFacts{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts.RunId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.AdditionalFailureCodes[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.ArtifactTrust[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.BeforeDispatch[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.CurrentCheckpoint[]:Microsoft.Maui.DevFlow.Testing.MauiFlowCheckpoint{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.ExpectedCheckpoint[]:Microsoft.Maui.DevFlow.Testing.MauiFlowCheckpoint{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.Flow[]:Microsoft.Maui.DevFlow.Testing.MauiFlow{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.ImportedArtifact[]:Microsoft.Maui.DevFlow.Testing.MauiArtifactTrustRecord{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.ImportedEvidence[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.IsCurrentLocalRun[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.Manifest[]:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.Plan[]:Microsoft.Maui.DevFlow.Testing.MauiTestPlan{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.PriorActiveSelectorResolution[]:Microsoft.Maui.DevFlow.Testing.MauiRepairPriorSelectorResolution{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.ReplayEligibility[]:Microsoft.Maui.DevFlow.Testing.MauiFlowReplayEligibilityDecision{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.Report[]:Microsoft.Maui.DevFlow.Testing.MauiFlowRunReport{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput.TargetFingerprint[]:Microsoft.Maui.DevFlow.Testing.MauiElementFingerprint{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowValueDisclosure.Digest[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowValueDisclosure.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowValueDisclosure.Length[]:System.Nullable`1[System.Int32]{get:public;set:public}
@@ -1705,6 +1814,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactSafeProjection.Omissions[]:
 P:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactSafeProjection.Outcome[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactSafeProjection.PackageFingerprint[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactSafeProjection.PlatformFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactSafeProjection.RuntimeProfileFingerprint[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactSafeProjection.SourceSchema[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactSafeProjection.Truncated[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiImportedFailureProjection.Class[]:System.String{get:public;set:public}
@@ -1750,6 +1860,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.ExtensionData[
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.FlowDigest[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.PackageDigest[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.Platform[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.RuntimeProfileFingerprint[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts.AppBuildFingerprint[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts.AppSourceFingerprint[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts.DeviceProfile[]:System.String{get:public;set:public}
@@ -1760,7 +1871,36 @@ P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts.IsNewLocalRun[]:Syst
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts.LocalRunId[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts.PackageDigest[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts.Platform[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts.RuntimeProfileFingerprint[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts.StartedAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ApprovalGranted[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.BrokerBindingPersisted[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ImportTrustState[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ImportedArtifactDigest[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ImportedArtifactKind[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ImportedArtifact[]:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactIdentity{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ImportedFailureFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ImportedRuntimeProfileFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ImportedStepFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.LocalArtifacts[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.LocalExitCategory[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.LocalExpectedCheckpointFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.LocalFailureFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.LocalManifestDigest[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.LocalObservedCheckpointFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.LocalReportDigest[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.LocalRunId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.LocalRuntimeProfileFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.LocalStepFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.Matched[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.MissingFacts[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ProposalCreated[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ReasonCodes[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ReviewAction[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.ReviewCommand[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.Schema[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport.TrustState[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiManagedElementIdentity.AutomationId[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiManagedElementIdentity.Framework[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiManagedElementIdentity.FullType[]:System.String{get:public;set:public}
@@ -2494,6 +2634,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentRequestEnvelope.ReadCapabilityId[]
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentRequestEnvelope.RequestId[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentRequestEnvelope.Schema[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentRequestEnvelope.Target[]:Microsoft.Maui.DevFlow.Testing.MauiTestAgentTarget{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentRunBindingRequest.Envelope[]:Microsoft.Maui.DevFlow.Testing.MauiTestAgentRequestEnvelope{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentRunBindingRequest.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentRunBindingRequest.ReadCapabilityId[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentRunBindingRequest.RunCapabilityToken[]:System.String{get:public;set:public}
@@ -2556,6 +2697,79 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentUntrustedInput.Truncated[]:System.
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentValidationRequest.Envelope[]:Microsoft.Maui.DevFlow.Testing.MauiTestAgentRequestEnvelope{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentValidationRequest.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentValidationRequest.Mode[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact.ArtifactId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact.Digest[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact.Kind[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact.MediaType[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact.Redacted[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact.RelativePath[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact.Role[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact.SizeBytes[]:System.Nullable`1[System.Int64]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts.AppBuildFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts.AppId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts.AppSourceFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts.Configuration[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts.PackageDigest[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts.ProjectFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts.RepositoryFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts.SourceRevision[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts.TargetFramework[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts.ApiLevel[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts.Architecture[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts.DeviceIdentityFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts.FormFactor[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts.OsVersion[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts.Platform[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts.Profile[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts.RuntimeKind[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts.Virtual[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionHostFacts.Architecture[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionHostFacts.EnvironmentFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionHostFacts.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionHostFacts.Os[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionHostFacts.RunnerKind[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionHostFacts.Runtime[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts.CleanupCompleted[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts.CleanupPolicy[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts.EndedAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts.InstalledByInvocation[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts.LaunchedByInvocation[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts.Stages[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts.StartedAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage.DetailCode[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage.DurationMs[]:System.Nullable`1[System.Int64]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage.Name[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage.OwnedResource[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage.Sequence[]:System.Nullable`1[System.Int32]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage.Status[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.Artifacts[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.Build[]:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.Device[]:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.FingerprintVersion[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.FlowDigest[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.FlowId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.FlowRevision[]:System.Nullable`1[System.Int32]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.Host[]:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionHostFacts{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.IncidentFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.Lifecycle[]:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.ManifestId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.OccurrenceFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.Outcome[]:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionOutcomeFacts{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.RunId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.Schema[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest.TestIdentityFingerprint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionOutcomeFacts.ExitCategory[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionOutcomeFacts.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionOutcomeFacts.Status[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionOutcomeFacts.Terminal[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionOutcomeFacts.UnknownCompletion[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionOutcomeFacts.Verified[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestPlan.AcceptanceCriteria[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiAcceptanceCriterion]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestPlan.Approvals[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiPlanApproval]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestPlan.Assumptions[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
@@ -2664,6 +2878,8 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.ListMauiTestAgentApprova
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.ListMauiTestAgentAuditEntry[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuditEntry]]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.ListMauiTestAgentPatchRecord[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentPatchRecord]]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.ListMauiTestAgentUntrustedInput[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentUntrustedInput]]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.ListMauiTestExecutionArtifact[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact]]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.ListMauiTestExecutionLifecycleStage[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage]]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.ListMauiTestPrecondition[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestPrecondition]]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.ListMauiTestScenario[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestScenario]]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.ListMauiXamlSourceEligibilityReason[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiXamlSourceEligibilityReason]]{get:public}
@@ -2748,6 +2964,10 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiFlowSelectorRequest[
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiFlowSideEffectPolicy[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiFlowStepAttempt[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiFlowStepAttempt]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiFlowTargetResolution[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiFlowTargetResolution]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiFlowTriageClassification[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiFlowTriageEvidenceSufficiency[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceSufficiency]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiFlowTriageExecutionFacts[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiFlowTriage[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiFlowTriage]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiFlowValueDisclosure[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiFlowValueDisclosure]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiFlow[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiFlow]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiImportedArtifactIdentity[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactIdentity]{get:public}
@@ -2760,6 +2980,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiLocalReproductionBin
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiLocalReproductionEvaluation[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionEvaluation]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiLocalReproductionExpectation[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiLocalReproductionFacts[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiLocalReproductionReport[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiManagedElementIdentity[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiManagedElementIdentity]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiNativeAutomationIdentity[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiNativeAutomationIdentity]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiNormalizedBounds[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiNormalizedBounds]{get:public}
@@ -2847,6 +3068,14 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentToolResult[
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentTraceRequest[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentTraceRequest]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentUntrustedInput[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentUntrustedInput]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentValidationRequest[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentValidationRequest]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestExecutionArtifact[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestExecutionBuildFacts[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestExecutionDeviceFacts[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestExecutionHostFacts[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionHostFacts]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestExecutionLifecycleFacts[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestExecutionLifecycleStage[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestExecutionManifest[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestExecutionOutcomeFacts[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestExecutionOutcomeFacts]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestPlan[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestPlan]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestPrecondition[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestPrecondition]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestResetRequirement[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestResetRequirement]{get:public}
@@ -3074,6 +3303,7 @@ T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowDispatchReceipt
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowFailure
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowFingerprintSet
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowJsonContext
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowMigrationChange
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowMigrationResult
@@ -3121,6 +3351,11 @@ T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowSelectorRequest
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicyJsonConverter
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowStepAttempt
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowTargetResolution
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowTriage
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceSufficiency
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowTriageExecutionFacts
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowTriageInput
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiFlowValueDisclosure
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactIdentity
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactSafeProjection
@@ -3132,6 +3367,7 @@ T:class sealed Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionBinding
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionEvaluation
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionFacts
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReport
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiManagedElementIdentity
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiNativeAutomationIdentity
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiNormalizedBounds
@@ -3242,6 +3478,14 @@ T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentToolResult
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentTraceRequest
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentUntrustedInput
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentValidationRequest
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestExecutionArtifact
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestExecutionBuildFacts
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestExecutionDeviceFacts
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestExecutionHostFacts
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleFacts
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestExecutionLifecycleStage
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestExecutionOutcomeFacts
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestPlan
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidation
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestPrecondition
@@ -3284,6 +3528,7 @@ T:class static Microsoft.Maui.DevFlow.Testing.MauiElementFingerprintBuilder
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerifier
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClasses
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier
+T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowIncidentFingerprint
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowMigration
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowRepairEligibilityEvaluator
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowRepairOutcomeStates
@@ -3297,7 +3542,12 @@ T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowRequirementValidator
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowRunOutcomes
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowRunReportSerializer
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicies
+T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowTriageAnalyzer
+T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceStates
+T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions
+T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowTriageSerializer
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowValidator
+T:class static Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReportSerializer
 T:class static Microsoft.Maui.DevFlow.Testing.MauiPreviewFeatureFlagConfiguration
 T:class static Microsoft.Maui.DevFlow.Testing.MauiPreviewQualificationArtifactManifestReader
 T:class static Microsoft.Maui.DevFlow.Testing.MauiPreviewQualificationCorpusRunner
@@ -3329,6 +3579,8 @@ T:class static Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCategories
 T:class static Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes
 T:class static Microsoft.Maui.DevFlow.Testing.MauiTestAgentProtocolVersions
 T:class static Microsoft.Maui.DevFlow.Testing.MauiTestAgentSelectorScopeKey
+T:class static Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifestSerializer
+T:class static Microsoft.Maui.DevFlow.Testing.MauiTestExecutionRuntimeProfile
 T:class static Microsoft.Maui.DevFlow.Testing.MauiTestPlanValidator
 T:class static Microsoft.Maui.DevFlow.Testing.MauiXamlAutomationIdGrammar
 T:class static Microsoft.Maui.DevFlow.Testing.MauiXamlSourceEligibilityAnalyzer

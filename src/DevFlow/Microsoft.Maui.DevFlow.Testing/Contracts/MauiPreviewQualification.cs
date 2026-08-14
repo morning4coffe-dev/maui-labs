@@ -198,6 +198,7 @@ public static class MauiPreviewFeatureFlagConfiguration
         readEnvironment ??= Environment.GetEnvironmentVariable;
         var killSwitches = (readEnvironment("DEVFLOW_PREVIEW_KILL_SWITCHES") ?? string.Empty)
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static value => value.ToLowerInvariant())
             .Where(static value => value is "workbench" or "agent-authoring" or "repair-proposals" or "source-proposals" or "trace-import-export")
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(static value => value, StringComparer.Ordinal)

@@ -425,6 +425,7 @@ public sealed class MauiTestAgentRunBindingRequest
 {
     [JsonPropertyName("sessionId")] public string? SessionId { get; set; }
     [JsonPropertyName("readCapabilityId")] public string? ReadCapabilityId { get; set; }
+    [JsonPropertyName("envelope")] public MauiTestAgentRequestEnvelope? Envelope { get; set; }
     [JsonPropertyName("runId")] public string? RunId { get; set; }
     [JsonPropertyName("runCapabilityToken")] public string? RunCapabilityToken { get; set; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }

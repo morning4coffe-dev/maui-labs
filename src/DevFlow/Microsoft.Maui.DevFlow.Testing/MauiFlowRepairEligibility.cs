@@ -120,7 +120,7 @@ public static class MauiFlowRepairEligibilityEvaluator
         var trust = input.ArtifactTrust ?? input.ImportedArtifact?.Verification?.State;
         var decision = new MauiFlowRepairEligibilityDecision
         {
-            FailureCode = failure?.Code ?? failure?.Class,
+            FailureCode = failure?.Class ?? failure?.Code,
             SourceRunId = report?.RunId,
             SourceStepId = failure?.StepId ?? failedStep?.StepId,
             ExpectedCheckpoint = expected,

@@ -14,12 +14,12 @@ public sealed class FlowValidation
 public static class FlowValidator
 {
     private static readonly IReadOnlySet<string> AssertKinds =
-        new HashSet<string>(StringComparer.Ordinal) { "propEquals", "exists", "routeIs", "pageChanged" };
+        new HashSet<string>(StringComparer.Ordinal) { "propEquals", "exists", "notExists", "routeIs", "pageChanged" };
 
     // routeIs has an authoritative AgentStatus.Route value. pageChanged is report-only because a
     // generic flow does not retain authoritative before/after page identity.
     private static readonly IReadOnlySet<string> VerifiableAssertKinds =
-        new HashSet<string>(StringComparer.Ordinal) { "propEquals", "exists", "routeIs" };
+        new HashSet<string>(StringComparer.Ordinal) { "propEquals", "exists", "notExists", "routeIs" };
 
     private static readonly IReadOnlySet<string> Themes =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "light", "dark", "system" };
@@ -36,6 +36,8 @@ public static class FlowValidator
             v.Errors.Add("Flow must contain at least one step.");
             return v;
         }
+
+        ValidateStepIdentities(v, flow.Steps, requirePositiveSequence: flow.Schema >= 2);
 
         var ordinal = 0;
         foreach (var s in flow.Steps)
@@ -101,7 +103,8 @@ public static class FlowValidator
                 // just poll until a misleading failure.
                 if (a.Verify)
                 {
-                    if (a.Kind is "propEquals" or "exists" && (a.Selector is null || a.Selector.IsEmpty))
+                    if ((a.Kind is "propEquals" or "exists" or "notExists") &&
+                        (a.Selector is null || a.Selector.IsEmpty))
                         v.Errors.Add($"{where}: {a.Kind} assertion requires a selector.");
                     if (a.Kind == "propEquals" && string.IsNullOrEmpty(a.Name))
                         v.Errors.Add($"{where}: propEquals assertion requires a property name.");
@@ -113,6 +116,90 @@ public static class FlowValidator
                 v.Warnings.Add($"{where}: uses a fragile selector (no AutomationId) — replay may be brittle.");
         }
         return v;
+    }
+
+    private static void ValidateStepIdentities(
+        FlowValidation validation,
+        IReadOnlyList<FlowStep> steps,
+        bool requirePositiveSequence)
+    {
+        var sequences = new Dictionary<int, int>();
+        var stableIds = new Dictionary<string, int>(StringComparer.Ordinal);
+        for (var index = 0; index < steps.Count; index++)
+        {
+            var step = steps[index];
+            var ordinal = index + 1;
+            if (requirePositiveSequence && step.Seq < 1)
+            {
+                validation.Errors.Add(
+                    $"step {ordinal}: seq must be a positive integer.");
+            }
+            if (!sequences.TryAdd(step.Seq, ordinal))
+            {
+                validation.Errors.Add(
+                    $"step {step.Seq}: duplicate seq value; integer stepSequence APIs require a unique sequence.");
+            }
+
+            var where = $"step {(step.Seq > 0 ? step.Seq : ordinal)}";
+            var acceptanceCriterionIds = step.AcceptanceCriterionIds ?? [];
+            var criterionIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var criterionId in acceptanceCriterionIds)
+            {
+                if (string.IsNullOrWhiteSpace(criterionId) ||
+                    criterionId.Length > 128 ||
+                    !char.IsAsciiLetterOrDigit(criterionId[0]) ||
+                    criterionId.Any(static character =>
+                        !char.IsAsciiLetterOrDigit(character) &&
+                        character is not '-' and not '_' and not '.' and not ':'))
+                {
+                    validation.Errors.Add(
+                        $"{where}: acceptanceCriterionIds must contain non-empty identifier-shaped values.");
+                    continue;
+                }
+                if (!criterionIds.Add(criterionId))
+                {
+                    validation.Errors.Add(
+                        $"{where}: acceptanceCriterionIds contains duplicate value '{criterionId}'.");
+                }
+            }
+
+            if (step.StepId is null)
+                continue;
+
+            var value = step.StepId.Trim();
+            if (value.Length == 0)
+            {
+                validation.Errors.Add($"{where}: stepId cannot be empty or whitespace.");
+                continue;
+            }
+            if (!string.Equals(value, step.StepId, StringComparison.Ordinal))
+                validation.Errors.Add($"{where}: stepId cannot contain leading or trailing whitespace.");
+            if (value.Length > 128)
+                validation.Errors.Add($"{where}: stepId cannot exceed 128 characters.");
+            if (!char.IsAsciiLetterOrDigit(value[0]) ||
+                value.Any(static character =>
+                    !char.IsAsciiLetterOrDigit(character) &&
+                    character is not '-' and not '_' and not '.' and not ':'))
+            {
+                validation.Errors.Add(
+                    $"{where}: stepId must start with a letter or digit and contain only letters, digits, '-', '_', '.', or ':'.");
+            }
+            if (value.All(char.IsAsciiDigit))
+            {
+                validation.Errors.Add(
+                    $"{where}: numeric stepId values are reserved for legacy sequence lookup.");
+            }
+            if (value.StartsWith("step-", StringComparison.Ordinal) &&
+                value.Length > 5 &&
+                value.AsSpan(5).ToArray().All(char.IsAsciiDigit) &&
+                !string.Equals(value, MauiFlowStepIdentity.Create(step.Seq), StringComparison.Ordinal))
+            {
+                validation.Errors.Add(
+                    $"{where}: sequence-shaped stepId values must equal '{MauiFlowStepIdentity.Create(step.Seq)}' for that step.");
+            }
+            if (!stableIds.TryAdd(value, ordinal))
+                validation.Errors.Add($"{where}: duplicate stepId '{value}'.");
+        }
     }
 
     private static void ValidateSecretReference(FlowValidation validation, string where, FlowStep step)

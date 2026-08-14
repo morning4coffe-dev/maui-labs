@@ -1,3 +1,4 @@
+using System.ComponentModel;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -246,6 +247,29 @@ public static class MauiFlowReplaySafetyEvaluator
 {
     /// <summary>Evaluates replay, repair, continuation, and verification eligibility.</summary>
     public static MauiFlowReplayEligibilityDecision Evaluate(MauiFlowRunRequest request)
+        => EvaluateCore(request, flow: null);
+
+    /// <summary>
+    /// Compatibility overload. New callers should use <see cref="EvaluateWithFlow"/> so a null
+    /// second argument cannot be confused with the request-only API.
+    /// </summary>
+    [Obsolete("Use EvaluateWithFlow(request, flow) for executable-flow validation.")]
+    [EditorBrowsable(EditorBrowsableState.Never)]
+    public static MauiFlowReplayEligibilityDecision Evaluate(MauiFlowRunRequest request, MauiFlow? flow)
+        => EvaluateWithFlow(request, flow);
+
+    /// <summary>
+    /// Evaluates replay safety and verifies that a supplied executable flow covers the validated
+    /// plan's declared scenarios and required acceptance criteria.
+    /// </summary>
+    public static MauiFlowReplayEligibilityDecision EvaluateWithFlow(
+        MauiFlowRunRequest request,
+        MauiFlow? flow)
+        => EvaluateCore(request, flow);
+
+    private static MauiFlowReplayEligibilityDecision EvaluateCore(
+        MauiFlowRunRequest request,
+        MauiFlow? flow)
     {
         ArgumentNullException.ThrowIfNull(request);
 
@@ -260,6 +284,16 @@ public static class MauiFlowReplaySafetyEvaluator
                 ? MauiFlowSideEffectPolicies.ToWireValue(policy)
                 : MauiFlowSideEffectPolicies.Unspecified,
         };
+        if (plan is not null && !MauiTestPlanValidator.Validate(plan).IsValid)
+        {
+            AddReason(
+                decision,
+                "test-plan-invalid",
+                "The supplied test plan failed deterministic contract validation.",
+                blocking: true,
+                scope: "admission");
+            return decision;
+        }
 
         if (hasDeclaredPolicy && !MauiFlowSideEffectPolicies.IsKnown(rawPolicy))
         {
@@ -350,7 +384,11 @@ public static class MauiFlowReplaySafetyEvaluator
         }
 
         var oracle = EvaluateIndependentOracles(plan, context, decision);
-        decision.RunVerificationAllowed = admitted && oracle.AllRequiredSucceeded;
+        var coverage = EvaluateVerificationCoverage(plan, flow, decision);
+        decision.RunVerificationAllowed =
+            admitted &&
+            oracle.AllRequiredSucceeded &&
+            coverage.AllRequiredCovered;
         if (oracle.HasFailure)
             decision.DownstreamContinuationAllowed = false;
         decision.RepairValidationAllowed =
@@ -359,7 +397,10 @@ public static class MauiFlowReplaySafetyEvaluator
             context?.PriorMutationCompletionCertain != false &&
             oracle.HasRequiredDeclaration &&
             !oracle.HasFailure;
-        decision.RepairEligibility = decision.RepairValidationAllowed && oracle.AllRequiredSucceeded;
+        decision.RepairEligibility =
+            decision.RepairValidationAllowed &&
+            oracle.AllRequiredSucceeded &&
+            coverage.AllRequiredCovered;
 
         if (policy == MauiFlowSideEffectPolicy.NonReplayable)
         {
@@ -658,20 +699,22 @@ public static class MauiFlowReplaySafetyEvaluator
         var declarations = new List<MauiIndependentBusinessOracleDeclaration>();
         if (plan is not null)
         {
-            declarations.AddRange(plan.IndependentBusinessOracles);
-            declarations.AddRange(plan.BusinessOracles.Select(static oracle => new MauiIndependentBusinessOracleDeclaration
-            {
-                OracleId = oracle.OracleId,
-                Description = oracle.Description,
-                Required = oracle.Required,
-                Independent = oracle.Independent,
-                EvidenceKind = oracle.EvidenceKind,
-                Reference = oracle.Reference,
-            }));
+            declarations.AddRange(plan.IndependentBusinessOracles.Where(static oracle => oracle is not null));
+            declarations.AddRange(plan.BusinessOracles
+                .Where(static oracle => oracle is not null)
+                .Select(static oracle => new MauiIndependentBusinessOracleDeclaration
+                {
+                    OracleId = oracle.OracleId,
+                    Description = oracle.Description,
+                    Required = oracle.Required,
+                    Independent = oracle.Independent,
+                    EvidenceKind = oracle.EvidenceKind,
+                    Reference = oracle.Reference,
+                }));
         }
 
         var required = declarations
-            .Where(static oracle => oracle.Required && oracle.Independent)
+            .Where(static oracle => oracle is not null && oracle.Required && oracle.Independent)
             .GroupBy(static oracle => oracle.OracleId ?? string.Empty, StringComparer.Ordinal)
             .Select(static group => group.First())
             .ToList();
@@ -684,6 +727,16 @@ public static class MauiFlowReplaySafetyEvaluator
                 false,
                 "verification");
             return new OracleEvaluation(false, false, false);
+        }
+        if ((context?.BusinessOracles ?? []).Any(static result => result is null))
+        {
+            AddReason(
+                decision,
+                "independent-oracle-result-invalid",
+                "Independent business-oracle results cannot contain null entries.",
+                true,
+                "verification");
+            return new OracleEvaluation(true, false, true);
         }
 
         var allSucceeded = true;
@@ -703,9 +756,12 @@ public static class MauiFlowReplaySafetyEvaluator
                 continue;
             }
 
-            var result = context?.BusinessOracles.FirstOrDefault(candidate =>
-                string.Equals(candidate.OracleId, declaration.OracleId, StringComparison.Ordinal));
-            if (result is null || result.Independent == false || result.Succeeded is null)
+            var results = (context?.BusinessOracles ?? [])
+                .Where(candidate =>
+                    string.Equals(candidate.OracleId, declaration.OracleId, StringComparison.Ordinal))
+                .ToList();
+            if (results.Count == 0 ||
+                results.Any(static result => result.Independent != true || result.Succeeded is null))
             {
                 AddReason(
                     decision,
@@ -717,7 +773,20 @@ public static class MauiFlowReplaySafetyEvaluator
                 continue;
             }
 
-            if (result.Succeeded != true)
+            if (results.Select(static result => result.Succeeded).Distinct().Count() != 1)
+            {
+                AddReason(
+                    decision,
+                    "independent-oracle-outcome-conflict",
+                    $"Independent business oracle '{declaration.OracleId}' produced contradictory outcomes.",
+                    true,
+                    "verification");
+                allSucceeded = false;
+                hasFailure = true;
+                continue;
+            }
+
+            if (results[0].Succeeded != true)
             {
                 AddReason(
                     decision,
@@ -732,6 +801,105 @@ public static class MauiFlowReplaySafetyEvaluator
 
         return new OracleEvaluation(true, allSucceeded, hasFailure);
     }
+
+    private static CoverageEvaluation EvaluateVerificationCoverage(
+        MauiTestPlan? plan,
+        MauiFlow? flow,
+        MauiFlowReplayEligibilityDecision decision)
+    {
+        var scenarios = (plan?.Scenarios ?? [])
+            .Where(static scenario => scenario is not null)
+            .ToList();
+        var requiredCriteria = (plan?.AcceptanceCriteria ?? [])
+            .Where(static criterion => criterion is not null && criterion.Required)
+            .ToList();
+        if (scenarios.Count == 0 && requiredCriteria.Count == 0)
+            return new CoverageEvaluation(true);
+
+        if (flow is null)
+        {
+            AddReason(
+                decision,
+                "verification-flow-missing",
+                "The executable flow is required to verify scenario and acceptance-criterion coverage.",
+                false,
+                "verification");
+            return new CoverageEvaluation(false);
+        }
+
+        var coveredCriteria = (flow.Steps ?? [])
+            .Where(HasHardAssertion)
+            .SelectMany(static step => step.AcceptanceCriterionIds ?? [])
+            .Where(static criterionId => !string.IsNullOrWhiteSpace(criterionId))
+            .ToHashSet(StringComparer.Ordinal);
+        var allCovered = true;
+        foreach (var criterion in requiredCriteria)
+        {
+            if (string.IsNullOrWhiteSpace(criterion.CriterionId) ||
+                !coveredCriteria.Contains(criterion.CriterionId))
+            {
+                AddReason(
+                    decision,
+                    "required-acceptance-criterion-uncovered",
+                    "A required acceptance criterion is not linked to a hard assertion in the executable flow.",
+                    false,
+                    "verification");
+                allCovered = false;
+            }
+        }
+
+        foreach (var scenario in scenarios)
+        {
+            var criterionIds = (scenario.AcceptanceCriterionIds ?? [])
+                .Where(static criterionId => !string.IsNullOrWhiteSpace(criterionId))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+            if (criterionIds.Count == 0 ||
+                criterionIds.Any(criterionId => !coveredCriteria.Contains(criterionId)))
+            {
+                AddReason(
+                    decision,
+                    "required-scenario-uncovered",
+                    "A declared scenario does not have complete hard-assertion coverage for its acceptance criteria.",
+                    false,
+                    "verification");
+                allCovered = false;
+            }
+        }
+
+        var requiredOracleIds = (plan?.IndependentBusinessOracles ?? [])
+            .Where(static oracle =>
+                oracle is not null &&
+                oracle.Required &&
+                oracle.Independent &&
+                !string.IsNullOrWhiteSpace(oracle.OracleId))
+            .Select(static oracle => oracle.OracleId!)
+            .Concat((plan?.BusinessOracles ?? [])
+                .Where(static oracle =>
+                    oracle is not null &&
+                    oracle.Required &&
+                    oracle.Independent &&
+                    !string.IsNullOrWhiteSpace(oracle.OracleId))
+                .Select(static oracle => oracle.OracleId!))
+            .ToHashSet(StringComparer.Ordinal);
+        if (requiredCriteria.Any(criterion =>
+                !string.IsNullOrWhiteSpace(criterion.BusinessOracleId) &&
+                !requiredOracleIds.Contains(criterion.BusinessOracleId)))
+        {
+            AddReason(
+                decision,
+                "acceptance-criterion-oracle-undeclared",
+                "A required acceptance criterion references a business oracle that is not declared as required and independent.",
+                false,
+                "verification");
+            allCovered = false;
+        }
+
+        return new CoverageEvaluation(allCovered);
+    }
+
+    private static bool HasHardAssertion(FlowStep step)
+        => (step.Asserts ?? []).Any(static assertion => assertion?.Verify == true);
 
     private static MauiFlowCheckpoint? ToCheckpoint(MauiFlowCheckpointRequirements? requirements)
     {
@@ -798,4 +966,6 @@ public static class MauiFlowReplaySafetyEvaluator
         bool HasRequiredDeclaration,
         bool AllRequiredSucceeded,
         bool HasFailure);
+
+    private readonly record struct CoverageEvaluation(bool AllRequiredCovered);
 }

@@ -163,6 +163,7 @@ public static class FlowMarkdown
                 {
                     case "propEquals": sb.Append("   - Expect ").Append(NoFence(a.Name)).Append(" == \"").Append(NoFence(a.Expected)).Append("\"\n"); break;
                     case "exists": sb.Append("   - Expect target still present\n"); break;
+                    case "notExists": sb.Append("   - Expect target no longer present\n"); break;
                     case "routeIs": sb.Append("   - Expect route ").Append(NoFence(a.Expected)).Append('\n'); break;
                     case "pageChanged": sb.Append("   - Note: screen changed\n"); break;
                 }

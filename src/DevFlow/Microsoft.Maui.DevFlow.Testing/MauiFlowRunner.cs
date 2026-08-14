@@ -9,6 +9,11 @@ public sealed class MauiFlowRunnerOptions
 {
     public int PollTries { get; set; } = 10;
     public int PollGapMs { get; set; } = 250;
+    /// <summary>
+    /// Optional bounded pause after a completed non-final step so an interactive host can capture
+    /// the resulting UI state before the next mutation. Production/CI callers leave this at zero.
+    /// </summary>
+    public int StepObservationDelayMs { get; set; }
     public bool ContinueOnFailure { get; set; }
     /// <summary>Preserves the legacy replayer cancellation contract when true.</summary>
     public bool ThrowOnCancellation { get; set; }
@@ -90,6 +95,8 @@ public interface IFlowRunEvidenceCapture : IFlowReplayEvidenceCapture
 /// </summary>
 public sealed class MauiFlowRunner
 {
+    internal const string InfrastructureErrorMessage = "The flow runner encountered an infrastructure error.";
+
     private readonly IMauiFlowDriver _driver;
     private readonly MauiFlowRunnerOptions _options;
     private readonly IFlowReplayEvidenceCapture? _evidenceCapture;
@@ -140,7 +147,7 @@ public sealed class MauiFlowRunner
             Plan = _options.Plan,
             Context = _options.RunContext,
         };
-        var replayEligibility = MauiFlowReplaySafetyEvaluator.Evaluate(safetyRequest);
+        var replayEligibility = MauiFlowReplaySafetyEvaluator.EvaluateWithFlow(safetyRequest, flow);
         var expectedCheckpoint = _options.ExpectedCheckpoint ?? _options.RunContext?.Preconditions?.Expected;
         var report = new MauiFlowRunReport
         {
@@ -390,6 +397,7 @@ public sealed class MauiFlowRunner
                     receipt,
                     actionability,
                     legacyStep,
+                    expectedCheckpoint,
                     observedCheckpoint,
                     classification);
                 await AttachSelectorEvidenceAsync(
@@ -424,6 +432,13 @@ public sealed class MauiFlowRunner
                     report.Steps.Count,
                     flow.Steps?.Count ?? 0,
                     "step-completed");
+                if (_options.StepObservationDelayMs > 0 &&
+                    report.Steps.Count < (flow.Steps?.Count ?? 0))
+                {
+                    await Task.Delay(
+                        Math.Clamp(_options.StepObservationDelayMs, 0, 5_000),
+                        cancellationToken).ConfigureAwait(false);
+                }
 
                 if (!legacyStep.Ok)
                 {
@@ -495,6 +510,7 @@ public sealed class MauiFlowRunner
                     receipt: null,
                     activeActionability ?? [],
                     activeLegacyStep,
+                    expectedCheckpoint,
                     activeObservedCheckpoint,
                     classification));
                 report.DivergenceStepId ??= StepId(activeStep);
@@ -516,7 +532,7 @@ public sealed class MauiFlowRunner
                 "Flow run cancelled.",
                 CancellationToken.None).ConfigureAwait(false);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
             legacy.Ok = false;
             legacy.StoppedEarly = true;
@@ -527,7 +543,7 @@ public sealed class MauiFlowRunner
                 null,
                 report.DivergenceStepId,
                 _options.Clock.GetUtcNow(),
-                ex.Message);
+                InfrastructureErrorMessage);
             return await FinalizeAsync(
                 report,
                 legacy,
@@ -619,9 +635,7 @@ public sealed class MauiFlowRunner
 
         var verified = outcome == MauiFlowRunOutcomes.Passed &&
             report.ReplayEligibility?.RunVerificationAllowed == true;
-        var verificationReason = verified
-            ? "Required independent business oracles verified the run."
-            : "The run is not verified because required independent business-oracle evidence is absent, failed, or the run did not pass.";
+        var verificationReason = VerificationReason(outcome, report.ReplayEligibility, verified);
         report.Outcome.Verified = verified;
         report.Outcome.VerificationReason = verificationReason;
         report.Verification = new MauiFlowRunVerification
@@ -737,6 +751,32 @@ public sealed class MauiFlowRunner
         };
     }
 
+    private static string VerificationReason(
+        string outcome,
+        MauiFlowReplayEligibilityDecision? decision,
+        bool verified)
+    {
+        if (verified)
+        {
+            return "Required scenario, acceptance-criterion, and independent business-oracle coverage verified the run.";
+        }
+        if (!string.Equals(outcome, MauiFlowRunOutcomes.Passed, StringComparison.Ordinal))
+            return "The execution did not pass, so it was not independently verified.";
+
+        var reasonCodes = (decision?.Reasons ?? [])
+            .Where(static reason => string.Equals(reason.Scope, "verification", StringComparison.Ordinal))
+            .Select(static reason => MauiFlowReportRedactor.SafeIdentifier(reason.Code))
+            .Where(static code => code is not null)
+            .Cast<string>()
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static code => code, StringComparer.Ordinal)
+            .ToList();
+        return reasonCodes.Count == 0
+            ? "The execution passed, but independent verification requirements were not satisfied."
+            : "The execution passed, but independent verification requirements were not satisfied: " +
+              string.Join(", ", reasonCodes) + ".";
+    }
+
     private async Task<DriveResult> DriveAsync(
         FlowStep step,
         FlowActionabilityEngine actionability,
@@ -848,7 +888,7 @@ public sealed class MauiFlowRunner
                     var result = await _driver.SetThemeAsync(theme).ConfigureAwait(false);
                     return result.Success
                         ? DriveResult.Success()
-                        : DriveResult.Failure(FlowFailureKinds.Drive, result.Message ?? "setTheme reported failure");
+                        : DriveResult.Failure(FlowFailureKinds.Drive, "setTheme reported failure");
                 }
                 default:
                     return DriveResult.Failure(FlowFailureKinds.Drive, "The flow action is not supported.");
@@ -864,12 +904,14 @@ public sealed class MauiFlowRunner
                 ex.IsUnknownCompletion
                     ? FlowFailureKinds.UnknownCompletion
                     : FlowFailureKinds.WorkflowCommandConflict,
-                ex.Message,
+                ex.IsUnknownCompletion
+                    ? "Workflow command completion is unknown."
+                    : "The workflow command conflicted with another command.",
                 receipt: ex.Receipt);
         }
-        catch (Exception ex)
+        catch (Exception)
         {
-            return DriveResult.Failure(FlowFailureKinds.Drive, $"drive failed: {ex.Message}");
+            return DriveResult.Failure(FlowFailureKinds.Drive, "The driver operation failed.");
         }
     }
 
@@ -936,6 +978,19 @@ public sealed class MauiFlowRunner
                         return result;
                     }
                 }
+                else if (assertion.Kind == "notExists")
+                {
+                    var resolution = await new FlowActionabilityEngine(_driver, 1, 0)
+                        .ResolveAsync(assertion.Selector, cancellationToken)
+                        .ConfigureAwait(false);
+                    result.Actual = resolution.MatchCount.ToString(System.Globalization.CultureInfo.InvariantCulture);
+                    if (!resolution.Ok &&
+                        string.Equals(resolution.Kind, FlowFailureKinds.NotFound, StringComparison.Ordinal))
+                    {
+                        result.Ok = true;
+                        return result;
+                    }
+                }
                 else if (assertion.Kind == "routeIs")
                 {
                     var route = (await _driver.GetStatusAsync().ConfigureAwait(false))?.Route;
@@ -984,6 +1039,7 @@ public sealed class MauiFlowRunner
         WorkflowCommandReceipt? receipt,
         List<MauiFlowActionabilityAttempt> actionability,
         FlowStepResult legacy,
+        MauiFlowCheckpoint? expectedCheckpoint,
         MauiFlowCheckpoint? observedCheckpoint,
         MauiFlowFailureClassification? classification)
     {
@@ -1044,7 +1100,7 @@ public sealed class MauiFlowRunner
                     : "completed",
                 ReceivedAt = endedAt,
             },
-            ExpectedCheckpoint = _options.ExpectedCheckpoint,
+            ExpectedCheckpoint = expectedCheckpoint,
             ObservedCheckpoint = observedCheckpoint,
             CommandId = receipt is null ? null : MauiFlowReportRedactor.SafeIdentifier(receipt.CommandId),
             CommandSequence = receipt?.Sequence,
@@ -1325,7 +1381,7 @@ public sealed class MauiFlowRunner
     };
 
     private static string StepId(FlowStep step)
-        => step.Seq.ToString(CultureInfo.InvariantCulture);
+        => MauiFlowStepIdentity.Get(step);
 
     private string? ResolveStepValue(FlowStep step, string? literal, out string? error)
     {
@@ -1400,6 +1456,8 @@ public sealed class MauiFlowRunner
             DeviceProfile = target.DeviceProfile,
             AppId = target.AppId,
             AppBuildFingerprint = target.AppBuildFingerprint,
+            AppSourceFingerprint = target.AppSourceFingerprint,
+            PackageDigest = target.PackageDigest,
             AgentId = target.AgentId,
             AgentInstanceId = target.AgentInstanceId,
             Locale = target.Locale,

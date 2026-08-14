@@ -122,6 +122,7 @@ public static class MauiFlowRunReportSerializer
             Directory.CreateDirectory(Path.GetDirectoryName(target)!);
             File.WriteAllBytes(temporary, bytes);
             File.Move(temporary, target, overwrite: true);
+            report.ReportPath = target;
 
             return new MauiFlowRunReportWriteResult
             {
@@ -157,20 +158,77 @@ public static class MauiFlowRunReportSerializer
             result.Errors.Add("schema must be 1.");
         if (string.IsNullOrWhiteSpace(report.RunId))
             result.Errors.Add("runId is required.");
-        if (string.IsNullOrWhiteSpace(report.FlowDigest))
+        if (RequiresFlowDigest(report) && string.IsNullOrWhiteSpace(report.FlowDigest))
             result.Errors.Add("flowDigest is required.");
+        if (report.FlowRevision is < 1)
+            result.Errors.Add("flowRevision must be greater than or equal to 1.");
+        if (report.StartedAt is null)
+            result.Errors.Add("startedAt is required.");
+        if (report.EndedAt is null)
+            result.Errors.Add("endedAt is required.");
+        if (report.StartedAt is { } startedAt &&
+            report.EndedAt is { } endedAt &&
+            endedAt < startedAt)
+        {
+            result.Errors.Add("endedAt cannot precede startedAt.");
+        }
+        if (report.Outcome is null)
+            result.Errors.Add("outcome is required.");
         if (report.Outcome?.Terminal == true && report.EndedAt is null)
             result.Errors.Add("A terminal report requires endedAt.");
         if (report.Outcome?.Terminal == true && string.IsNullOrWhiteSpace(report.Outcome.Status))
             result.Errors.Add("A terminal report requires an outcome status.");
-        if (report.Events.Count > new MauiFlowRunReportLimits().MaxEvents)
+        if ((report.Events?.Count ?? 0) > new MauiFlowRunReportLimits().MaxEvents)
             result.Errors.Add("events exceeds the v1 bound.");
-        if (report.Steps.Count > new MauiFlowRunReportLimits().MaxSteps)
+        if ((report.Steps?.Count ?? 0) > new MauiFlowRunReportLimits().MaxSteps)
             result.Errors.Add("steps exceeds the v1 bound.");
-        if (report.Outcome?.Verified == true && report.ReplayEligibility?.RunVerificationAllowed != true)
-            result.Errors.Add("A verified run requires successful independent-oracle eligibility.");
+        if ((report.Outcome?.Verified == true || report.Verification?.Verified == true) &&
+            report.ReplayEligibility?.RunVerificationAllowed != true)
+        {
+            result.Errors.Add("A verified run requires successful scenario, acceptance-criterion, and independent-oracle eligibility.");
+        }
+        if (report.Verification?.Verified == true &&
+            !string.Equals(report.Outcome?.Status, MauiFlowRunOutcomes.Passed, StringComparison.Ordinal))
+        {
+            result.Errors.Add("Independent verification requires a passed execution outcome.");
+        }
+        if (report.Outcome?.Verified is { } outcomeVerified &&
+            report.Verification?.Verified is { } verificationVerified &&
+            outcomeVerified != verificationVerified)
+        {
+            result.Errors.Add("outcome.verified must match verification.verified.");
+        }
         if (report.Failure?.RepairEligible == true && report.ReplayEligibility?.RepairEligibility != true)
             result.Errors.Add("A repair-eligible failure requires replay repair eligibility.");
+        var passed = string.Equals(
+            report.Outcome?.Status,
+            MauiFlowRunOutcomes.Passed,
+            StringComparison.Ordinal);
+        if (passed && report.Failure is not null)
+            result.Errors.Add("A passed outcome cannot contain a failure.");
+        if (!passed && report.Outcome?.Terminal == true && report.Failure is null)
+            result.Errors.Add("A terminal non-passed outcome requires a failure.");
+        if (!passed &&
+            (report.Outcome?.Verified == true || report.Verification?.Verified == true))
+        {
+            result.Errors.Add("A non-passed outcome cannot be verified.");
+        }
+        if (report.Failure?.Retryable is { } reportedRetryable &&
+            reportedRetryable != MauiFlowFailureClassifier.Classify(new MauiFlowFailureFacts
+            {
+                FailureClass = report.Failure.Class,
+                LegacyFailureKind = report.Failure.LegacyKind,
+                TerminalOutcome = report.Outcome?.Status,
+            }).Retryable)
+        {
+            result.Errors.Add("failure.retryable must match the canonical failure classification.");
+        }
+        if (!HasPositiveUniqueSequence((report.Events ?? []).Where(static item => item is not null).Select(static item => item.Sequence)))
+            result.Errors.Add("events must use positive unique sequence values when sequence is present.");
+        if (!HasPositiveUniqueSequence((report.Steps ?? []).Where(static item => item is not null).Select(static item => item.Sequence)))
+            result.Errors.Add("steps must use positive unique sequence values when sequence is present.");
+        if (HasContradictoryOracleResults(report.BusinessOracles ?? []))
+            result.Errors.Add("businessOracles cannot contain contradictory outcomes for one oracleId.");
         if (report.ReplayEligibility is not null &&
             !string.Equals(report.SideEffectPolicy, report.ReplayEligibility.SideEffectPolicy, StringComparison.Ordinal))
         {
@@ -195,6 +253,7 @@ public static class MauiFlowRunReportSerializer
         limits.MaxJsonBytes = Math.Max(4_096, limits.MaxJsonBytes);
 
         SanitizeReport(report, limits.MaxTextLength);
+        ClearExtensionData(report);
         Trim(report.Events, limits.MaxEvents, report, "events", "The event limit was reached.");
         Trim(report.Steps, limits.MaxSteps, report, "steps", "The step-attempt limit was reached.");
         Trim(report.Artifacts, limits.MaxArtifacts, report, "artifacts", "The artifact-reference limit was reached.");
@@ -247,7 +306,88 @@ public static class MauiFlowRunReportSerializer
             report.Truncated = true;
             AddOmission(report, "report-size", "The report was reduced to satisfy the JSON size limit.", null);
         }
+
+        if (JsonSerializer.SerializeToUtf8Bytes(report, MauiTestingJsonContext.Default.MauiFlowRunReport).Length >
+            limits.MaxJsonBytes)
+        {
+            var retainedStep = report.Steps.FirstOrDefault(step =>
+                    string.Equals(step.StepId, report.DivergenceStepId, StringComparison.Ordinal))
+                ?? report.Steps.LastOrDefault();
+            report.Events.Clear();
+            report.Artifacts.Clear();
+            report.BusinessOracles.Clear();
+            report.Steps = retainedStep is null ? [] : [retainedStep];
+            if (retainedStep is not null)
+            {
+                retainedStep.Intent = null;
+                retainedStep.Selector = null;
+                retainedStep.SelectorRequest = null;
+                retainedStep.CandidateSummary = null;
+                retainedStep.TargetResolution = null;
+                retainedStep.Actionability.Clear();
+                retainedStep.Dispatch = null;
+                retainedStep.Assertions.Clear();
+                retainedStep.Fingerprint = null;
+                retainedStep.SelectorCandidates.Clear();
+                retainedStep.SelectorCandidateOmissions.Clear();
+                retainedStep.Artifacts.Clear();
+                retainedStep.ExtensionData = null;
+            }
+            report.Reset = null;
+            report.Preconditions = null;
+            report.Compensator = null;
+            report.ReplayEligibility = null;
+            report.SelectorHealth = null;
+            report.Omissions = report.Omissions.Take(8).ToList();
+            report.Truncated = true;
+            report.TruncationReason = "The report was reduced to its terminal summary to satisfy the JSON size limit.";
+            AddOmission(report, "report-size-terminal-summary", "Only the terminal summary was retained.", retainedStep?.Sequence);
+        }
     }
+
+    private static bool RequiresFlowDigest(MauiFlowRunReport report)
+    {
+        if ((report.Steps?.Count ?? 0) > 0)
+            return true;
+        if (report.Target is { } target &&
+            new[]
+            {
+                target.Platform,
+                target.AppId,
+                target.AppBuildFingerprint,
+                target.PackageDigest,
+            }.Any(static value => !string.IsNullOrWhiteSpace(value)))
+        {
+            return true;
+        }
+        return report.Failure?.Class is not
+            MauiFlowFailureClasses.FlowInvalid and not
+            MauiFlowFailureClasses.SchemaUnsupported;
+    }
+
+    private static bool HasPositiveUniqueSequence(IEnumerable<int?> sequences)
+    {
+        var seen = new HashSet<int>();
+        foreach (var sequence in sequences)
+        {
+            if (sequence is null)
+                continue;
+            if (sequence < 1 || !seen.Add(sequence.Value))
+                return false;
+        }
+        return true;
+    }
+
+    private static bool HasContradictoryOracleResults(
+        IEnumerable<MauiIndependentBusinessOracleResult> results)
+        => results
+            .Where(static result =>
+                result is not null &&
+                !string.IsNullOrWhiteSpace(result.OracleId) &&
+                result.Succeeded is not null)
+            .GroupBy(static result => result.OracleId!, StringComparer.Ordinal)
+            .Any(static group =>
+                group.Select(static result => result.Succeeded).Distinct().Count() > 1);
 
     private static void BoundStepText(MauiFlowStepAttempt step, int maxTextLength)
     {
@@ -265,12 +405,27 @@ public static class MauiFlowRunReportSerializer
 
     private static void SanitizeReport(MauiFlowRunReport report, int maxTextLength)
     {
+        report.Events = (report.Events ?? [])
+            .Where(static item => item is not null)
+            .ToList();
+        report.Steps = (report.Steps ?? [])
+            .Where(static item => item is not null)
+            .ToList();
+        report.Artifacts = (report.Artifacts ?? [])
+            .Where(static item => item is not null)
+            .ToList();
+        report.BusinessOracles = (report.BusinessOracles ?? [])
+            .Where(static item => item is not null)
+            .ToList();
+        report.Omissions = (report.Omissions ?? [])
+            .Where(static item => item is not null)
+            .ToList();
         report.RunId = MauiFlowReportRedactor.SafeIdentifier(report.RunId);
         report.FlowId = MauiFlowReportRedactor.SafeIdentifier(report.FlowId);
         report.FlowDigest = MauiFlowReportRedactor.SafeIdentifier(report.FlowDigest);
         report.LegacyFlowIdentity = MauiFlowReportRedactor.SafeIdentifier(report.LegacyFlowIdentity);
         report.ReportDigest = MauiFlowReportRedactor.SafeIdentifier(report.ReportDigest);
-        report.ReportPath = MauiFlowReportRedactor.SafeMessage(report.ReportPath, maxTextLength);
+        report.ReportPath = MauiFlowReportRedactor.SafeRelativePath(report.ReportPath);
         report.SideEffectPolicy = MauiFlowReportRedactor.SafeIdentifier(report.SideEffectPolicy);
         SanitizeTarget(report.Target);
         SanitizeCheckpoint(report.Reset);
@@ -288,6 +443,21 @@ public static class MauiFlowRunReportSerializer
 
         foreach (var step in report.Steps)
         {
+            step.Actionability = (step.Actionability ?? [])
+                .Where(static item => item is not null)
+                .ToList();
+            step.Assertions = (step.Assertions ?? [])
+                .Where(static item => item is not null)
+                .ToList();
+            step.SelectorCandidates = (step.SelectorCandidates ?? [])
+                .Where(static item => item is not null)
+                .ToList();
+            step.SelectorCandidateOmissions = (step.SelectorCandidateOmissions ?? [])
+                .Where(static item => item is not null)
+                .ToList();
+            step.Artifacts = (step.Artifacts ?? [])
+                .Where(static item => item is not null)
+                .ToList();
             step.StepId = MauiFlowReportRedactor.SafeIdentifier(step.StepId);
             step.Action = MauiFlowReportRedactor.SafeIdentifier(step.Action);
             step.Selector = MauiFlowReportRedactor.SanitizeSelector(step.Selector);
@@ -338,6 +508,9 @@ public static class MauiFlowRunReportSerializer
 
         if (report.Failure is not null)
         {
+            report.Failure.Artifacts = (report.Failure.Artifacts ?? [])
+                .Where(static item => item is not null)
+                .ToList();
             report.Failure.FailureId = MauiFlowReportRedactor.SafeIdentifier(report.Failure.FailureId);
             report.Failure.Class = MauiFlowReportRedactor.SafeIdentifier(report.Failure.Class);
             report.Failure.Code = MauiFlowReportRedactor.SafeIdentifier(report.Failure.Code);
@@ -345,6 +518,13 @@ public static class MauiFlowRunReportSerializer
             report.Failure.Phase = MauiFlowReportRedactor.SafeIdentifier(report.Failure.Phase);
             report.Failure.LegacyKind = MauiFlowReportRedactor.SafeIdentifier(report.Failure.LegacyKind);
             report.Failure.StepId = MauiFlowReportRedactor.SafeIdentifier(report.Failure.StepId);
+            report.Failure.Retryable = MauiFlowFailureClassifier.Classify(
+                new MauiFlowFailureFacts
+                {
+                    TerminalOutcome = report.Outcome?.Status,
+                    FailureClass = report.Failure.Class,
+                    LegacyFailureKind = report.Failure.LegacyKind,
+                }).Retryable;
             SanitizeArtifacts(report.Failure.Artifacts, maxTextLength);
         }
         SanitizeArtifacts(report.Artifacts, maxTextLength);
@@ -382,7 +562,7 @@ public static class MauiFlowRunReportSerializer
             }
             if (fingerprint.Source is not null)
             {
-                fingerprint.Source.File = MauiFlowReportRedactor.SafeMessage(fingerprint.Source.File);
+                fingerprint.Source.File = MauiFlowReportRedactor.SafeRelativePath(fingerprint.Source.File);
                 fingerprint.Source.BuildHash = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Source.BuildHash);
                 fingerprint.Source.CurrentHash = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Source.CurrentHash);
                 fingerprint.Source.State = MauiFlowReportRedactor.SafeIdentifier(fingerprint.Source.State);
@@ -493,13 +673,13 @@ public static class MauiFlowRunReportSerializer
             reset.Reference.ResetId = MauiFlowReportRedactor.SafeIdentifier(reset.Reference.ResetId);
             reset.Reference.Scope = MauiFlowReportRedactor.SafeIdentifier(reset.Reference.Scope);
             reset.Reference.Version = MauiFlowReportRedactor.SafeIdentifier(reset.Reference.Version);
-            reset.Reference.EvidenceReference = MauiFlowReportRedactor.SafeMessage(reset.Reference.EvidenceReference);
+            reset.Reference.EvidenceReference = MauiFlowReportRedactor.SafeReference(reset.Reference.EvidenceReference);
         }
         SanitizeAppStateSeed(reset.AppStateSeed);
         SanitizeBackendSeed(reset.BackendTestDataSeed);
         if (reset.Outcome is not null)
         {
-            reset.Outcome.EvidenceReference = MauiFlowReportRedactor.SafeMessage(reset.Outcome.EvidenceReference);
+            reset.Outcome.EvidenceReference = MauiFlowReportRedactor.SafeReference(reset.Outcome.EvidenceReference);
             reset.Outcome.Message = MauiFlowReportRedactor.SafeMessage(reset.Outcome.Message);
         }
     }
@@ -528,7 +708,7 @@ public static class MauiFlowRunReportSerializer
             return;
         SanitizeCheckpoint(preconditions.Expected);
         SanitizeCheckpoint(preconditions.Observed);
-        preconditions.EvidenceReference = MauiFlowReportRedactor.SafeMessage(preconditions.EvidenceReference);
+        preconditions.EvidenceReference = MauiFlowReportRedactor.SafeReference(preconditions.EvidenceReference);
     }
 
     private static void SanitizeAppStateSeed(MauiFlowAppStateSeedFingerprint? seed)
@@ -562,9 +742,9 @@ public static class MauiFlowRunReportSerializer
             outcome.Compensator.Description = MauiFlowReportRedactor.SafeMessage(outcome.Compensator.Description);
             outcome.Compensator.Scope = MauiFlowReportRedactor.SafeIdentifier(outcome.Compensator.Scope);
             outcome.Compensator.EvidenceKind = MauiFlowReportRedactor.SafeIdentifier(outcome.Compensator.EvidenceKind);
-            outcome.Compensator.Reference = MauiFlowReportRedactor.SafeMessage(outcome.Compensator.Reference);
+            outcome.Compensator.Reference = MauiFlowReportRedactor.SafeReference(outcome.Compensator.Reference);
         }
-        outcome.EvidenceReference = MauiFlowReportRedactor.SafeMessage(outcome.EvidenceReference);
+        outcome.EvidenceReference = MauiFlowReportRedactor.SafeReference(outcome.EvidenceReference);
         outcome.Message = MauiFlowReportRedactor.SafeMessage(outcome.Message);
     }
 
@@ -575,7 +755,7 @@ public static class MauiFlowRunReportSerializer
         foreach (var result in results)
         {
             result.OracleId = MauiFlowReportRedactor.SafeIdentifier(result.OracleId);
-            result.EvidenceReference = MauiFlowReportRedactor.SafeMessage(result.EvidenceReference, maxTextLength);
+            result.EvidenceReference = MauiFlowReportRedactor.SafeReference(result.EvidenceReference);
             result.Message = MauiFlowReportRedactor.SafeMessage(result.Message, maxTextLength);
         }
     }
@@ -588,6 +768,9 @@ public static class MauiFlowRunReportSerializer
             return;
         decision.SideEffectPolicy = MauiFlowReportRedactor.SafeIdentifier(decision.SideEffectPolicy) ??
             MauiFlowSideEffectPolicies.Unspecified;
+        decision.Reasons = (decision.Reasons ?? [])
+            .Where(static reason => reason is not null)
+            .ToList();
         foreach (var reason in decision.Reasons)
         {
             reason.Code = MauiFlowReportRedactor.SafeIdentifier(reason.Code);
@@ -633,7 +816,7 @@ public static class MauiFlowRunReportSerializer
         {
             artifact.ArtifactId = MauiFlowReportRedactor.SafeIdentifier(artifact.ArtifactId);
             artifact.Kind = MauiFlowReportRedactor.SafeIdentifier(artifact.Kind);
-            artifact.Path = MauiFlowReportRedactor.SafeMessage(artifact.Path, maxTextLength);
+            artifact.Path = MauiFlowReportRedactor.SafeRelativePath(artifact.Path);
             artifact.Digest = MauiFlowReportRedactor.SafeIdentifier(artifact.Digest);
             artifact.MediaType = MauiFlowReportRedactor.SafeIdentifier(artifact.MediaType);
         }
@@ -641,7 +824,7 @@ public static class MauiFlowRunReportSerializer
 
     private static void ClearExtensionData(MauiFlowRunReport report)
     {
-        report.ExtensionData = null;
+        report.ExtensionData = ProjectKnownReportExtensions(report.ExtensionData);
         report.Target?.Let(value => value.ExtensionData = null);
         report.Reset?.Let(value =>
         {
@@ -700,6 +883,66 @@ public static class MauiFlowRunReportSerializer
             artifact.ExtensionData = null;
         foreach (var omission in report.Omissions)
             omission.ExtensionData = null;
+    }
+
+    private static Dictionary<string, JsonElement>? ProjectKnownReportExtensions(
+        Dictionary<string, JsonElement>? extensionData)
+    {
+        if (extensionData is null)
+            return null;
+
+        var projected = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
+        if (extensionData.TryGetValue("exitCategory", out var exitCategory) &&
+            exitCategory.ValueKind == JsonValueKind.String &&
+            MauiFlowReportRedactor.SafeIdentifier(exitCategory.GetString()) is { } safeExitCategory)
+        {
+            projected["exitCategory"] = CreateStringElement(safeExitCategory);
+        }
+        if (!extensionData.TryGetValue("primaryExecutionOutcome", out var primary) ||
+            primary.ValueKind != JsonValueKind.Object)
+        {
+            return projected.Count == 0 ? null : projected;
+        }
+
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            foreach (var name in new[]
+                     {
+                         "exitCategory",
+                         "status",
+                         "failureClass",
+                         "failureCode",
+                         "failurePhase",
+                     })
+            {
+                if (primary.TryGetProperty(name, out var value) &&
+                    value.ValueKind == JsonValueKind.String &&
+                    MauiFlowReportRedactor.SafeIdentifier(value.GetString()) is { } safe)
+                {
+                    writer.WriteString(name, safe);
+                }
+            }
+            if (primary.TryGetProperty("verified", out var verified) &&
+                verified.ValueKind is JsonValueKind.True or JsonValueKind.False)
+            {
+                writer.WriteBoolean("verified", verified.GetBoolean());
+            }
+            writer.WriteEndObject();
+        }
+        using var document = JsonDocument.Parse(stream.ToArray());
+        projected["primaryExecutionOutcome"] = document.RootElement.Clone();
+        return projected;
+    }
+
+    private static JsonElement CreateStringElement(string value)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+            writer.WriteStringValue(value);
+        using var document = JsonDocument.Parse(stream.ToArray());
+        return document.RootElement.Clone();
     }
 
     private static void Trim<T>(
@@ -771,6 +1014,26 @@ public static class MauiFlowReportRedactor
         @"(?i)\bbearer\s+[a-z0-9._~+/\-=]{8,}",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
+    private static readonly Regex JsonWebToken = new(
+        @"(?i)\beyj[a-z0-9_-]{8,}\.[a-z0-9_-]{8,}(?:\.[a-z0-9_-]{8,})?\b",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex AbsolutePath = new(
+        @"(?ix)
+        (?<![a-z0-9])
+        (?:
+          [a-z]:[\\/][^\s""']+
+          |
+          (?:\\\\|//)[^\\/\s]+[\\/][^\s""']+
+          |
+          /(?:home|users?|var|etc|opt|private|mnt|workspace|workspaces)/[^\s""']+
+        )",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+    private static readonly Regex EmailAddress = new(
+        @"(?i)\b[a-z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-z0-9.-]+\.[a-z]{2,}\b",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
     public static MauiFlowValueDisclosure DescribeValue(string? value, bool allowPlain = false)
     {
         if (value is null)
@@ -797,6 +1060,9 @@ public static class MauiFlowReportRedactor
         var safe = RemoveControls(value);
         safe = SensitiveAssignment.Replace(safe, "$1=<redacted>");
         safe = BearerToken.Replace(safe, "Bearer <redacted>");
+        safe = JsonWebToken.Replace(safe, "******");
+        safe = AbsolutePath.Replace(safe, "<path>");
+        safe = EmailAddress.Replace(safe, "<email>");
         if (FlowSecretReference.LooksSensitive(safe) || LooksOpaqueSecret(safe))
             safe = "<redacted>";
         if (safe.Length > maximumLength)
@@ -804,20 +1070,77 @@ public static class MauiFlowReportRedactor
         return safe;
     }
 
+    public static string? SafeReference(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) ||
+            FlowSecretReference.LooksSensitive(value))
+            return null;
+        var trimmed = value.Trim();
+        if (LooksOpaqueSecret(trimmed))
+        {
+            return "sha256:" + Convert.ToHexString(
+                SHA256.HashData(Encoding.UTF8.GetBytes(trimmed))).ToLowerInvariant();
+        }
+        var safe = SafeIdentifier(trimmed, 256);
+        if (safe is not null &&
+            string.Equals(safe, trimmed, StringComparison.Ordinal) &&
+            !safe.Contains('/', StringComparison.Ordinal))
+        {
+            return safe;
+        }
+        return "sha256:" + Convert.ToHexString(
+            SHA256.HashData(Encoding.UTF8.GetBytes(trimmed))).ToLowerInvariant();
+    }
+
+    public static string? SafeRelativePath(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || FlowSecretReference.LooksSensitive(value))
+            return null;
+        var normalized = value.Trim().Replace('\\', '/');
+        if (normalized.StartsWith("/", StringComparison.Ordinal) ||
+            normalized.StartsWith("//", StringComparison.Ordinal) ||
+            (normalized.Length >= 2 &&
+             char.IsAsciiLetter(normalized[0]) &&
+             normalized[1] == ':') ||
+            normalized.Contains("://", StringComparison.Ordinal))
+        {
+            return null;
+        }
+        var segments = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        if (segments.Length == 0 || segments.Any(static segment => segment is "." or ".."))
+            return null;
+        var safeSegments = segments.Select(SafeFileSegment).ToArray();
+        return safeSegments.Any(string.IsNullOrWhiteSpace)
+            ? null
+            : string.Join("/", safeSegments!);
+    }
+
     public static string? SafeIdentifier(string? value, int maximumLength = 128)
     {
-        if (string.IsNullOrWhiteSpace(value))
+        if (string.IsNullOrWhiteSpace(value) ||
+            LooksOpaqueSecret(value))
             return null;
 
         var normalized = RemoveControls(value.Trim());
-        if (normalized.Length > maximumLength)
-            normalized = normalized[..maximumLength];
-        var builder = new StringBuilder(normalized.Length);
-        foreach (var character in normalized)
-            builder.Append(char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.' or ':' or '/'
-                ? character
-                : '_');
-        return builder.ToString();
+        if (normalized.Length > maximumLength ||
+            normalized.Any(static character =>
+                !char.IsAsciiLetterOrDigit(character) &&
+                character is not '-' and not '_' and not '.' and not ':' and not '/'))
+        {
+            return null;
+        }
+        if (normalized.StartsWith("/", StringComparison.Ordinal) ||
+            normalized.StartsWith("\\", StringComparison.Ordinal) ||
+            normalized.StartsWith("//", StringComparison.Ordinal) ||
+            normalized.StartsWith("\\\\", StringComparison.Ordinal) ||
+            (normalized.Length >= 2 &&
+             char.IsAsciiLetter(normalized[0]) &&
+             normalized[1] == ':') ||
+            normalized.Contains("://", StringComparison.Ordinal))
+        {
+            return null;
+        }
+        return normalized;
     }
 
     public static string? SafeFileSegment(string? value)

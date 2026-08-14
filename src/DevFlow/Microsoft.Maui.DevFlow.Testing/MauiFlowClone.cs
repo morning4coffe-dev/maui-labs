@@ -19,6 +19,7 @@ internal static class MauiFlowClone
     private static FlowStep CloneStep(FlowStep step) => new()
     {
         Seq = step.Seq,
+        StepId = step.StepId,
         Action = step.Action,
         Label = step.Label,
         Intent = step.Intent,

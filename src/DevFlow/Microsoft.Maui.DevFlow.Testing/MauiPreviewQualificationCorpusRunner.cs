@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace Microsoft.Maui.DevFlow.Testing;
 
@@ -53,6 +54,7 @@ public static class MauiPreviewQualificationCorpusRunner
         var errors = new List<string>();
         var cases = new List<MauiQualificationCorpusCaseResult>();
         var samples = new List<MauiQualificationExecutionSample>();
+        var noRepairFixtures = new List<(string Id, JsonElement Fixture)>();
         var summary = new MauiQualificationCorpusSummary
         {
             Version = "selector-health-corpus-v1",
@@ -120,6 +122,8 @@ public static class MauiPreviewQualificationCorpusRunner
             cases.Add(caseResult);
             if (!passed)
                 errors.Add("corpus-case-expectation-mismatch");
+            if (passed && string.Equals(metadata.Disposition, "no-repair", StringComparison.Ordinal))
+                noRepairFixtures.Add((metadata.Id, fixture.Clone()));
 
             samples.Add(new MauiQualificationExecutionSample
             {
@@ -136,10 +140,7 @@ public static class MauiPreviewQualificationCorpusRunner
             });
         }
 
-        var noRepairBases = cases
-            .Where(static item => string.Equals(item.Disposition, "no-repair", StringComparison.Ordinal) && item.Passed)
-            .ToList();
-        if (noRepairBases.Count == 0)
+        if (noRepairFixtures.Count == 0)
         {
             errors.Add("no-repair-corpus-base-missing");
         }
@@ -149,20 +150,28 @@ public static class MauiPreviewQualificationCorpusRunner
             var random = new DeterministicRandom((uint)request.MutationSeed);
             for (var index = 0; index < count; index++)
             {
-                var basis = noRepairBases[(int)(random.Next() % (uint)noRepairBases.Count)];
+                var basis = noRepairFixtures[(int)(random.Next() % (uint)noRepairFixtures.Count)];
+                var generatedId = $"generated:{basis.Id}:{index}:{request.MutationSeed}";
+                using var generated = GenerateNoRepairFixture(
+                    basis.Fixture,
+                    generatedId,
+                    (int)(random.Next() % 4));
+                var evaluation = EvaluateFixture(generated.RootElement, generatedId);
+                if (evaluation.RepairEligible)
+                    errors.Add("generated-no-repair-false-heal");
                 samples.Add(new MauiQualificationExecutionSample
                 {
-                    SampleId = MauiQualificationSanitizer.Fingerprint($"generated:{basis.CaseId}:{index}:{request.MutationSeed}"),
+                    SampleId = MauiQualificationSanitizer.Fingerprint(generatedId),
                     Source = MauiQualificationSampleSources.Generated,
-                    Category = "generated-no-repair-policy-evaluation",
+                    Category = "generated-no-repair-production-pipeline",
                     Platform = request.Platform,
                     DeviceEvidenceKind = "not-a-device-run",
                     RealDevice = false,
                     NoRepairExpected = true,
-                    RepairProposed = false,
+                    RepairProposed = evaluation.RepairEligible,
                     RepairCorrect = null,
-                    FalseHeal = false,
-                    Abstained = true,
+                    FalseHeal = evaluation.RepairEligible,
+                    Abstained = !evaluation.RepairEligible,
                 });
             }
         }
@@ -321,6 +330,7 @@ public static class MauiPreviewQualificationCorpusRunner
             else if (ids.Count == 1)
                 candidates.Add("automation-id");
         }
+
         if (fixture.TryGetProperty("selector", out var selector) && selector.ValueKind == JsonValueKind.Object)
         {
             if (selector.TryGetProperty("automationId", out _))
@@ -410,6 +420,38 @@ public static class MauiPreviewQualificationCorpusRunner
             candidates.Distinct(StringComparer.Ordinal).ToList(),
             ineligibility.OrderBy(static value => value, StringComparer.Ordinal).ToList(),
             repairEligible);
+    }
+
+    private static JsonDocument GenerateNoRepairFixture(
+        JsonElement source,
+        string generatedId,
+        int mutation)
+    {
+        var root = JsonNode.Parse(source.GetRawText())?.AsObject()
+            ?? throw new InvalidOperationException("The no-repair corpus fixture could not be cloned.");
+        root["id"] = generatedId;
+        var fixture = root["fixture"]?.AsObject()
+            ?? throw new InvalidOperationException("The no-repair corpus fixture payload is missing.");
+        fixture["generatedMutation"] = mutation;
+        if (fixture.ContainsKey("candidate") || fixture.ContainsKey("candidates"))
+        {
+            switch (mutation)
+            {
+                case 0:
+                    fixture["failure"] = MauiFlowFailureClasses.ActionRejected;
+                    break;
+                case 1:
+                    fixture["phase"] = "post-dispatch";
+                    break;
+                case 2:
+                    fixture["trust"] = MauiArtifactTrustStates.Untrusted;
+                    break;
+                default:
+                    fixture["unique"] = false;
+                    break;
+            }
+        }
+        return JsonDocument.Parse(root.ToJsonString());
     }
 
     private static void EvaluateRepairFixture(

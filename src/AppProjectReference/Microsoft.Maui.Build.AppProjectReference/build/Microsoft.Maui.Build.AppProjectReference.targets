@@ -173,11 +173,20 @@
     <ItemGroup>
       <_MauiAppProjectReferenceForMSBuild Remove="@(_MauiAppProjectReferenceForMSBuild)" />
       <_MauiAppProjectReferenceForMSBuild Include="@(_ResolvedMauiAppProjectReference)"
-                                        KeepMetadata="AdditionalProperties" />
+                                        KeepMetadata="AdditionalProperties;TargetFramework;RuntimeIdentifier">
+        <SetTargetFramework Condition="'%(_ResolvedMauiAppProjectReference.TargetFramework)' != ''">TargetFramework=%(_ResolvedMauiAppProjectReference.TargetFramework)</SetTargetFramework>
+        <SetRuntimeIdentifier Condition="'%(_ResolvedMauiAppProjectReference.RuntimeIdentifier)' != ''">RuntimeIdentifier=%(_ResolvedMauiAppProjectReference.RuntimeIdentifier)</SetRuntimeIdentifier>
+        <GlobalPropertiesToRemove>TargetFramework;TargetFrameworks;RuntimeIdentifier</GlobalPropertiesToRemove>
+        <GlobalPropertiesToRemove Condition="'%(_ResolvedMauiAppProjectReference.TargetFramework)' != '' and '%(_ResolvedMauiAppProjectReference.RuntimeIdentifier)' == ''">TargetFrameworks;RuntimeIdentifier</GlobalPropertiesToRemove>
+        <GlobalPropertiesToRemove Condition="'%(_ResolvedMauiAppProjectReference.TargetFramework)' == '' and '%(_ResolvedMauiAppProjectReference.RuntimeIdentifier)' != ''">TargetFramework;TargetFrameworks</GlobalPropertiesToRemove>
+        <GlobalPropertiesToRemove Condition="'%(_ResolvedMauiAppProjectReference.TargetFramework)' != '' and '%(_ResolvedMauiAppProjectReference.RuntimeIdentifier)' != ''">TargetFrameworks</GlobalPropertiesToRemove>
+      </_MauiAppProjectReferenceForMSBuild>
     </ItemGroup>
 
     <MSBuild Projects="@(_MauiAppProjectReferenceForMSBuild)"
              Targets="Restore"
+             Properties="%(_MauiAppProjectReferenceForMSBuild.AdditionalProperties);%(_MauiAppProjectReferenceForMSBuild.SetTargetFramework);%(_MauiAppProjectReferenceForMSBuild.SetRuntimeIdentifier)"
+             RemoveProperties="%(_MauiAppProjectReferenceForMSBuild.GlobalPropertiesToRemove)"
              BuildInParallel="$(BuildInParallel)"
              SkipNonexistentProjects="false"
              SkipNonexistentTargets="false"
@@ -185,6 +194,8 @@
 
     <MSBuild Projects="@(_MauiAppProjectReferenceForMSBuild)"
              Targets="_MauiAppRefBuildAndGetArtifacts"
+             Properties="%(_MauiAppProjectReferenceForMSBuild.AdditionalProperties);%(_MauiAppProjectReferenceForMSBuild.SetTargetFramework);%(_MauiAppProjectReferenceForMSBuild.SetRuntimeIdentifier)"
+             RemoveProperties="%(_MauiAppProjectReferenceForMSBuild.GlobalPropertiesToRemove)"
              BuildInParallel="$(BuildInParallel)"
              SkipNonexistentProjects="false"
              SkipNonexistentTargets="false">

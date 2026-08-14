@@ -6,7 +6,7 @@
 - **App:** com.companyname.mauitodo
 - **Platform:** android,windows
 - **Recorded:** (unknown)
-- **Preconditions:** Android or Windows lifecycle reset and devflow-sample-v1 seed have completed.
+- **Preconditions:** (none)
 - **Steps:** 2
 
 ## Steps
@@ -14,6 +14,7 @@
 1. Tap
    - Expect target still present
 2. Tap
+   - Expect target no longer present
    - Expect target still present
 
 ## Replay (machine-readable — source of truth)
@@ -25,7 +26,7 @@
   "app": "com.companyname.mauitodo",
   "platform": "android,windows",
   "recordedAt": null,
-  "preconditions": "Android or Windows lifecycle reset and devflow-sample-v1 seed have completed.",
+  "preconditions": null,
   "steps": [
     {
       "seq": 1,
@@ -130,9 +131,28 @@
       "screenshot": null,
       "asserts": [
         {
+          "kind": "notExists",
+          "selector": {
+            "automationId": "ModalTestPage",
+            "text": null,
+            "id": null,
+            "typeIndex": null,
+            "type": null,
+            "index": null,
+            "selectorKind": null,
+            "matchCount": null,
+            "quality": null,
+            "fragilityReasons": null
+          },
+          "name": null,
+          "expected": null,
+          "verify": true,
+          "note": null
+        },
+        {
           "kind": "exists",
           "selector": {
-            "automationId": "AddButton",
+            "automationId": "CountLabel",
             "text": null,
             "id": null,
             "typeIndex": null,

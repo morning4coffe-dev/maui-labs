@@ -10,12 +10,12 @@
     "maxDurationSeconds": 0
   },
   "flow": {
-    "digest": "3b4edbacc43a360b301f8e55eaa621d5997bd5edeedb0007d81e6264c51cd13a",
-    "path": "modal-roundtrip.md"
+    "digest": "4ff061d33afbf40169764c94b543d583086a590c219f89cc54c7eacecd93a0b0",
+    "path": "recording-2026-08-12T13-42-44.md"
   },
-  "goal": "Verify that Show Modal opens the modal and Close returns to the main todo page.",
+  "goal": "Verify that Show Modal opens the modal and Close returns to the main todo page.\u00A0",
   "independentBusinessOracles": [],
-  "planId": "plan_gol5st4j56",
+  "planId": "plan_35m2fwejmx",
   "preconditions": [],
   "prohibitedActionClasses": [],
   "provenance": {
@@ -23,7 +23,7 @@
     "channel": "inspector",
     "intent": "human-authored",
     "provider": "",
-    "recordedAt": "2026-08-03T09:13:02.775Z"
+    "recordedAt": "2026-08-12T13:42:35.989Z"
   },
   "requiredPlatforms": [],
   "requirements": {
@@ -32,17 +32,14 @@
   },
   "reset": {
     "backendStateFingerprint": "",
-    "required": false,
+    "required": true,
     "resetIdentity": "",
     "seedFingerprint": "",
     "strategy": ""
   },
   "reviews": [],
-  "revision": 2,
-  "risks": [
-    "Different page is open",
-    "feature is broken"
-  ],
+  "revision": 1,
+  "risks": [],
   "scenarios": [
     {
       "acceptanceCriterionIds": [],
@@ -53,5 +50,5 @@
   ],
   "schema": 1,
   "sideEffectPolicy": "none",
-  "title": "modal-roundtrip"
+  "title": ""
 }

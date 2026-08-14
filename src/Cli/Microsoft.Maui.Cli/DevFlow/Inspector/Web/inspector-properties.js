@@ -225,7 +225,9 @@ export function createPropertyGridController(options) {
   function appendDiagnostics(elementId) {
     const section = createDiagnostics(elementId);
     if (!section) return false;
-    body.append(section);
+    const previous = body.querySelector(':scope > .df-prop-diagnostics');
+    if (previous) previous.replaceWith(section);
+    else body.append(section);
     return true;
   }
 

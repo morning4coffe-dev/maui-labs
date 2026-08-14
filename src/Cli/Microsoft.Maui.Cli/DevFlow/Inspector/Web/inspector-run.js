@@ -191,7 +191,7 @@ function renderNovicePreflight(root, helpers, state, controller) {
     return;
   }
 
-  helpers.intro(root, 'Review the target and safety summary, then choose Review and start. Nothing runs until you confirm.');
+  helpers.intro(root, 'Review the target and safety summary, then choose Review, confirm, and start. The test starts only after the confirmation dialog.');
 
   const summary = section(root, 'Run check', 'df-run-summary');
   field(summary, 'Target', [
@@ -212,7 +212,7 @@ function renderNovicePreflight(root, helpers, state, controller) {
     list(block, blockers.map((item) => boundedText(item)));
     summary.append(block);
   } else {
-    summary.append(element('p', 'df-workbench-note', 'No current blocker is reported. Review and start still asks for confirmation.'));
+    summary.append(element('p', 'df-workbench-note', 'No current blocker is reported. Review, confirm, and start opens the final confirmation before execution.'));
   }
   if (notes.length) {
     const note = element('div', 'df-run-verification-notes');
@@ -245,7 +245,7 @@ function renderNovicePreflight(root, helpers, state, controller) {
   if (canReviewAndRun || state.starting) {
     button(
       actions,
-      state.starting ? 'Starting test…' : 'Review and start',
+      state.starting ? 'Starting test…' : 'Review, confirm, and start',
       () => controller?.reviewAndRun?.(),
       state.starting,
       'df-authoring-primary'
@@ -266,7 +266,7 @@ function renderNovicePreflight(root, helpers, state, controller) {
       'df-authoring-primary'
     );
     actions.append(element('p', 'df-authoring-field-hint',
-      'When the check succeeds, the final Review and start action becomes available.'));
+      'When the check succeeds, the final Review, confirm, and start action becomes available.'));
   }
 
   const details = element('details', 'df-run-details');

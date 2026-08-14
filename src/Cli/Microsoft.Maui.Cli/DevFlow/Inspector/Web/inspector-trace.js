@@ -46,6 +46,13 @@ function action(parent, text, callback, disabled = false, className = '') {
   return button;
 }
 
+export function shouldShowTraceImport(state) {
+  return state?.importEnabled === true &&
+    !state.run &&
+    !state.report &&
+    state.mode !== 'imported';
+}
+
 function time(value) {
   const parsed = Date.parse(value || '');
   return Number.isFinite(parsed) ? new Date(parsed).toLocaleTimeString() : 'time unavailable';
@@ -156,6 +163,23 @@ export function importedTrustPresentation(status) {
       ? 'Producer provenance was independently attested, but this artifact remains diagnostic-only and is not repair-authoritative.'
       : 'This artifact is untrusted diagnostic input. It cannot execute, mutate the app, or create a proposal.';
   return { state, explanation, reasons: values(verification.reasons) };
+}
+
+export function passPresentation(report) {
+  const independentOracleSucceeded = values(report?.businessOracles).some((oracle) =>
+    oracle?.independent === true && oracle?.succeeded === true);
+  const independentlyVerified = report?.verification?.verified === true &&
+    report?.replayEligibility?.runVerificationAllowed === true &&
+    independentOracleSucceeded;
+  return independentlyVerified
+    ? {
+      title: 'Test passed (independently verified)',
+      classification: 'Independently verified pass',
+    }
+    : {
+      title: 'Test passed (replay only)',
+      classification: 'Replay pass',
+    };
 }
 
 function renderStepRail(root, report, state, controller) {
@@ -292,9 +316,9 @@ function renderResultsSummary(root, helpers, state, controller, snapshot, report
   const terminal = snapshot.terminal === true || ['passed', 'failed', 'cancelled', 'timed-out', 'lease-lost', 'infrastructure-error', 'unknown-completion', 'orphaned'].includes(outcome);
   const failed = terminal && outcome !== 'passed';
   const steps = completedSteps(report);
-  const classification = report.failure?.class || report.failure?.code ||
-    (outcome === 'passed' ? 'Passed' : outcome);
-  const banner = section(root, outcome === 'passed' ? 'Test passed' : terminal ? 'Test needs attention' : 'Run in progress',
+  const pass = outcome === 'passed' ? passPresentation(report) : null;
+  const classification = pass?.classification || report.failure?.class || report.failure?.code || outcome;
+  const banner = section(root, pass?.title || (terminal ? 'Test needs attention' : 'Run in progress'),
     `df-results-banner ${outcome === 'passed' ? 'df-results-banner-pass' : terminal ? 'df-results-banner-fail' : ''}`);
   banner.id = 'df-results-summary';
   banner.tabIndex = -1;
@@ -329,9 +353,15 @@ function renderResultsSummary(root, helpers, state, controller, snapshot, report
     } else {
       action(actions, 'View failed step', () => controller?.focusResults?.(), !firstDivergenceStepId(report), 'df-authoring-primary');
       const repairEligible = helpers.repair?.state?.().eligibility?.eligible === true ||
-        report.repairEligibility?.eligible === true;
-      if (repairEligible) action(actions, 'Review repair', () => helpers.selectTab?.('repair'));
-      else action(actions, 'Improve selector', () => helpers.selectTab?.('improve'));
+        (report.failure?.repairEligible === true &&
+          report.replayEligibility?.repairEligibility === true);
+      if (repairEligible && helpers.featureEnabled?.('repair')) {
+        action(actions, 'Review repair', () => helpers.selectTab?.('repair'));
+      }
+      else if (report.failure?.category === 'selector' ||
+        ['locator-not-found', 'locator-ambiguous'].includes(report.failure?.class || report.failure?.code)) {
+        action(actions, 'Improve selector', () => helpers.selectTab?.('improve'));
+      }
     }
   }
   banner.append(actions);
@@ -544,7 +574,7 @@ export function renderTracePanel(helpers) {
       'df-authoring-primary'
     );
   }
-  if (!state.run && !state.report && state.mode !== 'imported') {
+  if (shouldShowTraceImport(state)) {
     const importControls = node('details', 'df-trace-import');
     importControls.append(node('summary', null, 'Open a result from another run'));
     helpers.capability(importControls, 'pickTrace');

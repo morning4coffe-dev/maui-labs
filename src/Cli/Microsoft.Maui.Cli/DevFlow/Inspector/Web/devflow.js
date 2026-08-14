@@ -3,6 +3,8 @@
 import { createInspectorApi } from './inspector-api.js';
 import { confirmModal } from './inspector-dialog.js';
 import { createDataSnapshot, isSecretContextKey, supportsDataContextScope } from './inspector-data-context.js';
+import { createDataDockController } from './inspector-data-controller.js';
+import { createDataUi } from './inspector-data-ui.js';
 import { chooseLayoutScopeRoot, createLayoutDataPayload, diffLayoutReports, formatLayoutReport, formatPerformanceSummary } from './inspector-diagnostics.js';
 import { createEvidenceController } from './inspector-evidence.js';
 import { createAgentRequestController } from './inspector-agent-requests.js';
@@ -44,6 +46,16 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     const meta = document.querySelector(`meta[name="${name}"]`);
     return meta && typeof meta.content === 'string' && meta.content ? meta.content : null;
   }
+  function metaFlag(name) {
+    return metaContent(name) === 'true';
+  }
+  const previewFeatures = Object.freeze({
+    workbench: metaFlag('devflow-preview-workbench'),
+    agentAuthoring: metaFlag('devflow-preview-agent-authoring'),
+    repair: metaFlag('devflow-preview-repair'),
+    source: metaFlag('devflow-preview-source'),
+    traceImport: metaFlag('devflow-preview-trace-import'),
+  });
   const inspectorAgent = Object.freeze({
     id: metaContent('devflow-agent-id'),
     instanceId: metaContent('devflow-agent-instance-id'),
@@ -409,9 +421,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       }
 
       // Update viewport size if changed
-      let layoutChanged = false;
+      let viewportLayoutChanged = false;
       if (state.viewportWidth && state.viewportHeight) {
-        layoutChanged = viewport.dataset.width !== String(state.viewportWidth)
+        viewportLayoutChanged = viewport.dataset.width !== String(state.viewportWidth)
           || viewport.dataset.height !== String(state.viewportHeight);
         viewport.style.width = state.viewportWidth + 'px';
         viewport.style.height = state.viewportHeight + 'px';
@@ -425,11 +437,16 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       viewport.dataset.rootOffsetY = String(rootOffsetY);
 
       // Smart DOM diff — only update elements that changed, preserving hover/selection
+      let elementLayoutChanged = false;
       if (state.elements) {
-        layoutChanged = patchElements(state.elements) || layoutChanged;
+        elementLayoutChanged = patchElements(state.elements);
         onElementsUpdated();
       }
-      if (layoutChanged) markLayoutStale();
+      if (viewportLayoutChanged || elementLayoutChanged) {
+        markLayoutStale(viewportLayoutChanged
+          ? 'state-refresh:viewport'
+          : `state-refresh:elements:${lastElementPatchReason || 'unknown'}`);
+      }
     } catch (err) {
       markConnected(false);
       console.error('State refresh failed:', err);
@@ -452,7 +469,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
     if (!value) {
       disconnectReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
-      markLayoutStale();
+      markLayoutStale('disconnect');
     } else if (disconnectReturnFocus && disconnectReturnFocus.isConnected) {
       const active = document.activeElement;
       if (!active || active === document.body || active === document.documentElement ||
@@ -484,6 +501,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   });
 
   // Keyed DOM diff: match elements by data-id, update in-place if changed
+  let lastElementPatchReason = null;
   function patchElements(newHtml) {
     // ─────────────────────────────────────────────────────────────────────────
     // XSS / trust boundary contract with the server.
@@ -531,6 +549,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     const oldEls = viewport.querySelectorAll('.devflow-element');
     const oldMap = new Map();
     let changed = false;
+    lastElementPatchReason = null;
     oldEls.forEach(el => {
       const id = el.getAttribute('data-id');
       if (id) oldMap.set(id, el);
@@ -541,6 +560,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       if (!newMap.has(id)) {
         el.remove();
         changed = true;
+        lastElementPatchReason ??= 'removed';
       }
     });
 
@@ -555,13 +575,17 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         if (oldEl.getAttribute('style') !== newEl.getAttribute('style')) {
           oldEl.setAttribute('style', newEl.getAttribute('style'));
           changed = true;
+          lastElementPatchReason ??= 'style';
         }
         // Sync data attributes
-        changed = syncDataAttrs(oldEl, newEl) || changed;
+        const dataChanged = syncDataAttrs(oldEl, newEl);
+        changed = dataChanged || changed;
+        if (dataChanged) lastElementPatchReason ??= 'data';
         // Ensure correct order
-        if (prevEl && prevEl.nextSibling !== oldEl) {
+        if (prevEl && prevEl.nextElementSibling !== oldEl) {
           prevEl.after(oldEl);
           changed = true;
+          lastElementPatchReason ??= 'order';
         }
         prevEl = oldEl;
       } else {
@@ -574,6 +598,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         }
         prevEl = clone;
         changed = true;
+        lastElementPatchReason ??= 'added';
       }
     }
     return changed;
@@ -1061,7 +1086,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         }
         if (!document.hidden && !replaying
           && (!type || ['treeChange', 'navigation', 'lifecycle', 'themeChange', 'alert'].includes(type))) {
-          markLayoutStale();
+          markLayoutStale(`event:${type || 'unknown'}`);
           scheduleLayoutLiveScan(175);
           scheduleRefresh(150);
         }
@@ -1143,7 +1168,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     onClose: () => restoreFocus(propsReturnFocus, tb && tb.tree),
     onRuntimeChange: ({ elementId, name, value }) => {
       if (recordingId) recordStep('setProperty', elById(elementId), { name, value });
-      markLayoutStale();
+      markLayoutStale('property-change');
       scheduleLayoutLiveScan(175);
       scheduleRefresh(200);
     },
@@ -1688,7 +1713,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       try {
         const a = JSON.parse(extra.assertsJson)[0]; const s = a.selector || {};
         const name = s.automationId || s.text || s.id || 'element';
-        return a.kind === 'propEquals' ? (name + '.' + a.name + ' = ' + String(a.expected).slice(0, 18)) : (name + ' exists');
+        if (a.kind === 'propEquals') return name + '.' + a.name + ' = ' + String(a.expected).slice(0, 18);
+        return name + (a.kind === 'notExists' ? ' no longer exists' : ' exists');
       } catch (e) { return ''; }
     }
     const base = el ? elementLabel(el) : '';
@@ -1758,7 +1784,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           recStepCount = j.stepCount;
           updateRecordingUi();
           notifyAuthoring();
-          timelineAdd(j.stepCount, action, el, extra);
+          timelineAdd(Number(j.seq) || j.stepCount, action, el, extra);
         }
       } catch (err) { console.error('record step failed:', err); }
     })());
@@ -2177,8 +2203,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     updateRecordingUi();
     if (cancelRecordingBtn) cancelRecordingBtn.disabled = !recordingId || recordingStopping || replaying || !canDrive;
     propertyGrid.updateWriterState();
-    document.querySelectorAll('#df-dock .df-alert-actions button').forEach((button) => {
+    document.querySelectorAll('#df-dock .df-alert-choice').forEach((button) => {
       button.disabled = !canDrive;
+      button.title = canDrive
+        ? `Choose ${button.textContent || 'this action'}`
+        : (capturedTraceMode ? 'Captured trace mode cannot dismiss native alerts.' : 'Take control before choosing a native alert action.');
     });
     if (tb?.interact) tb.interact.disabled = capturedTraceMode;
   }
@@ -2599,6 +2628,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   // filename, or preference value can't inject markup. Inherited by every host (browser/VS Code/canvas).
   const dockEl = document.getElementById('df-dock');
   const dockTabsEl = document.getElementById('df-dock-tabs');
+  const dockPanelEl = document.getElementById('df-dock-panel');
+  const dockActionStripEl = document.getElementById('df-dock-action-strip');
   const dockBodyEl = document.getElementById('df-dock-body');
   const dockMetaEl = document.getElementById('df-dock-meta');
   const dockMetaNoteEl = document.getElementById('df-dock-meta-note');
@@ -2607,13 +2638,18 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   const dockCloseBtn = document.getElementById('df-dock-close');
   const toggleDockBtn = document.getElementById('df-toggle-dock');
   dockActiveTab = 'problems';
+  let dockActiveView = 'default';
   let dockLoaded = false;
   let filesRoot = null, filesPath = '';
   let filesRoots = [];
   let filesLoadGeneration = 0;
   let cdpWebviewId = null;
+  let cdpExpressionDraft = '';
+  let cdpOutputValue = null;
+  let cdpOutputError = null;
   let dockViewGeneration = 0;
   let networkDetailId = null;
+  let networkListCache = null;
   let networkListSignature = '';
   let networkPollInFlight = false;
   let networkRequestEpoch = 0;
@@ -2625,6 +2661,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   let performanceRecording = false;
   let performanceOwned = false;
   let performanceBusy = false;
+  let sensorsView = 'list';
+  let sensorsList = [];
+  let sensorsListScrollTop = 0;
+  let sensorsLocation = null;
+  let sensorsLocationError = null;
+  let sensorsLocationBusy = false;
+  let currentAlert = null;
+  let currentAlertRevision = null;
 
   function elh(tag, attrs, ...children) {
     const e = document.createElement(tag);
@@ -2646,9 +2690,63 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     svg.append(use);
     return svg;
   }
-  function dockEmpty(msg) { dockBodyEl.replaceChildren(elh('div', { class: 'df-empty', text: msg })); }
+  const dataUi = createDataUi(document);
+  function dockEmpty(msg, options = {}) {
+    dockBodyEl.replaceChildren(dataUi.state({
+      kind: options.kind || 'empty',
+      icon: options.icon || 'i-data',
+      title: options.title || 'No data',
+      message: msg,
+      action: options.action || null,
+    }));
+  }
   function setDockMeta(text) { if (dockMetaEl) dockMetaEl.textContent = text || ''; }
   function setDockMetaNote(text) { if (dockMetaNoteEl) dockMetaNoteEl.textContent = text || ''; }
+  const dataDockController = createDataDockController({
+    panel: dockPanelEl,
+    actionStrip: dockActionStripEl,
+    body: dockBodyEl,
+    renderActionStrip: (host, model) => dataUi.renderActionStrip(host, model),
+    renderState: (options) => dataUi.state(options),
+    setMeta: setDockMeta,
+    setMetaNote: setDockMetaNote,
+  });
+  function setDockView(view) {
+    dockActiveView = view || 'default';
+    if (dockPanelEl) dockPanelEl.dataset.view = dockActiveView;
+  }
+  function activateDockSubview(view, label) {
+    const generation = ++dockViewGeneration;
+    setDockView(view);
+    dataDockController.activate(dockActiveTab, {
+      view: dockActiveView,
+      generation,
+      label: label || dockActiveTab.charAt(0).toUpperCase() + dockActiveTab.slice(1),
+    });
+    return generation;
+  }
+  function setDockActionStrip(model, generation = dockViewGeneration, view = dockActiveView) {
+    dataDockController.setActionStrip(dockActiveTab, generation, model, view);
+  }
+  function hideDockActionStrip(generation = dockViewGeneration, view = dockActiveView) {
+    setDockActionStrip(null, generation, view);
+  }
+  function dataStatusPill(label, tone = 'neutral') {
+    return elh('span', { class: `df-status-pill df-status-pill-${tone}`, text: label });
+  }
+  function dataActionText(text, title = text) {
+    return elh('span', { class: 'df-data-action-text', text, title });
+  }
+  function dataActionSelect(id, label, value, choices, onChange) {
+    const select = elh('select', { class: 'df-field', id, 'aria-label': label, title: label });
+    for (const [optionValue, optionLabel] of choices) {
+      const option = elh('option', { value: optionValue, text: optionLabel });
+      option.selected = optionValue === value;
+      select.append(option);
+    }
+    select.addEventListener('change', () => onChange(select.value));
+    return select;
+  }
   function clearDockSnapshot() {
     dockSnapshot = null;
     updateDataAttachButton();
@@ -2708,23 +2806,37 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     if (typeof value !== 'object') {
       const s = String(value);
       if (isSecretContextKey(keyName) && s.length > 0) {
-        const span = elh('span', { class: 'df-masked', text: '••••• (reveal)' });
-        span.addEventListener('click', () => { span.className = ''; span.textContent = s; });
-        return span;
+        const reveal = elh('button', {
+          class: 'df-data-reveal',
+          type: 'button',
+          text: '••••• (reveal)',
+          'aria-label': `Reveal ${keyName || 'masked'} value`,
+        });
+        reveal.addEventListener('click', () => {
+          reveal.className = 'df-data-revealed';
+          reveal.textContent = s;
+          reveal.disabled = true;
+        });
+        return reveal;
       }
       return elh('span', { text: s });
     }
     if (Array.isArray(value)) {
       if (!value.length) return elh('span', { text: '[]' });
-      const tbl = elh('table');
-      value.forEach((item, i) => tbl.append(elh('tr', null, elh('td', { class: 'df-kv-key', text: String(i) }), elh('td', null, jsonView(item)))));
-      return tbl;
+      const list = elh('ol', { class: 'df-data-array' });
+      value.forEach((item) => list.append(elh('li', null, jsonView(item))));
+      return list;
     }
     const keys = Object.keys(value);
     if (!keys.length) return elh('span', { text: '{}' });
-    const tbl = elh('table');
-    for (const k of keys) tbl.append(elh('tr', null, elh('td', { class: 'df-kv-key', text: k }), elh('td', null, jsonView(value[k], k))));
-    return tbl;
+    const list = elh('dl', { class: 'df-data-kv' });
+    for (const k of keys) {
+      list.append(
+        elh('div', { class: 'df-data-kv-row' },
+          elh('dt', { class: 'df-kv-key', text: k }),
+          elh('dd', null, jsonView(value[k], k))));
+    }
+    return list;
   }
 
   function renderProblems(j) {
@@ -2741,12 +2853,21 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
 
     if (j && j.enabled === false) {
       clearDockSnapshot();
-      dockEmpty('Binding Problems are disabled for this agent.');
+      dockEmpty('Binding and runtime diagnostics are disabled for this agent.', {
+        kind: 'unavailable',
+        title: 'Runtime Problems unavailable',
+      });
       return;
     }
     if (!Array.isArray(problems) || !problems.length) {
       clearDockSnapshot();
-      dockEmpty(j && j.error ? j.error : 'No runtime UI problems captured.');
+      dockEmpty(j && j.error
+        ? j.error
+        : 'Binding and runtime diagnostics appear here automatically as the app runs.', {
+        kind: j && j.error ? 'error' : 'empty',
+        icon: j && j.error ? 'i-refresh' : 'i-check',
+        title: j && j.error ? 'Could not read runtime Problems' : 'No runtime UI problems captured',
+      });
       return;
     }
 
@@ -2799,7 +2920,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       clearDockSnapshot();
       setDockMetaNote('');
       setDockMeta('');
-      dockEmpty(j && j.error ? j.error : 'No logs.');
+      dockEmpty(j && j.error ? j.error : 'Log entries appear here as the app writes them.', {
+        kind: j && j.error ? 'error' : 'empty',
+        icon: j && j.error ? 'i-refresh' : 'i-check',
+        title: j && j.error ? 'Could not read logs' : 'No logs captured',
+      });
       return;
     }
     const frag = document.createDocumentFragment();
@@ -2843,7 +2968,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       if (opts.nonDestructive) return false;
       clearDockSnapshot();
       networkListSignature = '';
-      dockEmpty(j && j.error ? j.error : 'Network data unavailable.');
+      dockEmpty(j && j.error ? j.error : 'Network capture is unavailable for this app.', {
+        kind: j && j.error ? 'error' : 'unavailable',
+        title: j && j.error ? 'Could not refresh network data' : 'Network data unavailable',
+      });
       return true;
     }
     const signature = networkSignature(reqs);
@@ -2852,22 +2980,44 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     networkListSignature = signature;
     if (!reqs.length) {
       clearDockSnapshot();
-      dockEmpty('No requests captured.');
+      dockEmpty('Requests appear here when the app uses the captured HTTP pipeline.', {
+        icon: 'i-check',
+        title: 'No requests captured',
+      });
       return true;
     }
     const tbl = elh('table');
     tbl.append(elh('tr', null, elh('th', { text: 'Method' }), elh('th', { text: 'URL' }), elh('th', { text: 'Status' }), elh('th', { text: 'ms' })));
     for (const r of reqs) {
-      const tr = elh('tr', { class: 'df-row-click' },
+      const open = elh('button', {
+        class: 'df-data-link',
+        type: 'button',
+        text: r.url || r.path || '',
+        'data-network-request-id': r.id || '',
+        'aria-label': `Open ${r.method || 'network'} request ${r.url || r.path || ''}`,
+      });
+      if (r.id) open.addEventListener('click', () => {
+        networkListCache = {
+          requests: reqs,
+          scrollTop: dockBodyEl.scrollTop,
+          focusId: r.id,
+        };
+        executeDataCommand('network.detail.open', { id: r.id });
+      });
+      const tr = elh('tr', null,
         elh('td', { text: r.method || '' }),
-        elh('td', { text: r.url || r.path || '' }),
+        elh('td', null, open),
         elh('td', { text: r.statusCode != null ? String(r.statusCode) : (r.error ? 'ERR' : '') }),
         elh('td', { text: r.durationMs != null ? String(r.durationMs) : '' }));
-      if (r.id) tr.addEventListener('click', () => loadNetworkDetail(r.id));
       tbl.append(tr);
     }
     dockBodyEl.replaceChildren(tbl);
     if (opts.preserveScroll) dockBodyEl.scrollTop = scrollTop;
+    networkListCache = {
+      requests: reqs,
+      scrollTop: opts.preserveScroll ? scrollTop : dockBodyEl.scrollTop,
+      focusId: networkListCache?.focusId || null,
+    };
     recordDockSnapshot(
       'network',
       `Network · ${reqs.length} request${reqs.length === 1 ? '' : 's'}`,
@@ -2919,27 +3069,91 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
   }
 
-  async function loadNetworkDetail(id) {
+  async function loadNetworkDetail(id, options = {}) {
     if (!id) return;
-    const generation = ++dockViewGeneration;
+    const retained = options.refresh ? {
+      nodes: [...dockBodyEl.childNodes],
+      scrollTop: dockBodyEl.scrollTop,
+      stripModel: dataDockController.current().stripModel,
+      snapshot: dockSnapshot,
+      meta: dockMetaEl?.textContent || '',
+      note: dockMetaNoteEl?.textContent || '',
+    } : null;
+    if (!options.refresh && (!networkListCache || !Array.isArray(networkListCache.requests))) {
+      networkListCache = {
+        requests: [],
+        scrollTop: dockBodyEl.scrollTop,
+        focusId: id,
+      };
+    }
     networkDetailId = id;
-    clearDockSnapshot();
-    setDockMeta('loading…');
+    const generation = activateDockSubview('detail', 'Network request');
+    if (!options.refresh) clearDockSnapshot();
+    if (options.refresh) {
+      dockBodyEl.setAttribute('aria-busy', 'true');
+    } else {
+      setDockMeta('loading…');
+      dockBodyEl.replaceChildren(dataUi.state({
+        kind: 'loading',
+        icon: 'i-refresh',
+        title: 'Loading request',
+        message: 'Reading the selected network request.',
+      }));
+    }
     const j = await apiPost('/api/network/detail', { id });
-    if (generation !== dockViewGeneration || dockActiveTab !== 'network' || networkDetailId !== id) return;
+    if (!dataDockController.isCurrent('network', generation, 'detail') || networkDetailId !== id) return;
     setDockMeta('live paused · captured ' + new Date().toLocaleTimeString());
     const r = j && j.request;
-    if (!r) { dockEmpty('Request detail unavailable.'); return; }
-    const frag = document.createDocumentFragment();
-    frag.append(elh('button', { class: 'df-dock-btn', type: 'button', text: '‹ Back to requests', onclick: () => loadTab('network') }));
-    frag.append(elh('div', { class: 'df-section-title', text: (r.method || '') + ' ' + (r.url || '') }));
-    frag.append(jsonView({
+    const back = dataUi.button('Requests', {
+      commandId: 'network.detail.back',
+      icon: 'i-chevron',
+      className: 'df-data-back df-network-back',
+      onClick: () => executeDataCommand('network.detail.back'),
+    });
+    if (!r) {
+      if (retained) {
+        dockBodyEl.replaceChildren(...retained.nodes);
+        dockBodyEl.scrollTop = retained.scrollTop;
+        dockBodyEl.setAttribute('aria-busy', 'false');
+        dockSnapshot = retained.snapshot;
+        updateDataAttachButton();
+        updateHostButtons();
+        setDockActionStrip(retained.stripModel, generation, 'detail');
+        setDockMeta('stale · refresh failed');
+        setDockMetaNote(retained.note);
+        return;
+      }
+      setDockActionStrip({
+        visible: true,
+        variant: 'navigation',
+        ariaLabel: 'Network request navigation',
+        context: [back, layoutStatusPill('Unavailable', 'error')],
+      }, generation, 'detail');
+      dockEmpty((j && j.error) || 'Request detail unavailable.', {
+        kind: 'error',
+        title: 'Could not load request',
+      });
+      return;
+    }
+    dockBodyEl.setAttribute('aria-busy', 'false');
+    const shortUrl = String(r.url || '').length > 90 ? `${String(r.url).slice(0, 87)}…` : String(r.url || '');
+    setDockActionStrip({
+      visible: true,
+      variant: 'navigation',
+      ariaLabel: 'Network request navigation',
+      context: [
+        back,
+        layoutStatusPill(r.statusCode != null ? String(r.statusCode) : r.error ? 'ERR' : 'Pending',
+          r.error || Number(r.statusCode) >= 400 ? 'error' : 'neutral'),
+        dataActionText(`${r.method || ''} ${shortUrl}`.trim(), `${r.method || ''} ${r.url || ''}`.trim()),
+      ],
+    }, generation, 'detail');
+    dockBodyEl.replaceChildren(jsonView({
       status: r.statusCode, statusText: r.statusText, durationMs: r.durationMs,
       requestContentType: r.requestContentType, responseContentType: r.responseContentType,
       requestHeaders: r.requestHeaders, responseHeaders: r.responseHeaders,
       requestBody: r.requestBody, responseBody: r.responseBody, error: r.error,
     }));
-    dockBodyEl.replaceChildren(frag);
     recordDockSnapshot(
       'network',
       `Network request · ${r.method || ''} ${r.url || ''}`.trim(),
@@ -2960,14 +3174,32 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       { view: 'detail', requestId: r.id || id });
   }
 
+  function restoreNetworkList() {
+    const cache = networkListCache;
+    networkDetailId = null;
+    activateDockSubview('list', 'Network');
+    hideDockActionStrip();
+    if (!cache || !Array.isArray(cache.requests)) {
+      loadTab('network');
+      return;
+    }
+    renderNetwork({ requests: cache.requests }, { force: true });
+    dockBodyEl.scrollTop = cache.scrollTop || 0;
+    requestAnimationFrame(() => {
+      dockBodyEl.querySelector(`[data-network-request-id="${CSS.escape(cache.focusId || '')}"]`)?.focus();
+    });
+  }
+
   function renderPreferences(j) {
     if (!j || j.ok === false) {
       clearDockSnapshot();
-      dockEmpty((j && j.error) || 'Preferences unavailable.');
+      dockEmpty((j && j.error) || 'Preferences are not available from this app.', {
+        kind: j && j.error ? 'error' : 'unavailable',
+        title: j && j.error ? 'Could not refresh Preferences' : 'Preferences unavailable',
+      });
       return;
     }
     const frag = document.createDocumentFragment();
-    frag.append(elh('div', { class: 'df-section-title', text: 'Known preferences (values with secret-looking keys are masked)' }));
     frag.append(jsonView(j.preferences));
     dockBodyEl.replaceChildren(frag);
     const count = j.preferences && typeof j.preferences === 'object' ? Object.keys(j.preferences).length : 0;
@@ -2978,7 +3210,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     const dev = j && j.device;
     if (!dev || typeof dev !== 'object' || !Object.keys(dev).length) {
       clearDockSnapshot();
-      dockEmpty('Device info unavailable.');
+      dockEmpty((j && j.error) || 'The connected app did not provide device information.', {
+        kind: j && j.error ? 'error' : 'unavailable',
+        title: j && j.error ? 'Could not refresh device information' : 'Device information unavailable',
+      });
       return;
     }
     const frag = document.createDocumentFragment();
@@ -3031,14 +3266,39 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   }
 
   function renderSensors(j) {
+    if (j && j.error) {
+      clearDockSnapshot();
+      hideDockActionStrip();
+      dockEmpty(j.error, { kind: 'error', title: 'Could not refresh sensors' });
+      return;
+    }
+    sensorsList = Array.isArray(j && j.sensors) ? j.sensors : [];
+    sensorsView = 'list';
+    setDockView('list');
+    renderSensorsList();
+  }
+
+  function renderSensorsList() {
+    const sensors = sensorsList;
+    setDockActionStrip({
+      visible: true,
+      variant: 'actions',
+      ariaLabel: 'Sensor actions',
+      context: [
+        layoutStatusPill(
+          `${sensors.length} sensor${sensors.length === 1 ? '' : 's'}`,
+          sensors.length ? 'success' : 'neutral'),
+      ],
+      primaryCommand: dataUi.button('Read location', {
+        commandId: 'sensors.location.read',
+        className: 'df-sensors-location-action',
+        icon: 'i-location',
+        primary: true,
+        disabled: replaying || sensorsLocationBusy,
+        onClick: () => executeDataCommand('sensors.location.read'),
+      }),
+    });
     const frag = document.createDocumentFragment();
-    const geoBtn = elh('button', { class: 'df-dock-btn df-icon-label', type: 'button' },
-      svgIcon('i-location'), elh('span', { text: 'Read geolocation' }));
-    geoBtn.addEventListener('click', readGeolocation);
-    frag.append(geoBtn);
-    const geoOut = elh('div', { id: 'df-geo-out' });
-    frag.append(geoOut);
-    const sensors = j && j.sensors;
     if (Array.isArray(sensors) && sensors.length) {
       const tbl = elh('table');
       tbl.append(elh('tr', null, elh('th', { text: 'Sensor' }), elh('th', { text: 'Supported' }), elh('th', { text: 'Active' }), elh('th', { text: 'Subscribers' })));
@@ -3047,9 +3307,15 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         elh('td', { text: String(s.active) }), elh('td', { text: String(s.subscribers != null ? s.subscribers : '') })));
       frag.append(tbl);
     } else {
-      frag.append(elh('div', { class: 'df-empty', text: 'No sensors reported.' }));
+      frag.append(dataUi.state({
+        kind: 'empty',
+        icon: 'i-check',
+        title: 'No sensors reported',
+        message: 'Supported sensor services appear here when the app exposes them.',
+      }));
     }
     dockBodyEl.replaceChildren(frag);
+    dockBodyEl.scrollTop = sensorsListScrollTop;
     if (Array.isArray(sensors) && sensors.length) {
       recordDockSnapshot('sensors', `Sensors · ${sensors.length}`, sensors, sensors.length, { geolocationIncluded: false });
     } else {
@@ -3057,12 +3323,72 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
   }
 
+  function renderSensorsLocation() {
+    const back = dataUi.button('Sensors', {
+      commandId: 'sensors.back',
+      className: 'df-data-back df-sensors-back',
+      icon: 'i-chevron',
+      onClick: () => {
+        sensorsView = 'list';
+        activateDockSubview('list', 'Sensors');
+        renderSensorsList();
+        requestAnimationFrame(() => dockActionStripEl.querySelector('.df-sensors-location-action')?.focus());
+      },
+    });
+    const accuracy = sensorsLocation && Number.isFinite(Number(sensorsLocation.accuracy))
+      ? `${Math.round(Number(sensorsLocation.accuracy))} m accuracy`
+      : sensorsLocationBusy ? 'Reading' : sensorsLocationError ? 'Unavailable' : 'Location';
+    setDockActionStrip({
+      visible: true,
+      variant: 'navigation',
+      ariaLabel: 'Location actions',
+      context: [
+        back,
+        layoutStatusPill(accuracy, sensorsLocationError ? 'error' : sensorsLocation ? 'success' : 'neutral'),
+      ],
+      primaryCommand: dataUi.button(sensorsLocationBusy ? 'Reading…' : 'Read again', {
+        commandId: 'sensors.location.read',
+        icon: 'i-location',
+        primary: true,
+        disabled: replaying || sensorsLocationBusy,
+        onClick: () => executeDataCommand('sensors.location.read'),
+      }),
+    });
+
+    if (sensorsLocationBusy) {
+      dockBodyEl.replaceChildren(dataUi.state({
+        kind: 'loading',
+        icon: 'i-location',
+        title: 'Reading location',
+        message: 'Waiting for the app location service.',
+      }));
+    } else if (sensorsLocationError) {
+      dockBodyEl.replaceChildren(dataUi.state({
+        kind: 'error',
+        icon: 'i-location',
+        title: 'Location unavailable',
+        message: sensorsLocationError,
+      }));
+    } else {
+      dockBodyEl.replaceChildren(jsonView(sensorsLocation));
+    }
+  }
+
   async function readGeolocation() {
     if (replaying) { setStatus('Geolocation is disabled during replay.'); return; }
-    const out = document.getElementById('df-geo-out');
-    if (out) out.textContent = 'Reading location…';
+    if (sensorsView !== 'location') sensorsListScrollTop = dockBodyEl.scrollTop;
+    sensorsView = 'location';
+    activateDockSubview('location', 'Location');
+    sensorsLocationBusy = true;
+    sensorsLocationError = null;
+    renderSensorsLocation();
     const j = await apiPost('/api/geolocation', {});
-    if (out) out.replaceChildren(j && j.ok ? jsonView(j.location) : elh('span', { class: 'df-empty', text: (j && j.error) || 'Geolocation unavailable.' }));
+    if (dockActiveTab !== 'sensors' || sensorsView !== 'location') return;
+    sensorsLocationBusy = false;
+    sensorsLocation = j && j.ok ? j.location : null;
+    sensorsLocationError = j && j.ok ? null : ((j && j.error) || 'Geolocation unavailable.');
+    setDockMeta((j && j.ok ? 'location read ' : 'location unavailable · ') + new Date().toLocaleTimeString());
+    renderSensorsLocation();
   }
 
   async function renderFiles(j) {
@@ -3071,33 +3397,15 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     const rootsArr = extractRoots(roots);
     if (!rootsArr.length) {
       clearDockSnapshot();
+      hideDockActionStrip();
       dockEmpty((j && j.error) || 'No storage roots advertised by this app.');
       return;
     }
     filesRoots = rootsArr;
     if (!filesRoot || !rootsArr.some((r) => r.id === filesRoot)) filesRoot = rootsArr[0].id;
-    const bar = elh('div', { class: 'df-files-toolbar' });
-    bar.append(elh('label', { class: 'df-kv-key', for: 'df-files-root', text: 'Root' }));
-    const sel = elh('select', { class: 'df-dock-btn', id: 'df-files-root' });
-    for (const r of rootsArr) sel.append(elh('option', { value: r.id, text: r.label }));
-    sel.value = filesRoot;
-    sel.addEventListener('change', () => {
-      filesRoot = sel.value;
-      filesPath = '';
-      updateFilesRootInfo();
-      loadFiles();
-    });
-    bar.append(sel);
-    bar.append(elh('span', {
-      class: 'df-files-mode',
-      title: 'The inspector browses files without changing them. DevFlow tools can download, upload, or delete files when explicitly requested.',
-      text: 'Browse only',
-    }));
-    frag.append(bar);
-    frag.append(elh('div', { id: 'df-files-root-info', class: 'df-files-root-info' }));
     frag.append(elh('div', { id: 'df-files-list' }));
     dockBodyEl.replaceChildren(frag);
-    updateFilesRootInfo();
+    updateFilesActionStrip();
     await loadFiles();
   }
 
@@ -3121,28 +3429,54 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     return filesRoots.find((r) => r.id === filesRoot) || null;
   }
 
-  function updateFilesRootInfo() {
-    const info = document.getElementById('df-files-root-info');
-    if (!info) return;
-    const root = currentFilesRoot();
-    if (!root) { info.textContent = ''; return; }
+  function filesRootDescription(root) {
+    if (!root) return '';
     const parts = [];
     if (root.kind === 'appData') parts.push('Private app storage');
     else if (root.kind) parts.push(root.kind);
     if (root.isPersistent) parts.push('persistent');
     if (root.isReadOnly) parts.push('root is read-only');
-    info.textContent = parts.join(' · ');
+    return parts.join(' · ');
   }
 
-  async function loadFiles() {
+  function updateFilesActionStrip() {
+    const root = currentFilesRoot();
+    if (!root) {
+      hideDockActionStrip();
+      return;
+    }
+    const select = dataActionSelect(
+      'df-files-root',
+      'Storage root',
+      filesRoot,
+      filesRoots.map((item) => [item.id, item.label]),
+      (value) => executeDataCommand('files.root.change', { root: value }));
+    setDockActionStrip({
+      visible: true,
+      variant: 'scope',
+      ariaLabel: 'File browser scope',
+      context: [
+        layoutStatusPill('Browse only', 'neutral'),
+        dataActionText(filesRootDescription(root) || root.label),
+      ],
+      persistentControls: [select],
+    });
+  }
+
+  async function loadFiles(options = {}) {
     const list = document.getElementById('df-files-list');
     if (!list) return;
+    const retained = options.refresh ? [...list.childNodes] : null;
     const loadGeneration = ++filesLoadGeneration;
     const dockGeneration = dockViewGeneration;
     const requestedRoot = filesRoot;
     const requestedPath = filesPath;
-    clearDockSnapshot();
-    list.textContent = 'Loading…';
+    if (!options.refresh) {
+      clearDockSnapshot();
+      list.textContent = 'Loading…';
+    } else {
+      list.setAttribute('aria-busy', 'true');
+    }
     const j = await apiPost('/api/files/list', { root: requestedRoot, path: requestedPath });
     if (loadGeneration !== filesLoadGeneration || dockGeneration !== dockViewGeneration
         || dockActiveTab !== 'files' || requestedRoot !== filesRoot || requestedPath !== filesPath) return;
@@ -3158,8 +3492,19 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     frag.append(crumb);
     const entries = extractEntries(j && j.files);
     if (j && j.error) {
+      if (retained) {
+        list.replaceChildren(...retained);
+        list.setAttribute('aria-busy', 'false');
+        setDockMeta('stale · refresh failed');
+        return;
+      }
       clearDockSnapshot();
-      frag.append(elh('div', { class: 'df-empty', text: j.error }));
+      frag.append(dataUi.state({
+        kind: 'error',
+        icon: 'i-refresh',
+        title: 'Could not browse files',
+        message: j.error,
+      }));
     } else if (!entries.length) {
       const empty = elh('div', { class: 'df-empty df-files-empty' });
       const root = currentFilesRoot();
@@ -3192,6 +3537,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       frag.append(tbl);
     }
     list.replaceChildren(frag);
+    list.setAttribute('aria-busy', 'false');
     if (!(j && j.error)) {
       const root = currentFilesRoot();
       recordDockSnapshot(
@@ -3240,6 +3586,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   // ── Layout diagnostics tab ──
   let latestLayoutReport = null;
   let selectedLayoutFindingId = null;
+  let layoutSubview = 'findings';
   let layoutFocusedElementId = null;
   let layoutError = null;
   let layoutStale = false;
@@ -3399,9 +3746,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     propertyGrid.refreshDiagnostics();
   }
 
-  function markLayoutStale() {
+  function markLayoutStale(reason = 'unknown') {
     if (!latestLayoutReport || layoutScanBusy || layoutStale) return;
     layoutStale = true;
+    document.body.dataset.layoutStaleReason = reason;
     updateLayoutSurfaces();
     if (dockActiveTab === 'layout' && !dockEl.classList.contains('df-hidden'))
       renderLayoutDiagnostics();
@@ -3515,6 +3863,20 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     propertyGrid.open(target);
   }
 
+  function openLayoutFindingDetail(finding) {
+    selectedLayoutFindingId = finding.id;
+    renderLayoutOverlays(finding);
+    showLayoutSubview('detail', '.df-data-action-strip .df-layout-back');
+  }
+
+  function showLayoutSubview(view, focusSelector = null) {
+    layoutSubview = view;
+    activateDockSubview(view, 'Layout');
+    renderLayoutDiagnostics();
+    if (focusSelector)
+      requestAnimationFrame(() => document.querySelector(focusSelector)?.focus());
+  }
+
   function setLayoutCopilotSnapshot(report, findingId) {
     const payload = createLayoutDataPayload(
       report,
@@ -3542,7 +3904,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
   }
 
   function layoutStatusPill(label, tone = 'neutral') {
-    return elh('span', { class: `df-status-pill df-status-pill-${tone}`, text: label });
+    return dataStatusPill(label, tone);
   }
 
   function layoutActionButton(label, icon, className = '') {
@@ -3831,132 +4193,33 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     return card;
   }
 
-  function renderLayoutDiagnostics() {
-    if (!latestLayoutReport) {
-      clearDockSnapshot();
-      if (layoutScanBusy) {
-        dockEmpty('Scanning layout…');
-        return;
-      }
-      const empty = elh('div', { class: 'df-empty-state df-layout-empty-state' },
-        svgIcon(layoutError ? 'i-refresh' : 'i-layout', 'df-empty-state-icon'),
-        elh('div', { class: 'df-empty-state-copy' },
-          elh('h4', { text: layoutError ? 'Layout diagnostics are unavailable' : 'Check this page layout' }),
-          elh('p', {
-            text: layoutError || 'Check this page for clipping, overflow, overlap, and sizing issues.',
-          })));
-      const actions = elh('div', { class: 'df-action-row' });
-      const start = layoutActionButton(layoutError ? 'Retry' : 'Start', 'i-refresh', 'df-layout-button-primary');
-      start.addEventListener('click', () => runLayoutScan());
-      actions.append(start);
-      empty.append(actions);
-      dockBodyEl.replaceChildren(empty);
-      return;
-    }
+  function compactLayoutCount(view) {
+    return layoutFocusedElementId
+      ? String(view.findings.length)
+      : view.matchingFindings === view.totalFindings
+        ? String(view.totalFindings)
+        : `${view.matchingFindings} of ${view.totalFindings}`;
+  }
 
-    if (selectedLayoutFindingId &&
-        !(Array.isArray(latestLayoutReport.findings) &&
-          latestLayoutReport.findings.some((finding) => finding && finding.id === selectedLayoutFindingId))) {
-      selectedLayoutFindingId = null;
-      clearLayoutOverlays();
-    }
-    const view = formatLayoutReport(latestLayoutReport, {
-      outcome: layoutOptions.outcome,
-      minimumSeverity: layoutOptions.minimumSeverity,
-      minimumConfidence: layoutOptions.minimumConfidence,
-      rule: layoutOptions.rule,
-      includeSuppressed: layoutOptions.includeSuppressed,
-    });
-    if (layoutFocusedElementId) {
-      view.findings = view.findings.filter((finding) => finding.elementId === layoutFocusedElementId);
-      view.findingsTruncated = false;
-    }
-    const root = elh('div', { class: 'df-layout-root' });
-    const header = elh('header', { class: 'df-layout-header' });
-    const headingRow = elh('div', { class: 'df-layout-heading-row' });
-    const heading = elh('div', { class: 'df-layout-heading' });
-    heading.append(
-      elh('div', { class: 'df-layout-title-row' },
-        elh('h3', { text: view.title }),
-        layoutStatusPill(view.status.label, view.status.tone)),
-      elh('p', {
-        class: 'df-layout-scope',
-        text: `${layoutScopeLabel(view)} · ${view.scope}${view.scopeTruncated ? ' · truncated' : ''}`,
-      }));
-
-    const headerActions = elh('div', { class: 'df-action-row df-layout-header-actions' });
-    const liveInput = elh('input', { type: 'checkbox', 'aria-label': 'Live layout diagnostics' });
-    liveInput.checked = layoutOptions.live;
-    const live = elh('label', { class: 'df-layout-live-toggle' },
-      liveInput,
-      elh('span', { class: 'df-layout-switch', 'aria-hidden': 'true' }),
-      elh('span', { text: 'Live' }));
-    liveInput.addEventListener('change', () => {
-      layoutOptions.live = liveInput.checked;
-      setStatus(layoutOptions.live
-        ? 'Live layout diagnostics enabled. Relevant UI changes will trigger read-only rescans.'
-        : 'Live layout diagnostics disabled.');
-      if (layoutOptions.live) scheduleLayoutLiveScan(0);
-      else if (layoutLiveTimer) {
-        clearTimeout(layoutLiveTimer);
-        layoutLiveTimer = null;
-      }
-    });
-    const rescan = layoutActionButton(
-      layoutScanBusy ? 'Scanning…' : 'Rescan',
-      'i-refresh',
-      'df-layout-button-primary');
-    rescan.disabled = layoutScanBusy;
-    rescan.addEventListener('click', () => runLayoutScan());
-    headerActions.append(live, rescan);
-    headingRow.append(heading, headerActions);
-    header.append(headingRow);
-
-    const captured = formatLayoutCaptureTime(view.snapshot.capturedAt);
-    header.append(elh('p', {
-      class: 'df-layout-capture',
-      text: [
-        view.snapshot.platform,
-        captured ? `Captured ${captured}` : null,
-        view.snapshot.stable === false ? 'Single-frame snapshot' : null,
-      ].filter(Boolean).join(' · '),
-    }));
-    root.append(header);
-    if (layoutStale || layoutError) {
-      root.append(elh('div', {
-        class: `df-layout-state-banner ${layoutError ? 'df-layout-state-error' : 'df-layout-state-stale'}`,
-        role: 'status',
-        text: layoutError
-          ? `${layoutError} The previous Layout results are retained.`
-          : 'The UI changed after this Layout check. Results may be outdated until you rescan.',
-      }));
-    }
-
-    const summary = elh('section', {
-      class: 'df-summary-grid df-layout-summary',
-      'aria-label': 'Layout diagnostic summary',
-    });
-    summary.append(
-      layoutSummaryCard('Issues', view.counts.violations, view.counts.violations ? 'error' : 'neutral'),
-      layoutSummaryCard('Observations', view.counts.observations, view.counts.observations ? 'warning' : 'neutral'),
-      layoutSummaryCard('Incomplete', view.counts.incomplete, view.counts.incomplete ? 'neutral' : 'success'),
-      layoutSummaryCard('Coverage', view.coverageLabel, view.coverageOverall === 'full' ? 'success' : view.coverageOverall === 'partial' ? 'warning' : 'neutral'));
-    root.append(summary);
-
-    const filters = elh('section', { class: 'df-layout-filterbar', 'aria-label': 'Filter layout findings' });
-    const rule = elh('input', {
-      class: 'df-field df-layout-search',
+  function createLayoutFilterMenu() {
+    const filters = elh('details', { class: 'df-layout-filter-menu' });
+    filters.append(elh('summary', { class: 'df-data-button', 'aria-label': 'Layout filters' },
+      svgIcon('i-more'),
+      elh('span', { text: 'Filters' })));
+    const body = elh('div', { class: 'df-layout-filter-popover' });
+    const search = elh('input', {
+      class: 'df-field',
       type: 'search',
       value: layoutOptions.rule,
       placeholder: 'Search findings',
       'aria-label': 'Search layout findings',
     });
-    rule.addEventListener('change', () => {
-      layoutOptions.rule = rule.value;
+    search.addEventListener('change', () => {
+      layoutOptions.rule = search.value;
       renderLayoutDiagnostics();
     });
-    filters.append(
-      rule,
+    body.append(
+      search,
       layoutSelect('Finding type', layoutOptions.outcome, [
         ['all', 'All findings'],
         ['violations', 'Issues'],
@@ -3965,24 +4228,13 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       ], (value) => {
         layoutOptions.outcome = value;
         renderLayoutDiagnostics();
-      }));
-
-    const advanced = elh('details', { class: 'df-disclosure df-layout-advanced' });
-    advanced.open = layoutOptions.advancedOpen;
-    advanced.addEventListener('toggle', () => { layoutOptions.advancedOpen = advanced.open; });
-    advanced.append(elh('summary', null,
-      elh('span', { class: 'df-disclosure-title', text: 'Advanced options' })));
-    const advancedBody = elh('div', { class: 'df-disclosure-body df-layout-advanced-grid' });
-    advancedBody.append(
-      layoutSelect('Profile', layoutOptions.profile, [
+      }),
+      layoutSelect('Profile for next check', layoutOptions.profile, [
         ['agent', 'Agent'],
         ['strict', 'Strict'],
         ['exhaustive', 'Exhaustive'],
         ['ci', 'CI'],
-      ], (value) => {
-        layoutOptions.profile = value;
-        runLayoutScan();
-      }),
+      ], (value) => { layoutOptions.profile = value; }),
       layoutSelect('Minimum severity', layoutOptions.minimumSeverity, [
         ['info', 'Info+'],
         ['minor', 'Minor+'],
@@ -4002,12 +4254,12 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         layoutOptions.minimumConfidence = value;
         renderLayoutDiagnostics();
       }));
-    const selectedScope = elh('input', { id: 'df-layout-selected-scope', type: 'checkbox' });
+    const selectedScope = elh('input', { type: 'checkbox' });
     selectedScope.checked = layoutOptions.selectedScope;
     selectedScope.disabled = !selectedId;
     selectedScope.addEventListener('change', () => {
       layoutOptions.selectedScope = selectedScope.checked;
-      runLayoutScan();
+      setStatus('Layout scope updated for the next check.');
     });
     const suppressed = elh('input', { type: 'checkbox' });
     suppressed.checked = layoutOptions.includeSuppressed;
@@ -4015,108 +4267,347 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       layoutOptions.includeSuppressed = suppressed.checked;
       renderLayoutDiagnostics();
     });
-    advancedBody.append(
-      elh('label', { class: 'df-layout-check' }, selectedScope, elh('span', { text: 'Scan selected subtree' })),
-      elh('label', { class: 'df-layout-check' }, suppressed, elh('span', { text: 'Show suppressed findings' })));
-    advanced.append(advancedBody);
-    filters.append(advanced);
-    root.append(filters);
-    if (layoutFocusedElementId) {
-      const focusedElement = elById(layoutFocusedElementId);
-      const focus = elh('div', { class: 'df-layout-focus' },
-        elh('span', {
-          text: `Selected element · ${focusedElement ? elementLabel(focusedElement) : 'Element no longer present'}`,
-        }));
-      const clear = layoutActionButton('Clear', 'i-close');
-      clear.addEventListener('click', () => {
-        layoutFocusedElementId = null;
-        selectedLayoutFindingId = null;
-        clearLayoutOverlays();
-        renderLayoutDiagnostics();
-      });
-      focus.append(clear);
-      root.append(focus);
-    }
-
-    const coverageDetails = renderLayoutCoverage(view);
-    const findingsSection = elh('section', { class: 'df-layout-findings' });
-    findingsSection.append(elh('div', { class: 'df-layout-section-heading' },
-      elh('h4', { text: 'Findings' }),
-      elh('span', {
-        class: 'df-layout-section-count',
-        text: layoutFocusedElementId
-          ? String(view.findings.length)
-          : view.matchingFindings === view.totalFindings
-          ? String(view.totalFindings)
-          : `${view.matchingFindings} of ${view.totalFindings}`,
-      })));
-
-    if (!view.findings.length) {
-      const empty = elh('div', { class: 'df-empty-state df-layout-empty-state' });
-      empty.append(
-        svgIcon(view.totalFindings ? 'i-inspect' : 'i-check', 'df-empty-state-icon'),
-        elh('div', { class: 'df-empty-state-copy' },
-          elh('h4', {
-            text: layoutFocusedElementId
-              ? 'No findings for the selected element'
-              : view.totalFindings ? 'No findings match these filters' : 'No layout findings in the evaluated elements',
-          }),
-          elh('p', {
-            text: layoutFocusedElementId
-              ? 'Clear the selected-element filter to return to the complete page result.'
-              : view.totalFindings
-              ? 'Reset the filters to see the complete result.'
-              : view.coverageOverall === 'full'
-                ? 'Every enabled check completed without a finding.'
-                : 'Coverage is not complete. Review what could and could not be evaluated.',
-          })));
-      const emptyActions = elh('div', { class: 'df-action-row' });
-      if (layoutFocusedElementId) {
-        const clear = layoutActionButton('Clear element filter', 'i-close');
-        clear.addEventListener('click', () => {
-          layoutFocusedElementId = null;
-          renderLayoutDiagnostics();
-        });
-        emptyActions.append(clear);
-      } else if (view.totalFindings) {
-        const reset = layoutActionButton('Reset filters', 'i-refresh');
-        reset.addEventListener('click', resetLayoutFilters);
-        emptyActions.append(reset);
-      } else if (view.coverageOverall !== 'full') {
-        const review = layoutActionButton('Review coverage', 'i-data');
-        review.addEventListener('click', () => {
-          layoutOptions.coverageOpen = true;
-          coverageDetails.open = true;
-          coverageDetails.scrollIntoView({ block: 'nearest' });
-        });
-        emptyActions.append(review);
-      }
-      empty.append(emptyActions);
-      findingsSection.append(empty);
-    } else {
-      const list = elh('div', { class: 'df-layout-finding-list' });
-      for (const finding of view.findings)
-        list.append(renderLayoutFinding(finding, latestLayoutReport));
-      findingsSection.append(list);
-    }
-    if (view.findingsTruncated) {
-      findingsSection.append(elh('p', {
-        class: 'df-layout-guidance',
-        text: 'The visible list is capped. Use `maui devflow diagnostics layout --json` for the complete report.',
-      }));
-    }
-    root.append(findingsSection, coverageDetails);
-
-    dockBodyEl.replaceChildren(root);
-    setLayoutCopilotSnapshot(latestLayoutReport, selectedLayoutFindingId);
-    if (selectedLayoutFindingId) {
-      requestAnimationFrame(() => {
-        dockBodyEl.querySelector(`[data-layout-finding-id="${CSS.escape(selectedLayoutFindingId)}"]`)
-          ?.scrollIntoView({ block: 'nearest' });
-      });
-    }
+    body.append(
+      elh('label', { class: 'df-layout-check' },
+        selectedScope, elh('span', { text: 'Scan selected subtree next' })),
+      elh('label', { class: 'df-layout-check' },
+        suppressed, elh('span', { text: 'Show suppressed findings' })));
+    filters.append(body);
+    return filters;
   }
 
+  function createLayoutLiveToggle() {
+    const input = elh('input', { type: 'checkbox', 'aria-label': 'Live layout diagnostics' });
+    input.checked = layoutOptions.live;
+    const toggle = elh('label', { class: 'df-layout-live-toggle df-layout-live-compact' },
+      input,
+      elh('span', { class: 'df-layout-switch', 'aria-hidden': 'true' }),
+      elh('span', { text: 'Live' }));
+    input.addEventListener('change', () => {
+      layoutOptions.live = input.checked;
+      if (layoutOptions.live) scheduleLayoutLiveScan(0);
+      else if (layoutLiveTimer) {
+        clearTimeout(layoutLiveTimer);
+        layoutLiveTimer = null;
+      }
+    });
+    return toggle;
+  }
+
+  function setLayoutFindingsActionStrip(view = null) {
+    const context = [];
+    if (view) {
+      const count = compactLayoutCount(view);
+      context.push(layoutStatusPill(`${count} finding${count === '1' ? '' : 's'}`, view.status.tone));
+      if (layoutStale || layoutError)
+        context.push(layoutStatusPill(layoutError ? 'Refresh failed' : 'Stale', layoutError ? 'error' : 'warning'));
+    } else {
+      context.push(layoutStatusPill(layoutScanBusy ? 'Checking' : layoutError ? 'Unavailable' : 'Not checked',
+        layoutError ? 'error' : 'neutral'));
+      context.push(dataActionText(layoutOptions.selectedScope ? 'Selected subtree' : 'Current page'));
+    }
+    const coverage = view
+      ? dataUi.button(`${view.coverageLabel} coverage`, {
+          commandId: 'layout.coverage',
+          className: 'df-layout-coverage-button',
+          onClick: () => showLayoutSubview('coverage', '.df-data-action-strip .df-layout-back'),
+        })
+      : null;
+    const scanLabel = layoutScanBusy ? 'Checking…' : view ? 'Rescan' : layoutError ? 'Retry' : 'Start check';
+    setDockActionStrip({
+      visible: true,
+      variant: 'actions',
+      ariaLabel: 'Layout actions',
+      context,
+      persistentControls: [createLayoutFilterMenu(), createLayoutLiveToggle()],
+      secondaryCommands: coverage ? [coverage] : [],
+      primaryCommand: dataUi.button(scanLabel, {
+        commandId: 'layout.scan',
+        icon: 'i-refresh',
+        primary: true,
+        disabled: layoutScanBusy,
+        onClick: () => executeDataCommand('layout.scan'),
+      }),
+    });
+  }
+
+  function compactLayoutCoverage(view) {
+    const tone = view.coverageOverall === 'full'
+      ? 'success'
+      : view.coverageOverall === 'partial' ? 'warning' : 'neutral';
+    const back = dataUi.button('Findings', {
+      commandId: 'layout.back',
+      icon: 'i-chevron',
+      className: 'df-data-back df-layout-back',
+      onClick: () => showLayoutSubview('findings', '.df-data-action-strip .df-layout-coverage-button'),
+    });
+    setDockActionStrip({
+      visible: true,
+      variant: 'navigation',
+      ariaLabel: 'Layout coverage navigation',
+      context: [
+        back,
+        dataActionText('Coverage'),
+        layoutStatusPill(view.coverageLabel, tone),
+        dataActionText(view.scope),
+      ],
+    });
+
+    const root = elh('div', { class: 'df-layout-subview' });
+    const table = elh('table', { class: 'df-layout-compact-table' });
+    table.append(elh('thead', null, elh('tr', null,
+      elh('th', { text: 'Check' }),
+      elh('th', { text: 'Support' }),
+      elh('th', { text: 'Evaluated' }))));
+    const body = elh('tbody');
+    for (const rule of view.rules) {
+      body.append(elh('tr', null,
+        elh('td', null,
+          elh('span', { text: rule.label }),
+          elh('code', { class: 'df-layout-rule-code', text: rule.ruleId })),
+        elh('td', null, layoutStatusPill(
+          rule.supportLabel,
+          rule.support === 'full' ? 'success' : rule.support === 'partial' ? 'warning' : 'neutral')),
+        elh('td', { text: rule.detail })));
+    }
+    table.append(body);
+    root.append(table);
+    const limitations = [...view.limitations, ...view.neverCaptured.map((item) => `Never captured: ${item}`)];
+    if (limitations.length) {
+      const details = elh('details', { class: 'df-layout-compact-details' });
+      details.append(elh('summary', { text: `${limitations.length} limitations and privacy notes` }));
+      const list = elh('ul', { class: 'df-layout-list' });
+      for (const limitation of limitations) list.append(elh('li', { text: limitation }));
+      details.append(list);
+      root.append(details);
+    }
+    return root;
+  }
+
+  function compactLayoutFindingDetail(finding, report) {
+    const tone = finding.outcome === 'violation'
+      ? 'error'
+      : finding.outcome === 'observation' ? 'warning' : 'neutral';
+    const view = formatLayoutReport(report);
+    const back = dataUi.button('Findings', {
+      commandId: 'layout.back',
+      icon: 'i-chevron',
+      className: 'df-data-back df-layout-back',
+      onClick: () => {
+        showLayoutSubview('findings');
+        requestAnimationFrame(() => {
+          dockBodyEl.querySelector(`[data-layout-finding-id="${CSS.escape(finding.id)}"]`)?.focus();
+        });
+      },
+    });
+    setDockActionStrip({
+      visible: true,
+      variant: 'navigation',
+      ariaLabel: 'Layout finding actions',
+      context: [
+        back,
+        layoutStatusPill(finding.outcomeLabel, tone),
+        dataActionText(finding.ruleLabel),
+      ],
+      secondaryCommands: [
+        dataUi.button(`${view.coverageLabel} coverage`, {
+          commandId: 'layout.coverage',
+          className: 'df-layout-coverage-button',
+          onClick: () => showLayoutSubview('coverage', '.df-data-action-strip .df-layout-back'),
+        }),
+      ],
+      primaryCommand: dataUi.button('Show in app', {
+        commandId: 'layout.show',
+        icon: 'i-inspect',
+        primary: true,
+        onClick: () => selectLayoutFinding(finding),
+      }),
+    });
+
+    const root = elh('div', { class: 'df-layout-subview' });
+    const detail = elh('div', { class: 'df-layout-detail' },
+      elh('p', { class: 'df-layout-finding-message', text: finding.message }),
+      finding.context ? elh('p', { class: 'df-layout-finding-context', text: finding.context }) : null,
+      elh('p', { class: 'df-layout-guidance', text: finding.explanation }));
+    const evidence = layoutEvidenceLine(finding);
+    if (evidence) detail.append(elh('p', { class: 'df-layout-evidence-line', text: evidence }));
+    if (finding.limitations.length) {
+      const list = elh('ul', { class: 'df-layout-list' });
+      for (const limitation of finding.limitations) list.append(elh('li', { text: limitation }));
+      detail.append(list);
+    }
+    const actions = elh('div', { class: 'df-layout-detail-actions' });
+    if (finding.elementId && finding.element?.sourceFile) {
+      actions.append(dataUi.button('Open source', {
+        icon: 'i-source',
+        onClick: async () => {
+          selectLayoutFinding(finding);
+          await openSource();
+        },
+      }));
+    }
+    actions.append(
+      dataUi.button('Add to Copilot', {
+        icon: 'i-copilot',
+        onClick: async () => {
+          setLayoutCopilotSnapshot(report, finding.id);
+          await attachDockDataToCopilot();
+        },
+      }),
+      dataUi.button('Copy payload', {
+        icon: 'i-data',
+        onClick: async () => {
+          const ok = await copyText(JSON.stringify(createLayoutDataPayload(report, finding.id), null, 2));
+          setStatus(ok ? 'Copied the selected layout finding.' : 'Could not copy the layout finding.');
+        },
+      }));
+    if (finding.outcome !== 'pass' && finding.id) {
+      actions.append(dataUi.button(finding.suppressed ? 'Unsuppress' : 'Suppress', {
+        icon: finding.suppressed ? 'i-refresh' : 'i-close',
+        onClick: async (event) => {
+          const button = event.currentTarget;
+          button.disabled = true;
+          const result = await apiPost(
+            finding.suppressed ? '/api/diagnostics/unsuppress' : '/api/diagnostics/suppress',
+            {
+              findingId: finding.id,
+              reason: finding.suppressed ? null : 'Suppressed in DevFlow Inspector',
+            });
+          if (!result || result.ok === false) {
+            button.disabled = false;
+            setStatus((result && (result.error || result.message)) || 'The layout suppression policy could not be changed.');
+            return;
+          }
+          showLayoutSubview('findings');
+          await executeDataCommand('layout.scan');
+        },
+      }));
+    }
+    detail.append(actions);
+    root.append(detail);
+    return root;
+  }
+
+  function compactLayoutFindingRow(finding) {
+    const tone = finding.outcome === 'violation'
+      ? 'error'
+      : finding.outcome === 'observation' ? 'warning' : 'neutral';
+    const row = elh('button', {
+      class: `df-layout-finding-row df-layout-${finding.outcome}` +
+        (finding.suppressed ? ' df-suppressed' : ''),
+      type: 'button',
+      'data-layout-finding-id': finding.id,
+      'aria-label': `${finding.outcomeLabel}: ${finding.ruleLabel}. ${finding.message}`,
+    });
+    row.addEventListener('click', () => openLayoutFindingDetail(finding));
+    row.append(
+      layoutStatusPill(finding.outcomeLabel, tone),
+      elh('span', { class: 'df-layout-row-main' },
+        elh('strong', { text: finding.ruleLabel }),
+        elh('span', { text: finding.message })),
+      elh('span', {
+        class: 'df-layout-row-meta',
+        text: [finding.context, finding.severityLabel, finding.confidenceLabel].filter(Boolean).join(' · '),
+      }),
+      svgIcon('i-chevron'));
+    return row;
+  }
+
+  function renderLayoutDiagnostics() {
+    if (!latestLayoutReport) {
+      clearDockSnapshot();
+      setLayoutFindingsActionStrip(null);
+      dockBodyEl.replaceChildren(dataUi.state({
+        kind: layoutScanBusy ? 'loading' : layoutError ? 'error' : 'empty',
+        icon: layoutScanBusy || layoutError ? 'i-refresh' : 'i-layout',
+        title: layoutScanBusy ? 'Checking layout' : layoutError ? 'Layout check unavailable' : 'Layout not checked',
+        message: layoutScanBusy
+          ? 'Scanning the current page for clipping, overflow, overlap, and sizing issues.'
+          : layoutError || 'Start a check for clipping, overflow, overlap, and sizing issues.',
+      }));
+      return;
+    }
+
+    const reportFinding = selectedLayoutFindingId
+      ? latestLayoutReport.findings?.find((finding) => finding?.id === selectedLayoutFindingId)
+      : null;
+    if (layoutSubview === 'detail' && !reportFinding) {
+      layoutSubview = 'findings';
+      activateDockSubview('findings', 'Layout');
+      selectedLayoutFindingId = null;
+      clearLayoutOverlays();
+      setStatus('The selected Layout finding is no longer present after the latest check.');
+    }
+
+    const view = formatLayoutReport(latestLayoutReport, {
+      outcome: layoutOptions.outcome,
+      minimumSeverity: layoutOptions.minimumSeverity,
+      minimumConfidence: layoutOptions.minimumConfidence,
+      rule: layoutOptions.rule,
+      includeSuppressed: layoutOptions.includeSuppressed,
+    });
+    if (layoutFocusedElementId) {
+      view.findings = view.findings.filter((finding) => finding.elementId === layoutFocusedElementId);
+      view.findingsTruncated = false;
+    }
+
+    if (layoutSubview === 'coverage') {
+      dockBodyEl.replaceChildren(compactLayoutCoverage(view));
+      setLayoutCopilotSnapshot(latestLayoutReport, null);
+      return;
+    }
+    if (layoutSubview === 'detail' && reportFinding) {
+      const finding = formatLayoutReport({ ...latestLayoutReport, findings: [reportFinding] }).findings[0];
+      dockBodyEl.replaceChildren(compactLayoutFindingDetail(finding, latestLayoutReport));
+      setLayoutCopilotSnapshot(latestLayoutReport, finding.id);
+      return;
+    }
+
+    setLayoutFindingsActionStrip(view);
+    const root = elh('div', { class: 'df-layout-root df-layout-compact' });
+    if (layoutFocusedElementId) {
+      const focusedElement = elById(layoutFocusedElementId);
+      root.append(elh('div', { class: 'df-layout-focus df-layout-focus-compact' },
+        elh('span', { text: `Selected element · ${focusedElement ? elementLabel(focusedElement) : 'Element no longer present'}` }),
+        dataUi.button('Clear', {
+          icon: 'i-close',
+          onClick: () => {
+            layoutFocusedElementId = null;
+            selectedLayoutFindingId = null;
+            clearLayoutOverlays();
+            renderLayoutDiagnostics();
+          },
+        })));
+    }
+
+    const list = elh('div', { class: 'df-layout-finding-list df-layout-compact-list' });
+    if (!view.findings.length) {
+      const action = view.totalFindings
+        ? dataUi.button('Reset filters', { icon: 'i-refresh', onClick: resetLayoutFilters })
+        : view.coverageOverall !== 'full'
+          ? dataUi.button('Review coverage', {
+              icon: 'i-data',
+              onClick: () => showLayoutSubview('coverage', '.df-data-action-strip .df-layout-back'),
+            })
+          : null;
+      list.append(dataUi.state({
+        kind: 'empty',
+        icon: view.totalFindings ? 'i-inspect' : 'i-check',
+        title: view.totalFindings ? 'No findings match these filters' : 'No layout findings',
+        message: view.totalFindings
+          ? 'Reset the filters to see the complete result.'
+          : view.coverageOverall === 'full'
+            ? 'Every enabled check completed without a finding.'
+            : `No findings in the evaluated checks. Coverage is ${view.coverageLabel.toLowerCase()}.`,
+        action,
+      }));
+    } else {
+      for (const finding of view.findings) list.append(compactLayoutFindingRow(finding));
+    }
+    root.append(list);
+    dockBodyEl.replaceChildren(root);
+    setLayoutCopilotSnapshot(latestLayoutReport, null);
+  }
   async function runLayoutScan() {
     if (layoutScanBusy) {
       layoutScanPending = true;
@@ -4171,6 +4662,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       latestLayoutReport = result.report;
       layoutError = null;
       layoutStale = false;
+      delete document.body.dataset.layoutStaleReason;
       elementTree.setDiagnostics(Array.isArray(result.report.findings) ? result.report.findings : []);
       if (selectedLayoutFindingId &&
           !result.report.findings?.some((finding) => finding?.id === selectedLayoutFindingId)) {
@@ -4217,7 +4709,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     if (!j || j.ok === false || !j.summary) {
       performanceRecording = false;
       performanceOwned = false;
-      dockEmpty((j && j.error) || 'Performance triage is unavailable for this agent.');
+      hideDockActionStrip();
+      dockEmpty((j && j.error) || 'This agent does not expose a performance triage session.', {
+        kind: j && j.error ? 'error' : 'unavailable',
+        title: j && j.error ? 'Could not refresh performance data' : 'Performance triage unavailable',
+      });
       return;
     }
 
@@ -4226,29 +4722,29 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     performanceOwned = !!j.owned;
 
     const fragment = document.createDocumentFragment();
-    const header = elh('div', { class: 'df-diag-header' });
-    header.append(
-      elh('div', { class: 'df-section-title', text: view.title }),
-      elh('div', { class: 'df-diag-meta', text: view.session }),
-      elh('div', { class: 'df-diag-meta', text: view.mode }));
-
-    const controls = elh('div', { class: 'df-diag-controls' });
-    const startBtn = elh('button', { type: 'button', text: view.active ? 'Recording…' : 'Start recording' });
-    startBtn.disabled = view.active || performanceBusy || capturedTraceMode;
-    startBtn.addEventListener('click', () => controlPerformance('start'));
-    const stopBtn = elh('button', { type: 'button', text: 'Stop' });
-    stopBtn.disabled = !view.active || !performanceOwned || performanceBusy || capturedTraceMode;
-    stopBtn.addEventListener('click', () => controlPerformance('stop'));
-    controls.append(startBtn, stopBtn);
-    header.append(controls);
+    const context = [
+      layoutStatusPill(view.active ? 'Recording' : 'Stopped', view.active ? 'warning' : 'neutral'),
+      dataActionText(`${view.session} · ${view.mode}`),
+    ];
     if (view.active && !performanceOwned)
-      header.append(elh('div', { class: 'df-diag-meta', text: 'Attached read-only: another client owns this session.' }));
-    fragment.append(header);
+      context.push(layoutStatusPill('Read-only owner', 'warning'));
+    setDockActionStrip({
+      visible: true,
+      variant: 'actions',
+      ariaLabel: 'Performance actions',
+      context,
+      primaryCommand: dataUi.button(view.active ? 'Stop' : 'Start', {
+        commandId: view.active ? 'performance.stop' : 'performance.start',
+        icon: view.active ? 'i-close' : 'i-record',
+        primary: !view.active,
+        disabled: performanceBusy || capturedTraceMode || (view.active && !performanceOwned),
+        title: view.active && !performanceOwned ? 'Another client owns this performance session.' : null,
+        onClick: () => executeDataCommand(view.active ? 'performance.stop' : 'performance.start'),
+      }),
+    });
 
-    fragment.append(elh('div', {
-      class: view.perturbed ? 'df-diag-warning' : 'df-diag-meta',
-      text: view.perturbationNote,
-    }));
+    if (view.perturbed)
+      fragment.append(elh('div', { class: 'df-data-inline-warning', text: view.perturbationNote }));
 
     const table = elh('table', { class: 'df-diag-metrics' });
     for (const metric of view.metrics) {
@@ -4276,15 +4772,16 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       fragment.append(hot);
     }
 
-    for (const warning of view.warnings)
-      fragment.append(elh('div', { class: 'df-diag-warning', text: `! ${warning}` }));
-
-    const limits = elh('div', { class: 'df-diag-footer' });
-    limits.append(elh('div', { class: 'df-diag-subtitle', text: 'Limitations' }));
-    for (const limitation of view.limitations)
-      limits.append(elh('div', { class: 'df-diag-limitation', text: `- ${limitation}` }));
-    limits.append(elh('div', { class: 'df-diag-meta', text: 'Hand off to a native profiler (dotnet-trace, Instruments, Android Studio Profiler) for call-stack attribution.' }));
-    fragment.append(limits);
+    const notes = [...view.warnings, ...view.limitations,
+      'Use a native profiler for call-stack attribution.'];
+    if (notes.length) {
+      const limits = elh('details', { class: 'df-performance-notes' });
+      limits.append(elh('summary', { text: `${notes.length} warnings and limitations` }));
+      const list = elh('ul');
+      for (const note of notes) list.append(elh('li', { text: note }));
+      limits.append(list);
+      fragment.append(limits);
+    }
 
     dockBodyEl.replaceChildren(fragment);
   }
@@ -4296,15 +4793,16 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
     performanceBusy = true;
     setStatus(action === 'start' ? 'Starting performance triage…' : 'Stopping performance triage…');
+    let j = null;
     try {
-      const j = await apiPost(`/api/performance/${action}`, {});
-      if (dockActiveTab === 'performance') renderPerformance(j);
-      setStatus(j && j.ok === false
-        ? (j.error || 'Performance triage is unavailable.')
-        : (action === 'start' ? 'Recording performance triage.' : 'Performance triage stopped.'));
+      j = await apiPost(`/api/performance/${action}`, {});
     } finally {
       performanceBusy = false;
     }
+    if (dockActiveTab === 'performance') renderPerformance(j);
+    setStatus(j && j.ok === false
+      ? (j.error || 'Performance triage is unavailable.')
+      : (action === 'start' ? 'Recording performance triage.' : 'Performance triage stopped.'));
   }
 
   function performancePollIsActive() {
@@ -4322,8 +4820,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       if (dockLoadIsCurrent('problems', generation)) renderProblems(j);
     },
     layout: async (generation, options = {}) => {
-      if (options.forceScan === true ||
-          (!latestLayoutReport && !layoutError && !layoutScanBusy))
+      if (options.forceScan === true)
         await runLayoutScan();
       else if (dockLoadIsCurrent('layout', generation))
         renderLayoutDiagnostics();
@@ -4365,50 +4862,114 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
 
   function renderAlerts(result) {
     if (!result || result.supported === false) {
-      dockEmpty((result && result.error) || 'Native alert control is unavailable for this target.');
+      currentAlert = null;
+      currentAlertRevision = null;
+      hideDockActionStrip();
+      dockEmpty((result && result.error) || 'This target does not expose native alert control.', {
+        kind: 'unavailable',
+        title: 'Native alerts unavailable',
+      });
       return;
     }
-    if (!result.ok) {
-      dockEmpty(result.error || 'Could not inspect native alerts.');
+    if (!result.ok && !result.alert) {
+      hideDockActionStrip();
+      dockEmpty(result.error || 'Try refreshing this tab.', {
+        kind: 'error',
+        title: 'Could not inspect native alerts',
+      });
       return;
     }
     if (!result.alert) {
-      dockEmpty('No native alert is visible.');
+      currentAlert = null;
+      currentAlertRevision = null;
+      hideDockActionStrip();
+      dockEmpty('A visible native alert and its choices will appear here.', {
+        icon: 'i-check',
+        title: 'No native alert is visible',
+      });
       return;
     }
+    currentAlert = result.alert;
+    currentAlertRevision = result.revision || null;
     recordDockSnapshot('alerts', result.alert.title || 'Native alert', result.alert, 1);
 
-    const fragment = document.createDocumentFragment();
-    fragment.append(elh('div', { class: 'df-section-title', text: result.alert.title || 'Native alert' }));
     const buttons = Array.isArray(result.alert.buttons) ? result.alert.buttons : [];
-    if (!buttons.length) {
-      fragment.append(elh('div', { class: 'df-empty', text: 'This alert has no actionable buttons.' }));
+    const choices = buttons.map((alertButton) => {
+      const label = String(alertButton.label || 'Dismiss');
+      const choice = dataUi.button(label, {
+        commandId: `alerts.choose.${label}`,
+        className: 'df-alert-choice',
+        disabled: !isWriter || !connected || capturedTraceMode,
+        title: !isWriter || !connected || capturedTraceMode
+          ? (capturedTraceMode ? 'Captured trace mode cannot dismiss native alerts.' : 'Take control before choosing a native alert action.')
+          : `Choose ${label}`,
+        onClick: () => executeDataCommand('alerts.choose', {
+          buttonLabel: label,
+          alertRevision: currentAlertRevision,
+        }),
+      });
+      choice.dataset.alertAction = 'dismiss';
+      return choice;
+    });
+    const persistentControls = [];
+    const secondaryCommands = [];
+    if (choices.length > 2) {
+      const menu = elh('details', { class: 'df-alert-choice-menu' });
+      menu.append(elh('summary', { class: 'df-data-button' },
+        svgIcon('i-more'),
+        elh('span', { text: 'Choose…' })));
+      const menuBody = elh('div', { class: 'df-alert-choice-menu-body', role: 'group', 'aria-label': 'Native alert choices' });
+      menuBody.append(...choices);
+      menu.append(menuBody);
+      persistentControls.push(menu);
     } else {
-      const actions = elh('div', { class: 'df-alert-actions' });
-      for (const alertButton of buttons) {
-        const label = String(alertButton.label || 'Dismiss');
-        const button = elh('button', { class: 'df-dock-btn', text: label, 'data-alert-action': 'dismiss' });
-        button.disabled = !isWriter || !connected || capturedTraceMode;
-        button.title = button.disabled
-          ? (capturedTraceMode ? 'Captured trace mode cannot dismiss native alerts.' : 'Take control before dismissing native alerts.')
-          : `Dismiss with ${label}`;
-        button.addEventListener('click', async () => {
-          if (!ensureCanDrive()) return;
-          button.disabled = true;
-          const response = await apiPost('/api/alerts/dismiss', { buttonLabel: label });
-          if (response && response.ok && response.dismissed) {
-            setStatus(`Dismissed native alert with ${label}.`);
-            await loadTab('alerts');
-          } else {
-            button.disabled = false;
-            setStatus((response && response.error) || 'Could not dismiss the native alert.');
-          }
-        });
-        actions.append(button);
-      }
-      fragment.append(actions);
+      persistentControls.push(...choices);
     }
-    dockBodyEl.replaceChildren(fragment);
+    setDockActionStrip({
+      visible: true,
+      variant: 'actions',
+      ariaLabel: 'Native alert actions',
+      context: [
+        layoutStatusPill('Alert visible', 'warning'),
+        dataActionText(result.alert.title || 'Native alert'),
+      ],
+      persistentControls,
+      secondaryCommands,
+    });
+
+    if (!buttons.length) {
+      dockBodyEl.replaceChildren(dataUi.state({
+        kind: 'empty',
+        icon: 'i-check',
+        title: 'No actionable choices',
+        message: 'This native alert does not expose a button DevFlow can choose.',
+      }));
+    } else {
+      dockBodyEl.replaceChildren(elh('p', {
+        class: result.ok ? 'df-data-inline-note' : 'df-data-inline-warning',
+        text: result.ok
+          ? 'Choose an action above to affect the visible native alert in the live app.'
+          : (result.error || 'The alert changed. Review the current choices and choose again.'),
+      }));
+    }
+  }
+
+  async function chooseAlert(buttonLabel, alertRevision) {
+    if (!ensureCanDrive()) return;
+    const state = dataDockController.current();
+    const response = await apiPost('/api/alerts/dismiss', { buttonLabel, alertRevision });
+    if (!dataDockController.isCurrent('alerts', state.generation, state.view)) return;
+    if (response && response.ok && response.dismissed) {
+      setStatus(`Chose ${buttonLabel} on the native alert.`);
+      await loadTab('alerts', { refresh: true });
+      return;
+    }
+    if (response && response.alert) {
+      renderAlerts(response);
+      setStatus(response.error || 'The native alert changed. Review it and choose again.');
+      return;
+    }
+    setStatus((response && response.error) || 'Could not choose the native alert action.');
   }
 
   // ── Blazor WebView CDP tab — list WebViews, view source, evaluate JS ──
@@ -4425,21 +4986,55 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
 
   async function renderWebView(j) {
     const wvs = extractWebviews(j && j.webviews);
-    if (!wvs.length) { dockEmpty((j && j.error) || 'No Blazor WebViews in this app.'); return; }
+    if (!wvs.length) {
+      hideDockActionStrip();
+      dockEmpty((j && j.error) || 'WebView tools appear when the app exposes a Blazor WebView.', {
+        kind: j && j.error ? 'error' : 'empty',
+        title: j && j.error ? 'Could not inspect WebViews' : 'No Blazor WebViews in this app',
+      });
+      return;
+    }
+    const targetStillAvailable = cdpWebviewId && wvs.some((w) => w.id === cdpWebviewId);
+    if (!targetStillAvailable) {
+      cdpWebviewId = wvs[0].id;
+      cdpOutputValue = null;
+      cdpOutputError = null;
+    }
+    const target = dataActionSelect(
+      'df-cdp-webview',
+      'WebView target',
+      cdpWebviewId,
+      wvs.map((item) => [item.id, item.label]),
+      (value) => {
+        cdpWebviewId = value;
+        cdpOutputValue = null;
+        cdpOutputError = null;
+        renderCdpOutput();
+      });
+    setDockActionStrip({
+      visible: true,
+      variant: 'scope',
+      ariaLabel: 'WebView scope and actions',
+      context: [layoutStatusPill(`${wvs.length} WebView${wvs.length === 1 ? '' : 's'}`, 'neutral')],
+      persistentControls: [target],
+      secondaryCommands: [
+        dataUi.button('View source', {
+          icon: 'i-source',
+          onClick: () => executeDataCommand('webview.source.read'),
+        }),
+      ],
+    });
+
     const frag = document.createDocumentFragment();
-    const bar = elh('div', null, elh('span', { class: 'df-kv-key', text: 'WebView: ' }));
-    const sel = elh('select', { class: 'df-dock-btn' });
-    for (const w of wvs) sel.append(elh('option', { value: w.id, text: w.label }));
-    if (!cdpWebviewId || !wvs.some((w) => w.id === cdpWebviewId)) cdpWebviewId = wvs[0].id;
-    sel.value = cdpWebviewId;
-    sel.addEventListener('change', () => { cdpWebviewId = sel.value; });
-    bar.append(sel);
-    bar.append(document.createTextNode(' '));
-    bar.append(elh('button', { class: 'df-dock-btn', text: 'View source', onclick: cdpViewSource }));
-    frag.append(bar);
-    const evalRow = elh('div', null);
-    const inp = elh('input', { class: 'df-dock-btn', id: 'df-cdp-expr', placeholder: 'JS expression, e.g. document.title' });
-    inp.style.width = '360px';
+    const evalRow = elh('div', { class: 'df-data-control-row' });
+    const inp = elh('input', {
+      class: 'df-field df-data-expression',
+      id: 'df-cdp-expr',
+      'aria-label': 'JavaScript expression',
+      placeholder: 'JS expression, e.g. document.title',
+      value: cdpExpressionDraft,
+    });
+    inp.addEventListener('input', () => { cdpExpressionDraft = inp.value; });
     // Wait for key release before focusing the confirmation action so this Enter cannot approve it.
     let enterArmed = false;
     inp.addEventListener('keydown', (e) => {
@@ -4448,26 +5043,57 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     inp.addEventListener('keyup', (e) => {
       if (e.key !== 'Enter' || !enterArmed) return;
       enterArmed = false;
-      cdpEval();
+      executeDataCommand('webview.javascript.run');
     });
     inp.addEventListener('blur', () => { enterArmed = false; });
-    evalRow.append(inp, document.createTextNode(' '), elh('button', { class: 'df-dock-btn', text: 'Run', onclick: cdpEval }));
+    evalRow.append(inp, dataUi.button('Run', {
+      icon: 'i-replay',
+      primary: true,
+      onClick: () => executeDataCommand('webview.javascript.run'),
+    }));
     frag.append(evalRow);
     frag.append(elh('div', { id: 'df-cdp-out' }));
     dockBodyEl.replaceChildren(frag);
+    renderCdpOutput();
+  }
+
+  function renderCdpOutput() {
+    const out = document.getElementById('df-cdp-out');
+    if (!out) return;
+    if (cdpOutputError) {
+      out.replaceChildren(dataUi.state({
+        kind: 'error',
+        icon: 'i-refresh',
+        title: 'WebView command failed',
+        message: cdpOutputError,
+      }));
+    } else if (cdpOutputValue !== null && cdpOutputValue !== undefined) {
+      out.replaceChildren(typeof cdpOutputValue === 'string'
+        ? elh('pre', { class: 'df-log-row', text: cdpOutputValue })
+        : jsonView(cdpOutputValue));
+    } else {
+      out.replaceChildren();
+    }
   }
 
   async function cdpViewSource() {
+    const state = dataDockController.current();
+    const targetWebViewId = cdpWebviewId;
     const out = document.getElementById('df-cdp-out');
     if (out) out.textContent = 'Loading…';
-    const j = await apiPost('/api/cdp/source', { webviewId: cdpWebviewId });
-    if (out) out.replaceChildren(elh('pre', { class: 'df-log-row', text: (j && j.ok && j.source != null) ? String(j.source) : ((j && j.error) || 'No source.') }));
+    const j = await apiPost('/api/cdp/source', { webviewId: targetWebViewId });
+    if (!dataDockController.isCurrent('webview', state.generation, state.view) ||
+        cdpWebviewId !== targetWebViewId) return;
+    cdpOutputValue = j && j.ok && j.source != null ? String(j.source) : null;
+    cdpOutputError = cdpOutputValue === null ? ((j && j.error) || 'No source.') : null;
+    renderCdpOutput();
   }
 
   async function cdpEval() {
+    const state = dataDockController.current();
     const inp = document.getElementById('df-cdp-expr');
     const out = document.getElementById('df-cdp-out');
-    const expr = inp ? inp.value : '';
+    const expr = inp ? inp.value : cdpExpressionDraft;
     if (!expr) return;
     if (!ensureCanDrive()) return;
     const targetWebViewId = cdpWebviewId;
@@ -4475,39 +5101,163 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       'Run this JavaScript in the selected LIVE WebView? It can read or change application data.',
       'Run JavaScript');
     if (!confirmed) return;
+    if (!dataDockController.isCurrent('webview', state.generation, state.view)) return;
+    if (cdpWebviewId !== targetWebViewId) {
+      cdpWebviewId = targetWebViewId;
+      const target = document.getElementById('df-cdp-webview');
+      if (target) target.value = targetWebViewId;
+    }
     if (out) out.textContent = 'Running…';
     const j = await apiPost('/api/cdp/eval', { expression: expr, webviewId: targetWebViewId });
-    if (out) out.replaceChildren(jsonView(j && j.ok ? j.result : ((j && j.error) || 'evaluate failed')));
+    if (!dataDockController.isCurrent('webview', state.generation, state.view)) return;
+    cdpOutputValue = j && j.ok ? j.result : null;
+    cdpOutputError = j && j.ok ? null : ((j && j.error) || 'Evaluate failed.');
+    renderCdpOutput();
+  }
+
+  async function executeDataCommand(command, payload = {}) {
+    switch (command) {
+      case 'layout.scan':
+        return runLayoutScan();
+      case 'performance.refresh':
+        return loadTab('performance', { refresh: true, view: 'default' });
+      case 'performance.start':
+        return controlPerformance('start');
+      case 'performance.stop':
+        return controlPerformance('stop');
+      case 'sensors.refresh':
+        sensorsView = 'list';
+        return loadTab('sensors', { refresh: true, view: 'list' });
+      case 'sensors.location.read':
+        return readGeolocation();
+      case 'files.refresh':
+        return loadFiles({ refresh: true });
+      case 'files.root.change':
+        filesRoot = payload.root;
+        filesPath = '';
+        updateFilesActionStrip();
+        return loadFiles();
+      case 'webview.refresh':
+        return loadTab('webview', { refresh: true, view: 'default' });
+      case 'webview.source.read':
+        return cdpViewSource();
+      case 'webview.javascript.run':
+        return cdpEval();
+      case 'alerts.refresh':
+        return loadTab('alerts', { refresh: true, view: 'default' });
+      case 'alerts.choose':
+        return chooseAlert(payload.buttonLabel, payload.alertRevision);
+      case 'network.list.refresh':
+        return loadTab('network', { refresh: true, view: 'list' });
+      case 'network.detail.open':
+        return loadNetworkDetail(payload.id);
+      case 'network.detail.refresh':
+        return loadNetworkDetail(networkDetailId, { refresh: true });
+      case 'network.detail.back':
+        return restoreNetworkList();
+      default:
+        throw new Error(`Unknown Data command '${command}'.`);
+    }
+  }
+
+  function refreshActiveDataView() {
+    if (dockActiveTab === 'layout') return executeDataCommand('layout.scan');
+    if (dockActiveTab === 'performance') return executeDataCommand('performance.refresh');
+    if (dockActiveTab === 'sensors')
+      return executeDataCommand(sensorsView === 'location' ? 'sensors.location.read' : 'sensors.refresh');
+    if (dockActiveTab === 'files') return executeDataCommand('files.refresh');
+    if (dockActiveTab === 'webview') return executeDataCommand('webview.refresh');
+    if (dockActiveTab === 'alerts') return executeDataCommand('alerts.refresh');
+    if (dockActiveTab === 'network')
+      return executeDataCommand(networkDetailId ? 'network.detail.refresh' : 'network.list.refresh');
+    return loadTab(dockActiveTab, { refresh: true, view: dockActiveView });
   }
 
   async function loadTab(name, options = {}) {
     const generation = ++dockViewGeneration;
+    const view = options.view || (
+      name === 'layout' ? layoutSubview :
+      name === 'sensors' ? sensorsView :
+      name === 'network' ? 'list' :
+      'default');
+    const refreshing = options.refresh === true && dockBodyEl.childElementCount > 0;
+    const retained = refreshing ? {
+      nodes: [...dockBodyEl.childNodes],
+      scrollTop: dockBodyEl.scrollTop,
+      snapshot: dockSnapshot,
+      stripModel: dataDockController.current().stripModel,
+      meta: dockMetaEl?.textContent || '',
+      note: dockMetaNoteEl?.textContent || '',
+    } : null;
     dockActiveTab = name;
+    setDockView(view);
     if (name !== 'layout') {
       clearLayoutOverlays();
     }
     networkDetailId = null;
-    clearDockSnapshot();
+    if (!refreshing) clearDockSnapshot();
     for (const b of dockTabsEl.querySelectorAll('.df-dock-tab')) {
       const active = b.getAttribute('data-tab') === name;
       b.classList.toggle('df-active', active);
       b.setAttribute('aria-selected', String(active));
       b.tabIndex = active ? 0 : -1;
-      if (active && b.id) dockBodyEl.setAttribute('aria-labelledby', b.id);
+      if (active && b.id) {
+        requestAnimationFrame(() => b.scrollIntoView({ block: 'nearest', inline: 'nearest' }));
+      }
     }
     updateLayoutEntry();
-    dockEmpty('Loading…');
+    dataDockController.begin(name, {
+      view,
+      generation,
+      label: name.charAt(0).toUpperCase() + name.slice(1),
+      refresh: options.refresh === true,
+    });
     setDockMeta('loading…');
     setDockMetaNote('');
     try {
       await tabLoaders[name](generation, options);
       if (!dockLoadIsCurrent(name, generation)) return;
-      setDockMeta((name === 'network' ? 'live · updated ' : 'captured ') + new Date().toLocaleTimeString());
+      if (retained && dockBodyEl.querySelector('.df-data-state-error')) {
+        dockBodyEl.replaceChildren(...retained.nodes);
+        dockBodyEl.scrollTop = retained.scrollTop;
+        dockSnapshot = retained.snapshot;
+        updateDataAttachButton();
+        updateHostButtons();
+        setDockActionStrip(retained.stripModel, generation, view);
+        setDockMetaNote(retained.note);
+        dataDockController.fail(name, 'The latest refresh failed.', {
+          generation,
+          retain: true,
+          view,
+        });
+        return;
+      }
+      dataDockController.complete(
+        name,
+        name === 'layout' && !latestLayoutReport
+          ? ''
+          : (name === 'network' ? 'live · updated ' : name === 'problems' ? 'auto-captured · updated ' : name === 'layout' ? 'last checked ' : 'captured ') +
+            new Date().toLocaleTimeString(),
+        dockMetaNoteEl?.textContent || '',
+        { generation, view });
     }
     catch (e) {
       if (!dockLoadIsCurrent(name, generation)) return;
-      dockEmpty('Failed to load.');
-      setDockMeta('');
+      if (retained) {
+        dockBodyEl.replaceChildren(...retained.nodes);
+        dockBodyEl.scrollTop = retained.scrollTop;
+        dockSnapshot = retained.snapshot;
+        updateDataAttachButton();
+        updateHostButtons();
+        setDockActionStrip(retained.stripModel, generation, view);
+        setDockMeta(retained.meta);
+        setDockMetaNote(retained.note);
+      }
+      dataDockController.fail(name, 'Try refreshing this tab.', {
+        generation,
+        retain: options.refresh === true,
+        view,
+      });
     }
   }
 
@@ -4569,6 +5319,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     const forceScan = options.forceScan === true;
     layoutFocusedElementId = elementId;
     selectedLayoutFindingId = null;
+    layoutSubview = 'findings';
     clearLayoutOverlays();
 
     if (latestLayoutReport && elementId) {
@@ -4582,8 +5333,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       }
     }
 
-    const shouldScan = forceScan || (!latestLayoutReport && !layoutError && !layoutScanBusy);
-    openDock('layout', { forceScan: shouldScan });
+    openDock('layout', { forceScan });
   }
   function parseAuthoringFlow(markdown) {
     if (typeof markdown !== 'string') return null;
@@ -4811,6 +5561,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       authoringDraft.errors = ['The local authoring service did not respond.'];
       return;
     }
+    const preserveLocalDraft = response.stale === true && response.ok !== true;
     authoringDraft.workspaceAvailable = response.supported === false ? false : true;
     authoringDraft.stale = response.stale === true;
     authoringDraft.errors = Array.isArray(response.errors)
@@ -4829,7 +5580,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         'The recorded steps changed after this plan was saved. Review and save the test to update their binding.';
     }
     authoringDraft.diff = typeof response.diff === 'string' ? response.diff : null;
-    if (response.flow) {
+    if (response.flow && !preserveLocalDraft) {
       const canonicalMarkdown = response.flow.document &&
           typeof response.flow.markdown === 'string' &&
           response.flow.markdown.includes('"schemaVersion"')
@@ -4840,7 +5591,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       authoringDraft.flow = response.flow.document || parseAuthoringFlow(authoringDraft.markdown);
       authoringDraft.flowDigest = response.flow.digest || authoringDraft.flowDigest;
     }
-    if (response.plan) {
+    if (response.plan && !preserveLocalDraft) {
       authoringDraft.planJson = response.plan.json || null;
       authoringDraft.plan = response.plan.document || (response.plan.json ? JSON.parse(response.plan.json) : null);
       authoringDraft.planDigest = response.plan.digest || null;
@@ -5089,9 +5840,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           rejected: 'repair-rejected',
           applied: 'repair-applied',
           verified: 'repair-verified',
-          reverted: 'repair-rollback',
-          'rollback-required': 'repair-rollback',
-          'rollback-failed': 'repair-rollback',
+          reverted: 'repair-reverted',
+          'rollback-required': 'repair-rollback-required',
+          'rollback-failed': 'repair-rollback-failed',
         }[state];
         return event && proposalId
           ? recordStudyEvent(event, { proposalId, provenance: state === 'proposed' ? studyProvenance() : 'human' })
@@ -6326,27 +7077,69 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       return null;
     }
 
-    function browserPickTrace() {
+    function browserPickTrace(returnFocus = null) {
       return new Promise((resolve) => {
+        const maxFlowRunBytes = 1024 * 1024;
+        const maxEvidenceBytes = 64 * 1024 * 1024;
         const input = document.createElement('input');
         input.type = 'file';
         input.accept = '.json,.mauitrace,application/json,application/vnd.maui.evidence+zip';
         input.className = 'df-sr-only';
+        input.tabIndex = -1;
+        input.setAttribute('aria-hidden', 'true');
+        let settled = false;
+        let cancelTimer = null;
+        const cleanup = () => {
+          input.remove();
+          window.removeEventListener('focus', onWindowFocus);
+          if (cancelTimer !== null) window.clearTimeout(cancelTimer);
+        };
+        const finish = (result, restoreFocus = false) => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          if (restoreFocus && returnFocus?.isConnected && typeof returnFocus.focus === 'function') {
+            window.setTimeout(() => {
+              if (returnFocus.isConnected) returnFocus.focus({ preventScroll: true });
+            }, 0);
+          }
+          resolve(result);
+        };
+        const onWindowFocus = () => {
+          cancelTimer = window.setTimeout(() => {
+            if (!input.files?.length) finish(null, true);
+          }, 500);
+        };
         input.addEventListener('change', async () => {
           const file = input.files?.[0] || null;
-          input.remove();
           if (!file) {
-            resolve(null);
+            finish(null, true);
+            return;
+          }
+          const kind = fileKind(file.name);
+          const maximumBytes = kind === 'flow-run' ? maxFlowRunBytes : maxEvidenceBytes;
+          if (!kind || file.size > maximumBytes) {
+            finish({
+              error: !kind
+                ? 'Choose a .json flow result or .mauitrace evidence bundle.'
+                : 'The selected artifact exceeds the supported size limit.',
+            }, true);
             return;
           }
           try {
-            resolve({ name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) });
+            finish({ name: file.name, bytes: new Uint8Array(await file.arrayBuffer()) });
           } catch {
-            resolve({ error: 'The selected artifact could not be read.' });
+            finish({ error: 'The selected artifact could not be read.' });
           }
         }, { once: true });
+        input.addEventListener('cancel', () => finish(null, true), { once: true });
         document.body.append(input);
-        input.click();
+        window.addEventListener('focus', onWindowFocus, { once: true });
+        try {
+          input.click();
+        } catch {
+          finish({ error: 'The result-file picker could not be opened.' }, true);
+        }
       });
     }
 
@@ -6417,9 +7210,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     }
 
     return Object.freeze({
-      state: () => ({ ...state }),
+      state: () => ({ ...state, importEnabled: previewFeatures.traceImport }),
       async pickTrace() {
         if (state.importing) return;
+        if (!previewFeatures.traceImport) {
+          workbenchAnnouncement('Opening result files is disabled in this Inspector. No file picker was opened.', true);
+          return;
+        }
+        const pickerReturnFocus = document.activeElement;
         let picked = null;
         if (hostBridge.has('pickTrace')) {
           const host = await hostBridge.request('pickTrace', {}, 60000);
@@ -6431,7 +7229,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           const bytes = decodeBase64(value.bytesBase64);
           picked = bytes ? { name: value.name, bytes } : { error: 'The host returned an invalid bounded trace artifact.' };
         } else {
-          picked = await browserPickTrace();
+          picked = await browserPickTrace(pickerReturnFocus);
         }
         if (!picked) return;
         if (picked.error) {
@@ -6545,7 +7343,9 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         notify();
       },
       setReproduction(result) {
-        state.reproduction = result || null;
+        state.reproduction = result
+          ? { ...state.reproduction, ...result }
+          : null;
         if (state.imported) state.imported.status = result?.status || state.imported.status;
         notify();
       },
@@ -6573,11 +7373,12 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       const flow = currentAuthoringFlow();
       const plan = authoringDraft.plan || null;
       const trace = traceController?.state?.();
+      const run = trace?.run || runController?.state?.().run || null;
       const report = trace?.report || trace?.run?.report || null;
       const failedStep = Array.isArray(report?.steps)
         ? report.steps.find((step) => step?.stepId === (report?.failure?.stepId || report?.divergenceStepId)) || null
         : null;
-      return { flow, plan, report, failedStep };
+      return { flow, plan, run, report, failedStep, reproduction: trace?.reproduction || null };
     }
 
     function setRepairState(message, failure = false) {
@@ -6595,20 +7396,15 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       }
     }
 
-    function baseFlow(flow) {
-      const digest = authoringDraft.flowDigest || null;
-      return {
-        path: authoringDraft.flowName || `${flow?.name || 'scenario'}.md`,
-        flowId: flow?.flowId || null,
-        revision: Number.isInteger(flow?.revision) ? flow.revision : null,
-        digest,
-      };
+    function browserApprovalAvailable() {
+      return runController?.state?.().brokerCapabilities?.browserApprovalAvailable === true;
     }
 
-    function currentTrust(report) {
-      // A live Inspector run is current local evidence. Imported/attested traces remain
-      // diagnostic-only until the separate local reproduction has completed.
-      return traceController?.state?.().mode === 'local' && report ? 'current-local-run' : 'untrusted';
+    function repairDisabled() {
+      if (previewFeatures.repair) return false;
+      state.error = 'Selector repair is disabled in this Inspector.';
+      setRepairState(state.error, true);
+      return true;
     }
 
     return Object.freeze({
@@ -6625,11 +7421,24 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
               ? true
               : null,
         canMutate: isWriter && connected && !capturedTraceMode,
+        enabled: previewFeatures.repair,
+        approvalAvailable:
+          runController?.state?.().brokerCapabilities?.browserApprovalAvailable === true,
       }),
       async classify() {
-        const { flow, plan, report, failedStep } = current();
-        if (!flow || !report?.failure) {
+        if (repairDisabled()) return;
+        const { flow, run, report, reproduction } = current();
+        if (!flow || !run?.runId || !report?.failure) {
           state.error = 'Open a failed local flow run before classifying selector repair eligibility.';
+          setRepairState(state.error, true);
+          return;
+        }
+        const stored = readWorkbenchRunStorage();
+        const runCapabilityToken = stored?.runId === run.runId
+          ? stored.capabilityToken
+          : run.capabilityToken;
+        if (!runCapabilityToken) {
+          state.error = 'The broker-owned run capability is unavailable. Run the saved test again before classifying repair.';
           setRepairState(state.error, true);
           return;
         }
@@ -6639,19 +7448,16 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         setRepairState('Classifying repair eligibility without changing the flow.');
         try {
           const response = await inspectorApi.postDetailed('/api/workbench/repair/classify', {
-            run: report,
-            plan,
-            replayEligibility: report.replayEligibility || null,
-            expectedCheckpoint: failedStep?.expectedCheckpoint || null,
-            currentCheckpoint: failedStep?.observedCheckpoint || null,
-            beforeDispatch: failedStep?.dispatch == null && report.failure?.phase === 'resolution',
-            isCurrentLocalRun: currentTrust(report) === 'current-local-run',
-            artifactTrust: currentTrust(report),
-            // A prior trusted unique resolution must be supplied by canonical run history. This
-            // browser intentionally does not invent it from the failed lookup.
-            priorActiveSelectorResolution: null,
-            targetFingerprint: failedStep?.fingerprint || null,
-            additionalFailureCodes: [report.outcome?.status, failedStep?.failureClass].filter(Boolean),
+            runId: run.runId,
+            runCapabilityToken,
+            ...(reproduction?.status?.verification?.state === 'locally-reproduced' &&
+                reproduction?.artifactId &&
+                reproduction?.capabilityToken
+              ? {
+                artifactId: reproduction.artifactId,
+                artifactCapabilityToken: reproduction.capabilityToken,
+              }
+              : {}),
           });
           if (!response.ok || !response.body?.ok) {
             state.error = response.body?.error || response.error || 'Repair eligibility classification failed.';
@@ -6674,6 +7480,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         }
       },
       async propose() {
+        if (repairDisabled()) return;
         const { flow, report, failedStep } = current();
         if (!state.eligibility?.eligible || !flow || !report || !failedStep) {
           state.error = 'Eligibility, a failed local run, and a semantic flow are required before proposing a repair.';
@@ -6683,24 +7490,13 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         state.proposing = true;
         state.error = null;
         try {
-          const candidates = Array.isArray(failedStep.selectorCandidates) ? failedStep.selectorCandidates : [];
           const response = await inspectorApi.postDetailed('/api/workbench/repair/propose', {
             classificationToken: state.classificationToken,
             input: {
-              eligibility: state.eligibility,
-              plan: current().plan,
-              flow,
-              baseFlow: baseFlow(flow),
-              sourceRunId: report.runId,
-              sourceStepId: report.failure?.stepId || failedStep.stepId,
-              sourceFailureId: report.failure?.failureId || null,
-              sourceFailureCode: report.failure?.code || report.failure?.class,
               priorFingerprint: null,
-              selectorHealthCandidates: candidates,
               // The browser never claims a fresh live uniqueness/fingerprint proof. A capable
               // lifecycle host supplies these facts; without them the deterministic core abstains.
               currentResolutions: [],
-              trust: 'current-local-run',
             },
             agentOriginated: false,
           });
@@ -6722,6 +7518,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         }
       },
       async preview() {
+        if (repairDisabled()) return;
         const id = state.proposal?.proposal?.proposalId || state.proposal?.proposalId;
         if (!id) return;
         const response = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/preview`, {});
@@ -6735,6 +7532,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         setRepairState('Selector-only diff preview loaded. Assertions, actions, values, and order are unchanged.');
       },
       async refresh() {
+        if (repairDisabled()) return;
         const id = state.proposal?.proposal?.proposalId || state.proposal?.proposalId;
         if (!id) return;
         const response = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/status`, {});
@@ -6748,6 +7546,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         }
       },
       async reject() {
+        if (repairDisabled()) return;
         const id = state.proposal?.proposal?.proposalId || state.proposal?.proposalId;
         if (!id) return;
         const response = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/reject`, {
@@ -6764,10 +7563,16 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         }
       },
       async requestApproval() {
+        if (repairDisabled()) return;
         // This records an explicit human review request only. It cannot apply; validation and the
         // single-use approval grant are still required by the broker.
         const id = state.proposal?.proposal?.proposalId || state.proposal?.proposalId;
         if (!id) return;
+        if (!browserApprovalAvailable()) {
+          state.error = 'Native approval is unavailable in this preview. Browser or chat text cannot issue the broker grant.';
+          setRepairState(state.error, true);
+          return;
+        }
         const response = await inspectorApi.postDetailed(`/api/workbench/repair/${encodeURIComponent(id)}/approve`, {
           reviewer: 'workbench-user',
           humanConfirmed: true,
@@ -6785,8 +7590,14 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         }
       },
       async validate() {
+        if (repairDisabled()) return;
         const id = state.proposal?.proposal?.proposalId || state.proposal?.proposalId;
         if (!id) return;
+        if (!browserApprovalAvailable()) {
+          state.error = 'Native approval is unavailable in this preview, so transient validation cannot obtain its single-use grant.';
+          setRepairState(state.error, true);
+          return;
+        }
         if (state.validationAvailable === false) {
           state.error = 'Transient validation is unavailable until a lifecycle-capable host is connected.';
           setRepairState(state.error, true);
@@ -6821,6 +7632,7 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         }
       },
       async apply() {
+        if (repairDisabled()) return;
         const runState = runController?.state?.().run?.state || traceController?.state?.().run?.state;
         if (['unknown-completion', 'orphaned'].includes(runState)) {
           state.error = 'Repair is unavailable until the uncertain run completion is resolved.';
@@ -6922,6 +7734,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       };
     }
 
+    function browserApprovalAvailable() {
+      return runController?.state?.().brokerCapabilities?.browserApprovalAvailable === true;
+    }
+
     function proposalId() {
       return state.proposal?.proposal?.proposalId || state.proposal?.proposalId || state.preview?.proposalId || null;
     }
@@ -7016,6 +7832,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         selectedElement: selectedElement(),
         hostCapability: capability(),
         canMutate: isWriter && connected && !capturedTraceMode,
+        approvalAvailable:
+          runController?.state?.().brokerCapabilities?.browserApprovalAvailable === true,
       }),
       setLanguage(value) {
         const language = value === 'CSharp' ? 'CSharp' : 'Xaml';
@@ -7139,6 +7957,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       async approve() {
         const id = proposalId();
         if (!id) return;
+        if (!browserApprovalAvailable()) {
+          state.error = 'Native approval is unavailable in this preview, so source approval cannot obtain a trusted native host confirmation for this exact patch digest.';
+          setSourceState(state.error, true);
+          return;
+        }
         const response = await inspectorApi.postDetailed(proposalRoute(id, 'approve'), {
           reviewer: 'workbench-user',
           humanConfirmed: true,
@@ -7281,6 +8104,11 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
         }
         const id = proposalId();
         const hostCapability = capability();
+        if (!browserApprovalAvailable()) {
+          state.error = 'Native approval is unavailable in this preview, so source rollback cannot obtain a trusted native host confirmation for the rollback digest.';
+          setSourceState(state.error, true);
+          return;
+        }
         const canApply = isCSharp() ? hostCapability.canApplyCSharpSource : hostCapability.canApplySource;
         if (!id || !canApply) {
           state.error = 'Rollback requires an explicit capable local host.';
@@ -7663,6 +8491,13 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
           notify();
           return false;
         }
+        if (testWorkbench?.featureEnabled?.('source') !== true) {
+          workbenchAnnouncement(
+            'Source preview is disabled. Kept focus on this mapped control; use the safe agent handoff for a read-only testability plan.',
+            true
+          );
+          return false;
+        }
         selectElement(candidate.id);
         testWorkbench?.open?.('source', true);
         workbenchAnnouncement(
@@ -7701,6 +8536,8 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     source: sourceProposalController,
     improve: improveController,
     study: studyController,
+    agent: inspectorAgent,
+    featureCapabilities: previewFeatures,
     getLayout: () => ({
       width: hostLayoutWidth,
       height: hostLayoutHeight,
@@ -7720,11 +8557,29 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
     },
     onClose: syncPaneChrome,
   });
+  const workbenchToggle = document.getElementById('df-toggle-workbench');
+  if (workbenchToggle)
+    workbenchToggle.hidden = !previewFeatures.workbench && !previewFeatures.agentAuthoring;
+  if (!previewFeatures.workbench) {
+    for (const element of document.querySelectorAll(
+      '#df-workbench-stage-goal, #df-workbench-stage-record, #df-workbench-stage-review, ' +
+      '#df-workbench-stage-run, #df-workbench-stage-results, #df-workbench-tab-improve'))
+      element.hidden = true;
+  }
+  const repairTab = document.getElementById('df-workbench-tab-repair');
+  if (repairTab) repairTab.hidden = !previewFeatures.repair;
+  const sourceTab = document.getElementById('df-workbench-tab-source');
+  if (sourceTab) sourceTab.hidden = !previewFeatures.source;
   agentRequestController = createAgentRequestController({
     inspectorApi,
+    hostBridge,
     openPanel: () => testWorkbench?.open?.('requests', false),
     setStatus,
     copyText,
+    agentId: inspectorAgent.id,
+    agentInstanceId: inspectorAgent.instanceId,
+    workbenchToggle,
+    baseWorkbenchAvailable: previewFeatures.workbench || previewFeatures.agentAuthoring,
     onTransition: (kind, data) => studyController?.agentApprovalTransition?.(kind, data),
   });
   agentRequestController.start();
@@ -7739,16 +8594,12 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       closeDock(true);
       return;
     }
-    openLayoutDiagnostics();
+    openLayoutDiagnostics({ forceScan: !latestLayoutReport });
   });
   if (toggleDockBtn) toggleDockBtn.addEventListener('click', () => (dockEl.classList.contains('df-hidden') ? openDock() : closeDock()));
   if (dockCloseBtn) dockCloseBtn.addEventListener('click', () => closeDock(true));
   if (dockCollapseBtn) dockCollapseBtn.addEventListener('click', toggleDockCollapsed);
-  if (dockRefreshBtn) dockRefreshBtn.addEventListener('click', () => {
-    if (dockActiveTab === 'network' && networkDetailId) loadNetworkDetail(networkDetailId);
-    else if (dockActiveTab === 'layout') runLayoutScan();
-    else loadTab(dockActiveTab);
-  });
+  if (dockRefreshBtn) dockRefreshBtn.addEventListener('click', refreshActiveDataView);
   if (attachDataBtn) attachDataBtn.addEventListener('click', attachDockDataToCopilot);
   const dockTabButtons = [...dockTabsEl.querySelectorAll('.df-dock-tab')];
   for (const b of dockTabButtons) {
@@ -7757,8 +8608,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       if (tab === 'layout') {
         layoutFocusedElementId = null;
         selectedLayoutFindingId = null;
+        layoutSubview = 'findings';
         clearLayoutOverlays();
       }
+      if (tab === 'sensors') sensorsView = 'list';
       loadTab(tab);
     });
     b.addEventListener('keydown', (e) => {
@@ -7775,8 +8628,10 @@ import { createPrototypeStudyJournal } from './inspector-study.js';
       if (tab === 'layout') {
         layoutFocusedElementId = null;
         selectedLayoutFindingId = null;
+        layoutSubview = 'findings';
         clearLayoutOverlays();
       }
+      if (tab === 'sensors') sensorsView = 'list';
       loadTab(tab);
     });
   }

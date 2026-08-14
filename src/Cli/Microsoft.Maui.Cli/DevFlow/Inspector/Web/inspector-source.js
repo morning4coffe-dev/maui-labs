@@ -12,6 +12,7 @@ export function renderSourceProposalPanel(helpers) {
   const host = state.hostCapability || {};
   const hostCanApply = language === 'CSharp' ? host.canApplyCSharpSource : host.canApplySource;
   const canMutate = state.canMutate === true;
+  const approvalAvailable = state.approvalAvailable === true;
 
   if (!selected?.id)
     helpers.intro(root, 'Select a source-mapped control to add a durable AutomationId.');
@@ -163,17 +164,21 @@ export function renderSourceProposalPanel(helpers) {
       const preview = helpers.action(proposalCard, 'Preview exact change', () => source?.preview?.());
       preview.classList.add('df-authoring-primary');
     } else if (lifecycle === 'previewed') {
-      const approve = helpers.action(proposalCard, 'Approve source change', () => source?.approve?.());
-      approve.classList.add('df-authoring-primary');
-      approve.disabled = !canMutate;
+      if (approvalAvailable) {
+        const approve = helpers.action(proposalCard, 'Approve source change', () => source?.approve?.());
+        approve.classList.add('df-authoring-primary');
+        approve.disabled = !canMutate;
+      } else {
+        const unavailable = document.createElement('p');
+        unavailable.className = 'df-workbench-safety';
+        unavailable.textContent = 'Native approval is unavailable in this preview. A trusted native host confirmation bound to this exact patch digest cannot be made here; browser or chat approval cannot issue the grant.';
+        proposalCard.append(unavailable);
+      }
     } else if (lifecycle === 'approved' && hostCanApply) {
-      const apply = helpers.action(
-        proposalCard,
-        language === 'CSharp' ? 'Apply in IDE' : 'Apply approved XAML change',
-        () => source?.apply?.()
-      );
-      apply.classList.add('df-authoring-primary');
-      apply.disabled = !snapshot?.grant || !canMutate;
+      const unavailable = document.createElement('p');
+      unavailable.className = 'df-workbench-safety';
+      unavailable.textContent = 'No trusted native-host approval client is available yet, so this exact patch cannot be applied here. The browser does not receive the single-use grant.';
+      proposalCard.append(unavailable);
     } else if (lifecycle === 'approved') {
       const download = helpers.action(proposalCard, 'Download approved patch', () => source?.downloadPatch?.());
       download.classList.add('df-authoring-primary');
@@ -187,9 +192,16 @@ export function renderSourceProposalPanel(helpers) {
     }
     if (['proposed', 'previewed'].includes(lifecycle)) helpers.action(proposalCard, 'Reject', () => source?.reject?.());
     if (lifecycle === 'rollback-required') {
-      const rollback = helpers.action(proposalCard, 'Rollback source change', () => source?.rollback?.());
-      rollback.classList.add('df-authoring-primary');
-      rollback.disabled = !source || hostCanApply !== true || !canMutate;
+      if (approvalAvailable) {
+        const rollback = helpers.action(proposalCard, 'Rollback source change', () => source?.rollback?.());
+        rollback.classList.add('df-authoring-primary');
+        rollback.disabled = !source || hostCanApply !== true || !canMutate;
+      } else {
+        const unavailable = document.createElement('p');
+        unavailable.className = 'df-workbench-safety';
+        unavailable.textContent = 'Native approval is unavailable in this preview, so a new trusted native host confirmation cannot be made for the rollback digest.';
+        proposalCard.append(unavailable);
+      }
     }
     root.append(proposalCard);
 

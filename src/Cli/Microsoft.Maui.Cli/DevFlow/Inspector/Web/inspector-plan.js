@@ -550,8 +550,8 @@ export function renderPlanPanel(helpers) {
   openSaved.classList.add('df-workbench-action-secondary');
   goalStart.append(quickActions);
   helpers.agentAction?.(goalStart, {
-    title: 'Create this test with your agent',
-    description: 'Ask your host agent to prepare the complete draft. A standalone browser copies the same bounded request.',
+    title: 'Prepare a draft with your agent',
+    description: 'Ask your host agent to prepare a bounded draft. This preview can review or reject agent requests, but trusted approval is not available yet.',
     prompt: () => agentPreparationPrompt(plan.goal),
   });
   if (!draft.savedTestPickerOpen) root.append(goalStart);

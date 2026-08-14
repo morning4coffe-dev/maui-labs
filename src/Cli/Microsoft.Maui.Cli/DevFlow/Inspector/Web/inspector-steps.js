@@ -12,7 +12,10 @@ let pendingReviewFocusIndex = null;
 const selectorChecks = new Map();
 
 function stepKey(step, index) {
-  return String(step?.stepId || step?.seq || index + 1);
+  if (step?.stepId) return `stepId:${step.stepId}`;
+  if (step?.id) return `id:${step.id}`;
+  const seq = Number(step?.seq);
+  return Number.isFinite(seq) ? `seq:${seq}:${index}` : `legacy:${index}`;
 }
 
 function selectorCheckKey(flow, step, index) {
@@ -563,6 +566,7 @@ function renderAssertionComposer(parent, flow, draft, authoring, options = {}) {
   const kind = el('select', { className: 'df-authoring-select' });
   for (const [value, text] of [
     ['exists', 'The step target exists'],
+    ['notExists', 'The target no longer exists'],
     ['propEquals', 'A target property equals a value'],
     ['routeIs', 'The current route equals a value'],
     ['pageChanged', 'The page changed (observation only)'],
@@ -573,6 +577,9 @@ function renderAssertionComposer(parent, flow, draft, authoring, options = {}) {
       target.append(el('option', { value: String(index), text: `${step.seq || index + 1}. ${step.label || step.action}` })));
   }
   const property = input('Text', () => {}, { placeholder: 'Text' });
+  const selectorAutomationId = input(selectedSelector?.automationId || '', () => {}, {
+    placeholder: 'AutomationId of the target that should disappear',
+  });
   // The selected element supplies only a durable selector and property default. Never copy its
   // current value into an authored assertion: an apparently ordinary Entry can still hold a secret.
   const expected = input('', () => {}, { placeholder: 'Expected value (never prefilled)' });
@@ -584,9 +591,10 @@ function renderAssertionComposer(parent, flow, draft, authoring, options = {}) {
       : 'Select an element with an AutomationId before adding a target result.',
   });
   const updateKind = () => {
-    const elementAssertion = kind.value === 'exists' || kind.value === 'propEquals';
+    const elementAssertion = kind.value === 'exists' || kind.value === 'notExists' || kind.value === 'propEquals';
     property.closest('label')?.toggleAttribute('hidden', kind.value !== 'propEquals');
     expected.closest('label')?.toggleAttribute('hidden', kind.value !== 'propEquals' && kind.value !== 'routeIs');
+    selectorAutomationId.closest('label')?.toggleAttribute('hidden', kind.value !== 'notExists');
     selectorHint.hidden = !elementAssertion;
   };
   kind.addEventListener('change', updateKind);
@@ -594,6 +602,7 @@ function renderAssertionComposer(parent, flow, draft, authoring, options = {}) {
   if (target) host.append(field('After step', target));
   host.append(
     selectorHint,
+    field('Target AutomationId', selectorAutomationId),
     field('Property', property),
     field('Expected value', expected),
     field('Observation note', note),
@@ -616,7 +625,7 @@ function renderAssertionComposer(parent, flow, draft, authoring, options = {}) {
   host.append(button('Add expected result', async () => {
     const assertion = buildAssertion();
     if (!assertion) return;
-    if (assertion.kind !== 'routeIs' && assertion.kind !== 'pageChanged') {
+    if (assertion.kind === 'exists' || assertion.kind === 'propEquals') {
       const checked = await authoring.verifySelector?.(assertion.selector);
       if (!checked || checked.ok !== true || checked.matchCount !== 1) {
         status.textContent = (checked && checked.error) || 'The selected selector is not uniquely resolvable.';
@@ -624,6 +633,8 @@ function renderAssertionComposer(parent, flow, draft, authoring, options = {}) {
       }
       assertion.selector.matchCount = checked.matchCount;
       assertion.selector.quality = checked.quality || (assertion.selector.automationId ? 'durable' : 'fragile');
+    } else if (assertion.kind === 'notExists') {
+      assertion.selector.quality = 'durable';
     }
     const next = clone(flow);
     const index = fixedStepIndex == null
@@ -644,6 +655,13 @@ function renderAssertionComposer(parent, flow, draft, authoring, options = {}) {
         return null;
       }
       result.selector = selectedSelector;
+    } else if (kind.value === 'notExists') {
+      const automationId = selectorAutomationId.value.trim();
+      if (!selectedSelector && !automationId) {
+        status.textContent = 'Provide the AutomationId of the target that should no longer exist.';
+        return null;
+      }
+      result.selector = selectedSelector || { automationId };
     } else if (kind.value === 'propEquals') {
       if (!selectedSelector) {
         status.textContent = 'Select an element with a durable selector before adding this result.';
@@ -672,6 +690,7 @@ function renderAssertionComposer(parent, flow, draft, authoring, options = {}) {
 
 function expectedResultLabel(assertion) {
   if (assertion?.kind === 'exists') return 'Target exists';
+  if (assertion?.kind === 'notExists') return 'Target no longer exists';
   if (assertion?.kind === 'propEquals')
     return `${assertion.name || 'Property'} equals ${assertion.expected ?? '(empty)'}`;
   if (assertion?.kind === 'routeIs') return `Route equals ${assertion.expected || '(empty)'}`;

@@ -25,15 +25,25 @@ function readableAction(value) {
   }[value] || readable(value);
 }
 
-export function agentRequestStarterPrompt(appName = null, platform = null) {
+export function agentRequestStarterPrompt(
+  appName = null,
+  platform = null,
+  agentId = null,
+  agentInstanceId = null
+) {
   const target = [appName, platform].filter(Boolean).join(' on ');
   return [
     'Use only the restricted DevFlow test-agent tools.',
+    agentId && agentInstanceId
+      ? `Target exactly agentId "${String(agentId).slice(0, 256)}" and agentInstanceId "${String(agentInstanceId).slice(0, 256)}".`
+      : 'Resolve an exact agentId and agentInstanceId before continuing.',
     target
       ? `Discover and explicitly target ${target}.`
       : 'Discover and explicitly target the connected app.',
     'Help me define the Goal if needed, then prepare the complete test draft with steps and expected results.',
     'Request one commit review, then wait. Do not run until I approve a separate run request.',
+    'Chat approval or affirmative text expresses intent only; it does not authorize commit or run.',
+    'A current Test Workbench broker grant is required separately for each commit or run.',
     'Do not apply repairs or source changes automatically.',
   ].join(' ');
 }
@@ -98,16 +108,6 @@ function requestTitle(kind) {
   }[kind] || `Review ${readable(kind)}`;
 }
 
-function approvalLabel(kind) {
-  return {
-    commit: 'Save test',
-    run: 'Allow one run',
-    'draft-change': 'Allow update',
-    assertion: 'Add expected results',
-    exploration: 'Allow exploration',
-  }[kind] || 'Approve request';
-}
-
 function formatExpiry(value) {
   const time = Date.parse(value || '');
   if (!Number.isFinite(time)) return 'unknown';
@@ -124,61 +124,32 @@ function appendText(doc, parent, tag, text, className = null) {
   return element;
 }
 
-function createDraft(scope) {
-  const normalized = normalizeAgentRequestScope(scope);
-  return {
-    allowedActions: new Set(normalized.allowedActions),
-    allowedSelectors: new Set(normalized.allowedSelectors),
-    allowedRoutes: new Set(normalized.allowedRoutes),
-    allowedSideEffectClasses: new Set(normalized.allowedSideEffectClasses),
-    maxActionCount: normalized.maxActionCount,
-    maxValueBytes: normalized.maxValueBytes,
-  };
-}
-
-function scopeFromDraft(draft) {
-  return {
-    allowedActions: [...draft.allowedActions],
-    allowedSelectors: [...draft.allowedSelectors],
-    allowedRoutes: [...draft.allowedRoutes],
-    allowedSideEffectClasses: [...draft.allowedSideEffectClasses],
-    maxActionCount: draft.maxActionCount,
-    maxValueBytes: draft.maxValueBytes,
-  };
-}
-
-function scopeGroup(doc, parent, label, values, selected, disabled, onChange) {
+function scopeGroup(doc, parent, label, values) {
   if (values.length === 0) return;
-  const fieldset = doc.createElement('fieldset');
-  fieldset.className = 'df-agent-request-scope-group';
-  const legend = doc.createElement('legend');
-  legend.textContent = label;
-  fieldset.append(legend);
+  const group = doc.createElement('div');
+  group.className = 'df-agent-request-scope-group';
+  appendText(doc, group, 'strong', label);
+  const list = doc.createElement('ul');
+  list.className = 'df-workbench-list';
   for (const value of values) {
-    const row = doc.createElement('label');
-    row.className = 'df-agent-request-choice';
-    const checkbox = doc.createElement('input');
-    checkbox.type = 'checkbox';
-    checkbox.checked = selected.has(value);
-    checkbox.disabled = disabled;
-    checkbox.addEventListener('change', () => onChange(value, checkbox.checked));
-    const text = doc.createElement('span');
-    text.textContent = value;
-    row.append(checkbox, text);
-    fieldset.append(row);
+    appendText(doc, list, 'li', value);
   }
-  parent.append(fieldset);
+  group.append(list);
+  parent.append(group);
 }
 
 export function createAgentRequestController(options = {}) {
   const doc = options.document || document;
   const win = options.window || window;
   const api = options.inspectorApi;
+  const hostBridge = options.hostBridge || null;
   const panel = options.panel || doc.getElementById('df-agent-requests');
   const body = options.body || doc.getElementById('df-agent-requests-body');
   const tab = options.tab || doc.getElementById('df-workbench-tab-requests');
   const toolbarBadge = options.toolbarBadge || doc.getElementById('df-test-agent-request-badge');
   const tabBadge = options.tabBadge || doc.getElementById('df-agent-requests-badge');
+  const workbenchToggle = options.workbenchToggle || doc.getElementById('df-toggle-workbench');
+  const baseWorkbenchAvailable = options.baseWorkbenchAvailable === true;
   const openPanel = typeof options.openPanel === 'function' ? options.openPanel : () => {};
   const setStatus = typeof options.setStatus === 'function' ? options.setStatus : () => {};
   const copyText = typeof options.copyText === 'function'
@@ -193,6 +164,8 @@ export function createAgentRequestController(options = {}) {
       }
     };
   const onTransition = typeof options.onTransition === 'function' ? options.onTransition : () => {};
+  const agentId = options.agentId || null;
+  const agentInstanceId = options.agentInstanceId || null;
   if (!api || !panel || !body) {
     return Object.freeze({
       start: () => {},
@@ -202,17 +175,21 @@ export function createAgentRequestController(options = {}) {
     });
   }
 
-  const drafts = new Map();
-  const confirmations = new Set();
   const busy = new Set();
   const expandedRequests = new Set();
   const knownStates = new Map();
   let requests = [];
   let appName = null;
   let platform = null;
+  let brokerApprovalAvailable = false;
   let timer = null;
   let stopped = false;
   let responseFingerprint = null;
+  let needsRender = false;
+
+  function nativeApprovalAvailable() {
+    return brokerApprovalAvailable && hostBridge?.has?.('nativeApproval') === true;
+  }
 
   function updateBadge(element, count) {
     if (!element) return;
@@ -230,6 +207,8 @@ export function createAgentRequestController(options = {}) {
   function syncChrome() {
     const pending = requests.filter((request) => request.state === 'pending').length;
     const available = requests.length > 0;
+    if (workbenchToggle)
+      workbenchToggle.hidden = !baseWorkbenchAvailable && !available;
     updateBadge(toolbarBadge, pending);
     updateBadge(tabBadge, pending);
     if (tab) {
@@ -249,15 +228,8 @@ export function createAgentRequestController(options = {}) {
     }
   }
 
-  function ensureDraft(request) {
-    const id = request.approvalRequestId;
-    if (!drafts.has(id)) drafts.set(id, createDraft(request.approvedScope || request.requestedScope));
-    return drafts.get(id);
-  }
-
   function renderScope(request, pending, expandByDefault = false) {
     const requested = normalizeAgentRequestScope(request.requestedScope);
-    const draft = ensureDraft(request);
     const details = doc.createElement('details');
     details.className = 'df-agent-request-details';
     details.open = expandedRequests.has(request.approvalRequestId) || expandByDefault;
@@ -273,57 +245,137 @@ export function createAgentRequestController(options = {}) {
       details,
       'p',
       pending
-        ? 'Only the buttons in this review grant permission. You may remove permissions or reduce limits.'
+        ? nativeApprovalAvailable()
+          ? 'Narrow this exact scope if needed, then review it in the trusted native host.'
+          : 'This surface is read-only. A trusted native host with native approval is required to approve, narrow, or reject.'
         : 'This is the exact scope that was reviewed.',
       'df-agent-request-help'
     );
 
     const grid = doc.createElement('div');
     grid.className = 'df-agent-request-scope';
-    scopeGroup(doc, grid, 'Actions', requested.allowedActions, draft.allowedActions, !pending, (value, checked) => {
-      checked ? draft.allowedActions.add(value) : draft.allowedActions.delete(value);
-      render();
-    });
-    scopeGroup(doc, grid, 'Controls', requested.allowedSelectors, draft.allowedSelectors, !pending, (value, checked) => {
-      checked ? draft.allowedSelectors.add(value) : draft.allowedSelectors.delete(value);
-      render();
-    });
-    scopeGroup(doc, grid, 'Routes', requested.allowedRoutes, draft.allowedRoutes, !pending, (value, checked) => {
-      checked ? draft.allowedRoutes.add(value) : draft.allowedRoutes.delete(value);
-      render();
-    });
-    scopeGroup(doc, grid, 'App changes', requested.allowedSideEffectClasses, draft.allowedSideEffectClasses, !pending, (value, checked) => {
-      checked ? draft.allowedSideEffectClasses.add(value) : draft.allowedSideEffectClasses.delete(value);
-      render();
-    });
+    scopeGroup(doc, grid, 'Actions', requested.allowedActions);
+    scopeGroup(doc, grid, 'Controls', requested.allowedSelectors);
+    scopeGroup(doc, grid, 'Routes', requested.allowedRoutes);
+    scopeGroup(doc, grid, 'App changes', requested.allowedSideEffectClasses);
 
     const limits = doc.createElement('div');
     limits.className = 'df-agent-request-limits';
-    for (const [label, key, maximum] of [
-      ['Maximum actions', 'maxActionCount', requested.maxActionCount],
-      ['Maximum value bytes', 'maxValueBytes', requested.maxValueBytes],
+    for (const [label, value] of [
+      ['Maximum actions', requested.maxActionCount],
+      ['Maximum value bytes', requested.maxValueBytes],
     ]) {
-      const row = doc.createElement('label');
+      const row = doc.createElement('p');
       row.className = 'df-agent-request-limit';
-      const name = doc.createElement('span');
-      name.textContent = label;
-      const input = doc.createElement('input');
-      input.type = 'number';
-      input.min = key === 'maxActionCount' ? '1' : '0';
-      input.max = String(maximum);
-      input.value = String(draft[key]);
-      input.disabled = !pending;
-      input.addEventListener('change', () => {
-        const floor = key === 'maxActionCount' ? 1 : 0;
-        draft[key] = Math.max(floor, Math.min(maximum, Number.parseInt(input.value, 10) || floor));
-        render();
-      });
-      row.append(name, input);
+      const name = doc.createElement('strong');
+      name.textContent = `${label}: `;
+      row.append(name);
+      appendText(doc, row, 'span', String(value));
       limits.append(row);
     }
     grid.append(limits);
     details.append(grid);
     return details;
+  }
+
+  function renderNativeApprovalControls(request, review) {
+    const requested = normalizeAgentRequestScope(request.requestedScope);
+    const controls = [];
+    const fieldsets = [
+      ['Actions', 'allowedActions', requested.allowedActions],
+      ['Controls', 'allowedSelectors', requested.allowedSelectors],
+      ['Routes', 'allowedRoutes', requested.allowedRoutes],
+      ['App changes', 'allowedSideEffectClasses', requested.allowedSideEffectClasses],
+    ];
+    const narrowing = doc.createElement('div');
+    narrowing.className = 'df-agent-request-narrowing';
+    appendText(doc, narrowing, 'p',
+      'Select a subset only. Limits can only be reduced. The native host will show this exact scope before approval.',
+      'df-agent-request-help');
+    for (const [label, key, values] of fieldsets) {
+      if (values.length === 0) continue;
+      const fieldset = doc.createElement('fieldset');
+      fieldset.className = 'df-agent-request-scope-group';
+      appendText(doc, fieldset, 'legend', label);
+      for (const value of values) {
+        const row = doc.createElement('label');
+        row.className = 'df-agent-request-choice';
+        const checkbox = doc.createElement('input');
+        checkbox.type = 'checkbox';
+        checkbox.checked = true;
+        checkbox.dataset.scopeKey = key;
+        checkbox.value = value;
+        row.append(checkbox);
+        appendText(doc, row, 'span', value);
+        fieldset.append(row);
+        controls.push(checkbox);
+      }
+      narrowing.append(fieldset);
+    }
+
+    const limits = doc.createElement('div');
+    limits.className = 'df-agent-request-limits';
+    function limitInput(label, key, min, max) {
+      const row = doc.createElement('label');
+      row.className = 'df-agent-request-limit';
+      appendText(doc, row, 'span', label);
+      const input = doc.createElement('input');
+      input.type = 'number';
+      input.min = String(min);
+      input.max = String(max);
+      input.value = String(max);
+      input.dataset.scopeLimit = key;
+      row.append(input);
+      limits.append(row);
+      return input;
+    }
+    const actionCount = limitInput('Maximum actions', 'maxActionCount', 1, requested.maxActionCount);
+    const valueBytes = limitInput('Maximum value bytes', 'maxValueBytes', 0, requested.maxValueBytes);
+    narrowing.append(limits);
+
+    const confirmed = doc.createElement('label');
+    confirmed.className = 'df-agent-request-human-confirm';
+    const confirmation = doc.createElement('input');
+    confirmation.type = 'checkbox';
+    confirmation.dataset.humanReviewed = 'true';
+    confirmed.append(confirmation);
+    appendText(doc, confirmed, 'span', 'I reviewed this exact scope and want the trusted native host to ask for approval.');
+    narrowing.append(confirmed);
+
+    const actions = doc.createElement('div');
+    actions.className = 'df-agent-request-actions';
+    const approve = doc.createElement('button');
+    approve.type = 'button';
+    approve.className = 'df-workbench-action df-workbench-action-primary';
+    approve.textContent = busy.has(request.approvalRequestId) ? 'Working...' : 'Approve in native host';
+    const reject = doc.createElement('button');
+    reject.type = 'button';
+    reject.className = 'df-workbench-action';
+    reject.textContent = 'Reject';
+
+    const approvedScope = () => {
+      const selection = {};
+      for (const key of Object.values(LIST_KEYS))
+        selection[key] = controls
+          .filter((checkbox) => checkbox.dataset.scopeKey === key && checkbox.checked)
+          .map((checkbox) => checkbox.value);
+      selection.maxActionCount = Number(actionCount.value);
+      selection.maxValueBytes = Number(valueBytes.value);
+      return normalizeAgentRequestScope(selection);
+    };
+    const sync = () => {
+      const valid = isNarrowedAgentRequestScope(requested, approvedScope()) && confirmation.checked;
+      approve.disabled = busy.has(request.approvalRequestId) || !valid;
+      reject.disabled = busy.has(request.approvalRequestId);
+    };
+    for (const control of [...controls, actionCount, valueBytes, confirmation])
+      control.addEventListener('change', sync);
+    approve.addEventListener('click', () => approveRequest(request, approvedScope(), confirmation.checked));
+    reject.addEventListener('click', () => rejectRequest(request));
+    sync();
+    actions.append(approve, reject);
+    narrowing.append(actions);
+    review.append(narrowing);
   }
 
   function renderRequest(request, expandByDefault = false) {
@@ -349,46 +401,20 @@ export function createAgentRequestController(options = {}) {
       const review = renderScope(request, true, expandByDefault);
       card.append(review);
       const id = request.approvalRequestId;
-      const draft = ensureDraft(request);
-      const approvedScope = scopeFromDraft(draft);
-      const validScope = isNarrowedAgentRequestScope(request.requestedScope, approvedScope);
-      const confirmation = doc.createElement('label');
-      confirmation.className = 'df-agent-request-confirm';
-      const checkbox = doc.createElement('input');
-      checkbox.type = 'checkbox';
-      checkbox.checked = confirmations.has(id);
-      checkbox.addEventListener('change', () => {
-        checkbox.checked ? confirmations.add(id) : confirmations.delete(id);
-        render();
-      });
-      const confirmationText = doc.createElement('span');
-      confirmationText.textContent = `I reviewed what my agent wants to do in ${appName || 'this app'}${platform ? ` on ${platform}` : ''}.`;
-      confirmation.append(checkbox, confirmationText);
-      review.append(confirmation);
-
-      if (!validScope) {
-        appendText(doc, review, 'p', 'Keep at least one requested action. Limits may only be reduced.', 'df-agent-request-error');
+      if (nativeApprovalAvailable()) {
+        renderNativeApprovalControls(request, review);
+      } else {
+        appendText(
+          doc,
+          review,
+          'p',
+          'Native approval is unavailable in this surface. Browser or chat text cannot approve, narrow, reject, or issue a grant.',
+          'df-workbench-safety'
+        );
       }
-
-      const actions = doc.createElement('div');
-      actions.className = 'df-agent-request-actions';
-      const approve = doc.createElement('button');
-      approve.type = 'button';
-      approve.className = 'df-workbench-action df-authoring-primary df-agent-request-approve';
-      approve.textContent = busy.has(id) ? 'Approving...' : approvalLabel(request.kind);
-      approve.disabled = busy.has(id) || !confirmations.has(id) || !validScope;
-      approve.addEventListener('click', () => approveRequest(request, approvedScope));
-      const reject = doc.createElement('button');
-      reject.type = 'button';
-      reject.className = 'df-workbench-action';
-      reject.textContent = busy.has(id) ? 'Working...' : 'Reject';
-      reject.disabled = busy.has(id);
-      reject.addEventListener('click', () => rejectRequest(request));
-      actions.append(approve, reject);
-      review.append(actions);
     } else {
       const message = {
-        approved: 'Approved. Your agent can continue; you do not need to copy anything into chat.',
+        approved: 'This request is no longer pending. Browser preview cannot establish usable authority or agent continuation.',
         consumed: 'Completed. This approval was used and cannot be used again.',
         rejected: 'Rejected. Your agent cannot continue with this request.',
         expired: 'Expired. Ask your agent to submit a fresh request.',
@@ -434,7 +460,12 @@ export function createAgentRequestController(options = {}) {
       copy.className = 'df-workbench-action';
       copy.textContent = 'Copy prompt for your agent';
       copy.addEventListener('click', async () => {
-        const copied = await copyText(agentRequestStarterPrompt(appName, platform));
+        const copied = await copyText(agentRequestStarterPrompt(
+          appName,
+          platform,
+          agentId,
+          agentInstanceId
+        ));
         setStatus(copied
           ? 'Copied instructions. Paste them into your coding agent chat.'
           : 'Could not copy the agent prompt.');
@@ -450,7 +481,9 @@ export function createAgentRequestController(options = {}) {
         doc,
         body,
         'p',
-        `Your agent is waiting for ${pending.length === 1 ? 'a decision' : `${pending.length} decisions`}. Review what it wants to do. Nothing changes until you approve.`,
+        `${pending.length === 1 ? 'One agent request is' : `${pending.length} agent requests are`} pending. ${nativeApprovalAvailable()
+          ? 'Review the exact scope, then use the trusted native host confirmation.'
+          : 'This surface is read-only; a trusted native host with native approval is required.'}`,
         'df-agent-request-intro'
       );
       pending.forEach((request, index) => body.append(renderRequest(request, index === 0)));
@@ -467,25 +500,6 @@ export function createAgentRequestController(options = {}) {
     syncChrome();
   }
 
-  async function approveRequest(request, approvedScope) {
-    const id = request.approvalRequestId;
-    busy.add(id);
-    render();
-    const response = await api.postDetailed(`/api/workbench/agent-requests/${encodeURIComponent(id)}/approve`, {
-      humanConfirmed: true,
-      approvedScope,
-      grantDurationSeconds: agentRequestGrantDurationSeconds(request),
-    });
-    busy.delete(id);
-    if (!response.ok || !response.body?.ok) {
-      setStatus(response.body?.error?.message || response.body?.error || response.error || 'Agent request approval failed.');
-    } else {
-      setStatus(response.body.message || 'Agent request approved.');
-      confirmations.delete(id);
-    }
-    await refresh(true);
-  }
-
   async function rejectRequest(request) {
     const id = request.approvalRequestId;
     busy.add(id);
@@ -499,28 +513,65 @@ export function createAgentRequestController(options = {}) {
       setStatus(response.body?.error?.message || response.body?.error || response.error || 'Agent request rejection failed.');
     } else {
       setStatus(response.body.message || 'Agent request rejected.');
-      confirmations.delete(id);
+    }
+    await refresh(true);
+  }
+
+  async function approveRequest(request, approvedScope, humanReviewed) {
+    if (!humanReviewed || !isNarrowedAgentRequestScope(request.requestedScope, approvedScope)) {
+      setStatus('Review a non-empty subset of the requested actions and explicit bounded limits before approval.');
+      return;
+    }
+    if (!nativeApprovalAvailable()) {
+      setStatus('Native approval is unavailable in this surface.');
+      return;
+    }
+    const approvalRequestId = typeof request.approvalRequestId === 'string'
+      ? request.approvalRequestId.slice(0, 256)
+      : '';
+    if (!approvalRequestId || approvalRequestId !== request.approvalRequestId) {
+      setStatus('The approval request identifier is invalid. Refresh and review a new request.');
+      return;
+    }
+    const id = approvalRequestId;
+    busy.add(id);
+    render();
+    const result = await hostBridge.request('nativeApproval', {
+      approvalRequestId,
+      kind: typeof request.kind === 'string' ? request.kind.slice(0, 64) : '',
+      intent: typeof request.intent === 'string' ? request.intent.slice(0, 1024) : '',
+      approvedScope,
+      grantDurationSeconds: agentRequestGrantDurationSeconds(request),
+      appName: typeof appName === 'string' ? appName.slice(0, 256) : '',
+      platform: typeof platform === 'string' ? platform.slice(0, 128) : '',
+      scopeSummary: agentRequestSummary({ requestedScope: approvedScope }).slice(0, 1024),
+    });
+    busy.delete(id);
+    if (!result?.ok) {
+      setStatus(result?.message || result?.error || 'Native approval was cancelled or could not be completed.');
+    } else {
+      setStatus(result.message || 'Approved by the trusted native host.');
     }
     await refresh(true);
   }
 
   async function refresh(force = false) {
     if (stopped) return;
-    if (!force && panel.contains?.(doc.activeElement)) return;
     const response = await api.getDetailed('/api/workbench/agent-requests');
     if (!response.ok || !response.body?.ok) {
-      if (requests.length === 0) render();
+      if (requests.length === 0 && (!panel.contains?.(doc.activeElement) || force)) render();
       return;
     }
     const nextRequests = Array.isArray(response.body.requests) ? response.body.requests : [];
     const nextAppName = response.body.appName || null;
     const nextPlatform = response.body.platform || null;
+    const nextBrokerApprovalAvailable = response.body.approvalAvailable === true;
     const nextFingerprint = JSON.stringify({
       appName: nextAppName,
       platform: nextPlatform,
       requests: nextRequests,
     });
-    if (!force && nextFingerprint === responseFingerprint) return;
+    if (!force && nextFingerprint === responseFingerprint && !needsRender) return;
     for (const request of nextRequests) {
       const id = request.approvalRequestId;
       const state = request.state;
@@ -542,11 +593,24 @@ export function createAgentRequestController(options = {}) {
     requests = nextRequests;
     appName = nextAppName;
     platform = nextPlatform;
+    brokerApprovalAvailable = nextBrokerApprovalAvailable;
+    const panelFocused = panel.contains?.(doc.activeElement);
+    if (!force && panelFocused) {
+      // Polling must keep the waiting count and badges current, but replacing this
+      // panel while someone is reviewing it discards their focus and disclosure state.
+      needsRender = true;
+      syncChrome();
+      return;
+    }
     render();
+    needsRender = false;
   }
 
   function start() {
     if (timer || stopped) return;
+    hostBridge?.onCapabilitiesChanged?.(() => {
+      if (!stopped) render();
+    });
     refresh();
     timer = win.setInterval(refresh, 2000);
   }

@@ -143,7 +143,7 @@
             <button id="df-workbench-stage-record" class="df-panel-tab df-workbench-tab df-workbench-stage-tab" type="button" role="tab" data-workbench-tab="steps" data-workbench-stage="record" aria-keyshortcuts="Control+Alt+2 Meta+Alt+2" aria-selected="false" aria-controls="df-workbench-panel-steps" aria-disabled="true" title="Add a Goal to unlock Steps." tabindex="-1" disabled><span class="df-stage-number">2</span><span class="df-stage-label">Steps</span><span class="df-stage-state" aria-hidden="true"></span></button>
             <button id="df-workbench-stage-review" class="df-panel-tab df-workbench-tab df-workbench-stage-tab" type="button" role="tab" data-workbench-tab="review" data-workbench-stage="review" aria-keyshortcuts="Control+Alt+3 Meta+Alt+3" aria-selected="false" aria-controls="df-workbench-panel-review" aria-disabled="true" title="Record at least one step to unlock Review." tabindex="-1" disabled><span class="df-stage-number">3</span><span class="df-stage-label">Review</span><span class="df-stage-state" aria-hidden="true"></span></button>
             <button id="df-workbench-stage-run" class="df-panel-tab df-workbench-tab df-workbench-stage-tab" type="button" role="tab" data-workbench-tab="run" data-workbench-stage="run" aria-keyshortcuts="Control+Alt+4 Meta+Alt+4" aria-selected="false" aria-controls="df-workbench-panel-run" aria-disabled="true" title="Save a reviewed test with an expected result to unlock Run." tabindex="-1" disabled><span class="df-stage-number">4</span><span class="df-stage-label">Run</span><span class="df-stage-state" aria-hidden="true"></span></button>
-            <button id="df-workbench-stage-results" class="df-panel-tab df-workbench-tab df-workbench-stage-tab" type="button" role="tab" data-workbench-tab="trace" data-workbench-stage="results" aria-keyshortcuts="Control+Alt+5 Meta+Alt+5" aria-selected="false" aria-controls="df-workbench-panel-trace" aria-disabled="true" title="Run a test or use Import result to unlock Results." tabindex="-1" disabled><span class="df-stage-number">5</span><span class="df-stage-label">Results</span><span class="df-stage-state" aria-hidden="true"></span></button>
+            <button id="df-workbench-stage-results" class="df-panel-tab df-workbench-tab df-workbench-stage-tab" type="button" role="tab" data-workbench-tab="trace" data-workbench-stage="results" aria-keyshortcuts="Control+Alt+5 Meta+Alt+5" aria-selected="false" aria-controls="df-workbench-panel-trace" aria-disabled="true" title="Review a local result or import diagnostic output from another run." tabindex="-1" disabled><span class="df-stage-number">5</span><span class="df-stage-label">Results &amp; import</span><span class="df-stage-state" aria-hidden="true"></span></button>
           </div>
         </nav>
         <div id="df-workbench-advanced-tools" class="df-workbench-tools">
@@ -165,7 +165,7 @@
         <section id="df-agent-requests" class="df-workbench-view df-agent-requests" role="tabpanel" aria-labelledby="df-workbench-tab-requests" tabindex="0" hidden>
           <div class="df-agent-requests-heading">
             <h3>Agent requests</h3>
-            <p>Approve or reject actions requested by a test agent.</p>
+            <p>Review agent requests. They remain read-only unless both this broker and embedding host advertise trusted native approval.</p>
           </div>
           <div id="df-agent-requests-body"></div>
         </section>
@@ -185,17 +185,17 @@
     <div id="df-dock" class="df-hidden" aria-label="App data">
       <div id="df-dock-tabs">
         <div class="df-dock-tab-list" role="tablist" aria-label="App data">
-          <button id="df-tab-problems" class="df-dock-tab df-active" data-tab="problems" role="tab" aria-selected="true" aria-controls="df-dock-body" tabindex="0">Problems</button>
-          <button id="df-tab-layout" class="df-dock-tab" data-tab="layout" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Layout</button>
-          <button id="df-tab-performance" class="df-dock-tab" data-tab="performance" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Performance</button>
-          <button id="df-tab-logs" class="df-dock-tab" data-tab="logs" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Logs</button>
-          <button id="df-tab-network" class="df-dock-tab" data-tab="network" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Network</button>
-          <button id="df-tab-preferences" class="df-dock-tab" data-tab="preferences" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Preferences</button>
-          <button id="df-tab-device" class="df-dock-tab" data-tab="device" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Device</button>
-          <button id="df-tab-sensors" class="df-dock-tab" data-tab="sensors" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Sensors</button>
-          <button id="df-tab-files" class="df-dock-tab" data-tab="files" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Files</button>
-          <button id="df-tab-alerts" class="df-dock-tab" data-tab="alerts" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">Alerts</button>
-          <button id="df-tab-webview" class="df-dock-tab" data-tab="webview" role="tab" aria-selected="false" aria-controls="df-dock-body" tabindex="-1">WebView</button>
+          <button id="df-tab-problems" class="df-dock-tab df-active" data-tab="problems" role="tab" aria-selected="true" aria-controls="df-dock-panel" tabindex="0">Problems</button>
+          <button id="df-tab-layout" class="df-dock-tab" data-tab="layout" role="tab" aria-selected="false" aria-controls="df-dock-panel" tabindex="-1">Layout</button>
+          <button id="df-tab-performance" class="df-dock-tab" data-tab="performance" role="tab" aria-selected="false" aria-controls="df-dock-panel" tabindex="-1">Performance</button>
+          <button id="df-tab-logs" class="df-dock-tab" data-tab="logs" role="tab" aria-selected="false" aria-controls="df-dock-panel" tabindex="-1">Logs</button>
+          <button id="df-tab-network" class="df-dock-tab" data-tab="network" role="tab" aria-selected="false" aria-controls="df-dock-panel" tabindex="-1">Network</button>
+          <button id="df-tab-preferences" class="df-dock-tab" data-tab="preferences" role="tab" aria-selected="false" aria-controls="df-dock-panel" tabindex="-1">Preferences</button>
+          <button id="df-tab-device" class="df-dock-tab" data-tab="device" role="tab" aria-selected="false" aria-controls="df-dock-panel" tabindex="-1">Device</button>
+          <button id="df-tab-sensors" class="df-dock-tab" data-tab="sensors" role="tab" aria-selected="false" aria-controls="df-dock-panel" tabindex="-1">Sensors</button>
+          <button id="df-tab-files" class="df-dock-tab" data-tab="files" role="tab" aria-selected="false" aria-controls="df-dock-panel" tabindex="-1">Files</button>
+          <button id="df-tab-alerts" class="df-dock-tab" data-tab="alerts" role="tab" aria-selected="false" aria-controls="df-dock-panel" tabindex="-1">Alerts</button>
+          <button id="df-tab-webview" class="df-dock-tab" data-tab="webview" role="tab" aria-selected="false" aria-controls="df-dock-panel" tabindex="-1">WebView</button>
         </div>
         <span id="df-problems-status" class="df-sr-only" role="status" aria-live="polite" aria-atomic="true"></span>
         <span id="df-dock-meta" class="df-dock-meta"></span>
@@ -205,7 +205,10 @@
         <button id="df-dock-refresh" class="df-icon-btn" title="Refresh this tab"><svg class="df-ic"><use href="#i-refresh"/></svg></button>
         <button id="df-dock-close" class="df-icon-btn" title="Hide the data dock"><svg class="df-ic"><use href="#i-close"/></svg></button>
       </div>
-      <div id="df-dock-body" role="tabpanel" aria-labelledby="df-tab-problems"></div>
+      <div id="df-dock-panel" role="tabpanel" aria-labelledby="df-tab-problems">
+        <div id="df-dock-action-strip" class="df-hidden" role="group"></div>
+        <div id="df-dock-body" role="region" aria-label="Problems data"></div>
+      </div>
     </div>
   </div>
 

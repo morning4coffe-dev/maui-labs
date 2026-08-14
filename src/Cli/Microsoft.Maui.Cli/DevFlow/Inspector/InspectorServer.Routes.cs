@@ -121,6 +121,8 @@ public sealed partial class InspectorServer
             ["/inspector-api.js"] = new("inspector-api.js", "application/javascript"),
             ["/inspector-dialog.js"] = new("inspector-dialog.js", "application/javascript"),
             ["/inspector-data-context.js"] = new("inspector-data-context.js", "application/javascript"),
+            ["/inspector-data-controller.js"] = new("inspector-data-controller.js", "application/javascript"),
+            ["/inspector-data-ui.js"] = new("inspector-data-ui.js", "application/javascript"),
             ["/inspector-diagnostics.js"] = new("inspector-diagnostics.js", "application/javascript"),
             ["/inspector-video.js"] = new("inspector-video.js", "application/javascript"),
             ["/inspector-evidence.js"] = new("inspector-evidence.js", "application/javascript"),

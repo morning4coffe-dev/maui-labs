@@ -8,7 +8,8 @@ internal sealed record InspectorAlertResult(
     bool Supported,
     AlertInfo? Alert = null,
     string? Error = null,
-    bool Dismissed = false);
+    bool Dismissed = false,
+    string? Revision = null);
 
 internal sealed class InspectorAlertController
 {
@@ -61,7 +62,7 @@ internal sealed class InspectorAlertController
                 if (driver is LinuxAppDriver)
                     await ((AppDriverBase)driver).ConnectAsync(_agentHost, _agentPort);
                 var alert = await driver.DetectAlertAsync();
-                return new(true, true, Alert: alert);
+                return new(true, true, Alert: alert, Revision: AlertRevision.Create(alert));
             }
             catch (Exception ex)
             {
@@ -70,7 +71,7 @@ internal sealed class InspectorAlertController
         }
     }
 
-    public async Task<InspectorAlertResult> DismissAsync(string? buttonLabel)
+    public async Task<InspectorAlertResult> DismissAsync(string? buttonLabel, string? expectedRevision = null)
     {
         var target = NormalizePlatform(_platform);
         var processId = await ResolveProcessIdAsync(target);
@@ -89,10 +90,22 @@ internal sealed class InspectorAlertController
             {
                 if (driver is LinuxAppDriver)
                     await ((AppDriverBase)driver).ConnectAsync(_agentHost, _agentPort);
-                var alert = await driver.HandleAlertIfPresentAsync(buttonLabel);
-                return alert is not null
-                    ? new(true, true, Alert: alert, Dismissed: true)
-                    : new(true, true, Alert: null, Error: "No native alert is visible.", Dismissed: false);
+                var action = await driver.HandleAlertAsync(buttonLabel, expectedRevision);
+                var currentRevision = AlertRevision.Create(action.Alert);
+                if (action.Alert is null)
+                    return new(true, true, Alert: null, Error: "No native alert is visible.", Dismissed: false);
+                if (!action.MatchesExpected)
+                {
+                    return new(
+                        false,
+                        true,
+                        Alert: action.Alert,
+                        Error: "The native alert changed before the choice was applied. Review the current alert and choose again.",
+                        Revision: currentRevision);
+                }
+                return action.Dismissed
+                    ? new(true, true, Alert: action.Alert, Dismissed: true, Revision: currentRevision)
+                    : new(true, true, Alert: action.Alert, Error: "The native alert choice could not be applied.", Dismissed: false, Revision: currentRevision);
             }
             catch (Exception ex)
             {

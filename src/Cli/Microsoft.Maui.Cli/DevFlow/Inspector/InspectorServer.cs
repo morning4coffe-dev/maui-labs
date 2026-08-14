@@ -33,6 +33,8 @@ public sealed partial class InspectorServer : IDisposable
     private readonly string? _platform;
     private readonly string? _project;
     private readonly string? _sessionId;
+    private readonly Testing.MauiPreviewFeatureFlags _previewFlags;
+    private readonly Func<string?, bool>? _trustedHostApprovalVerifier;
     private readonly AgentRegistration _checkpointRegistration;
     private readonly RouteCheckpointCoordinator _checkpoints;
     private readonly Func<
@@ -98,6 +100,8 @@ public sealed partial class InspectorServer : IDisposable
         new(StringComparer.Ordinal);
     private readonly Dictionary<string, WorkbenchAgentHandoff> _workbenchAgentHandoffs =
         new(StringComparer.Ordinal);
+    private readonly Dictionary<string, WorkbenchApprovalConfirmation> _workbenchApprovalConfirmations =
+        new(StringComparer.Ordinal);
     private PerformanceOwnership? _performanceOwnership;
     private byte[]? _lastReplayEvidence;
     private static readonly TimeSpan ScreenshotCacheDuration = TimeSpan.FromMilliseconds(200);
@@ -115,6 +119,7 @@ public sealed partial class InspectorServer : IDisposable
     private const int MaxRetainedWorkbenchEvidence = 8;
     private const int MaxRetainedWorkbenchRepairClassifications = 32;
     private const int MaxRetainedWorkbenchAgentHandoffs = 16;
+    private const int MaxRetainedWorkbenchApprovalConfirmations = 64;
     private const int MaxCachedWorkbenchEvidenceBytes = 16 * 1024 * 1024;
     private const int MaxSelectorVerifyAmbiguityMatches = 20;
 
@@ -130,7 +135,17 @@ public sealed partial class InspectorServer : IDisposable
     internal string? AgentInstanceId => _agentInstanceId;
 
     public InspectorServer(int port, string agentHost, int agentPort, string? embedToken = null)
-        : this(port, agentHost, agentPort, embedToken, agentId: null, appName: null, platform: null, project: null, sessionId: null)
+        : this(
+            port,
+            agentHost,
+            agentPort,
+            embedToken,
+            agentId: null,
+            appName: null,
+            platform: null,
+            project: null,
+            sessionId: null,
+            previewFlags: null)
     {
     }
 
@@ -158,7 +173,9 @@ public sealed partial class InspectorServer : IDisposable
         TestAgentSessionService? testAgentSessions = null,
         Func<
             Testing.MauiTestAgentTargetState,
-            Task<Testing.MauiTestAgentTargetState?>>? testAgentTargetStateRefresh = null)
+            Task<Testing.MauiTestAgentTargetState?>>? testAgentTargetStateRefresh = null,
+        Testing.MauiPreviewFeatureFlags? previewFlags = null,
+        Func<string?, bool>? trustedHostApprovalVerifier = null)
     {
         _port = port;
         _agentHost = agentHost;
@@ -170,6 +187,8 @@ public sealed partial class InspectorServer : IDisposable
         _platform = platform;
         _project = string.IsNullOrWhiteSpace(project) ? null : project;
         _sessionId = string.IsNullOrWhiteSpace(sessionId) ? null : sessionId;
+        _previewFlags = ResolvePreviewFlags(previewFlags);
+        _trustedHostApprovalVerifier = trustedHostApprovalVerifier;
         _checkpointRegistration = checkpointRegistration ?? new AgentRegistration
         {
             Id = agentId ?? $"inspector-{agentPort}",
@@ -198,6 +217,14 @@ public sealed partial class InspectorServer : IDisposable
             MutationLeaseLabel = "DevFlow Web Inspector"
         };
     }
+
+    internal static Testing.MauiPreviewFeatureFlags ResolvePreviewFlags(
+        Testing.MauiPreviewFeatureFlags? supplied,
+        Func<string, string?>? readEnvironment = null)
+        => supplied ??
+           (readEnvironment is null
+               ? Testing.MauiPreviewFeatureFlagConfiguration.FromEnvironment()
+               : Testing.MauiPreviewFeatureFlagConfiguration.FromEnvironment(readEnvironment));
 
     private void InvalidateScreenshotCache()
     {
@@ -396,6 +423,8 @@ public sealed partial class InspectorServer : IDisposable
                     ["x-devflow-lease"] = context.Request.Headers["X-DevFlow-Lease"] ?? "",
                     ["x-devflow-holder"] = context.Request.Headers["X-DevFlow-Holder"] ?? "",
                     ["x-devflow-label"] = context.Request.Headers["X-DevFlow-Label"] ?? "",
+                    ["x-devflow-host-approval-token"] =
+                        context.Request.Headers["X-DevFlow-Host-Approval-Token"] ?? "",
                 },
                 Query = context.Request.QueryString.AllKeys
                     .Where(static key => key is not null)
@@ -745,7 +774,25 @@ public sealed partial class InspectorServer : IDisposable
             if (IsTokenGatedPath(request.Path))
             {
                 var token = request.Headers.TryGetValue("x-devflow-inspector-token", out var t) ? t : null;
-                if (string.IsNullOrEmpty(token) || !string.Equals(token, _readToken, StringComparison.Ordinal))
+                var trustedHostConfirmationIssue =
+                    request.Method == "POST" &&
+                    string.Equals(
+                        request.Path.TrimEnd('/'),
+                        "/api/workbench/approval-confirmations/issue",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    _trustedHostApprovalVerifier?.Invoke(
+                        request.Headers.TryGetValue("x-devflow-host-approval-token", out var hostToken)
+                            ? hostToken
+                            : null) == true;
+                var consumesTrustedHostConfirmation =
+                    request.Method == "POST" &&
+                    request.Path.StartsWith(
+                        "/api/workbench/agent-requests/",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    request.Path.EndsWith("/approve", StringComparison.OrdinalIgnoreCase);
+                if (!trustedHostConfirmationIssue &&
+                    !consumesTrustedHostConfirmation &&
+                    (string.IsNullOrEmpty(token) || !string.Equals(token, _readToken, StringComparison.Ordinal)))
                     return (403, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"forbidden\"}"));
             }
 
@@ -753,6 +800,15 @@ public sealed partial class InspectorServer : IDisposable
             // services. They never fall back to the legacy direct replay path.
             if (request.Path.StartsWith("/api/workbench/", StringComparison.OrdinalIgnoreCase))
             {
+                if (!IsPreviewRouteEnabled(_previewFlags, request.Path))
+                {
+                    return JsonResponse(404, new
+                    {
+                        ok = false,
+                        error = "This preview capability is disabled."
+                    });
+                }
+
                 if (request.Method == "POST" &&
                     string.Equals(
                         request.Path.TrimEnd('/'),
@@ -821,6 +877,33 @@ public sealed partial class InspectorServer : IDisposable
         => exception is HttpRequestException or SocketException or IOException or TaskCanceledException
             || (exception.InnerException is not null && IsAgentUnavailableException(exception.InnerException));
 
+    internal static bool IsPreviewRouteEnabled(
+        Testing.MauiPreviewFeatureFlags flags,
+        string path)
+    {
+        ArgumentNullException.ThrowIfNull(flags);
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+
+        var normalized = path.TrimEnd('/');
+        if (normalized.StartsWith("/api/workbench/agent-requests", StringComparison.OrdinalIgnoreCase))
+            return DevFlowPreviewPolicy.IsInspectorAgentRequestRouteEnabled(flags, normalized);
+        if (string.Equals(
+                normalized,
+                "/api/workbench/approval-confirmations/issue",
+                StringComparison.OrdinalIgnoreCase))
+            return true;
+        if (normalized.StartsWith("/api/workbench/repair", StringComparison.OrdinalIgnoreCase))
+            return flags.IsEnabled("repair-proposals");
+        if (normalized.StartsWith("/api/workbench/source", StringComparison.OrdinalIgnoreCase))
+            return flags.IsEnabled("source-proposals");
+        if (normalized.StartsWith("/api/workbench/artifacts", StringComparison.OrdinalIgnoreCase))
+            return flags.IsEnabled("trace-import-export");
+        if (string.Equals(normalized, "/api/workbench/agent-handoff", StringComparison.OrdinalIgnoreCase))
+            return flags.IsEnabled("agent-authoring");
+
+        return flags.IsEnabled("workbench");
+    }
+
     private async Task<(int, string, byte[])> HandleRootAsync()
     {
         var frame = await CreateFrameAsync();
@@ -842,6 +925,11 @@ public sealed partial class InspectorServer : IDisposable
             .Append(BuildMeta("devflow-app-name", _appName))
             .Append(BuildMeta("devflow-platform", _platform))
             .Append(BuildMeta("devflow-agent-port", _agentPort.ToString(System.Globalization.CultureInfo.InvariantCulture)))
+            .Append(BuildMeta("devflow-preview-workbench", _previewFlags.IsEnabled("workbench").ToString().ToLowerInvariant()))
+            .Append(BuildMeta("devflow-preview-agent-authoring", _previewFlags.IsEnabled("agent-authoring").ToString().ToLowerInvariant()))
+            .Append(BuildMeta("devflow-preview-repair", _previewFlags.IsEnabled("repair-proposals").ToString().ToLowerInvariant()))
+            .Append(BuildMeta("devflow-preview-source", _previewFlags.IsEnabled("source-proposals").ToString().ToLowerInvariant()))
+            .Append(BuildMeta("devflow-preview-trace-import", _previewFlags.IsEnabled("trace-import-export").ToString().ToLowerInvariant()))
             .ToString();
         html = html.Contains("</head>", StringComparison.Ordinal)
             ? html.Replace("</head>", tokenMeta + agentMeta + "</head>")
@@ -2873,6 +2961,16 @@ public sealed partial class InspectorServer : IDisposable
         string holderLabel)
     {
         var path = request.Path.TrimEnd('/');
+        if (string.Equals(
+                path,
+                "/api/workbench/approval-confirmations/issue",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return request.Method == "POST"
+                ? HandleWorkbenchApprovalConfirmationIssue(request)
+                : JsonResponse(405, new { ok = false, error = "Method not allowed." });
+        }
+
         if (string.Equals(path, "/api/workbench/improve/analyze", StringComparison.OrdinalIgnoreCase))
         {
             return request.Method == "POST"
@@ -2932,7 +3030,7 @@ public sealed partial class InspectorServer : IDisposable
         if (string.Equals(path, "/api/workbench/repair/grant", StringComparison.OrdinalIgnoreCase))
         {
             return request.Method == "POST"
-                ? HandleWorkbenchRepairGrant(services, request.Body)
+                ? await HandleWorkbenchRepairGrantAsync(services, request.Body)
                 : JsonResponse(405, new { ok = false, error = "Method not allowed." });
         }
 
@@ -3166,6 +3264,430 @@ public sealed partial class InspectorServer : IDisposable
         return JsonResponse(404, new { ok = false, error = "Not found." });
     }
 
+    private (int, string, byte[]) HandleWorkbenchApprovalConfirmationIssue(HttpRequestInfo httpRequest)
+    {
+        if (_trustedHostApprovalVerifier is null)
+        {
+            return JsonResponse(501, new
+            {
+                ok = false,
+                code = "native-host-approval-unavailable",
+                error = "No native host approval client is connected. Approval is disabled; browser, chat, loopback, and broker-state values cannot substitute for it.",
+            });
+        }
+
+        var hostToken = httpRequest.Headers.TryGetValue(
+            "x-devflow-host-approval-token",
+            out var supplied)
+            ? supplied
+            : null;
+        if (_trustedHostApprovalVerifier.Invoke(hostToken) != true)
+            return TrustedHostApprovalRequired();
+        if (!TryReadWorkbenchApprovalConfirmationIssue(
+                httpRequest.Body,
+                out var request,
+                out var error))
+        {
+            return JsonResponse(400, new { ok = false, error });
+        }
+        if (string.IsNullOrWhiteSpace(_agentId) || string.IsNullOrWhiteSpace(_agentInstanceId))
+            return JsonResponse(409, new { ok = false, error = "The Inspector has no exact live target." });
+
+        string? material;
+        switch (request!.Action)
+        {
+            case WorkbenchApprovalConfirmationActions.AgentRequestApprove:
+            {
+                if (!DevFlowPreviewPolicy.IsAgentAuthoringEnabled(_previewFlags))
+                    return JsonResponse(404, new { ok = false, error = "This preview capability is disabled." });
+                if (_testAgentSessions is null ||
+                    string.IsNullOrWhiteSpace(request.SubjectId) ||
+                    request.ApprovedScope is null)
+                {
+                    return JsonResponse(400, new
+                    {
+                        ok = false,
+                        error = "An agent approval request ID and exact approved scope are required."
+                    });
+                }
+                var lookup = _testAgentSessions.GetApprovalRequest(request.SubjectId, includeGrant: false);
+                if (!lookup.Ok || lookup.Request is null)
+                    return JsonResponse(404, new { ok = false, error = lookup.Error });
+                if (!ApprovalTargetsThisInspector(lookup.Request))
+                    return JsonResponse(404, new { ok = false, error = "The approval request does not target this Inspector." });
+                material = AgentApprovalConfirmationMaterial(
+                    request.SubjectId,
+                    request.ApprovedScope,
+                    request.GrantDurationSeconds);
+                break;
+            }
+            case WorkbenchApprovalConfirmationActions.RepairGrant:
+            {
+                if (!_previewFlags.IsEnabled("repair-proposals"))
+                    return JsonResponse(404, new { ok = false, error = "This preview capability is disabled." });
+                var services = _workflowServices;
+                var lookup = services?.GetRepair(request.SubjectId ?? string.Empty);
+                if (services is null || lookup?.Ok != true || lookup.Proposal is null)
+                    return JsonResponse(404, new { ok = false, error = lookup?.Error ?? "Repair proposal was not found." });
+                var kind = NormalizeRepairGrantKind(request.Kind);
+                var binding = CreateRepairBinding(services, lookup.Proposal);
+                material = RepairApprovalConfirmationMaterial(
+                    lookup.Proposal,
+                    kind,
+                    request.Reviewer,
+                    request.ExpiresAt,
+                    binding);
+                break;
+            }
+            case WorkbenchApprovalConfirmationActions.XamlSourceGrant:
+            {
+                if (!_previewFlags.IsEnabled("source-proposals"))
+                    return JsonResponse(404, new { ok = false, error = "This preview capability is disabled." });
+                var lookup = _workflowServices?.GetXamlSource(request.SubjectId ?? string.Empty);
+                if (lookup?.Ok != true || lookup.Proposal is null)
+                    return JsonResponse(404, new { ok = false, error = lookup?.Error ?? "Source proposal was not found." });
+                var capability = ToXamlSourceHostCapability(request.HostCapability);
+                var binding = CreateXamlSourceBinding(lookup.Proposal, capability);
+                if (binding is null)
+                    return JsonResponse(409, new { ok = false, error = "A trusted local project identity and host capability are required." });
+                material = XamlSourceApprovalConfirmationMaterial(
+                    lookup.Proposal,
+                    NormalizeXamlSourceGrantKind(request.Kind),
+                    request.Reviewer,
+                    request.ExpiresAt,
+                    binding);
+                break;
+            }
+            case WorkbenchApprovalConfirmationActions.CSharpSourceGrant:
+            {
+                if (!_previewFlags.IsEnabled("source-proposals"))
+                    return JsonResponse(404, new { ok = false, error = "This preview capability is disabled." });
+                var lookup = _workflowServices?.GetCSharpSource(request.SubjectId ?? string.Empty);
+                if (lookup?.Ok != true || lookup.Proposal is null)
+                    return JsonResponse(404, new { ok = false, error = lookup?.Error ?? "C# source proposal was not found." });
+                var capability = ToCSharpSourceHostCapability(request.HostCapability);
+                var binding = CreateCSharpSourceBinding(lookup.Proposal, capability);
+                if (binding is null)
+                    return JsonResponse(409, new { ok = false, error = "A trusted local project identity and native IDE host capability are required." });
+                material = CSharpSourceApprovalConfirmationMaterial(
+                    lookup.Proposal,
+                    NormalizeCSharpSourceGrantKind(request.Kind),
+                    request.Reviewer,
+                    request.ExpiresAt,
+                    binding);
+                break;
+            }
+            case WorkbenchApprovalConfirmationActions.CSharpSourceApplyAck:
+            case WorkbenchApprovalConfirmationActions.CSharpSourceRollbackAck:
+            {
+                if (!_previewFlags.IsEnabled("source-proposals"))
+                    return JsonResponse(404, new { ok = false, error = "This preview capability is disabled." });
+                var lookup = _workflowServices?.GetCSharpSource(request.SubjectId ?? string.Empty);
+                if (lookup?.Ok != true || lookup.Proposal is null)
+                    return JsonResponse(404, new { ok = false, error = lookup?.Error ?? "C# source proposal was not found." });
+                material = CSharpSourceAcknowledgmentConfirmationMaterial(
+                    lookup.Proposal,
+                    request.Action,
+                    request.HostKind,
+                    request.PreContentDigest,
+                    request.ContentDigest,
+                    request.PatchDigest);
+                break;
+            }
+            default:
+                return JsonResponse(400, new { ok = false, error = "The approval confirmation action is unsupported." });
+        }
+
+        var confirmation = RememberWorkbenchApprovalConfirmation(
+            request.Action!,
+            request.SubjectId!,
+            material);
+        return JsonResponse(201, new
+        {
+            ok = true,
+            confirmationCapability = confirmation.Capability,
+            confirmationDigest = confirmation.MaterialDigest,
+            expiresAt = confirmation.ExpiresAt,
+            target = new
+            {
+                agentId = _agentId,
+                agentInstanceId = _agentInstanceId,
+            },
+            note = "This single-use capability confirms one exact target, subject, and digest. Chat text is not approval.",
+        });
+    }
+
+    private (int, string, byte[]) TrustedHostApprovalRequired()
+        => JsonResponse(403, new
+        {
+            ok = false,
+            code = "trusted-host-required",
+            error = "A trusted native host must confirm this exact target and proposal. Browser or chat text cannot issue a grant.",
+        });
+
+    private bool TryConsumeWorkbenchApprovalConfirmation(
+        string? capability,
+        string action,
+        string subjectId,
+        string material,
+        out string error)
+    {
+        error = "A trusted native host confirmation capability is required.";
+        if (string.IsNullOrWhiteSpace(capability))
+            return false;
+
+        lock (_workbenchRunGate)
+        {
+            var now = DateTimeOffset.UtcNow;
+            foreach (var expired in _workbenchApprovalConfirmations
+                         .Where(pair => pair.Value.ExpiresAt <= now)
+                         .Select(pair => pair.Key)
+                         .ToArray())
+            {
+                _workbenchApprovalConfirmations.Remove(expired);
+            }
+
+            if (!_workbenchApprovalConfirmations.Remove(capability, out var confirmation))
+            {
+                error = "The trusted-host confirmation capability is invalid, expired, or already used.";
+                return false;
+            }
+            if (!string.Equals(confirmation.AgentId, _agentId, StringComparison.Ordinal) ||
+                !string.Equals(confirmation.AgentInstanceId, _agentInstanceId, StringComparison.Ordinal) ||
+                !string.Equals(confirmation.Action, action, StringComparison.Ordinal) ||
+                !string.Equals(confirmation.SubjectId, subjectId, StringComparison.Ordinal) ||
+                !FixedDigestEquals(confirmation.MaterialDigest, ApprovalMaterialDigest(material)))
+            {
+                error = "The trusted-host confirmation does not match this exact target, subject, and digest.";
+                return false;
+            }
+            return true;
+        }
+    }
+
+    private WorkbenchApprovalConfirmation RememberWorkbenchApprovalConfirmation(
+        string action,
+        string subjectId,
+        string material)
+    {
+        var confirmation = new WorkbenchApprovalConfirmation(
+            CreateWorkbenchCapability(),
+            _agentId!,
+            _agentInstanceId!,
+            action,
+            subjectId,
+            ApprovalMaterialDigest(material),
+            DateTimeOffset.UtcNow.AddMinutes(2));
+        lock (_workbenchRunGate)
+        {
+            foreach (var expired in _workbenchApprovalConfirmations
+                         .Where(pair => pair.Value.ExpiresAt <= DateTimeOffset.UtcNow)
+                         .Select(pair => pair.Key)
+                         .ToArray())
+            {
+                _workbenchApprovalConfirmations.Remove(expired);
+            }
+            while (_workbenchApprovalConfirmations.Count >= MaxRetainedWorkbenchApprovalConfirmations)
+            {
+                var oldest = _workbenchApprovalConfirmations
+                    .OrderBy(pair => pair.Value.ExpiresAt)
+                    .First();
+                _workbenchApprovalConfirmations.Remove(oldest.Key);
+            }
+            _workbenchApprovalConfirmations.Add(confirmation.Capability, confirmation);
+        }
+        return confirmation;
+    }
+
+    private static string CreateWorkbenchCapability()
+        => Convert.ToBase64String(System.Security.Cryptography.RandomNumberGenerator.GetBytes(32))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+
+    private static string ApprovalMaterialDigest(string material)
+        => Convert.ToHexString(
+            System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(material)))
+            .ToLowerInvariant();
+
+    private static bool FixedDigestEquals(string expected, string supplied)
+        => expected.Length == supplied.Length &&
+           System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+               Encoding.UTF8.GetBytes(expected),
+               Encoding.UTF8.GetBytes(supplied));
+
+    private string AgentApprovalConfirmationMaterial(
+        string approvalRequestId,
+        Testing.MauiTestAgentMutationScope scope,
+        int? grantDurationSeconds)
+        => ApprovalMaterial(
+            WorkbenchApprovalConfirmationActions.AgentRequestApprove,
+            _agentId,
+            _agentInstanceId,
+            approvalRequestId,
+            ApprovalMaterialDigest(CanonicalScope(scope)),
+            grantDurationSeconds?.ToString(System.Globalization.CultureInfo.InvariantCulture));
+
+    private string RepairApprovalConfirmationMaterial(
+        WorkflowRepairProposalSnapshot snapshot,
+        string kind,
+        string? reviewer,
+        DateTimeOffset? expiresAt,
+        WorkflowRepairGrantBinding binding)
+        => ApprovalMaterial(
+            WorkbenchApprovalConfirmationActions.RepairGrant,
+            _agentId,
+            _agentInstanceId,
+            snapshot.Proposal.ProposalId,
+            snapshot.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            snapshot.PatchDigest ?? snapshot.Proposal.PatchDigest,
+            kind,
+            reviewer,
+            expiresAt?.ToUniversalTime().ToString("O"),
+            binding.FlowPath,
+            binding.FlowDigest,
+            binding.FlowRevision?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            binding.PatchDigest,
+            binding.TargetId,
+            binding.Policy,
+            binding.PlanDigest,
+            binding.PlanRevision?.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            binding.SafetyPolicy);
+
+    private string XamlSourceApprovalConfirmationMaterial(
+        WorkflowXamlSourceProposalSnapshot snapshot,
+        string kind,
+        string? reviewer,
+        DateTimeOffset? expiresAt,
+        WorkflowXamlSourceGrantBinding binding)
+        => ApprovalMaterial(
+            WorkbenchApprovalConfirmationActions.XamlSourceGrant,
+            _agentId,
+            _agentInstanceId,
+            snapshot.Proposal.ProposalId,
+            snapshot.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            snapshot.Proposal.PatchDigest,
+            kind,
+            reviewer,
+            expiresAt?.ToUniversalTime().ToString("O"),
+            binding.FileRelativePath,
+            binding.BaseContentDigest,
+            binding.SourceHash,
+            binding.PatchDigest,
+            binding.ProjectIdentity,
+            binding.FlowReferencesDigest,
+            binding.HostKind);
+
+    private string CSharpSourceApprovalConfirmationMaterial(
+        WorkflowCSharpSourceProposalSnapshot snapshot,
+        string kind,
+        string? reviewer,
+        DateTimeOffset? expiresAt,
+        WorkflowCSharpSourceGrantBinding binding)
+        => ApprovalMaterial(
+            WorkbenchApprovalConfirmationActions.CSharpSourceGrant,
+            _agentId,
+            _agentInstanceId,
+            snapshot.Proposal.ProposalId,
+            snapshot.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            string.Equals(kind, WorkflowCSharpSourceGrantKinds.Rollback, StringComparison.Ordinal)
+                ? snapshot.Proposal.RollbackPatchDigest
+                : snapshot.Proposal.PatchDigest,
+            kind,
+            reviewer,
+            expiresAt?.ToUniversalTime().ToString("O"),
+            binding.FileRelativePath,
+            binding.BaseContentDigest,
+            binding.SourceHash,
+            binding.PatchDigest,
+            binding.RollbackPatchDigest,
+            binding.ProjectIdentity,
+            binding.FlowReferencesDigest,
+            binding.HostKind);
+
+    private string CSharpSourceAcknowledgmentConfirmationMaterial(
+        WorkflowCSharpSourceProposalSnapshot snapshot,
+        string action,
+        string? hostKind,
+        string? preContentDigest,
+        string? contentDigest,
+        string? patchDigest)
+        => ApprovalMaterial(
+            action,
+            _agentId,
+            _agentInstanceId,
+            snapshot.Proposal.ProposalId,
+            snapshot.Revision.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            snapshot.Proposal.PatchDigest,
+            hostKind?.Trim().ToLowerInvariant(),
+            preContentDigest,
+            contentDigest,
+            patchDigest);
+
+    private static string ApprovalMaterial(params string?[] values)
+        => string.Concat(values.Select(value =>
+        {
+            var bounded = SafeWorkbenchText(value, 4096) ?? "";
+            return $"{bounded.Length}:{bounded}";
+        }));
+
+    private static string CanonicalScope(Testing.MauiTestAgentMutationScope scope)
+        => ApprovalMaterial(
+            string.Join('\n', scope.AllowedActions.OrderBy(static value => value, StringComparer.Ordinal)),
+            string.Join('\n', scope.AllowedSelectors.OrderBy(static value => value, StringComparer.Ordinal)),
+            string.Join('\n', scope.AllowedRoutes.OrderBy(static value => value, StringComparer.Ordinal)),
+            string.Join('\n', scope.AllowedSideEffectClasses.OrderBy(static value => value, StringComparer.Ordinal)),
+            Convert.ToString(scope.MaxActionCount, System.Globalization.CultureInfo.InvariantCulture),
+            Convert.ToString(scope.MaxValueBytes, System.Globalization.CultureInfo.InvariantCulture));
+
+    private static string NormalizeRepairGrantKind(string? kind)
+        => string.Equals(kind, WorkflowRepairGrantKinds.Rollback, StringComparison.Ordinal)
+            ? WorkflowRepairGrantKinds.Rollback
+            : string.Equals(kind, WorkflowRepairGrantKinds.Validation, StringComparison.Ordinal)
+                ? WorkflowRepairGrantKinds.Validation
+                : WorkflowRepairGrantKinds.Apply;
+
+    private static string NormalizeXamlSourceGrantKind(string? kind)
+        => string.Equals(kind, WorkflowXamlSourceGrantKinds.Rollback, StringComparison.Ordinal)
+            ? WorkflowXamlSourceGrantKinds.Rollback
+            : WorkflowXamlSourceGrantKinds.Apply;
+
+    private static string NormalizeCSharpSourceGrantKind(string? kind)
+        => string.Equals(kind, WorkflowCSharpSourceGrantKinds.Rollback, StringComparison.Ordinal)
+            ? WorkflowCSharpSourceGrantKinds.Rollback
+            : WorkflowCSharpSourceGrantKinds.Apply;
+
+    private static bool TryReadWorkbenchApprovalConfirmationIssue(
+        string? body,
+        out WorkbenchApprovalConfirmationIssueRequest? request,
+        out string? error)
+    {
+        request = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            error = "An approval confirmation request body is required.";
+            return false;
+        }
+        try
+        {
+            request = JsonSerializer.Deserialize<WorkbenchApprovalConfirmationIssueRequest>(body, CamelCase);
+        }
+        catch (JsonException)
+        {
+            error = "The approval confirmation request is invalid.";
+            return false;
+        }
+        if (request is null ||
+            string.IsNullOrWhiteSpace(request.Action) ||
+            string.IsNullOrWhiteSpace(request.SubjectId))
+        {
+            error = "An approval confirmation action and subject ID are required.";
+            return false;
+        }
+        return true;
+    }
+
     private (int, string, byte[]) HandleWorkbenchAgentRequests()
     {
         if (_testAgentSessions is null ||
@@ -3191,7 +3713,12 @@ public sealed partial class InspectorServer : IDisposable
             pendingCount = requests.Count(request =>
                 string.Equals(request.State, Testing.MauiTestAgentApprovalStates.Pending, StringComparison.Ordinal)),
             requests,
-            note = "Approve here; typing approval in agent chat never issues a grant.",
+            note = "Review or reject here. Approval requires a trusted native host confirmation; typing approval in agent chat never issues a grant.",
+            approvalMode = _trustedHostApprovalVerifier is null
+                ? "disabled-native-host-unavailable"
+                : "trusted-host-confirmation-required",
+            approvalAvailable = _trustedHostApprovalVerifier is not null,
+            browserApprovalAvailable = false,
         });
     }
 
@@ -3203,14 +3730,8 @@ public sealed partial class InspectorServer : IDisposable
             return JsonResponse(503, new { ok = false, error = "Broker-owned test-agent approvals are unavailable." });
         if (!TryReadWorkbenchAgentRequestDecision(body, out var decision, out var error))
             return JsonResponse(400, new { ok = false, error });
-        if (!decision!.HumanConfirmed)
-        {
-            return JsonResponse(400, new
-            {
-                ok = false,
-                error = "Review the exact scope and confirm it before approving the agent request."
-            });
-        }
+        if (decision!.ApprovedScope is null)
+            return JsonResponse(400, new { ok = false, error = "An exact approved scope is required." });
 
         var lookup = _testAgentSessions.GetApprovalRequest(approvalRequestId, includeGrant: false);
         if (!lookup.Ok || lookup.Request?.TargetState is null)
@@ -3234,6 +3755,25 @@ public sealed partial class InspectorServer : IDisposable
             if (seconds is < 1 or > 900)
                 return JsonResponse(400, new { ok = false, error = "grantDurationSeconds must be between 1 and 900." });
             grantExpiresAt = DateTimeOffset.UtcNow.AddSeconds(seconds);
+        }
+        if (!TryConsumeWorkbenchApprovalConfirmation(
+                decision.ConfirmationCapability,
+                WorkbenchApprovalConfirmationActions.AgentRequestApprove,
+                approvalRequestId,
+                AgentApprovalConfirmationMaterial(
+                    approvalRequestId,
+                    decision.ApprovedScope,
+                    decision.GrantDurationSeconds),
+                out var confirmationError))
+        {
+            return JsonResponse(403, new
+            {
+                ok = false,
+                code = string.IsNullOrWhiteSpace(decision.ConfirmationCapability)
+                    ? "trusted-host-required"
+                    : "approval-confirmation-invalid",
+                error = confirmationError,
+            });
         }
 
         var result = _testAgentSessions.ApproveApprovalRequest(
@@ -3416,29 +3956,41 @@ public sealed partial class InspectorServer : IDisposable
     {
         if (!TryReadWorkbenchXamlSourceRequest(body, out WorkbenchXamlSourceGrantRequest? request, out var error))
             return JsonResponse(400, new { ok = false, error });
-        if (!request!.HumanConfirmed)
-        {
-            return JsonResponse(400, new
-            {
-                ok = false,
-                error = "Explicit human confirmation is required before issuing a source proposal grant."
-            });
-        }
 
-        var lookup = services.GetXamlSource(request.ProposalId ?? string.Empty);
+        var lookup = services.GetXamlSource(request!.ProposalId ?? string.Empty);
         if (!lookup.Ok || lookup.Proposal is null)
             return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
         var capability = ToXamlSourceHostCapability(request.HostCapability);
         var binding = CreateXamlSourceBinding(lookup.Proposal, capability);
         if (binding is null)
             return JsonResponse(409, new { ok = false, error = "A trusted local project identity and host capability are required." });
+        var kind = NormalizeXamlSourceGrantKind(request.Kind);
+        if (!TryConsumeWorkbenchApprovalConfirmation(
+                request!.ConfirmationCapability,
+                WorkbenchApprovalConfirmationActions.XamlSourceGrant,
+                lookup.Proposal.Proposal.ProposalId!,
+                XamlSourceApprovalConfirmationMaterial(
+                    lookup.Proposal,
+                    kind,
+                    request.Reviewer,
+                    request.ExpiresAt,
+                    binding),
+                out var confirmationError))
+        {
+            return JsonResponse(403, new
+            {
+                ok = false,
+                code = string.IsNullOrWhiteSpace(request.ConfirmationCapability)
+                    ? "trusted-host-required"
+                    : "approval-confirmation-invalid",
+                error = confirmationError,
+            });
+        }
 
         var issued = services.IssueXamlSourceGrant(new WorkflowXamlSourceGrantIssueRequest
         {
             ProposalId = lookup.Proposal.Proposal.ProposalId,
-            Kind = string.Equals(request.Kind, WorkflowXamlSourceGrantKinds.Rollback, StringComparison.Ordinal)
-                ? WorkflowXamlSourceGrantKinds.Rollback
-                : WorkflowXamlSourceGrantKinds.Apply,
+            Kind = kind,
             Reviewer = request.Reviewer,
             HumanConfirmed = true,
             ExpiresAt = request.ExpiresAt,
@@ -3519,21 +4071,34 @@ public sealed partial class InspectorServer : IDisposable
     {
         if (!TryReadWorkbenchXamlSourceRequest(body, out WorkbenchXamlSourceGrantRequest? request, out var error))
             return JsonResponse(400, new { ok = false, error });
-        if (!request!.HumanConfirmed)
-        {
-            return JsonResponse(400, new
-            {
-                ok = false,
-                error = "Explicit human confirmation is required before source approval."
-            });
-        }
         var lookup = services.GetXamlSource(proposalId);
         if (!lookup.Ok || lookup.Proposal is null)
             return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
-        var capability = ToXamlSourceHostCapability(request.HostCapability);
+        var capability = ToXamlSourceHostCapability(request!.HostCapability);
         var binding = CreateXamlSourceBinding(lookup.Proposal, capability);
         if (binding is null)
             return JsonResponse(409, new { ok = false, error = "A trusted local project identity and host capability are required." });
+        if (!TryConsumeWorkbenchApprovalConfirmation(
+                request!.ConfirmationCapability,
+                WorkbenchApprovalConfirmationActions.XamlSourceGrant,
+                proposalId,
+                XamlSourceApprovalConfirmationMaterial(
+                    lookup.Proposal,
+                    WorkflowXamlSourceGrantKinds.Apply,
+                    request.Reviewer,
+                    request.ExpiresAt,
+                    binding),
+                out var confirmationError))
+        {
+            return JsonResponse(403, new
+            {
+                ok = false,
+                code = string.IsNullOrWhiteSpace(request.ConfirmationCapability)
+                    ? "trusted-host-required"
+                    : "approval-confirmation-invalid",
+                error = confirmationError,
+            });
+        }
 
         var issued = services.IssueXamlSourceGrant(new WorkflowXamlSourceGrantIssueRequest
         {
@@ -3919,6 +4484,17 @@ public sealed partial class InspectorServer : IDisposable
             IsExplicitLocalHostAction = value?.IsExplicitLocalHostAction == true,
         };
 
+    private static WorkflowXamlSourceHostCapability ToXamlSourceHostCapability(
+        WorkbenchApprovalHostCapability? value)
+        => new()
+        {
+            HostKind = value?.HostKind?.Trim().ToLowerInvariant() ?? "browser",
+            CanOpenNativeDiff = value?.CanOpenNativeDiff == true,
+            CanDownloadPatch = value?.CanDownloadPatch == true,
+            CanApplySource = value?.CanApplySource == true,
+            IsExplicitLocalHostAction = value?.IsExplicitLocalHostAction == true,
+        };
+
     private static List<Testing.MauiXamlSourcePlatformVerification> DefaultXamlSourcePlatforms()
     {
         var appleExternal = OperatingSystem.IsWindows();
@@ -4069,29 +4645,41 @@ public sealed partial class InspectorServer : IDisposable
     {
         if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceGrantRequest? request, out var error))
             return JsonResponse(400, new { ok = false, error });
-        if (!request!.HumanConfirmed)
-        {
-            return JsonResponse(400, new
-            {
-                ok = false,
-                error = "Explicit human confirmation is required before issuing a C# source proposal grant."
-            });
-        }
 
-        var lookup = services.GetCSharpSource(request.ProposalId ?? string.Empty);
+        var lookup = services.GetCSharpSource(request!.ProposalId ?? string.Empty);
         if (!lookup.Ok || lookup.Proposal is null)
             return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
         var capability = ToCSharpSourceHostCapability(request.HostCapability);
         var binding = CreateCSharpSourceBinding(lookup.Proposal, capability);
         if (binding is null)
             return JsonResponse(409, new { ok = false, error = "A trusted local project identity and native IDE host capability are required." });
+        var kind = NormalizeCSharpSourceGrantKind(request.Kind);
+        if (!TryConsumeWorkbenchApprovalConfirmation(
+                request.ConfirmationCapability,
+                WorkbenchApprovalConfirmationActions.CSharpSourceGrant,
+                lookup.Proposal.Proposal.ProposalId!,
+                CSharpSourceApprovalConfirmationMaterial(
+                    lookup.Proposal,
+                    kind,
+                    request.Reviewer,
+                    request.ExpiresAt,
+                    binding),
+                out var confirmationError))
+        {
+            return JsonResponse(403, new
+            {
+                ok = false,
+                code = string.IsNullOrWhiteSpace(request.ConfirmationCapability)
+                    ? "trusted-host-required"
+                    : "approval-confirmation-invalid",
+                error = confirmationError,
+            });
+        }
 
         var issued = services.IssueCSharpSourceGrant(new WorkflowCSharpSourceGrantIssueRequest
         {
             ProposalId = lookup.Proposal.Proposal.ProposalId,
-            Kind = string.Equals(request.Kind, WorkflowCSharpSourceGrantKinds.Rollback, StringComparison.Ordinal)
-                ? WorkflowCSharpSourceGrantKinds.Rollback
-                : WorkflowCSharpSourceGrantKinds.Apply,
+            Kind = kind,
             Reviewer = request.Reviewer,
             HumanConfirmed = true,
             ExpiresAt = request.ExpiresAt,
@@ -4178,16 +4766,35 @@ public sealed partial class InspectorServer : IDisposable
     {
         if (!TryReadWorkbenchCSharpSourceRequest(body, out WorkbenchCSharpSourceGrantRequest? request, out var error))
             return JsonResponse(400, new { ok = false, error });
-        if (!request!.HumanConfirmed)
-            return JsonResponse(400, new { ok = false, error = "Explicit human confirmation is required before C# source approval." });
 
         var lookup = services.GetCSharpSource(proposalId);
         if (!lookup.Ok || lookup.Proposal is null)
             return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
-        var capability = ToCSharpSourceHostCapability(request.HostCapability);
+        var capability = ToCSharpSourceHostCapability(request!.HostCapability);
         var binding = CreateCSharpSourceBinding(lookup.Proposal, capability);
         if (binding is null)
             return JsonResponse(409, new { ok = false, error = "A trusted local project identity and native IDE host capability are required." });
+        if (!TryConsumeWorkbenchApprovalConfirmation(
+                request.ConfirmationCapability,
+                WorkbenchApprovalConfirmationActions.CSharpSourceGrant,
+                proposalId,
+                CSharpSourceApprovalConfirmationMaterial(
+                    lookup.Proposal,
+                    WorkflowCSharpSourceGrantKinds.Apply,
+                    request.Reviewer,
+                    request.ExpiresAt,
+                    binding),
+                out var confirmationError))
+        {
+            return JsonResponse(403, new
+            {
+                ok = false,
+                code = string.IsNullOrWhiteSpace(request.ConfirmationCapability)
+                    ? "trusted-host-required"
+                    : "approval-confirmation-invalid",
+                error = confirmationError,
+            });
+        }
 
         var issued = services.IssueCSharpSourceGrant(new WorkflowCSharpSourceGrantIssueRequest
         {
@@ -4305,6 +4912,21 @@ public sealed partial class InspectorServer : IDisposable
                 ok = false,
                 error = "The IDE host acknowledgment does not match the host bound to the approved C# patch."
             });
+        }
+        if (!TryConsumeWorkbenchApprovalConfirmation(
+                request.ConfirmationCapability,
+                WorkbenchApprovalConfirmationActions.CSharpSourceApplyAck,
+                proposalId,
+                CSharpSourceAcknowledgmentConfirmationMaterial(
+                    lookup.Proposal,
+                    WorkbenchApprovalConfirmationActions.CSharpSourceApplyAck,
+                    request.HostKind,
+                    request.PreContentDigest,
+                    request.AppliedContentDigest,
+                    request.PatchDigest),
+                out var confirmationError))
+        {
+            return JsonResponse(403, new { ok = false, error = confirmationError });
         }
 
         var completed = services.CompleteCSharpSourceHostApply(proposalId, new WorkflowCSharpSourceHostApplyRecord
@@ -4446,6 +5068,21 @@ public sealed partial class InspectorServer : IDisposable
                 ok = false,
                 error = "The IDE rollback acknowledgment does not match the host bound to the C# proposal."
             });
+        }
+        if (!TryConsumeWorkbenchApprovalConfirmation(
+                request.ConfirmationCapability,
+                WorkbenchApprovalConfirmationActions.CSharpSourceRollbackAck,
+                proposalId,
+                CSharpSourceAcknowledgmentConfirmationMaterial(
+                    lookup.Proposal,
+                    WorkbenchApprovalConfirmationActions.CSharpSourceRollbackAck,
+                    request.HostKind,
+                    request.PreContentDigest,
+                    request.ContentDigest,
+                    request.PatchDigest),
+                out var confirmationError))
+        {
+            return JsonResponse(403, new { ok = false, error = confirmationError });
         }
 
         var completed = services.CompleteCSharpSourceRollback(proposalId, new WorkflowCSharpSourceRollbackRecord
@@ -4592,6 +5229,17 @@ public sealed partial class InspectorServer : IDisposable
             IsExplicitLocalHostAction = value?.IsExplicitLocalHostAction == true,
         };
 
+    private static WorkflowCSharpSourceHostCapability ToCSharpSourceHostCapability(
+        WorkbenchApprovalHostCapability? value)
+        => new()
+        {
+            HostKind = value?.HostKind?.Trim().ToLowerInvariant() ?? "browser",
+            CanOpenNativeDiff = value?.CanOpenNativeDiff == true,
+            CanDownloadPatch = value?.CanDownloadPatch == true,
+            CanApplyCSharpSource = value?.CanApplyCSharpSource == true,
+            IsExplicitLocalHostAction = value?.IsExplicitLocalHostAction == true,
+        };
+
     private static bool TryReadWorkbenchCSharpSourceRequest<T>(
         string? body,
         out T? request,
@@ -4628,49 +5276,105 @@ public sealed partial class InspectorServer : IDisposable
         InspectorWorkflowServices services,
         string? body)
     {
-        if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairClassifyRequest? request, out var error))
+        if (!TryReadWorkbenchRepairClassifyRequest(body, out var request, out var error))
             return JsonResponse(400, new { ok = false, error });
+        var contextResult = services.GetRunRepairContext(
+            request!.RunId ?? string.Empty,
+            request.RunCapabilityToken);
+        if (contextResult.Context is null)
+        {
+            return JsonResponse(contextResult.StatusCode, new
+            {
+                ok = false,
+                error = contextResult.Error,
+            });
+        }
+        if (!IsCurrentRetainedWorkbenchRun(request.RunId!, request.RunCapabilityToken))
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = "Repair classification requires the most recent broker-retained Workbench run and its capability."
+            });
+        }
+        var runContext = contextResult.Context;
+        var report = runContext.Report;
+        if (report.Failure is null)
+            return JsonResponse(409, new { ok = false, error = "The broker-owned run has no retained failure." });
+        var failedStepId = report.Failure.StepId ?? report.DivergenceStepId;
+        var failedStep = report.Steps.FirstOrDefault(step =>
+            string.Equals(step.StepId, failedStepId, StringComparison.Ordinal));
+        if (failedStep is null)
+            return JsonResponse(409, new { ok = false, error = "The broker-owned failed step is unavailable." });
+
+        var isCurrentLocalRun = true;
+        var artifactTrust = Testing.MauiArtifactTrustStates.Untrusted;
+        var hasArtifactId = !string.IsNullOrWhiteSpace(request.ArtifactId);
+        var hasArtifactCapability = !string.IsNullOrWhiteSpace(request.ArtifactCapabilityToken);
+        if (hasArtifactId || hasArtifactCapability)
+        {
+            if (!hasArtifactId || !hasArtifactCapability)
+            {
+                return JsonResponse(400, new
+                {
+                    ok = false,
+                    error = "Both an imported artifact ID and its capability token are required."
+                });
+            }
+            var trust = services.GetArtifactRepairTrust(
+                request.ArtifactId!,
+                request.ArtifactCapabilityToken,
+                runContext.RunId);
+            if (trust.StatusCode != 200)
+                return JsonResponse(trust.StatusCode, new { ok = false, error = trust.Error });
+            isCurrentLocalRun = false;
+            artifactTrust = trust.Trust ?? Testing.MauiArtifactTrustStates.Untrusted;
+        }
 
         try
         {
             var status = await _client.GetStatusAsync().ConfigureAwait(false);
-            var current = request!.CurrentCheckpoint ?? new Testing.MauiFlowCheckpoint();
-            current.AppBuildFingerprint = SafeWorkbenchText(status?.App?.Build) ?? current.AppBuildFingerprint;
-            current.AgentInstanceId = _agentInstanceId ?? current.AgentInstanceId;
-            current.Route = SafeWorkbenchText(status?.Route) ?? current.Route;
-            current.Window = SafeWorkbenchText(status?.Window) ?? current.Window;
-            current.Modal = SafeWorkbenchText(status?.Modal) ?? current.Modal;
-            current.Locale = SafeWorkbenchText(status?.Locale) ?? current.Locale;
-            current.Theme = SafeWorkbenchText(status?.Theme) ?? current.Theme;
-            current.Orientation = SafeWorkbenchText(status?.Orientation) ?? current.Orientation;
-            current.DisplayProfile = SafeWorkbenchText(status?.DisplayProfile) ?? current.DisplayProfile;
-
-            var prior = request.PriorActiveSelectorResolution;
-            if (prior is null &&
-                request.Run?.RunId is { Length: > 0 } sourceRunId &&
-                (request.Run.Failure?.StepId ?? request.Run.DivergenceStepId) is { Length: > 0 } sourceStepId)
+            var current = new Testing.MauiFlowCheckpoint
             {
-                prior = services.GetPriorSelectorResolution(sourceRunId, sourceStepId).Resolution;
-            }
+                AppBuildFingerprint = SafeWorkbenchText(status?.App?.Build),
+                AgentInstanceId = _agentInstanceId,
+                Route = SafeWorkbenchText(status?.Route),
+                Window = SafeWorkbenchText(status?.Window),
+                Modal = SafeWorkbenchText(status?.Modal),
+                Locale = SafeWorkbenchText(status?.Locale),
+                Theme = SafeWorkbenchText(status?.Theme),
+                Orientation = SafeWorkbenchText(status?.Orientation),
+                DisplayProfile = SafeWorkbenchText(status?.DisplayProfile),
+            };
+
+            var prior = services.GetPriorSelectorResolution(runContext.RunId, failedStep.StepId!).Resolution;
+            var beforeDispatch = failedStep.Dispatch is null &&
+                string.Equals(report.Failure.Phase, "resolution", StringComparison.OrdinalIgnoreCase);
+            var additionalFailureCodes = new[]
+            {
+                report.Outcome?.Status,
+                failedStep.FailureClass,
+            }.Where(static value => !string.IsNullOrWhiteSpace(value)).Cast<string>().ToList();
             var decision = Testing.MauiFlowRepairEligibilityEvaluator.Evaluate(
                 new Testing.MauiFlowRepairEligibilityInput
                 {
-                    Run = request.Run,
-                    Plan = request.Plan,
-                    ReplayEligibility = request.ReplayEligibility,
-                    ExpectedCheckpoint = request.ExpectedCheckpoint,
+                    Run = report,
+                    Plan = runContext.Plan,
+                    ReplayEligibility = report.ReplayEligibility ?? runContext.Admission,
+                    ExpectedCheckpoint = failedStep.ExpectedCheckpoint,
                     CurrentCheckpoint = current,
-                    BeforeDispatch = request.BeforeDispatch,
-                    IsCurrentLocalRun = request.IsCurrentLocalRun,
-                    ArtifactTrust = request.ArtifactTrust,
+                    BeforeDispatch = beforeDispatch,
+                    IsCurrentLocalRun = isCurrentLocalRun,
+                    ArtifactTrust = artifactTrust,
                     PriorActiveSelectorResolution = prior,
-                    TargetFingerprint = request.TargetFingerprint,
-                    AdditionalFailureCodes = request.AdditionalFailureCodes ?? [],
+                    TargetFingerprint = failedStep.Fingerprint,
+                    AdditionalFailureCodes = additionalFailureCodes,
                 });
             var classificationToken = RememberWorkbenchRepairClassification(
                 decision,
-                reportRunId: request.Run?.RunId,
-                flowDigest: request.Run?.FlowDigest,
+                runContext,
+                failedStep,
+                artifactTrust,
                 prior);
             return JsonResponse(200, new
             {
@@ -4678,6 +5382,9 @@ public sealed partial class InspectorServer : IDisposable
                 eligibility = decision,
                 classificationToken,
                 currentCheckpoint = current,
+                evidenceSource = isCurrentLocalRun
+                    ? "broker-current-local-run"
+                    : "broker-locally-reproduced-artifact",
                 repairAuthority = "human-approved-only",
                 repairValidationAvailable = _repairValidationAvailable,
             });
@@ -4708,19 +5415,131 @@ public sealed partial class InspectorServer : IDisposable
                 error = "Repair eligibility must be freshly classified by this Inspector target before candidate generation."
             });
         }
-        if (!string.IsNullOrWhiteSpace(classification.ReportRunId) &&
-            !string.Equals(classification.ReportRunId, request.Input?.SourceRunId, StringComparison.Ordinal))
+        if (!IsCurrentRetainedWorkbenchRunId(classification.Run.RunId))
         {
-            return JsonResponse(409, new { ok = false, error = "The proposal source run does not match the classified repair." });
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = "The classified run is no longer the current retained Workbench run. Classify the latest result again."
+            });
         }
-        request.Input ??= new Testing.MauiFlowRepairProposalGenerationInput();
-        request.Input.Eligibility = classification.Decision;
-        request.Input.PriorActiveSelectorResolution = classification.PriorActiveSelectorResolution;
-        var generated = Testing.MauiFlowRepairProposalGenerator.Generate(request!.Input);
+        if (classification.Run.Plan is null ||
+            string.IsNullOrWhiteSpace(classification.Run.Plan.SideEffectPolicy) ||
+            classification.Run.Plan.Revision is null)
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = "The retained broker run has no revisioned safety plan for repair authority."
+            });
+        }
+
+        var currentResolutions = await ResolveCurrentRepairCandidatesAsync(classification)
+            .ConfigureAwait(false);
+        var generationInput = new Testing.MauiFlowRepairProposalGenerationInput
+        {
+            Eligibility = classification.Decision,
+            Plan = classification.Run.Plan,
+            Flow = classification.Run.Flow,
+            BaseFlow = new Testing.MauiFlowReference
+            {
+                Path = classification.Run.Plan.Flow?.Path ??
+                    $"{classification.Run.Flow.Name ?? "scenario"}.md",
+                FlowId = classification.Run.Plan.Flow?.FlowId,
+                Revision = classification.Run.Plan.Flow?.Revision,
+                Digest = classification.Run.FlowDigest,
+            },
+            SourceRunId = classification.Run.RunId,
+            SourceStepId = classification.FailedStep.StepId,
+            SourceFailureId = classification.Run.Report.Failure?.FailureId,
+            SourceFailureCode = classification.Run.Report.Failure?.Code ??
+                classification.Run.Report.Failure?.Class,
+            PriorFingerprint = classification.PriorActiveSelectorResolution?.Fingerprint,
+            PriorActiveSelectorResolution = classification.PriorActiveSelectorResolution,
+            SelectorHealthCandidates = classification.FailedStep.SelectorCandidates.ToList(),
+            CurrentResolutions = currentResolutions,
+            Provenance = new Testing.MauiActorProvenance
+            {
+                ActorKind = "host",
+                ActorId = "devflow-broker",
+                Channel = "inspector",
+                Provider = "broker-retained-repair-evidence",
+                Intent = "selector-repair-proposal",
+                RecordedAt = DateTimeOffset.UtcNow,
+            },
+            Trust = classification.IsCurrentLocalRun
+                ? "current-local-run"
+                : classification.ArtifactTrust,
+        };
+        var generated = Testing.MauiFlowRepairProposalGenerator.Generate(generationInput);
+        if (generated.Proposals.Count == 0)
+        {
+            return JsonResponse(200, new
+            {
+                ok = false,
+                generation = generated,
+                proposals = Array.Empty<WorkflowRepairProposalSnapshot>(),
+                history = Array.Empty<WorkflowRepairHistoryAppendResult>(),
+                automaticApply = false,
+                sourceWrite = false,
+                repairValidationAvailable = _repairValidationAvailable,
+            });
+        }
+        var planStore = await ResolveWorkflowPlanStoreAsync().ConfigureAwait(false);
+        if (planStore is null)
+        {
+            return JsonResponse(503, new
+            {
+                ok = false,
+                error = "A trusted workspace is required for authoritative repair history persistence."
+            });
+        }
+        var workspace = planStore.Load(generationInput.BaseFlow.Path);
+        if (!workspace.Ok ||
+            workspace.Snapshot?.Plan is null ||
+            string.IsNullOrWhiteSpace(workspace.Snapshot.PlanDigest) ||
+            !string.Equals(
+                workspace.Snapshot.FlowDigest,
+                classification.Run.FlowDigest,
+                StringComparison.Ordinal) ||
+            workspace.Snapshot.Plan.Revision != classification.Run.Plan.Revision ||
+            !string.Equals(
+                workspace.Snapshot.Plan.SideEffectPolicy,
+                classification.Run.Plan.SideEffectPolicy,
+                StringComparison.Ordinal))
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = "The trusted workspace flow or plan changed after the retained run was classified."
+            });
+        }
+        var trustedContext = new WorkflowRepairTrustedContext
+        {
+            Eligibility = classification.Decision,
+            ReplaySafety = classification.Run.Report.ReplayEligibility ?? classification.Run.Admission,
+            ClassifiedCheckpoint = classification.Decision.CurrentCheckpoint,
+            PlanDigest = workspace.Snapshot.PlanDigest,
+            PlanRevision = workspace.Snapshot.Plan.Revision,
+            SafetyPolicy = workspace.Snapshot.Plan.SideEffectPolicy,
+        };
         var stored = new List<WorkflowRepairProposalSnapshot>();
+        var history = new List<WorkflowRepairHistoryAppendResult>();
+        WorkflowRepairHistoryAppendResult PersistHistory(
+            WorkflowRepairProposalSnapshot snapshot,
+            string state)
+        {
+            var result = AppendRepairHistory(planStore, snapshot, state);
+            history.Add(result);
+            return result;
+        }
         foreach (var proposal in generated.Proposals)
         {
-            var result = services.ProposeRepair(proposal, request.AgentOriginated);
+            var result = services.ProposeRepair(
+                proposal,
+                trustedContext,
+                agentOriginated: false,
+                PersistHistory);
             if (!result.Ok || result.Proposal is null)
             {
                 return JsonResponse(409, new
@@ -4734,17 +5553,10 @@ public sealed partial class InspectorServer : IDisposable
             stored.Add(result.Proposal);
         }
 
-        var history = new List<WorkflowRepairHistoryAppendResult>();
-        foreach (var proposal in stored)
+        var historyPersisted = history.Count == stored.Count && history.All(static item => item.Ok);
+        return JsonResponse(historyPersisted && stored.Count > 0 ? 200 : 503, new
         {
-            var appended = await AppendRepairHistoryAsync(proposal, Testing.MauiFlowRepairOutcomeStates.Proposed)
-                .ConfigureAwait(false);
-            if (appended is not null)
-                history.Add(appended);
-        }
-        return JsonResponse(200, new
-        {
-            ok = stored.Count > 0,
+            ok = stored.Count > 0 && historyPersisted,
             generation = generated,
             proposals = stored,
             history,
@@ -4754,35 +5566,60 @@ public sealed partial class InspectorServer : IDisposable
         });
     }
 
-    private (int, string, byte[]) HandleWorkbenchRepairGrant(
+    private async Task<(int, string, byte[])> HandleWorkbenchRepairGrantAsync(
         InspectorWorkflowServices services,
         string? body)
     {
         if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairGrantRequest? request, out var error))
             return JsonResponse(400, new { ok = false, error });
-        if (!request!.HumanConfirmed)
-        {
-            return JsonResponse(400, new
-            {
-                ok = false,
-                error = "Explicit human confirmation is required before issuing a repair grant."
-            });
-        }
 
-        var lookup = services.GetRepair(request.ProposalId ?? string.Empty);
+        var lookup = services.GetRepair(request!.ProposalId ?? string.Empty);
         if (!lookup.Ok || lookup.Proposal is null)
             return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
 
-        var binding = CreateRepairBinding(services, lookup.Proposal, request.Policy);
-        var issued = services.IssueRepairGrant(new WorkflowRepairGrantIssueRequest
+        var binding = CreateRepairBinding(services, lookup.Proposal);
+        var kind = NormalizeRepairGrantKind(request.Kind);
+        WorkflowPlanStore? historyStore = null;
+        if (kind == WorkflowRepairGrantKinds.Apply)
         {
-            ProposalId = request.ProposalId,
-            Kind = request.Kind,
-            Reviewer = request.Reviewer,
-            HumanConfirmed = request.HumanConfirmed,
-            ExpiresAt = request.ExpiresAt,
-            Binding = binding,
-        });
+            historyStore = await ResolveWorkflowPlanStoreAsync().ConfigureAwait(false);
+            if (historyStore is null)
+                return JsonResponse(503, new { ok = false, error = "A trusted workspace is required for repair history." });
+        }
+        if (!TryConsumeWorkbenchApprovalConfirmation(
+                request.ConfirmationCapability,
+                WorkbenchApprovalConfirmationActions.RepairGrant,
+                lookup.Proposal.Proposal.ProposalId!,
+                RepairApprovalConfirmationMaterial(
+                    lookup.Proposal,
+                    kind,
+                    request.Reviewer,
+                    request.ExpiresAt,
+                    binding),
+                out var confirmationError))
+        {
+            return JsonResponse(403, new
+            {
+                ok = false,
+                code = string.IsNullOrWhiteSpace(request.ConfirmationCapability)
+                    ? "trusted-host-required"
+                    : "approval-confirmation-invalid",
+                error = confirmationError,
+            });
+        }
+        var issued = services.IssueRepairGrant(
+            new WorkflowRepairGrantIssueRequest
+            {
+                ProposalId = request.ProposalId,
+                Kind = kind,
+                Reviewer = request.Reviewer,
+                HumanConfirmed = true,
+                ExpiresAt = request.ExpiresAt,
+                Binding = binding,
+            },
+            historyStore is null
+                ? null
+                : (snapshot, state) => AppendRepairHistory(historyStore, snapshot, state));
         return JsonResponse(issued.Ok ? 200 : 409, new
         {
             ok = issued.Ok,
@@ -4814,11 +5651,13 @@ public sealed partial class InspectorServer : IDisposable
         InspectorWorkflowServices services,
         string proposalId)
     {
-        var result = services.PreviewRepair(proposalId);
-        var history = result.Ok
-            ? await AppendRepairHistoryAsync(result.Proposal, Testing.MauiFlowRepairOutcomeStates.Previewed)
-                .ConfigureAwait(false)
-            : null;
+        var store = await ResolveWorkflowPlanStoreAsync().ConfigureAwait(false);
+        if (store is null)
+            return JsonResponse(503, new { ok = false, error = "A trusted workspace is required for repair history." });
+        WorkflowRepairHistoryAppendResult? history = null;
+        var result = services.PreviewRepair(
+            proposalId,
+            (snapshot, state) => history = AppendRepairHistory(store, snapshot, state));
         return JsonResponse(result.Ok ? 200 : 409, new
         {
             ok = result.Ok,
@@ -4838,11 +5677,15 @@ public sealed partial class InspectorServer : IDisposable
     {
         if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairRejectRequest? request, out var error))
             return JsonResponse(400, new { ok = false, error });
-        var result = services.RejectRepair(proposalId, request!.Reviewer, request.ReasonCode);
-        var history = result.Ok
-            ? await AppendRepairHistoryAsync(result.Proposal, Testing.MauiFlowRepairOutcomeStates.Rejected)
-                .ConfigureAwait(false)
-            : null;
+        var store = await ResolveWorkflowPlanStoreAsync().ConfigureAwait(false);
+        if (store is null)
+            return JsonResponse(503, new { ok = false, error = "A trusted workspace is required for repair history." });
+        WorkflowRepairHistoryAppendResult? history = null;
+        var result = services.RejectRepair(
+            proposalId,
+            request!.Reviewer,
+            request.ReasonCode,
+            (snapshot, state) => history = AppendRepairHistory(store, snapshot, state));
         return JsonResponse(result.Ok ? 200 : 409, new
         {
             ok = result.Ok,
@@ -4870,6 +5713,9 @@ public sealed partial class InspectorServer : IDisposable
                 hostFallback = true,
             });
         }
+        var historyStore = await ResolveWorkflowPlanStoreAsync().ConfigureAwait(false);
+        if (historyStore is null)
+            return JsonResponse(503, new { ok = false, error = "A trusted workspace is required for repair history." });
 
         var lookup = services.GetRepair(proposalId);
         if (!lookup.Ok || lookup.Proposal is null)
@@ -4878,17 +5724,21 @@ public sealed partial class InspectorServer : IDisposable
             new WorkflowRepairTransientValidationRequest
             {
                 Proposal = lookup.Proposal.Proposal,
-                ReplaySafety = request!.ReplaySafety,
-                ValidationGrantDigest = request.ValidationGrant,
+                Eligibility = lookup.Proposal.TrustedContext.Eligibility,
+                ReplaySafety = lookup.Proposal.TrustedContext.ReplaySafety,
+                ClassifiedCheckpoint = lookup.Proposal.TrustedContext.ClassifiedCheckpoint,
+                ValidationGrantDigest = request!.ValidationGrant,
                 InMemorySelectorOverrideOnly = true,
-                AllowDownstreamContinuation = request.ReplaySafety?.DownstreamContinuationAllowed == true,
+                AllowDownstreamContinuation =
+                    lookup.Proposal.TrustedContext.ReplaySafety?.DownstreamContinuationAllowed == true,
             },
             _lifetimeCts.Token).ConfigureAwait(false);
-        var recorded = services.RecordRepairValidation(proposalId, request.ValidationGrant ?? string.Empty, validation);
-        var history = recorded.Ok
-            ? await AppendRepairHistoryAsync(recorded.Proposal, Testing.MauiFlowRepairOutcomeStates.Previewed)
-                .ConfigureAwait(false)
-            : null;
+        WorkflowRepairHistoryAppendResult? history = null;
+        var recorded = services.RecordRepairValidation(
+            proposalId,
+            request.ValidationGrant ?? string.Empty,
+            validation,
+            (snapshot, state) => history = AppendRepairHistory(historyStore, snapshot, state));
         return JsonResponse(recorded.Ok ? 200 : 409, new
         {
             ok = recorded.Ok,
@@ -4909,35 +5759,51 @@ public sealed partial class InspectorServer : IDisposable
     {
         if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairGrantRequest? request, out var error))
             return JsonResponse(400, new { ok = false, error });
-        if (!request!.HumanConfirmed)
-        {
-            return JsonResponse(400, new
-            {
-                ok = false,
-                error = "Explicit human confirmation is required before approval."
-            });
-        }
         var lookup = services.GetRepair(proposalId);
         if (!lookup.Ok || lookup.Proposal is null)
             return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
+        var historyStore = await ResolveWorkflowPlanStoreAsync().ConfigureAwait(false);
+        if (historyStore is null)
+            return JsonResponse(503, new { ok = false, error = "A trusted workspace is required for repair history." });
 
-        var issued = services.IssueRepairGrant(new WorkflowRepairGrantIssueRequest
+        var binding = CreateRepairBinding(services, lookup.Proposal);
+        if (!TryConsumeWorkbenchApprovalConfirmation(
+                request!.ConfirmationCapability,
+                WorkbenchApprovalConfirmationActions.RepairGrant,
+                proposalId,
+                RepairApprovalConfirmationMaterial(
+                    lookup.Proposal,
+                    WorkflowRepairGrantKinds.Apply,
+                    request.Reviewer,
+                    request.ExpiresAt,
+                    binding),
+                out var confirmationError))
         {
-            ProposalId = proposalId,
-            Kind = WorkflowRepairGrantKinds.Apply,
-            Reviewer = request.Reviewer,
-            HumanConfirmed = true,
-            ExpiresAt = request.ExpiresAt,
-            Binding = CreateRepairBinding(services, lookup.Proposal, request.Policy),
-        });
-        var history = issued.Ok
-            ? await AppendRepairHistoryAsync(issued.Proposal, Testing.MauiFlowRepairOutcomeStates.Approved)
-                .ConfigureAwait(false)
-            : null;
+            return JsonResponse(403, new
+            {
+                ok = false,
+                code = string.IsNullOrWhiteSpace(request.ConfirmationCapability)
+                    ? "trusted-host-required"
+                    : "approval-confirmation-invalid",
+                error = confirmationError,
+            });
+        }
+        WorkflowRepairHistoryAppendResult? history = null;
+        var issued = services.IssueRepairGrant(
+            new WorkflowRepairGrantIssueRequest
+            {
+                ProposalId = proposalId,
+                Kind = WorkflowRepairGrantKinds.Apply,
+                Reviewer = request.Reviewer,
+                HumanConfirmed = true,
+                ExpiresAt = request.ExpiresAt,
+                Binding = binding,
+            },
+            (snapshot, state) => history = AppendRepairHistory(historyStore, snapshot, state));
         return JsonResponse(issued.Ok ? 200 : 409, new
         {
             ok = issued.Ok,
-            grant = issued.Grant,
+            grant = issued.Ok ? issued.Grant : null,
             grantDigest = issued.GrantDigest,
             expiresAt = issued.ExpiresAt,
             proposal = issued.Proposal,
@@ -4968,8 +5834,8 @@ public sealed partial class InspectorServer : IDisposable
         var lookup = services.GetRepair(proposalId);
         if (!lookup.Ok || lookup.Proposal is null)
             return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
-        var binding = CreateRepairBinding(services, lookup.Proposal, request!.Policy);
-        var begun = services.BeginRepairApply(proposalId, request.ApprovalGrant ?? string.Empty, binding);
+        var binding = CreateRepairBinding(services, lookup.Proposal);
+        var begun = services.BeginRepairApply(proposalId, request!.ApprovalGrant ?? string.Empty, binding);
         if (!begun.Ok || begun.Proposal is null)
         {
             return JsonResponse(409, new
@@ -4986,6 +5852,9 @@ public sealed partial class InspectorServer : IDisposable
             Proposal = begun.Proposal.Proposal,
             ExpectedFlowDigest = binding.FlowDigest,
             ExpectedFlowRevision = binding.FlowRevision,
+            ExpectedPlanDigest = binding.PlanDigest,
+            ExpectedPlanRevision = binding.PlanRevision,
+            ExpectedSafetyPolicy = binding.SafetyPolicy,
             Reviewer = begun.Proposal.Reviewer,
             GrantDigest = begun.Proposal.GrantDigest,
             ValidationRunIds = begun.Proposal.ValidationRunIds,
@@ -4995,6 +5864,9 @@ public sealed partial class InspectorServer : IDisposable
             Applied = applied.Ok,
             NewFlowRevision = applied.FlowRevision,
             AppliedFlowDigest = applied.FlowDigest,
+            AppliedPlanDigest = applied.PlanDigest,
+            AppliedPlanRevision = applied.PlanRevision,
+            AppliedSafetyPolicy = applied.SafetyPolicy,
             ErrorCode = applied.Code,
             Error = applied.Error,
         });
@@ -5015,20 +5887,24 @@ public sealed partial class InspectorServer : IDisposable
     {
         if (!TryReadWorkbenchRepairRequest(body, out WorkbenchRepairVerificationRequest? request, out var error))
             return JsonResponse(400, new { ok = false, error });
-        if (!request!.HumanConfirmed)
+        if (request!.VerificationRuns is null ||
+            request.VerificationRuns.Count != 3)
         {
             return JsonResponse(400, new
             {
                 ok = false,
-                error = "Explicit human confirmation is required to record host verification results."
+                error = "Exactly three distinct broker run IDs and capabilities are required for verification."
             });
         }
+        var historyStore = await ResolveWorkflowPlanStoreAsync().ConfigureAwait(false);
+        if (historyStore is null)
+            return JsonResponse(503, new { ok = false, error = "A trusted workspace is required for repair history." });
 
-        var result = services.RecordRepairVerification(proposalId, request.VerificationRuns ?? []);
-        var history = result.Ok
-            ? await AppendRepairHistoryAsync(result.Proposal, result.Proposal?.State ?? Testing.MauiFlowRepairOutcomeStates.RollbackRequired)
-                .ConfigureAwait(false)
-            : null;
+        WorkflowRepairHistoryAppendResult? history = null;
+        var result = services.RecordRepairVerification(
+            proposalId,
+            request.VerificationRuns,
+            (snapshot, state) => history = AppendRepairHistory(historyStore, snapshot, state));
         return JsonResponse(result.Ok ? 200 : 409, new
         {
             ok = result.Ok,
@@ -5054,8 +5930,8 @@ public sealed partial class InspectorServer : IDisposable
         var lookup = services.GetRepair(proposalId);
         if (!lookup.Ok || lookup.Proposal is null)
             return JsonResponse(404, new { ok = false, code = lookup.Code, error = lookup.Error });
-        var binding = CreateRepairBinding(services, lookup.Proposal, request!.Policy);
-        var begun = services.BeginRepairRollback(proposalId, request.RollbackGrant ?? string.Empty, binding);
+        var binding = CreateRepairBinding(services, lookup.Proposal);
+        var begun = services.BeginRepairRollback(proposalId, request!.RollbackGrant ?? string.Empty, binding);
         if (!begun.Ok || begun.Proposal is null)
             return JsonResponse(409, new { ok = false, proposal = begun.Proposal, code = begun.Code, error = begun.Error });
 
@@ -5064,6 +5940,9 @@ public sealed partial class InspectorServer : IDisposable
             Proposal = begun.Proposal.Proposal,
             ExpectedAppliedFlowDigest = begun.Proposal.AppliedFlowDigest,
             ExpectedAppliedFlowRevision = begun.Proposal.NewFlowRevision,
+            ExpectedPlanDigest = binding.PlanDigest,
+            ExpectedPlanRevision = binding.PlanRevision,
+            ExpectedSafetyPolicy = binding.SafetyPolicy,
             Reviewer = begun.Proposal.Reviewer,
             GrantDigest = begun.Proposal.GrantDigest,
             VerificationRunIds = begun.Proposal.VerificationRunIds,
@@ -5085,20 +5964,11 @@ public sealed partial class InspectorServer : IDisposable
         });
     }
 
-    private async Task<WorkflowRepairHistoryAppendResult?> AppendRepairHistoryAsync(
-        WorkflowRepairProposalSnapshot? snapshot,
+    private static WorkflowRepairHistoryAppendResult AppendRepairHistory(
+        WorkflowPlanStore store,
+        WorkflowRepairProposalSnapshot snapshot,
         string state)
-    {
-        if (snapshot is null)
-            return null;
-        var store = await ResolveWorkflowPlanStoreAsync().ConfigureAwait(false);
-        if (store is null)
-        {
-            return WorkflowRepairHistoryAppendResult.Failure(
-                "workspace-unavailable",
-                "A trusted workspace is unavailable for repair history persistence.");
-        }
-        return store.AppendRepairHistory(new WorkflowRepairHistoryAppendRequest
+        => store.AppendRepairHistory(new WorkflowRepairHistoryAppendRequest
         {
             Proposal = snapshot.Proposal,
             State = state,
@@ -5110,12 +5980,10 @@ public sealed partial class InspectorServer : IDisposable
             VerificationRunIds = snapshot.VerificationRunIds,
             ReasonCode = snapshot.ReasonCode,
         });
-    }
 
     private static WorkflowRepairGrantBinding CreateRepairBinding(
         InspectorWorkflowServices services,
-        WorkflowRepairProposalSnapshot snapshot,
-        string? requestedPolicy)
+        WorkflowRepairProposalSnapshot snapshot)
     {
         var baseFlow = snapshot.BaseFlow ?? snapshot.Proposal.BaseFlow;
         return new WorkflowRepairGrantBinding
@@ -5125,8 +5993,146 @@ public sealed partial class InspectorServer : IDisposable
             FlowRevision = snapshot.NewFlowRevision ?? baseFlow?.Revision,
             PatchDigest = snapshot.PatchDigest,
             TargetId = services.Target.AgentId + ":" + services.Target.AgentInstanceId,
-            Policy = string.IsNullOrWhiteSpace(requestedPolicy) ? "repair-policy-v1" : requestedPolicy.Trim(),
+            Policy = "repair-policy-v1",
+            PlanDigest = snapshot.AppliedPlanDigest ?? snapshot.TrustedContext.PlanDigest,
+            PlanRevision = snapshot.AppliedPlanRevision ?? snapshot.TrustedContext.PlanRevision,
+            SafetyPolicy = snapshot.AppliedSafetyPolicy ?? snapshot.TrustedContext.SafetyPolicy,
         };
+    }
+
+    private async Task<List<Testing.MauiRepairCandidateResolution>> ResolveCurrentRepairCandidatesAsync(
+        WorkbenchRepairClassification classification)
+    {
+        var candidates = classification.FailedStep.SelectorCandidates
+            .Where(static candidate =>
+                !string.IsNullOrWhiteSpace(candidate.CandidateId) &&
+                candidate.Selector is not null)
+            .Take(8)
+            .ToArray();
+        if (candidates.Length == 0)
+            return [];
+
+        try
+        {
+            var status = await _client.GetStatusAsync().ConfigureAwait(false);
+            var tree = await _client.GetTreeAsync().ConfigureAwait(false);
+            if (status is null || tree.Count == 0)
+                return [];
+            var context = new MauiSelectorObservationContext
+            {
+                AppId = SafeWorkbenchText(status.App?.PackageId ?? status.App?.Name),
+                AppBuild = SafeWorkbenchText(status.App?.Build),
+                Platform = SafeWorkbenchText(status.Device?.Platform),
+                Route = SafeWorkbenchText(status.Route),
+                Window = SafeWorkbenchText(status.Window),
+                Modal = SafeWorkbenchText(status.Modal),
+                Locale = SafeWorkbenchText(status.Locale),
+                Theme = SafeWorkbenchText(status.Theme),
+                Orientation = SafeWorkbenchText(status.Orientation),
+                DisplayProfile = SafeWorkbenchText(status.DisplayProfile),
+                CapabilityVersion = "broker-repair-resolution-v1",
+                ObservedAt = DateTimeOffset.UtcNow,
+            };
+            var observations = Testing.MauiSelectorObservationFactory.Create(tree[0], tree, context).Elements;
+            var result = new List<Testing.MauiRepairCandidateResolution>(candidates.Length);
+            foreach (var candidate in candidates)
+            {
+                var selector = candidate.Selector!;
+                var matches = observations.Where(element => MatchesRepairSelector(selector, element))
+                    .Take(2)
+                    .ToArray();
+                var currentFingerprint = matches.Length == 1
+                    ? Testing.MauiElementFingerprintBuilder.Build(matches[0], observations, context)
+                    : null;
+                result.Add(new Testing.MauiRepairCandidateResolution
+                {
+                    CandidateId = candidate.CandidateId,
+                    MatchCount = matches.Length,
+                    CurrentFingerprint = currentFingerprint,
+                    SemanticFingerprintMatches = currentFingerprint is not null &&
+                        Testing.MauiRepairFingerprintComparer.SemanticallyMatches(
+                            classification.PriorActiveSelectorResolution?.Fingerprint,
+                            currentFingerprint),
+                    EvidenceRefs = currentFingerprint?.FingerprintId is { Length: > 0 } fingerprintId
+                        ? [$"broker-live:{fingerprintId}"]
+                        : ["broker-live:selector-resolution"],
+                });
+            }
+            return result;
+        }
+        catch (Exception exception) when (IsAgentUnavailableException(exception))
+        {
+            return [];
+        }
+    }
+
+    private static bool MatchesRepairSelector(
+        Testing.FlowSelector selector,
+        MauiSelectorObservationElement element)
+    {
+        if (string.IsNullOrWhiteSpace(selector.AutomationId) ||
+            !string.Equals(selector.AutomationId, element.AutomationId, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        if (!selector.HasScopedStableItem)
+            return true;
+        return string.Equals(selector.StableItemKey, element.StableItemKey, StringComparison.Ordinal) &&
+            string.Equals(selector.CollectionScope, element.CollectionScope, StringComparison.Ordinal);
+    }
+
+    private static bool TryReadWorkbenchRepairClassifyRequest(
+        string? body,
+        out WorkbenchRepairClassifyRequest? request,
+        out string? error)
+    {
+        request = null;
+        error = null;
+        if (string.IsNullOrWhiteSpace(body))
+        {
+            error = "A broker-owned run ID and capability token are required.";
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(body);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                error = "The repair classification request must be a JSON object.";
+                return false;
+            }
+            var allowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "runId",
+                "runCapabilityToken",
+                "artifactId",
+                "artifactCapabilityToken",
+            };
+            foreach (var property in document.RootElement.EnumerateObject())
+            {
+                if (!allowed.Contains(property.Name))
+                {
+                    error = $"Caller-supplied repair field '{property.Name}' is not trusted. Use broker-owned run and artifact identifiers.";
+                    return false;
+                }
+            }
+            request = document.RootElement.Deserialize<WorkbenchRepairClassifyRequest>(CamelCase);
+        }
+        catch (JsonException)
+        {
+            error = "The repair classification request is not valid JSON.";
+            return false;
+        }
+
+        if (request is null ||
+            string.IsNullOrWhiteSpace(request.RunId) ||
+            string.IsNullOrWhiteSpace(request.RunCapabilityToken))
+        {
+            error = "A broker-owned run ID and capability token are required.";
+            return false;
+        }
+        return true;
     }
 
     private static bool TryReadWorkbenchRepairRequest<T>(
@@ -5321,6 +6327,8 @@ public sealed partial class InspectorServer : IDisposable
                     maxSteps = capabilities.MaxSteps,
                     workflowCommandLedger = capabilities.WorkflowCommandLedger,
                     repairValidationAvailable = _repairValidationAvailable,
+                    approvalMode = "trusted-host-confirmation-required",
+                    browserApprovalAvailable = false,
                 },
                 target = new
                 {
@@ -5374,6 +6382,19 @@ public sealed partial class InspectorServer : IDisposable
             return JsonResponse(enriched.StatusCode, new { ok = false, error = enriched.Error });
 
         var preflight = services.Preflight(enriched.Request!);
+        if (!preflight.Ok)
+            return JsonResponse(preflight.StatusCode, preflight);
+
+        var liveSelectorError = await ValidateLiveSelectorBindingsAsync(enriched.Request!).ConfigureAwait(false);
+        if (liveSelectorError is not null)
+        {
+            return JsonResponse(409, new
+            {
+                ok = false,
+                error = liveSelectorError,
+                errors = new[] { liveSelectorError },
+            });
+        }
         return JsonResponse(preflight.StatusCode, preflight);
     }
 
@@ -5389,6 +6410,8 @@ public sealed partial class InspectorServer : IDisposable
 
         CancellationTokenSource? heartbeatCancellation = null;
         Task? heartbeatTask = null;
+        var leaseClaimed = false;
+        var leaseTransferred = false;
         try
         {
             if (!TryReadWorkbenchRunEnvelope(body, out var envelope, out var error))
@@ -5416,6 +6439,7 @@ public sealed partial class InspectorServer : IDisposable
                     authority = claim.Authority,
                 });
             }
+            leaseClaimed = true;
 
             heartbeatCancellation = new CancellationTokenSource();
             heartbeatTask = HeartbeatStartingLeaseAsync(
@@ -5428,6 +6452,10 @@ public sealed partial class InspectorServer : IDisposable
             if (enriched.Error is not null)
                 return JsonResponse(enriched.StatusCode, new { ok = false, error = enriched.Error });
 
+            var liveSelectorError = await ValidateLiveSelectorBindingsAsync(enriched.Request!).ConfigureAwait(false);
+            if (liveSelectorError is not null)
+                return JsonResponse(409, new { ok = false, error = liveSelectorError });
+
             var consent = WorkbenchEvidenceConsent.From(envelope.Evidence);
             var result = services.Start(
                 enriched.Request!,
@@ -5436,6 +6464,7 @@ public sealed partial class InspectorServer : IDisposable
                     consent,
                     StoreWorkbenchEvidence),
                 new WorkflowRunLeaseHandoff(leaseId, holderKind, holderLabel));
+            leaseTransferred = result.Ok && !result.Existing;
             if (result.Ok && result.Run is not null && !string.IsNullOrWhiteSpace(result.CapabilityToken))
             {
                 RememberWorkbenchRun(
@@ -5460,6 +6489,21 @@ public sealed partial class InspectorServer : IDisposable
                     catch (OperationCanceledException) { }
                 }
                 heartbeatCancellation.Dispose();
+            }
+            if (leaseClaimed && !leaseTransferred)
+            {
+                try
+                {
+                    await _client.ControlMutationLeaseAsync(
+                        "release",
+                        force: false,
+                        leaseId,
+                        holderKind,
+                        holderLabel).ConfigureAwait(false);
+                }
+                catch (Exception exception) when (IsAgentUnavailableException(exception))
+                {
+                }
             }
             Volatile.Write(ref _workbenchRunStartingIdempotencyKey, null);
             Volatile.Write(ref _workbenchRunStarting, 0);
@@ -5702,10 +6746,12 @@ public sealed partial class InspectorServer : IDisposable
             });
         }
 
+        var failureEnvelope = HandoffEnvelope(snapshot, target, request.RunId, "failure", handoffId);
         var bound = _testAgentSessions.BindRun(new Testing.MauiTestAgentRunBindingRequest
         {
             SessionId = snapshot.SessionId,
             ReadCapabilityId = snapshot.ReadCapabilityId,
+            Envelope = failureEnvelope,
             RunId = request.RunId,
             RunCapabilityToken = runToken,
         });
@@ -5718,7 +6764,6 @@ public sealed partial class InspectorServer : IDisposable
             });
         }
 
-        var failureEnvelope = HandoffEnvelope(snapshot, target, request.RunId, "failure", handoffId);
         var improvementsEnvelope = HandoffEnvelope(snapshot, target, request.RunId, "improvements", handoffId);
         var patchEnvelope = HandoffEnvelope(snapshot, target, request.RunId, "patch", handoffId);
         var context = new WorkbenchAgentHandoffContext
@@ -5935,6 +6980,56 @@ public sealed partial class InspectorServer : IDisposable
         }
     }
 
+    private async Task<string?> ValidateLiveSelectorBindingsAsync(WorkflowRunStartRequest request)
+    {
+        var flow = request.Flow;
+        if (flow is null && !string.IsNullOrWhiteSpace(request.Markdown))
+        {
+            var parsed = Testing.FlowMarkdown.Parse(request.Markdown);
+            flow = parsed.Ok ? parsed.Flow : null;
+        }
+        if (flow is null)
+            return null;
+
+        var engine = new Testing.FlowActionabilityEngine(
+            new Testing.AgentClientMauiFlowDriver(_client),
+            tries: 1,
+            gapMs: 0);
+        foreach (var step in flow.Steps ?? [])
+        {
+            var actionSelector = step.Args?.Selector is { IsEmpty: false }
+                ? step.Args.Selector
+                : step.Target;
+            var selectors = new List<Testing.FlowSelector?> { actionSelector };
+            var isAssertionOnly = string.Equals(
+                step.Action,
+                Testing.FlowActions.Assert,
+                StringComparison.Ordinal);
+            if (isAssertionOnly)
+                selectors.AddRange((step.Asserts ?? []).Select(static assertion => assertion.Selector));
+
+            foreach (var selector in selectors)
+            {
+                if (selector?.MatchCount != 1)
+                    continue;
+
+                var resolution = await engine.ResolveAsync(selector, _lifetimeCts.Token).ConfigureAwait(false);
+                if (!resolution.Ok || resolution.MatchCount != 1)
+                {
+                    return $"Step {step.Seq} selector no longer resolves exactly one live element. " +
+                        "Return to Review and verify the selector before starting the run.";
+                }
+            }
+
+            // A mutating action changes the state in which later selectors and this step's
+            // post-action assertions resolve. Preflight can only recheck the current-state prefix;
+            // the runner resolves future-state selectors immediately before each dispatch.
+            if (!isAssertionOnly)
+                break;
+        }
+        return null;
+    }
+
     private static bool TryReadWorkbenchRunEnvelope(
         string? body,
         out WorkbenchRunEnvelope? envelope,
@@ -6047,8 +7142,9 @@ public sealed partial class InspectorServer : IDisposable
 
     private string RememberWorkbenchRepairClassification(
         Testing.MauiFlowRepairEligibilityDecision decision,
-        string? reportRunId,
-        string? flowDigest,
+        WorkflowRunRepairContext run,
+        Testing.MauiFlowStepAttempt failedStep,
+        string artifactTrust,
         Testing.MauiRepairPriorSelectorResolution? priorActiveSelectorResolution)
     {
         var token = "repairclass_" + Guid.NewGuid().ToString("N");
@@ -6056,8 +7152,9 @@ public sealed partial class InspectorServer : IDisposable
         {
             _workbenchRepairClassifications[token] = new WorkbenchRepairClassification(
                 decision,
-                reportRunId,
-                flowDigest,
+                run,
+                failedStep,
+                artifactTrust,
                 priorActiveSelectorResolution,
                 DateTimeOffset.UtcNow);
             while (_workbenchRepairClassifications.Count > MaxRetainedWorkbenchRepairClassifications)
@@ -6094,6 +7191,35 @@ public sealed partial class InspectorServer : IDisposable
                 : null;
     }
 
+    private bool IsCurrentRetainedWorkbenchRun(string runId, string? suppliedToken)
+    {
+        if (string.IsNullOrWhiteSpace(suppliedToken) || suppliedToken.Length > 128)
+            return false;
+        lock (_workbenchRunGate)
+        {
+            var current = _workbenchRunCapabilities.Values
+                .OrderByDescending(static entry => entry.CreatedAt)
+                .FirstOrDefault();
+            return current is not null &&
+                string.Equals(current.RunId, runId, StringComparison.Ordinal) &&
+                System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
+                    Encoding.UTF8.GetBytes(current.CapabilityToken),
+                    Encoding.UTF8.GetBytes(suppliedToken));
+        }
+    }
+
+    private bool IsCurrentRetainedWorkbenchRunId(string runId)
+    {
+        lock (_workbenchRunGate)
+        {
+            var current = _workbenchRunCapabilities.Values
+                .OrderByDescending(static entry => entry.CreatedAt)
+                .FirstOrDefault();
+            return current is not null &&
+                string.Equals(current.RunId, runId, StringComparison.Ordinal);
+        }
+    }
+
     private bool HasActiveWorkbenchRun()
     {
         var runId = Volatile.Read(ref _activeWorkbenchRunId);
@@ -6127,7 +7253,7 @@ public sealed partial class InspectorServer : IDisposable
                 _workbenchAgentHandoffs.Remove(key);
             }
             foreach (var token in _workbenchRepairClassifications
-                         .Where(pair => string.Equals(pair.Value.ReportRunId, runId, StringComparison.Ordinal))
+                         .Where(pair => string.Equals(pair.Value.Run.RunId, runId, StringComparison.Ordinal))
                          .Select(static pair => pair.Key)
                          .ToArray())
             {
@@ -6172,15 +7298,72 @@ public sealed partial class InspectorServer : IDisposable
         return builder.ToString();
     }
 
+    private static Testing.MauiFlowCheckpoint CloneWorkbenchCheckpoint(
+        Testing.MauiFlowCheckpoint? checkpoint)
+        => checkpoint is null
+            ? new Testing.MauiFlowCheckpoint()
+            : JsonSerializer.Deserialize(
+                JsonSerializer.SerializeToUtf8Bytes(
+                    checkpoint,
+                    Testing.MauiTestingJsonContext.Default.MauiFlowCheckpoint),
+                Testing.MauiTestingJsonContext.Default.MauiFlowCheckpoint)
+                ?? new Testing.MauiFlowCheckpoint();
+
     private sealed class WorkbenchRunEnvelope
     {
         [JsonPropertyName("run")] public WorkflowRunStartRequest? Run { get; set; }
         [JsonPropertyName("evidence")] public WorkbenchEvidenceRequest? Evidence { get; set; }
     }
 
+    private static class WorkbenchApprovalConfirmationActions
+    {
+        public const string AgentRequestApprove = "agent-request-approve";
+        public const string RepairGrant = "repair-grant";
+        public const string XamlSourceGrant = "xaml-source-grant";
+        public const string CSharpSourceGrant = "csharp-source-grant";
+        public const string CSharpSourceApplyAck = "csharp-source-apply-ack";
+        public const string CSharpSourceRollbackAck = "csharp-source-rollback-ack";
+    }
+
+    private sealed class WorkbenchApprovalConfirmationIssueRequest
+    {
+        [JsonPropertyName("action")] public string? Action { get; set; }
+        [JsonPropertyName("subjectId")] public string? SubjectId { get; set; }
+        [JsonPropertyName("kind")] public string? Kind { get; set; }
+        [JsonPropertyName("reviewer")] public string? Reviewer { get; set; }
+        [JsonPropertyName("expiresAt")] public DateTimeOffset? ExpiresAt { get; set; }
+        [JsonPropertyName("approvedScope")] public Testing.MauiTestAgentMutationScope? ApprovedScope { get; set; }
+        [JsonPropertyName("grantDurationSeconds")] public int? GrantDurationSeconds { get; set; }
+        [JsonPropertyName("hostCapability")] public WorkbenchApprovalHostCapability? HostCapability { get; set; }
+        [JsonPropertyName("hostKind")] public string? HostKind { get; set; }
+        [JsonPropertyName("preContentDigest")] public string? PreContentDigest { get; set; }
+        [JsonPropertyName("contentDigest")] public string? ContentDigest { get; set; }
+        [JsonPropertyName("patchDigest")] public string? PatchDigest { get; set; }
+    }
+
+    private sealed class WorkbenchApprovalHostCapability
+    {
+        [JsonPropertyName("hostKind")] public string? HostKind { get; set; }
+        [JsonPropertyName("canOpenNativeDiff")] public bool CanOpenNativeDiff { get; set; }
+        [JsonPropertyName("canDownloadPatch")] public bool CanDownloadPatch { get; set; }
+        [JsonPropertyName("canApplySource")] public bool CanApplySource { get; set; }
+        [JsonPropertyName("canApplyCSharpSource")] public bool CanApplyCSharpSource { get; set; }
+        [JsonPropertyName("isExplicitLocalHostAction")] public bool IsExplicitLocalHostAction { get; set; }
+    }
+
+    private sealed record WorkbenchApprovalConfirmation(
+        string Capability,
+        string AgentId,
+        string AgentInstanceId,
+        string Action,
+        string SubjectId,
+        string MaterialDigest,
+        DateTimeOffset ExpiresAt);
+
     private sealed class WorkbenchAgentRequestDecision
     {
         [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("confirmationCapability")] public string? ConfirmationCapability { get; set; }
         [JsonPropertyName("approvedScope")] public Testing.MauiTestAgentMutationScope? ApprovedScope { get; set; }
         [JsonPropertyName("grantDurationSeconds")] public int? GrantDurationSeconds { get; set; }
         [JsonPropertyName("reasonCode")] public string? ReasonCode { get; set; }
@@ -6201,41 +7384,39 @@ public sealed partial class InspectorServer : IDisposable
 
     private sealed class WorkbenchRepairClassifyRequest
     {
-        [JsonPropertyName("run")] public Testing.MauiFlowRunReport? Run { get; set; }
-        [JsonPropertyName("plan")] public Testing.MauiTestPlan? Plan { get; set; }
-        [JsonPropertyName("replayEligibility")] public Testing.MauiFlowReplayEligibilityDecision? ReplayEligibility { get; set; }
-        [JsonPropertyName("expectedCheckpoint")] public Testing.MauiFlowCheckpoint? ExpectedCheckpoint { get; set; }
-        [JsonPropertyName("currentCheckpoint")] public Testing.MauiFlowCheckpoint? CurrentCheckpoint { get; set; }
-        [JsonPropertyName("beforeDispatch")] public bool? BeforeDispatch { get; set; }
-        [JsonPropertyName("isCurrentLocalRun")] public bool IsCurrentLocalRun { get; set; }
-        [JsonPropertyName("artifactTrust")] public string? ArtifactTrust { get; set; }
-        [JsonPropertyName("priorActiveSelectorResolution")] public Testing.MauiRepairPriorSelectorResolution? PriorActiveSelectorResolution { get; set; }
-        [JsonPropertyName("targetFingerprint")] public Testing.MauiElementFingerprint? TargetFingerprint { get; set; }
-        [JsonPropertyName("additionalFailureCodes")] public List<string>? AdditionalFailureCodes { get; set; }
+        [JsonPropertyName("runId")] public string? RunId { get; set; }
+        [JsonPropertyName("runCapabilityToken")] public string? RunCapabilityToken { get; set; }
+        [JsonPropertyName("artifactId")] public string? ArtifactId { get; set; }
+        [JsonPropertyName("artifactCapabilityToken")] public string? ArtifactCapabilityToken { get; set; }
     }
 
     private sealed class WorkbenchRepairProposeRequest
     {
         [JsonPropertyName("classificationToken")] public string? ClassificationToken { get; set; }
-        [JsonPropertyName("input")] public Testing.MauiFlowRepairProposalGenerationInput? Input { get; set; }
-        [JsonPropertyName("agentOriginated")] public bool AgentOriginated { get; set; }
     }
 
     private sealed record WorkbenchRepairClassification(
         Testing.MauiFlowRepairEligibilityDecision Decision,
-        string? ReportRunId,
-        string? FlowDigest,
+        WorkflowRunRepairContext Run,
+        Testing.MauiFlowStepAttempt FailedStep,
+        string ArtifactTrust,
         Testing.MauiRepairPriorSelectorResolution? PriorActiveSelectorResolution,
-        DateTimeOffset CreatedAt);
+        DateTimeOffset CreatedAt)
+    {
+        public bool IsCurrentLocalRun =>
+            !string.Equals(
+                ArtifactTrust,
+                Testing.MauiArtifactTrustStates.LocallyReproduced,
+                StringComparison.Ordinal);
+    }
 
     private sealed class WorkbenchRepairGrantRequest
     {
         [JsonPropertyName("proposalId")] public string? ProposalId { get; set; }
         [JsonPropertyName("kind")] public string? Kind { get; set; }
         [JsonPropertyName("reviewer")] public string? Reviewer { get; set; }
-        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("confirmationCapability")] public string? ConfirmationCapability { get; set; }
         [JsonPropertyName("expiresAt")] public DateTimeOffset? ExpiresAt { get; set; }
-        [JsonPropertyName("policy")] public string? Policy { get; set; }
     }
 
     private sealed class WorkbenchRepairRejectRequest
@@ -6247,25 +7428,21 @@ public sealed partial class InspectorServer : IDisposable
     private sealed class WorkbenchRepairValidationRequest
     {
         [JsonPropertyName("validationGrant")] public string? ValidationGrant { get; set; }
-        [JsonPropertyName("replaySafety")] public Testing.MauiFlowReplayEligibilityDecision? ReplaySafety { get; set; }
     }
 
     private sealed class WorkbenchRepairApplyRequest
     {
         [JsonPropertyName("approvalGrant")] public string? ApprovalGrant { get; set; }
-        [JsonPropertyName("policy")] public string? Policy { get; set; }
     }
 
     private sealed class WorkbenchRepairVerificationRequest
     {
-        [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
-        [JsonPropertyName("verificationRuns")] public List<WorkflowRepairVerificationRun>? VerificationRuns { get; set; }
+        [JsonPropertyName("verificationRuns")] public List<WorkflowRepairVerificationAccess>? VerificationRuns { get; set; }
     }
 
     private sealed class WorkbenchRepairRollbackRequest
     {
         [JsonPropertyName("rollbackGrant")] public string? RollbackGrant { get; set; }
-        [JsonPropertyName("policy")] public string? Policy { get; set; }
     }
 
     private sealed class WorkbenchCSharpSourceProposalRequest
@@ -6287,8 +7464,13 @@ public sealed partial class InspectorServer : IDisposable
         [JsonPropertyName("kind")] public string? Kind { get; set; }
         [JsonPropertyName("reviewer")] public string? Reviewer { get; set; }
         [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("confirmationCapability")] public string? ConfirmationCapability { get; set; }
         [JsonPropertyName("expiresAt")] public DateTimeOffset? ExpiresAt { get; set; }
         [JsonPropertyName("hostCapability")] public WorkbenchCSharpSourceHostCapability? HostCapability { get; set; }
+        [JsonPropertyName("hostKind")] public string? HostKind { get; set; }
+        [JsonPropertyName("preContentDigest")] public string? PreContentDigest { get; set; }
+        [JsonPropertyName("contentDigest")] public string? ContentDigest { get; set; }
+        [JsonPropertyName("patchDigest")] public string? PatchDigest { get; set; }
     }
 
     private sealed class WorkbenchCSharpSourceRejectRequest
@@ -6311,6 +7493,7 @@ public sealed partial class InspectorServer : IDisposable
 
     private sealed class WorkbenchCSharpSourceApplyAckRequest
     {
+        [JsonPropertyName("confirmationCapability")] public string? ConfirmationCapability { get; set; }
         [JsonPropertyName("applied")] public bool Applied { get; set; }
         [JsonPropertyName("hostKind")] public string? HostKind { get; set; }
         [JsonPropertyName("preContentDigest")] public string? PreContentDigest { get; set; }
@@ -6352,6 +7535,7 @@ public sealed partial class InspectorServer : IDisposable
 
     private sealed class WorkbenchCSharpSourceRollbackAckRequest
     {
+        [JsonPropertyName("confirmationCapability")] public string? ConfirmationCapability { get; set; }
         [JsonPropertyName("reverted")] public bool Reverted { get; set; }
         [JsonPropertyName("hostKind")] public string? HostKind { get; set; }
         [JsonPropertyName("preContentDigest")] public string? PreContentDigest { get; set; }
@@ -6384,6 +7568,7 @@ public sealed partial class InspectorServer : IDisposable
         [JsonPropertyName("kind")] public string? Kind { get; set; }
         [JsonPropertyName("reviewer")] public string? Reviewer { get; set; }
         [JsonPropertyName("humanConfirmed")] public bool HumanConfirmed { get; set; }
+        [JsonPropertyName("confirmationCapability")] public string? ConfirmationCapability { get; set; }
         [JsonPropertyName("expiresAt")] public DateTimeOffset? ExpiresAt { get; set; }
         [JsonPropertyName("hostCapability")] public WorkbenchXamlSourceHostCapability? HostCapability { get; set; }
     }
@@ -6853,7 +8038,10 @@ public sealed partial class InspectorServer : IDisposable
         var buttonLabel = ReadStringField(body, "buttonLabel");
         if (string.IsNullOrWhiteSpace(buttonLabel) || buttonLabel.Length > 256)
             return BadRequest("buttonLabel is required and must be 256 characters or fewer");
-        var result = await _alertController.DismissAsync(buttonLabel);
+        var alertRevision = ReadStringField(body, "alertRevision");
+        if (alertRevision is { Length: > 128 })
+            return BadRequest("alertRevision must be 128 characters or fewer");
+        var result = await _alertController.DismissAsync(buttonLabel, alertRevision);
         return Ok(JsonSerializer.Serialize(result, CamelCase));
     }
 

@@ -65,9 +65,10 @@ export async function deliverAgentRequest({
   label = 'Work with your agent',
   intent = 'devflow-test-assistance',
   copyText,
+  agent,
 } = {}) {
   const value = typeof prompt === 'function' ? await prompt() : prompt;
-  const request = String(value || '').trim().slice(0, 8192);
+  const request = bindAgentPrompt(value, agent);
   if (!request) {
     return {
       ok: false,
@@ -112,6 +113,21 @@ export async function deliverAgentRequest({
         : 'Copied the agent request. Paste it into your coding agent chat.'
       : hostError || 'The host agent was unavailable and the prompt could not be copied.',
   };
+}
+
+export function bindAgentPrompt(prompt, agent = null) {
+  const request = String(prompt || '').trim();
+  if (!request) return '';
+  const agentId = String(agent?.id || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 256);
+  const agentInstanceId = String(agent?.instanceId || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 256);
+  const binding = agentId && agentInstanceId
+    ? [
+      `Target exactly agentId "${agentId}" and agentInstanceId "${agentInstanceId}".`,
+      'Chat approval or affirmative text expresses intent only; it does not authorize commit or run.',
+      'A current Test Workbench broker grant is required separately for each commit or run.',
+    ].join(' ')
+    : '';
+  return [binding, request].filter(Boolean).join(' ').slice(0, 8192);
 }
 
 export function parseWorkbenchStartupHints(search = '') {
@@ -213,6 +229,28 @@ export function visibleFocusables(root) {
       element.getClientRects().length > 0);
 }
 
+export function retainWorkbenchFocus(element, schedule = (callback) => callback()) {
+  if (!element ||
+      typeof element.focus !== 'function' ||
+      typeof element.getClientRects !== 'function' ||
+      element.isConnected === false ||
+      element.getClientRects().length === 0) {
+    return false;
+  }
+  schedule(() => {
+    if (element.isConnected !== false && element.getClientRects().length > 0)
+      element.focus({ preventScroll: true });
+  });
+  return true;
+}
+
+export function enabledWorkbenchTabs(tabs, tabList) {
+  return [...(tabs || [])].filter((button) =>
+    !button.disabled &&
+    !button.hidden &&
+    button.closest?.('[role="tablist"]') === tabList);
+}
+
 function readableState(value) {
   return String(value || 'none').replace(/-/g, ' ');
 }
@@ -274,6 +312,12 @@ export function createInspectorWorkbench(options = {}) {
   const repair = options.repair || null;
   const source = options.source || null;
   const study = options.study || null;
+  const agent = options.agent || run?.state?.().agent || null;
+  const featureCapabilities = Object.freeze({
+    repair: options.featureCapabilities?.repair === true,
+    source: options.featureCapabilities?.source === true,
+    traceImport: options.featureCapabilities?.traceImport === true,
+  });
   let state = createInitialWorkbenchState(win.location?.search || '');
   let opened = false;
   let returnFocus = null;
@@ -283,6 +327,10 @@ export function createInspectorWorkbench(options = {}) {
 
   function capabilities() {
     return bridge && typeof bridge.capabilities === 'function' ? bridge.capabilities() : [];
+  }
+
+  function featureEnabled(feature) {
+    return featureCapabilities[feature] === true;
   }
 
   function setStatus(message) {
@@ -316,7 +364,10 @@ export function createInspectorWorkbench(options = {}) {
     const hidden = !timeline || timeline.classList.contains('df-hidden');
     const title = doc.getElementById('df-timeline-title-text')?.textContent?.trim();
     const meta = doc.getElementById('df-timeline-meta')?.textContent?.trim();
-    const steps = timeline?.querySelectorAll('#df-timeline-steps .df-tl-step').length || 0;
+    const visibleSteps = timeline?.querySelectorAll('#df-timeline-steps .df-tl-step').length || 0;
+    const steps = draft.recording
+      ? Math.max(Number(draft.recordingSteps) || 0, visibleSteps)
+      : visibleSteps;
     strip.textContent = hidden
       ? 'No active test'
       : [title || 'Workflow', meta, steps ? `${steps} step${steps === 1 ? '' : 's'}` : null].filter(Boolean).join(' · ');
@@ -410,6 +461,12 @@ export function createInspectorWorkbench(options = {}) {
           reason: 'Agent requests appear here after your agent prepares a test or asks to run it.',
         };
       case 'repair':
+        if (!featureEnabled('repair')) {
+          return {
+            enabled: false,
+            reason: 'Selector repair is disabled in this Inspector.',
+          };
+        }
         if (traceState.mode === 'imported') {
           return {
             enabled: false,
@@ -434,6 +491,12 @@ export function createInspectorWorkbench(options = {}) {
           reason: 'Record or open a test to unlock Improve.',
         };
       case 'source':
+        if (!featureEnabled('source')) {
+          return {
+            enabled: false,
+            reason: 'Source preview is disabled in this Inspector. Stay on the visible control or ask your coding agent for a read-only testability plan.',
+          };
+        }
         if (traceState.mode === 'imported') {
           return {
             enabled: false,
@@ -557,6 +620,7 @@ export function createInspectorWorkbench(options = {}) {
               label,
               intent: config.intent,
               copyText,
+              agent,
             });
             button.textContent = outcome.buttonLabel;
             setStatus(outcome.status);
@@ -597,6 +661,8 @@ export function createInspectorWorkbench(options = {}) {
       },
       selectTab,
       selectStage,
+      featureEnabled,
+      toolAvailability,
       focusGoal,
       workbenchState: () => state,
       updateDraft(patch, rerender = true) {
@@ -664,7 +730,14 @@ export function createInspectorWorkbench(options = {}) {
   }
 
   function selectTab(tab, focus = false, stage = null) {
-    if (!WORKBENCH_TABS.includes(tab)) return;
+    if (!WORKBENCH_TABS.includes(tab)) return false;
+    const availability = toolAvailability(tab);
+    if (!availability.enabled && tab !== 'requests') {
+      const retainedFocus = doc.activeElement;
+      setStatus(availability.reason);
+      retainWorkbenchFocus(retainedFocus, (callback) => win.setTimeout(callback, 0));
+      return false;
+    }
     const mappedStage = stage || Object.entries(STAGE_TABS).find(([, candidate]) => candidate === tab)?.[0];
     state = normalizeWorkbenchState(state, { selectedTab: tab, selectedStage: mappedStage || state.selectedStage });
     if (tab === 'trace') study?.resultsOpened?.(trace?.state?.().run);
@@ -674,6 +747,7 @@ export function createInspectorWorkbench(options = {}) {
       target?.focus();
       target?.scrollIntoView?.({ block: 'nearest', inline: 'nearest' });
     }
+    return true;
   }
 
   function selectStage(stage, focus = false) {
@@ -710,13 +784,13 @@ export function createInspectorWorkbench(options = {}) {
       updateOpenChrome();
       syncTimelineStrip();
     }
-    selectTab(tab, false, tab === state.selectedTab ? state.selectedStage : null);
+    const selected = selectTab(tab, false, tab === state.selectedTab ? state.selectedStage : null);
     if (firstOpen) {
       setStatus(tab === 'requests'
         ? 'Tests opened to Agent requests.'
         : 'Tests opened. Enter a Goal or open a saved test.');
     }
-    if (focus) {
+    if (focus && selected !== false) {
       win.setTimeout(() => {
         if (focusGoalOnOpen) {
           const goal = root.querySelector('#df-goal-input');
@@ -871,7 +945,7 @@ export function createInspectorWorkbench(options = {}) {
 
   function onTabKeyDown(event) {
     const tabList = event.currentTarget.closest('[role="tablist"]');
-    const enabled = tabs.filter((button) => !button.disabled && button.closest('[role="tablist"]') === tabList);
+    const enabled = enabledWorkbenchTabs(tabs, tabList);
     const index = enabled.indexOf(event.currentTarget);
     let next = null;
     if (event.key === 'ArrowRight' || event.key === 'ArrowDown') next = enabled[(index + 1) % enabled.length];
@@ -955,6 +1029,10 @@ export function createInspectorWorkbench(options = {}) {
     open,
     openStage,
     focusGoal,
+    featureEnabled,
+    canSelectTab(tab) {
+      return WORKBENCH_TABS.includes(tab) && (tab === 'requests' || toolAvailability(tab).enabled);
+    },
     close,
     toggle,
     isOpen: () => opened,

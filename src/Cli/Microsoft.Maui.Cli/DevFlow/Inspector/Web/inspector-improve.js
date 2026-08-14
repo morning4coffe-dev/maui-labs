@@ -227,7 +227,20 @@ function findingCard(finding, helpers, controller) {
     links.append(button('Open Trace', () => helpers.selectTab?.('trace')));
   }
   if (finding.source) {
-    links.append(button('Source anchor', () => controller?.openSource?.(finding.source)));
+    if (helpers.featureEnabled?.('source')) {
+      links.append(button('Source anchor', () => controller?.openSource?.(finding.source)));
+    } else {
+      helpers.agentAction?.(links, {
+        buttonLabel: 'Ask agent about source anchor',
+        title: 'Ask your agent for a testability plan',
+        description: 'Source preview is disabled, so keep this finding visible and request a read-only conversational handoff.',
+        prompt: [
+          'Use only the restricted DevFlow test-agent tools.',
+          `Explain how to improve the testability finding anchored at ${finding.source}.`,
+          'Prepare a read-only plan only. Do not edit source, commit, run, or claim that chat approval grants authority.',
+        ].join(' '),
+      });
+    }
   }
   if (links.childElementCount) card.append(links);
   return card;
@@ -274,7 +287,7 @@ function ambiguityButton(text, action, label, disabled = false) {
   return element;
 }
 
-function ambiguityMatchCard(match, context, controller) {
+function ambiguityMatchCard(match, context, controller, helpers) {
   const card = create('article', 'df-ambiguity-match');
   card.append(create('h5', null, `${match.type || 'Element'} · ${match.role || 'role unavailable'}`));
   const facts = [
@@ -306,11 +319,24 @@ function ambiguityMatchCard(match, context, controller) {
     ));
   }
   if (!hasUniqueReturnedAutomationId(context) && match.hasSource) {
-    actions.append(ambiguityButton(
-      'Improve app testability',
-      () => controller?.improveTestability?.(match),
-      `Select this mapped ${match.type || 'element'} and open a reviewed source proposal`
-    ));
+    if (helpers.featureEnabled?.('source')) {
+      actions.append(ambiguityButton(
+        'Improve app testability',
+        () => controller?.improveTestability?.(match),
+        `Select this mapped ${match.type || 'element'} and open a reviewed source proposal`
+      ));
+    } else {
+      helpers.agentAction?.(actions, {
+        buttonLabel: 'Ask agent about testability',
+        title: 'Ask your agent for a safe testability plan',
+        description: 'Source preview is disabled. The current control stays selected and visible while the prompt is prepared.',
+        prompt: [
+          'Use only the restricted DevFlow test-agent tools.',
+          `Explain a read-only testability plan for the mapped ${match.type || 'element'} with no unique AutomationId.`,
+          'Do not edit source, change the test, commit, or run. Chat approval is intent only.',
+        ].join(' '),
+      });
+    }
   }
   card.append(actions);
   return card;
@@ -326,7 +352,7 @@ function ambiguityGuidance(context) {
   return 'A displayed AutomationId is only a candidate. DevFlow re-verifies it against the full live tree before changing the draft.';
 }
 
-function renderAmbiguityCard(context, controller) {
+function renderAmbiguityCard(context, controller, helpers) {
   const card = create('section', 'df-ambiguity-card');
   const heading = create('h4', null, 'Ambiguous selector');
   heading.id = 'df-ambiguous-selector-heading';
@@ -348,7 +374,7 @@ function renderAmbiguityCard(context, controller) {
   ]) facts.append(create('li', null, fact));
   card.append(facts);
   const matches = create('div', 'df-ambiguity-matches');
-  for (const match of context.matches) matches.append(ambiguityMatchCard(match, context, controller));
+  for (const match of context.matches) matches.append(ambiguityMatchCard(match, context, controller, helpers));
   card.append(matches);
   card.append(create('p', 'df-workbench-note', ambiguityGuidance(context)));
   return card;
@@ -378,7 +404,7 @@ export function renderImprovePanel(helpers) {
     return root;
   }
 
-  if (ambiguity) root.append(renderAmbiguityCard(ambiguity, controller));
+  if (ambiguity) root.append(renderAmbiguityCard(ambiguity, controller, helpers));
   if (state.error) root.append(create('p', 'df-workbench-safety', safe(state.error)));
 
   const controls = create('section', 'df-authoring-section df-tool-ready-state');

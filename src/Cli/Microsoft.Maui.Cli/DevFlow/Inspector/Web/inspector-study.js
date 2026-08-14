@@ -29,7 +29,9 @@ export const PROTOTYPE_STUDY_EVENT_KINDS = Object.freeze([
   'repair-rejected',
   'repair-applied',
   'repair-verified',
-  'repair-rollback',
+  'repair-rollback-required',
+  'repair-rollback-failed',
+  'repair-reverted',
 ]);
 
 const EVENT_KINDS = new Set(PROTOTYPE_STUDY_EVENT_KINDS);
@@ -65,7 +67,9 @@ const REPAIR_EVENT_KINDS = new Set([
   'repair-rejected',
   'repair-applied',
   'repair-verified',
-  'repair-rollback',
+  'repair-rollback-required',
+  'repair-rollback-failed',
+  'repair-reverted',
 ]);
 const AGENT_APPROVAL_EVENT_KINDS = new Set([
   'agent-requested',
@@ -487,13 +491,23 @@ function summarizeSession(session, storageState) {
     ? 'insufficient'
     : passedRuns.length === terminalRuns.length ? 'stable' : 'unstable';
   const authoringMode = summarizeAuthoringMode(events);
+  const latestRollbackByProposal = new Map();
+  for (const event of events) {
+    if (!['repair-rollback-required', 'repair-rollback-failed', 'repair-reverted'].includes(event.kind))
+      continue;
+    latestRollbackByProposal.set(event.proposal || 'unknown', event.kind);
+  }
   const repair = {
     proposed: countEvents(events, 'repair-proposed'),
     approved: countEvents(events, 'repair-approved'),
     rejected: countEvents(events, 'repair-rejected'),
     applied: countEvents(events, 'repair-applied'),
     verified: countEvents(events, 'repair-verified'),
-    rollback: countEvents(events, 'repair-rollback'),
+    rollbackRequired: countEvents(events, 'repair-rollback-required'),
+    rollbackFailed: countEvents(events, 'repair-rollback-failed'),
+    reverted: countEvents(events, 'repair-reverted'),
+    unresolvedRollback: [...latestRollbackByProposal.values()]
+      .filter((kind) => kind !== 'repair-reverted').length,
   };
   const agentApprovals = summarizeAgentApprovals(events);
   const humanInvolvementNeeded = [];
@@ -501,7 +515,8 @@ function summarizeSession(session, storageState) {
     humanInvolvementNeeded.push('review-terminal-result');
   if (repair.proposed > repair.approved + repair.rejected)
     humanInvolvementNeeded.push('repair-decision');
-  if (repair.applied > repair.verified + repair.rollback)
+  if (repair.applied > repair.verified + repair.reverted ||
+      repair.unresolvedRollback > 0)
     humanInvolvementNeeded.push('repair-verification-or-rollback');
   if (agentApprovals.pending > 0)
     humanInvolvementNeeded.push('agent-approval-decision');

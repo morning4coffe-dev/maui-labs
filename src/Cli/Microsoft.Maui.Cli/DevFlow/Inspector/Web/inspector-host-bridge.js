@@ -74,6 +74,10 @@ export const HOST_OPERATIONS = Object.freeze({
     message: 'devflow:getCSharpSourceSelection', mode: 'request', timeoutMs: 10000, report: true,
     label: 'supply an active C# source selection', fallback: null,
   }),
+  nativeApproval: Object.freeze({
+    message: 'devflow:nativeApproval', mode: 'request', timeoutMs: 120000, report: true,
+    label: 'obtain a human-confirmed native approval', fallback: null,
+  }),
 });
 
 export const HOST_CAPABILITIES = Object.freeze(Object.keys(HOST_OPERATIONS));

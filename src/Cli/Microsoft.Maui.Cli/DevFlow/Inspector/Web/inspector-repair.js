@@ -7,6 +7,7 @@ export function renderRepairPanel(helpers) {
   const hasFailedRun = !!state.current?.report?.failure;
   const lifecycle = state.proposal?.state || proposal?.state || null;
   const canMutate = state.canMutate === true;
+  const approvalAvailable = state.approvalAvailable === true;
   const validationAvailable = state.validationAvailable !== false;
   const reasons = Array.isArray(eligibility?.reasons) ? eligibility.reasons : [];
   const ambiguous = eligibility?.failureCode === 'locator-ambiguous' ||
@@ -114,10 +115,15 @@ export function renderRepairPanel(helpers) {
       const preview = helpers.action(proposalCard, 'Review suggested update', () => repair?.preview?.());
       preview.classList.add('df-authoring-primary');
     } else if (lifecycle === 'previewed' && !(proposal.validationRunIds?.length)) {
-      if (validationAvailable) {
+      if (validationAvailable && approvalAvailable) {
         const validate = helpers.action(proposalCard, 'Try this update', () => repair?.validate?.());
         validate.classList.add('df-authoring-primary');
         validate.disabled = !repair || !canMutate;
+      } else if (!approvalAvailable) {
+        const unavailable = document.createElement('p');
+        unavailable.className = 'df-workbench-safety';
+        unavailable.textContent = 'Native approval is unavailable in this preview. A trusted native host confirmation cannot be made here, and the browser cannot mint the temporary validation grant.';
+        proposalCard.append(unavailable);
       } else {
         const unavailable = document.createElement('p');
         unavailable.className = 'df-workbench-note';
@@ -125,13 +131,21 @@ export function renderRepairPanel(helpers) {
         proposalCard.append(unavailable);
       }
     } else if (lifecycle === 'previewed' && proposal.validationRunIds?.length && !agentOriginated) {
-      const approval = helpers.action(proposalCard, 'Approve update', () => repair?.requestApproval?.());
-      approval.classList.add('df-authoring-primary');
-      approval.disabled = !repair || !canMutate;
+      if (approvalAvailable) {
+        const approval = helpers.action(proposalCard, 'Approve update', () => repair?.requestApproval?.());
+        approval.classList.add('df-authoring-primary');
+        approval.disabled = !repair || !canMutate;
+      } else {
+        const unavailable = document.createElement('p');
+        unavailable.className = 'df-workbench-safety';
+        unavailable.textContent = 'Native approval is unavailable in this preview. A trusted native host confirmation cannot be made here; browser or chat approval cannot issue the broker grant.';
+        proposalCard.append(unavailable);
+      }
     } else if (lifecycle === 'approved' && !agentOriginated) {
-      const apply = helpers.action(proposalCard, 'Apply update', () => repair?.apply?.());
-      apply.classList.add('df-authoring-primary');
-      apply.disabled = !repair || !state.proposal?.grant || !canMutate;
+      const unavailable = document.createElement('p');
+      unavailable.className = 'df-workbench-safety';
+      unavailable.textContent = 'No trusted native-host approval client is available yet, so this exact digest cannot be applied here. The browser does not receive the grant.';
+      proposalCard.append(unavailable);
     } else if (['applying', 'applied'].includes(lifecycle)) {
       const refresh = helpers.action(proposalCard, 'Refresh update status', () => repair?.refresh?.());
       refresh.classList.add('df-authoring-primary');
@@ -159,7 +173,7 @@ export function renderRepairPanel(helpers) {
       const score = candidate.score ?? candidate.scores?.deterministicRankScore ?? 'n/a';
       const line = document.createElement('p');
       line.className = 'df-workbench-note';
-      line.textContent = `Candidate ${candidate.candidateId || 'unknown'} · ${kind} · unique ${candidate.validation?.unique === true ? 'yes' : 'no'} · score ${score}.`;
+      line.textContent = `Candidate ${candidate.candidateId || 'unknown'} · ${kind} · unique ${candidate.unique === true || candidate.validation?.unique === true ? 'yes' : 'no'} · score ${score}.`;
       proposalDetails.append(line);
     }
     const proof = proposal.unchangedAssertionsProof;

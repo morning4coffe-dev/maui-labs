@@ -42,6 +42,14 @@ internal sealed class ArtifactTrustStoreBindResult
     public MauiArtifactTrustStatus? Status { get; init; }
 }
 
+/// <summary>Broker-derived trust for one imported artifact bound to one exact local run.</summary>
+internal sealed class ArtifactTrustStoreRepairResult
+{
+    public int StatusCode { get; init; }
+    public string? Error { get; init; }
+    public string? Trust { get; init; }
+}
+
 /// <summary>
 /// Bounded in-memory store for imported artifact projections. Raw reports and ZIP bytes are never
 /// persisted. Every record is reachable only with the short-lived capability token minted at
@@ -173,6 +181,51 @@ internal sealed class ArtifactTrustStore
                 StatusCode = 200,
                 Evaluation = CloneEvaluation(evaluation),
                 Status = CreateStatus(stored),
+            };
+        }
+    }
+
+    public ArtifactTrustStoreRepairResult GetRepairTrust(
+        string artifactId,
+        string? capabilityToken,
+        string localRunId)
+    {
+        lock (_gate)
+        {
+            var lookup = FindAuthorizedLocked(artifactId, capabilityToken);
+            if (lookup.Result is not null)
+            {
+                return new ArtifactTrustStoreRepairResult
+                {
+                    StatusCode = lookup.Result.StatusCode,
+                    Error = lookup.Result.Error,
+                };
+            }
+
+            var record = lookup.Artifact!.Record;
+            var binding = record.LocalReproduction;
+            if (!string.Equals(
+                    record.Verification?.State,
+                    MauiArtifactTrustStates.LocallyReproduced,
+                    StringComparison.Ordinal) ||
+                binding?.Matched != true ||
+                !string.Equals(binding.LocalRunId, localRunId, StringComparison.Ordinal) ||
+                !string.Equals(
+                    binding.Verification?.State,
+                    MauiArtifactTrustStates.LocallyReproduced,
+                    StringComparison.Ordinal))
+            {
+                return new ArtifactTrustStoreRepairResult
+                {
+                    StatusCode = 409,
+                    Error = "The imported artifact is not locally reproduced by this exact broker-owned run.",
+                };
+            }
+
+            return new ArtifactTrustStoreRepairResult
+            {
+                StatusCode = 200,
+                Trust = MauiArtifactTrustStates.LocallyReproduced,
             };
         }
     }

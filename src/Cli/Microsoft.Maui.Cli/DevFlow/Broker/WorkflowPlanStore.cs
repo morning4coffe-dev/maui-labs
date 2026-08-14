@@ -326,6 +326,9 @@ internal sealed class WorkflowPlanStore
                 validProposal,
                 request.ExpectedFlowDigest ?? baseFlow.Digest,
                 request.ExpectedFlowRevision ?? baseFlow.Revision,
+                request.ExpectedPlanDigest,
+                request.ExpectedPlanRevision,
+                request.ExpectedSafetyPolicy,
                 validProposal.ProposedSelector,
                 verifyPatch: true,
                 MauiFlowRepairOutcomeStates.Applied,
@@ -360,6 +363,9 @@ internal sealed class WorkflowPlanStore
                 proposal,
                 request.ExpectedAppliedFlowDigest,
                 request.ExpectedAppliedFlowRevision,
+                request.ExpectedPlanDigest,
+                request.ExpectedPlanRevision,
+                request.ExpectedSafetyPolicy,
                 proposal.OldSelector,
                 verifyPatch: false,
                 MauiFlowRepairOutcomeStates.Reverted,
@@ -434,6 +440,9 @@ internal sealed class WorkflowPlanStore
         MauiFlowRepairProposal proposal,
         string? expectedDigest,
         int? expectedRevision,
+        string? expectedPlanDigest,
+        int? expectedPlanRevision,
+        string? expectedSafetyPolicy,
         FlowSelector? selector,
         bool verifyPatch,
         string state,
@@ -443,7 +452,7 @@ internal sealed class WorkflowPlanStore
         IReadOnlyList<string> verificationRunIds,
         DateTimeOffset recordedAt)
     {
-        if (selector is null || !int.TryParse(proposal.SourceStepId, out var stepSequence))
+        if (selector is null || string.IsNullOrWhiteSpace(proposal.SourceStepId))
         {
             return WorkflowRepairFlowApplyResult.Failure(
                 "repair-selector-invalid",
@@ -469,6 +478,13 @@ internal sealed class WorkflowPlanStore
             var currentIdentity = ReadFlowIdentity(current!.Flow!);
             if (!string.Equals(current.FlowDigest, expectedDigest, StringComparison.Ordinal) ||
                 currentIdentity.Revision != expectedRevision ||
+                string.IsNullOrWhiteSpace(expectedPlanDigest) ||
+                !string.Equals(current.PlanDigest, expectedPlanDigest, StringComparison.Ordinal) ||
+                current.Plan?.Revision != expectedPlanRevision ||
+                !string.Equals(
+                    current.Plan?.SideEffectPolicy,
+                    expectedSafetyPolicy,
+                    StringComparison.Ordinal) ||
                 (!string.IsNullOrWhiteSpace(proposal.BaseFlow.FlowId) &&
                  !string.Equals(currentIdentity.FlowId, proposal.BaseFlow.FlowId, StringComparison.Ordinal)))
             {
@@ -480,7 +496,7 @@ internal sealed class WorkflowPlanStore
 
             var patch = verifyPatch
                 ? MauiFlowRepairPatchBuilder.ApplyVerified(current.Flow, proposal)
-                : MauiFlowRepairPatchBuilder.Build(current.Flow, stepSequence, selector);
+                : MauiFlowRepairPatchBuilder.Build(current.Flow, proposal.SourceStepId, selector);
             if (!patch.Ok || patch.PatchedFlow is null)
             {
                 return WorkflowRepairFlowApplyResult.Failure(
@@ -544,7 +560,16 @@ internal sealed class WorkflowPlanStore
             if (!WriteRepairBundle(files, out var writeError))
                 return WorkflowRepairFlowApplyResult.Failure("write-failed", writeError!);
 
-            return WorkflowRepairFlowApplyResult.Success(flowId, nextRevision, digest, historyPath!);
+            var nextPlanDigest = planJson is null ? null : ComputeDigest(planJson);
+            int? nextPlanRevision = current.Plan is null ? null : (current.Plan.Revision ?? 0) + 1;
+            return WorkflowRepairFlowApplyResult.Success(
+                flowId,
+                nextRevision,
+                digest,
+                historyPath!,
+                nextPlanDigest,
+                nextPlanRevision,
+                current.Plan?.SideEffectPolicy);
         }
     }
 
@@ -713,17 +738,37 @@ internal sealed class WorkflowPlanStore
         var lines = existing.ReplaceLineEndings("\n")
             .Split('\n', StringSplitOptions.RemoveEmptyEntries)
             .ToList();
+        var previousHash = ValidateRepairHistoryChain(lines, out error);
+        if (error is not null)
+            return false;
+        var eventId = RepairHistoryEventId(repairEvent);
+        foreach (var existingLine in lines)
+        {
+            try
+            {
+                var existingNode = JsonNode.Parse(existingLine) as JsonObject;
+                if (string.Equals(
+                        existingNode?["eventId"]?.GetValue<string>(),
+                        eventId,
+                        StringComparison.Ordinal))
+                {
+                    content = existing;
+                    return true;
+                }
+            }
+            catch (JsonException)
+            {
+                error = "The existing repair history contains invalid JSON.";
+                return false;
+            }
+        }
         if (lines.Count >= MaxRepairHistoryEntries)
         {
             error = "The bounded repair history has reached its entry limit.";
             return false;
         }
 
-        var previousHash = ValidateRepairHistoryChain(lines, out error);
-        if (error is not null)
-            return false;
-
-        var node = CreateRepairHistoryNode(repairEvent, lines.Count + 1, previousHash);
+        var node = CreateRepairHistoryNode(repairEvent, lines.Count + 1, previousHash, eventId);
         var material = CanonicalizeJson(node, indented: false);
         node["hash"] = "sha256:" + HashRepair(material);
         var line = CanonicalizeJson(node, indented: false);
@@ -791,13 +836,15 @@ internal sealed class WorkflowPlanStore
     private static JsonObject CreateRepairHistoryNode(
         WorkflowRepairHistoryEvent repairEvent,
         int sequence,
-        string? previousHash)
+        string? previousHash,
+        string eventId)
     {
         var proposal = repairEvent.Proposal;
         var candidate = proposal.Candidate;
         var node = new JsonObject
         {
             ["schema"] = 1,
+            ["eventId"] = eventId,
             ["sequence"] = sequence,
             ["at"] = repairEvent.RecordedAt.ToString("O", System.Globalization.CultureInfo.InvariantCulture),
             ["previousHash"] = previousHash,
@@ -833,6 +880,19 @@ internal sealed class WorkflowPlanStore
         };
         return node;
     }
+
+    private static string RepairHistoryEventId(WorkflowRepairHistoryEvent repairEvent)
+        => "sha256:" + HashRepair(string.Join(
+            "\u001f",
+            repairEvent.Proposal.ProposalId,
+            repairEvent.Proposal.Revision,
+            repairEvent.State,
+            repairEvent.NewFlowRevision,
+            repairEvent.RollbackRevision,
+            repairEvent.GrantDigest,
+            repairEvent.ReasonCode,
+            string.Join(",", (repairEvent.ValidationRunIds ?? []).OrderBy(static value => value, StringComparer.Ordinal)),
+            string.Join(",", (repairEvent.VerificationRunIds ?? []).OrderBy(static value => value, StringComparer.Ordinal))));
 
     private static JsonArray ToSafeHistoryArray(IEnumerable<string>? values)
     {
@@ -2336,6 +2396,9 @@ internal sealed class WorkflowRepairFlowApplyRequest
     public MauiFlowRepairProposal? Proposal { get; init; }
     public string? ExpectedFlowDigest { get; init; }
     public int? ExpectedFlowRevision { get; init; }
+    public string? ExpectedPlanDigest { get; init; }
+    public int? ExpectedPlanRevision { get; init; }
+    public string? ExpectedSafetyPolicy { get; init; }
     public string? Reviewer { get; init; }
     public string? GrantDigest { get; init; }
     public IReadOnlyList<string> ValidationRunIds { get; init; } = [];
@@ -2347,6 +2410,9 @@ internal sealed class WorkflowRepairFlowRollbackRequest
     public MauiFlowRepairProposal? Proposal { get; init; }
     public string? ExpectedAppliedFlowDigest { get; init; }
     public int? ExpectedAppliedFlowRevision { get; init; }
+    public string? ExpectedPlanDigest { get; init; }
+    public int? ExpectedPlanRevision { get; init; }
+    public string? ExpectedSafetyPolicy { get; init; }
     public string? Reviewer { get; init; }
     public string? GrantDigest { get; init; }
     public IReadOnlyList<string> VerificationRunIds { get; init; } = [];
@@ -2363,18 +2429,27 @@ internal sealed class WorkflowRepairFlowApplyResult
     public int? FlowRevision { get; private init; }
     public string? FlowDigest { get; private init; }
     public string? HistoryPath { get; private init; }
+    public string? PlanDigest { get; private init; }
+    public int? PlanRevision { get; private init; }
+    public string? SafetyPolicy { get; private init; }
 
     public static WorkflowRepairFlowApplyResult Success(
         string flowId,
         int revision,
         string digest,
-        string historyPath) => new()
+        string historyPath,
+        string? planDigest = null,
+        int? planRevision = null,
+        string? safetyPolicy = null) => new()
     {
         Ok = true,
         FlowId = flowId,
         FlowRevision = revision,
         FlowDigest = digest,
         HistoryPath = historyPath,
+        PlanDigest = planDigest,
+        PlanRevision = planRevision,
+        SafetyPolicy = safetyPolicy,
     };
 
     public static WorkflowRepairFlowApplyResult Failure(

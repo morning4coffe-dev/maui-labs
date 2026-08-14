@@ -31,7 +31,11 @@ internal sealed class WorkflowRepairProposalStore
         }
     }
 
-    internal WorkflowRepairStoreResult Propose(MauiFlowRepairProposal proposal, bool agentOriginated = false)
+    internal WorkflowRepairStoreResult Propose(
+        MauiFlowRepairProposal proposal,
+        bool agentOriginated = false,
+        WorkflowRepairTrustedContext? trustedContext = null,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
     {
         ArgumentNullException.ThrowIfNull(proposal);
         lock (_gate)
@@ -39,6 +43,8 @@ internal sealed class WorkflowRepairProposalStore
             PurgeExpiredGrantsLocked();
             if (!ValidateProposedRepair(proposal, out var error))
                 return WorkflowRepairStoreResult.Failure("proposal-invalid", error!);
+            if (!ValidateTrustedContext(proposal, trustedContext, out error))
+                return WorkflowRepairStoreResult.Failure("proposal-evidence-invalid", error!);
 
             var id = proposal.ProposalId;
             if (string.IsNullOrWhiteSpace(id))
@@ -68,7 +74,16 @@ internal sealed class WorkflowRepairProposalStore
                 MauiFlowRepairOutcomeStates.Proposed,
                 revision: 1,
                 agentOriginated,
+                CloneTrustedContext(trustedContext!),
                 _clock.GetUtcNow());
+            if (!TryPersistHistory(
+                    historyWriter,
+                    record,
+                    MauiFlowRepairOutcomeStates.Proposed,
+                    out error))
+            {
+                return WorkflowRepairStoreResult.Failure("history-persistence-failed", error!);
+            }
             _records.Add(id, record);
             return WorkflowRepairStoreResult.Success(CreateSnapshot(record));
         }
@@ -85,7 +100,9 @@ internal sealed class WorkflowRepairProposalStore
         }
     }
 
-    internal WorkflowRepairStoreResult Preview(string? proposalId)
+    internal WorkflowRepairStoreResult Preview(
+        string? proposalId,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
     {
         lock (_gate)
         {
@@ -93,7 +110,23 @@ internal sealed class WorkflowRepairProposalStore
             if (!TryGetLocked(proposalId, out var record, out var error))
                 return WorkflowRepairStoreResult.Failure("proposal-not-found", error!);
             if (record!.State == MauiFlowRepairOutcomeStates.Proposed)
+            {
+                var priorState = record.State;
+                var priorRevision = record.Revision;
+                var priorUpdatedAt = record.UpdatedAt;
                 TransitionLocked(record, MauiFlowRepairOutcomeStates.Previewed);
+                if (!TryPersistHistory(
+                        historyWriter,
+                        record,
+                        MauiFlowRepairOutcomeStates.Previewed,
+                        out error))
+                {
+                    record.State = priorState;
+                    record.Revision = priorRevision;
+                    record.UpdatedAt = priorUpdatedAt;
+                    return WorkflowRepairStoreResult.Failure("history-persistence-failed", error!);
+                }
+            }
             if (record.State is not MauiFlowRepairOutcomeStates.Previewed and
                 not MauiFlowRepairOutcomeStates.Approved and
                 not MauiFlowRepairOutcomeStates.Applying and
@@ -110,27 +143,52 @@ internal sealed class WorkflowRepairProposalStore
         }
     }
 
-    internal WorkflowRepairStoreResult Reject(string? proposalId, string? reviewer, string? reasonCode)
+    internal WorkflowRepairStoreResult Reject(
+        string? proposalId,
+        string? reviewer,
+        string? reasonCode,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
     {
         lock (_gate)
         {
             RefreshExpiredApprovalLocked();
             if (!TryGetLocked(proposalId, out var record, out var error))
                 return WorkflowRepairStoreResult.Failure("proposal-not-found", error!);
-            if (IsTerminal(record!.State))
+            if (record!.State is not MauiFlowRepairOutcomeStates.Proposed and
+                not MauiFlowRepairOutcomeStates.Previewed)
             {
                 return WorkflowRepairStoreResult.Failure(
-                    "proposal-terminal",
-                    $"Repair proposal state '{record.State}' cannot be rejected.");
+                    "proposal-not-rejectable",
+                    $"Only a proposed or previewed repair can be rejected; current state is '{record.State}'.");
             }
+            var priorReviewer = record.Reviewer;
+            var priorReasonCode = record.ReasonCode;
+            var priorState = record.State;
+            var priorRevision = record.Revision;
+            var priorUpdatedAt = record.UpdatedAt;
             record.Reviewer = Bounded(reviewer, 256);
             record.ReasonCode = Bounded(reasonCode, 128) ?? "rejected";
             TransitionLocked(record, MauiFlowRepairOutcomeStates.Rejected);
+            if (!TryPersistHistory(
+                    historyWriter,
+                    record,
+                    MauiFlowRepairOutcomeStates.Rejected,
+                    out error))
+            {
+                record.Reviewer = priorReviewer;
+                record.ReasonCode = priorReasonCode;
+                record.State = priorState;
+                record.Revision = priorRevision;
+                record.UpdatedAt = priorUpdatedAt;
+                return WorkflowRepairStoreResult.Failure("history-persistence-failed", error!);
+            }
             return WorkflowRepairStoreResult.Success(CreateSnapshot(record));
         }
     }
 
-    internal WorkflowRepairGrantIssueResult IssueGrant(WorkflowRepairGrantIssueRequest request)
+    internal WorkflowRepairGrantIssueResult IssueGrant(
+        WorkflowRepairGrantIssueRequest request,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
     {
         ArgumentNullException.ThrowIfNull(request);
         lock (_gate)
@@ -170,12 +228,16 @@ internal sealed class WorkflowRepairProposalStore
                     "The requested repair grant expiry is outside the broker policy bounds.");
             }
 
-            if (request.Kind == WorkflowRepairGrantKinds.Apply)
-            {
-                TransitionLocked(found, MauiFlowRepairOutcomeStates.Approved);
-            }
             var secret = OpaqueSecret("repairgrant");
             var digest = Hash(secret);
+            var priorState = found.State;
+            var priorRevision = found.Revision;
+            var priorUpdatedAt = found.UpdatedAt;
+            var priorReviewer = found.Reviewer;
+            var priorGrantDigest = found.GrantDigest;
+            var priorExpiresAt = found.ExpiresAt;
+            if (request.Kind == WorkflowRepairGrantKinds.Apply)
+                TransitionLocked(found, MauiFlowRepairOutcomeStates.Approved);
             var grant = new GrantRecord(
                 secret,
                 digest,
@@ -187,12 +249,30 @@ internal sealed class WorkflowRepairProposalStore
                 request.Binding.FlowRevision,
                 request.Binding?.TargetId,
                 request.Binding?.Policy,
+                request.Binding!.PlanDigest!,
+                request.Binding.PlanRevision!.Value,
+                request.Binding.SafetyPolicy!,
                 Bounded(request.Reviewer, 256)!,
                 expiresAt);
-            _grants.Add(secret, grant);
             found.Reviewer = grant.Reviewer;
             found.GrantDigest = digest;
             found.ExpiresAt = expiresAt;
+            if (request.Kind == WorkflowRepairGrantKinds.Apply &&
+                !TryPersistHistory(
+                    historyWriter,
+                    found,
+                    MauiFlowRepairOutcomeStates.Approved,
+                    out error))
+            {
+                found.State = priorState;
+                found.Revision = priorRevision;
+                found.UpdatedAt = priorUpdatedAt;
+                found.Reviewer = priorReviewer;
+                found.GrantDigest = priorGrantDigest;
+                found.ExpiresAt = priorExpiresAt;
+                return WorkflowRepairGrantIssueResult.Failure("history-persistence-failed", error!);
+            }
+            _grants.Add(secret, grant);
 
             return WorkflowRepairGrantIssueResult.Success(
                 secret,
@@ -205,7 +285,8 @@ internal sealed class WorkflowRepairProposalStore
     internal WorkflowRepairStoreResult RecordValidation(
         string? proposalId,
         string? validationGrant,
-        WorkflowRepairValidationRecord validation)
+        WorkflowRepairValidationRecord validation,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
     {
         ArgumentNullException.ThrowIfNull(validation);
         lock (_gate)
@@ -217,6 +298,13 @@ internal sealed class WorkflowRepairProposalStore
             if (!ConsumeGrantLocked(validationGrant, found, WorkflowRepairGrantKinds.Validation, out error))
                 return WorkflowRepairStoreResult.Failure("validation-grant-invalid", error!);
 
+            var grant = _grants[validationGrant!];
+            var priorState = found.State;
+            var priorRevision = found.Revision;
+            var priorUpdatedAt = found.UpdatedAt;
+            var priorReasonCode = found.ReasonCode;
+            var priorValidationRunIds = found.ValidationRunIds.ToList();
+            var priorValidationCount = found.Validation.Count;
             found.Validation.Add(CloneValidation(validation));
             found.ValidationRunIds = found.Validation
                 .SelectMany(static item => item.RunIds)
@@ -228,6 +316,22 @@ internal sealed class WorkflowRepairProposalStore
             // Validation is non-persistent and keeps the proposal in a reviewable preview state.
             if (found.State == MauiFlowRepairOutcomeStates.Proposed)
                 TransitionLocked(found, MauiFlowRepairOutcomeStates.Previewed);
+            if (!TryPersistHistory(
+                    historyWriter,
+                    found,
+                    MauiFlowRepairOutcomeStates.Previewed,
+                    out error))
+            {
+                grant.Used = false;
+                while (found.Validation.Count > priorValidationCount)
+                    found.Validation.RemoveAt(found.Validation.Count - 1);
+                found.ValidationRunIds = priorValidationRunIds;
+                found.ReasonCode = priorReasonCode;
+                found.State = priorState;
+                found.Revision = priorRevision;
+                found.UpdatedAt = priorUpdatedAt;
+                return WorkflowRepairStoreResult.Failure("history-persistence-failed", error!);
+            }
             return WorkflowRepairStoreResult.Success(CreateSnapshot(found));
         }
     }
@@ -297,7 +401,11 @@ internal sealed class WorkflowRepairProposalStore
 
             record.NewFlowRevision = apply.NewFlowRevision;
             record.AppliedFlowDigest = apply.AppliedFlowDigest;
+            record.AppliedPlanDigest = apply.AppliedPlanDigest;
+            record.AppliedPlanRevision = apply.AppliedPlanRevision;
+            record.AppliedSafetyPolicy = apply.AppliedSafetyPolicy;
             record.ApplyRunId = apply.ApplyRunId;
+            record.AppliedAt = _clock.GetUtcNow();
             TransitionLocked(record, MauiFlowRepairOutcomeStates.Applied);
             return WorkflowRepairStoreResult.Success(CreateSnapshot(record));
         }
@@ -305,7 +413,8 @@ internal sealed class WorkflowRepairProposalStore
 
     internal WorkflowRepairStoreResult RecordVerification(
         string? proposalId,
-        IReadOnlyList<WorkflowRepairVerificationRun>? verificationRuns)
+        IReadOnlyList<WorkflowRepairVerificationRun>? verificationRuns,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
     {
         lock (_gate)
         {
@@ -318,6 +427,13 @@ internal sealed class WorkflowRepairProposalStore
                     "Only an applied repair can receive verification results.");
             }
 
+            var priorState = record.State;
+            var priorRevision = record.Revision;
+            var priorUpdatedAt = record.UpdatedAt;
+            var priorReasonCode = record.ReasonCode;
+            var priorRecoveryState = record.LastRecoveryState;
+            var priorVerification = record.Verification;
+            var priorVerificationRunIds = record.VerificationRunIds;
             var runs = (verificationRuns ?? [])
                 .Take(_options.MaxVerificationRuns)
                 .Select(CloneVerification)
@@ -328,16 +444,53 @@ internal sealed class WorkflowRepairProposalStore
                 .Where(static id => !string.IsNullOrWhiteSpace(id))
                 .Distinct(StringComparer.Ordinal)
                 .ToList();
-            if (runs.Count == 3 && runs.All(static run => run.IsCleanVerifiedReplay))
+            if (runs.Count == _options.MaxVerificationRuns &&
+                runs.Select(static run => run.RunId)
+                    .Where(static id => !string.IsNullOrWhiteSpace(id))
+                    .Distinct(StringComparer.Ordinal)
+                    .Count() == _options.MaxVerificationRuns &&
+                runs.All(static run => run.BrokerRetained && run.IsCleanVerifiedReplay) &&
+                runs.All(run => run.StartedAt is not null &&
+                    record.AppliedAt is not null &&
+                    run.StartedAt >= record.AppliedAt))
             {
                 TransitionLocked(record, MauiFlowRepairOutcomeStates.Verified);
+                if (!TryPersistHistory(
+                        historyWriter,
+                        record,
+                        MauiFlowRepairOutcomeStates.Verified,
+                        out error))
+                {
+                    RestoreVerification();
+                    return WorkflowRepairStoreResult.Failure("history-persistence-failed", error!);
+                }
                 return WorkflowRepairStoreResult.Success(CreateSnapshot(record));
             }
 
             record.ReasonCode = "verification-failed";
             record.LastRecoveryState = MauiFlowRepairOutcomeStates.VerificationFailed;
             TransitionLocked(record, MauiFlowRepairOutcomeStates.RollbackRequired);
+            if (!TryPersistHistory(
+                    historyWriter,
+                    record,
+                    MauiFlowRepairOutcomeStates.RollbackRequired,
+                    out error))
+            {
+                RestoreVerification();
+                return WorkflowRepairStoreResult.Failure("history-persistence-failed", error!);
+            }
             return WorkflowRepairStoreResult.Success(CreateSnapshot(record));
+
+            void RestoreVerification()
+            {
+                record.State = priorState;
+                record.Revision = priorRevision;
+                record.UpdatedAt = priorUpdatedAt;
+                record.ReasonCode = priorReasonCode;
+                record.LastRecoveryState = priorRecoveryState;
+                record.Verification = priorVerification;
+                record.VerificationRunIds = priorVerificationRunIds;
+            }
         }
     }
 
@@ -402,18 +555,48 @@ internal sealed class WorkflowRepairProposalStore
         }
     }
 
+    private static bool TryPersistHistory(
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter,
+        RepairRecord record,
+        string state,
+        out string? error)
+    {
+        error = null;
+        if (historyWriter is null)
+            return true;
+        WorkflowRepairHistoryAppendResult result;
+        try
+        {
+            result = historyWriter(CreateSnapshot(record), state);
+        }
+        catch (Exception exception)
+        {
+            error = "Repair history persistence failed: " + exception.Message;
+            return false;
+        }
+        if (result.Ok)
+            return true;
+        error = result.Error ?? "Repair history persistence failed.";
+        return false;
+    }
+
     private static bool ValidateProposedRepair(MauiFlowRepairProposal proposal, out string? error)
     {
         error = null;
         if (proposal.BaseFlow is null ||
             string.IsNullOrWhiteSpace(proposal.BaseFlow.Path) ||
             string.IsNullOrWhiteSpace(proposal.BaseFlow.Digest) ||
+            proposal.BaseFlow.Revision is null or < 1 ||
             string.IsNullOrWhiteSpace(proposal.SourceRunId) ||
             string.IsNullOrWhiteSpace(proposal.SourceStepId) ||
             !string.Equals(proposal.SourceFailureCode, MauiFlowFailureClasses.LocatorNotFound, StringComparison.Ordinal) ||
             proposal.PreDispatch != true ||
             proposal.OldSelector is null ||
             proposal.ProposedSelector is null ||
+            proposal.Candidate is null ||
+            proposal.Candidate.Unique != true ||
+            proposal.Candidate.Fingerprint is null ||
+            proposal.UniquenessProof?.MatchCount != 1 ||
             proposal.Patch is null ||
             proposal.Patch.SelectorOnly != true ||
             proposal.Patch.Operations.Count != 1 ||
@@ -423,7 +606,40 @@ internal sealed class WorkflowRepairProposalStore
             proposal.UnchangedAssertionsProof.ValuesUnchanged != true ||
             proposal.UnchangedAssertionsProof.OrderUnchanged != true)
         {
-            error = "The repair proposal must contain a pre-dispatch locator-not-found source, base flow, single selector-only patch, digest, and invariant proof.";
+            error = "The repair proposal must contain a pre-dispatch locator-not-found source, base flow, unique fingerprinted candidate, unique-resolution proof, single selector-only patch, digest, and invariant proof.";
+            return false;
+        }
+        return true;
+    }
+
+    private static bool ValidateTrustedContext(
+        MauiFlowRepairProposal proposal,
+        WorkflowRepairTrustedContext? context,
+        out string? error)
+    {
+        error = null;
+        if (context?.Eligibility?.Eligible != true ||
+            context.ReplaySafety?.RepairValidationAllowed != true ||
+            context.ReplaySafety.RepairEligibility != true ||
+            context.ClassifiedCheckpoint is null ||
+            string.IsNullOrWhiteSpace(context.PlanDigest) ||
+            context.PlanRevision is null or < 1 ||
+            string.IsNullOrWhiteSpace(context.SafetyPolicy) ||
+            string.Equals(
+                context.SafetyPolicy,
+                MauiFlowSideEffectPolicies.NonReplayable,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                context.Eligibility.SourceRunId,
+                proposal.SourceRunId,
+                StringComparison.Ordinal) ||
+            !string.Equals(
+                context.Eligibility.SourceStepId,
+                proposal.SourceStepId,
+                StringComparison.Ordinal) ||
+            !CheckpointsMatch(context.Eligibility.CurrentCheckpoint, context.ClassifiedCheckpoint))
+        {
+            error = "A repair proposal requires retained broker eligibility, replay safety, classified checkpoint, and exact plan safety identity.";
             return false;
         }
         return true;
@@ -440,7 +656,7 @@ internal sealed class WorkflowRepairProposalStore
                 break;
             case WorkflowRepairGrantKinds.Apply:
                 if (record.State == MauiFlowRepairOutcomeStates.Previewed &&
-                    record.Validation.Any(static validation => validation.Passed))
+                    record.Validation.LastOrDefault()?.Passed == true)
                     return true;
                 error = "A successful bounded transient validation is required before an apply approval can be issued.";
                 return false;
@@ -467,6 +683,15 @@ internal sealed class WorkflowRepairProposalStore
         var baseFlow = record.Proposal.BaseFlow;
         var expectedDigest = againstAppliedRevision ? record.AppliedFlowDigest : baseFlow?.Digest;
         var expectedRevision = againstAppliedRevision ? record.NewFlowRevision : baseFlow?.Revision;
+        var expectedPlanDigest = againstAppliedRevision
+            ? record.AppliedPlanDigest
+            : record.TrustedContext.PlanDigest;
+        var expectedPlanRevision = againstAppliedRevision
+            ? record.AppliedPlanRevision
+            : record.TrustedContext.PlanRevision;
+        var expectedSafetyPolicy = againstAppliedRevision
+            ? record.AppliedSafetyPolicy
+            : record.TrustedContext.SafetyPolicy;
         if (binding is null ||
             string.IsNullOrWhiteSpace(binding.FlowPath) ||
             string.IsNullOrWhiteSpace(binding.FlowDigest) ||
@@ -475,7 +700,16 @@ internal sealed class WorkflowRepairProposalStore
             !string.Equals(record.Proposal.PatchDigest, binding.PatchDigest, StringComparison.Ordinal) ||
             expectedRevision != binding.FlowRevision ||
             string.IsNullOrWhiteSpace(binding.TargetId) ||
-            string.IsNullOrWhiteSpace(binding.Policy))
+            string.IsNullOrWhiteSpace(binding.Policy) ||
+            string.IsNullOrWhiteSpace(binding.PlanDigest) ||
+            binding.PlanRevision is null ||
+            string.IsNullOrWhiteSpace(binding.SafetyPolicy) ||
+            !FixedEquals(expectedPlanDigest, binding.PlanDigest) ||
+            expectedPlanRevision != binding.PlanRevision ||
+            !string.Equals(
+                expectedSafetyPolicy,
+                binding.SafetyPolicy,
+                StringComparison.Ordinal))
         {
             error = "The grant must be bound to the exact proposal patch, base flow path/digest/revision, target, and side-effect policy.";
             return false;
@@ -519,7 +753,22 @@ internal sealed class WorkflowRepairProposalStore
             grant.FlowRevision !=
                 (expectedKind == WorkflowRepairGrantKinds.Rollback
                     ? record.NewFlowRevision
-                    : record.Proposal.BaseFlow?.Revision))
+                    : record.Proposal.BaseFlow?.Revision) ||
+            !FixedEquals(
+                grant.PlanDigest,
+                expectedKind == WorkflowRepairGrantKinds.Rollback
+                    ? record.AppliedPlanDigest
+                    : record.TrustedContext.PlanDigest) ||
+            grant.PlanRevision !=
+                (expectedKind == WorkflowRepairGrantKinds.Rollback
+                    ? record.AppliedPlanRevision
+                    : record.TrustedContext.PlanRevision) ||
+            !string.Equals(
+                grant.SafetyPolicy,
+                expectedKind == WorkflowRepairGrantKinds.Rollback
+                    ? record.AppliedSafetyPolicy
+                    : record.TrustedContext.SafetyPolicy,
+                StringComparison.Ordinal))
         {
             error = "The repair grant is not bound to this current proposal revision.";
             return false;
@@ -539,7 +788,10 @@ internal sealed class WorkflowRepairProposalStore
             !_grants.TryGetValue(secret, out var grant) ||
             current is null ||
             !string.Equals(grant.TargetId, current.TargetId, StringComparison.Ordinal) ||
-            !string.Equals(grant.Policy, current.Policy, StringComparison.Ordinal))
+            !string.Equals(grant.Policy, current.Policy, StringComparison.Ordinal) ||
+            !FixedEquals(grant.PlanDigest, current.PlanDigest) ||
+            grant.PlanRevision != current.PlanRevision ||
+            !string.Equals(grant.SafetyPolicy, current.SafetyPolicy, StringComparison.Ordinal))
         {
             error = "The repair grant target or side-effect policy binding no longer matches.";
             return false;
@@ -631,6 +883,7 @@ internal sealed class WorkflowRepairProposalStore
         State = record.State,
         Revision = record.Revision,
         AgentOriginated = record.AgentOriginated,
+        TrustedContext = CloneTrustedContext(record.TrustedContext),
         Trust = record.Proposal.Trust,
         Reviewer = record.Reviewer,
         GrantDigest = record.GrantDigest,
@@ -644,7 +897,11 @@ internal sealed class WorkflowRepairProposalStore
         VerificationRunIds = record.VerificationRunIds.ToList(),
         NewFlowRevision = record.NewFlowRevision,
         AppliedFlowDigest = record.AppliedFlowDigest,
+        AppliedPlanDigest = record.AppliedPlanDigest,
+        AppliedPlanRevision = record.AppliedPlanRevision,
+        AppliedSafetyPolicy = record.AppliedSafetyPolicy,
         RollbackRevision = record.RollbackRevision,
+        AppliedAt = record.AppliedAt,
         LastRecoveryState = record.LastRecoveryState,
         ReasonCode = record.ReasonCode,
         Validation = record.Validation.Select(CloneValidation).ToList(),
@@ -703,6 +960,9 @@ internal sealed class WorkflowRepairProposalStore
     {
         RunId = Bounded(value.RunId, 128),
         EvidenceId = Bounded(value.EvidenceId, 256),
+        ReportDigest = Bounded(value.ReportDigest, 256),
+        StartedAt = value.StartedAt,
+        BrokerRetained = value.BrokerRetained,
         CleanReset = value.CleanReset,
         CheckpointMatched = value.CheckpointMatched,
         FingerprintMatched = value.FingerprintMatched,
@@ -712,6 +972,44 @@ internal sealed class WorkflowRepairProposalStore
         Passed = value.Passed,
         FailureCode = Bounded(value.FailureCode, 128),
     };
+
+    private static WorkflowRepairTrustedContext CloneTrustedContext(WorkflowRepairTrustedContext value)
+        => new()
+        {
+            Eligibility = Clone(value.Eligibility, MauiTestingJsonContext.Default.MauiFlowRepairEligibilityDecision),
+            ReplaySafety = Clone(value.ReplaySafety, MauiTestingJsonContext.Default.MauiFlowReplayEligibilityDecision),
+            ClassifiedCheckpoint = Clone(value.ClassifiedCheckpoint, MauiTestingJsonContext.Default.MauiFlowCheckpoint),
+            PlanDigest = value.PlanDigest,
+            PlanRevision = value.PlanRevision,
+            SafetyPolicy = value.SafetyPolicy,
+        };
+
+    private static T? Clone<T>(T? value, System.Text.Json.Serialization.Metadata.JsonTypeInfo<T> typeInfo)
+        where T : class
+    {
+        if (value is null)
+            return null;
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value, typeInfo);
+        return JsonSerializer.Deserialize(bytes, typeInfo);
+    }
+
+    private static bool CheckpointsMatch(MauiFlowCheckpoint? first, MauiFlowCheckpoint? second)
+    {
+        if (first is null || second is null)
+            return false;
+        return string.Equals(first.AppBuildFingerprint, second.AppBuildFingerprint, StringComparison.Ordinal) &&
+            string.Equals(first.AgentInstanceId, second.AgentInstanceId, StringComparison.Ordinal) &&
+            string.Equals(first.SeedFingerprint, second.SeedFingerprint, StringComparison.Ordinal) &&
+            string.Equals(first.BackendStateFingerprint, second.BackendStateFingerprint, StringComparison.Ordinal) &&
+            string.Equals(first.Route, second.Route, StringComparison.Ordinal) &&
+            string.Equals(first.Window, second.Window, StringComparison.Ordinal) &&
+            string.Equals(first.Modal, second.Modal, StringComparison.Ordinal) &&
+            string.Equals(first.Locale, second.Locale, StringComparison.Ordinal) &&
+            string.Equals(first.Theme, second.Theme, StringComparison.Ordinal) &&
+            string.Equals(first.Orientation, second.Orientation, StringComparison.Ordinal) &&
+            string.Equals(first.DisplayProfile, second.DisplayProfile, StringComparison.Ordinal) &&
+            string.Equals(first.CollectionItemKey, second.CollectionItemKey, StringComparison.Ordinal);
+    }
 
     private static string OpaqueId(string prefix)
         => prefix + "_" + Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
@@ -745,12 +1043,14 @@ internal sealed class WorkflowRepairProposalStore
             string state,
             int revision,
             bool agentOriginated,
+            WorkflowRepairTrustedContext trustedContext,
             DateTimeOffset createdAt)
         {
             Proposal = proposal;
             State = state;
             Revision = revision;
             AgentOriginated = agentOriginated;
+            TrustedContext = trustedContext;
             CreatedAt = createdAt;
             UpdatedAt = createdAt;
         }
@@ -759,6 +1059,7 @@ internal sealed class WorkflowRepairProposalStore
         public string State { get; set; }
         public int Revision { get; set; }
         public bool AgentOriginated { get; }
+        public WorkflowRepairTrustedContext TrustedContext { get; }
         public DateTimeOffset CreatedAt { get; }
         public DateTimeOffset UpdatedAt { get; set; }
         public string? Reviewer { get; set; }
@@ -768,6 +1069,10 @@ internal sealed class WorkflowRepairProposalStore
         public string? LastRecoveryState { get; set; }
         public int? NewFlowRevision { get; set; }
         public string? AppliedFlowDigest { get; set; }
+        public string? AppliedPlanDigest { get; set; }
+        public int? AppliedPlanRevision { get; set; }
+        public string? AppliedSafetyPolicy { get; set; }
+        public DateTimeOffset? AppliedAt { get; set; }
         public int? RollbackRevision { get; set; }
         public string? ApplyRunId { get; set; }
         public string? RollbackRunId { get; set; }
@@ -790,6 +1095,9 @@ internal sealed class WorkflowRepairProposalStore
             int? flowRevision,
             string? targetId,
             string? policy,
+            string planDigest,
+            int planRevision,
+            string safetyPolicy,
             string reviewer,
             DateTimeOffset expiresAt)
         {
@@ -803,6 +1111,9 @@ internal sealed class WorkflowRepairProposalStore
             FlowRevision = flowRevision;
             TargetId = targetId;
             Policy = policy;
+            PlanDigest = planDigest;
+            PlanRevision = planRevision;
+            SafetyPolicy = safetyPolicy;
             Reviewer = reviewer;
             ExpiresAt = expiresAt;
         }
@@ -817,6 +1128,9 @@ internal sealed class WorkflowRepairProposalStore
         public int? FlowRevision { get; }
         public string? TargetId { get; }
         public string? Policy { get; }
+        public string PlanDigest { get; }
+        public int PlanRevision { get; }
+        public string SafetyPolicy { get; }
         public string Reviewer { get; }
         public DateTimeOffset ExpiresAt { get; }
         public bool Used { get; set; }
@@ -848,6 +1162,19 @@ internal sealed class WorkflowRepairGrantBinding
     public string? PatchDigest { get; init; }
     public string? TargetId { get; init; }
     public string? Policy { get; init; }
+    public string? PlanDigest { get; init; }
+    public int? PlanRevision { get; init; }
+    public string? SafetyPolicy { get; init; }
+}
+
+internal sealed class WorkflowRepairTrustedContext
+{
+    public MauiFlowRepairEligibilityDecision? Eligibility { get; init; }
+    public MauiFlowReplayEligibilityDecision? ReplaySafety { get; init; }
+    public MauiFlowCheckpoint? ClassifiedCheckpoint { get; init; }
+    public string? PlanDigest { get; init; }
+    public int? PlanRevision { get; init; }
+    public string? SafetyPolicy { get; init; }
 }
 
 internal sealed class WorkflowRepairGrantIssueRequest
@@ -905,6 +1232,9 @@ internal sealed class WorkflowRepairApplyRecord
     public bool Applied { get; init; }
     public int? NewFlowRevision { get; init; }
     public string? AppliedFlowDigest { get; init; }
+    public string? AppliedPlanDigest { get; init; }
+    public int? AppliedPlanRevision { get; init; }
+    public string? AppliedSafetyPolicy { get; init; }
     public string? ApplyRunId { get; init; }
     public string? ErrorCode { get; init; }
     public string? Error { get; init; }
@@ -914,6 +1244,9 @@ internal sealed class WorkflowRepairVerificationRun
 {
     public string? RunId { get; init; }
     public string? EvidenceId { get; init; }
+    public string? ReportDigest { get; init; }
+    public DateTimeOffset? StartedAt { get; init; }
+    public bool BrokerRetained { get; init; }
     public bool CleanReset { get; init; }
     public bool CheckpointMatched { get; init; }
     public bool FingerprintMatched { get; init; }
@@ -948,6 +1281,7 @@ internal sealed class WorkflowRepairProposalSnapshot
     public string State { get; init; } = "";
     public int Revision { get; init; }
     public bool AgentOriginated { get; init; }
+    public WorkflowRepairTrustedContext TrustedContext { get; init; } = new();
     public string? Trust { get; init; }
     public string? Reviewer { get; init; }
     public string? GrantDigest { get; init; }
@@ -961,6 +1295,10 @@ internal sealed class WorkflowRepairProposalSnapshot
     public List<string> VerificationRunIds { get; init; } = [];
     public int? NewFlowRevision { get; init; }
     public string? AppliedFlowDigest { get; init; }
+    public string? AppliedPlanDigest { get; init; }
+    public int? AppliedPlanRevision { get; init; }
+    public string? AppliedSafetyPolicy { get; init; }
+    public DateTimeOffset? AppliedAt { get; init; }
     public int? RollbackRevision { get; init; }
     public string? LastRecoveryState { get; init; }
     public string? ReasonCode { get; init; }

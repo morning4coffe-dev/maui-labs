@@ -34,7 +34,17 @@ internal sealed class ArtifactTrustImportResult
 /// bounded, redacted diagnostic projection; it never replays, executes, writes a workspace file,
 /// or retains raw imported bytes.
 /// </summary>
-internal sealed class ArtifactTrustImportService
+internal interface IArtifactTrustImporter
+{
+    ArtifactTrustImportResult Import(
+        Stream input,
+        string artifactKind,
+        MauiArtifactTrustPolicy? policy = null,
+        MauiArtifactVerifiedProvenanceFacts? verifiedProvenance = null,
+        CancellationToken cancellationToken = default);
+}
+
+internal sealed class ArtifactTrustImportService : IArtifactTrustImporter
 {
     internal const int MaxFlowRunBytes = 1_048_576;
     internal const int MaxJsonDepth = 64;
@@ -151,6 +161,8 @@ internal sealed class ArtifactTrustImportService
             projection.PackageFingerprint = MauiArtifactTrustRedactor.Fingerprint(GetString(target, "packageDigest"));
             projection.PlatformFingerprint = MauiArtifactTrustRedactor.Fingerprint(GetString(target, "platform"));
             projection.DeviceProfileFingerprint = MauiArtifactTrustRedactor.Fingerprint(GetString(target, "deviceProfile"));
+            projection.RuntimeProfileFingerprint = MauiArtifactTrustRedactor.NormalizeFingerprint(
+                GetString(target, "runtimeProfileFingerprint"));
 
             AddIdentifierDigest(projection, GetString(root, "runId"));
             PopulateFailureProjection(root, projection, digest);

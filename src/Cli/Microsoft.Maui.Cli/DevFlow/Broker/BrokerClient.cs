@@ -399,6 +399,27 @@ public static class BrokerClient
     public static int? ReadBrokerPortPublic() => ReadBrokerPort();
 
     /// <summary>
+    /// Indicates whether the current reachable broker has the owner-file-only native-host approval
+    /// authority needed by an Inspector host. This deliberately returns only a boolean; callers
+    /// must never receive the token.
+    /// </summary>
+    internal static bool HasNativeHostApprovalAuthority()
+    {
+        try
+        {
+            if (!File.Exists(BrokerPaths.StateFile))
+                return false;
+            var state = CliJson.Deserialize<BrokerState>(File.ReadAllText(BrokerPaths.StateFile));
+            return state is { Port: > 0, NativeApprovalToken: { Length: > 0 } } &&
+                   IsBrokerAlive(state.Port);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
     /// High-level port resolution: ensure broker running → resolve by project → auto-select → config fallback → default.
     /// Returns the resolved agent port.
     /// </summary>

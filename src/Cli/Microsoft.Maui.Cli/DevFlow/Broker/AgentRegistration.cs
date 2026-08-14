@@ -119,11 +119,12 @@ public record BrokerState
     public string? EmbedToken { get; init; }
 
     /// <summary>
-    /// Separate local-process bearer for a native host that has already performed a human approval
-    /// ceremony. It must never be placed in an Inspector URL, DOM, webview message, or browser API.
+    /// Per-broker-process secret for a trusted local native host to obtain a single-use approval
+    /// confirmation. This is intentionally written only to the owner-restricted local state file;
+    /// it is never an Inspector, MCP, or agent protocol value.
     /// </summary>
-    [JsonPropertyName("hostApprovalToken")]
-    public string? HostApprovalToken { get; init; }
+    [JsonPropertyName("nativeApprovalToken")]
+    public string? NativeApprovalToken { get; init; }
 }
 
 internal record RegistrationMessage

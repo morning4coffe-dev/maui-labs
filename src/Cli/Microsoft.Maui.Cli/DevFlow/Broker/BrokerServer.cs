@@ -43,6 +43,11 @@ public partial class BrokerServer : IDisposable
     private readonly WorkflowRepairProposalStore _workflowRepairs;
     private readonly WorkflowXamlSourceProposalStore _workflowXamlSources;
     private readonly WorkflowCSharpSourceProposalStore _workflowCSharpSources;
+    private readonly MauiPreviewFeatureFlags _previewFlags;
+    // A production broker supplies a per-process, owner-file-only native host verifier. Internal
+    // construction remains explicitly unavailable unless a test supplies its own verifier.
+    private readonly Func<string?, bool>? _trustedHostApprovalVerifier;
+    private readonly string? _nativeApprovalToken;
     private readonly HashSet<int> _assignedPorts = new();
     private readonly object _portLock = new();
     private DateTime _lastActivity = DateTime.UtcNow;
@@ -64,7 +69,28 @@ public partial class BrokerServer : IDisposable
             log,
             checkpointStore: null,
             recordingStorageRoot: null,
-            clock: null)
+            clock: null,
+            previewFlags: null,
+            trustedHostApprovalVerifier: null,
+            nativeApprovalToken: CreateNativeApprovalToken())
+    {
+    }
+
+    internal BrokerServer(
+        int port,
+        TimeSpan? idleTimeout,
+        MauiPreviewFeatureFlags previewFlags,
+        Action<string>? log = null,
+        Func<string?, bool>? trustedHostApprovalVerifier = null)
+        : this(
+            port,
+            idleTimeout,
+            log,
+            checkpointStore: null,
+            recordingStorageRoot: null,
+            clock: null,
+            previewFlags,
+            trustedHostApprovalVerifier)
     {
     }
 
@@ -74,11 +100,19 @@ public partial class BrokerServer : IDisposable
         Action<string>? log,
         RouteCheckpointStore? checkpointStore,
         string? recordingStorageRoot,
-        TimeProvider? clock)
+        TimeProvider? clock,
+        MauiPreviewFeatureFlags? previewFlags = null,
+        Func<string?, bool>? trustedHostApprovalVerifier = null,
+        string? nativeApprovalToken = null)
     {
         _port = port;
         _idleTimeout = idleTimeout ?? TimeSpan.FromMinutes(5);
         _log = log;
+        _previewFlags = previewFlags ?? MauiPreviewFeatureFlagConfiguration.FromEnvironment();
+        _nativeApprovalToken = nativeApprovalToken;
+        _trustedHostApprovalVerifier = nativeApprovalToken is null
+            ? trustedHostApprovalVerifier
+            : supplied => FixedTimeApprovalTokenEquals(nativeApprovalToken, supplied);
         _flows = new BrokerFlowCoordinator(
             new FlowRecordingStore(clock),
             new FlowRecordingSpoolStore(recordingStorageRoot, clock, warning => Log("Warning: " + warning)));
@@ -824,7 +858,7 @@ public partial class BrokerServer : IDisposable
                 Port = _port,
                 StartedAt = DateTime.UtcNow,
                 EmbedToken = _embedToken,
-                HostApprovalToken = _hostApprovalToken,
+                NativeApprovalToken = _nativeApprovalToken,
             };
 
             var json = CliJson.SerializeUntyped(state, indented: true);
@@ -838,6 +872,19 @@ public partial class BrokerServer : IDisposable
             Log($"Warning: failed to write broker state: {ex.Message}");
         }
     }
+
+    private static string CreateNativeApprovalToken()
+        => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+
+    private static bool FixedTimeApprovalTokenEquals(string expected, string? supplied)
+        => supplied is not null &&
+           expected.Length == supplied.Length &&
+           CryptographicOperations.FixedTimeEquals(
+               Encoding.UTF8.GetBytes(expected),
+               Encoding.UTF8.GetBytes(supplied));
 
     private async Task HandleMutationLeaseRoute(HttpListenerContext context, string method, string path)
     {
@@ -1377,6 +1424,21 @@ public partial class BrokerServer : IDisposable
                 });
             return;
         }
+        if (!DevFlowPreviewPolicy.IsBrokerTestAgentRouteEnabled(_previewFlags, normalizedPath))
+        {
+            await WriteTypedJsonResponseAsync(
+                context,
+                404,
+                new Microsoft.Maui.DevFlow.Testing.MauiTestAgentToolResult
+                {
+                    Error = TestAgentRouteError(
+                        Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.UnsupportedOperation,
+                        Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCategories.Unsupported,
+                        "The restricted test-agent preview is disabled by the effective agent-authoring feature policy.",
+                        retryable: false),
+                });
+            return;
+        }
 
         if (string.Equals(normalizedPath, "/api/test-agent/sessions/begin", StringComparison.OrdinalIgnoreCase))
         {
@@ -1425,6 +1487,18 @@ public partial class BrokerServer : IDisposable
 
         if (string.Equals(normalizedPath, "/api/test-agent/approvals/request", StringComparison.OrdinalIgnoreCase))
         {
+            if (_trustedHostApprovalVerifier is null)
+            {
+                await WriteTypedJsonResponseAsync(context, 501, new Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalResult
+                {
+                    Error = TestAgentRouteError(
+                        Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.HumanApprovalRequired,
+                        Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCategories.Unsupported,
+                        "Native host approval is unavailable in this broker build. Approval requests are disabled rather than presented as actionable.",
+                        retryable: false),
+                });
+                return;
+            }
             var request = await ReadWorkflowRunBodyAsync<Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalSubmitRequest>(context, maxBodyChars);
             if (request is null)
                 return;
@@ -1435,42 +1509,14 @@ public partial class BrokerServer : IDisposable
 
         if (string.Equals(normalizedPath, "/api/test-agent/grants/issue", StringComparison.OrdinalIgnoreCase))
         {
-            // A loopback caller or a model-controlled request body is not evidence of a human
-            // approval. Only a native local host that retained the host-only broker-state bearer
-            // may submit an already-human-reviewed approval. The iframe embed token is different.
-            var hostApprovalToken = context.Request.Headers["X-DevFlow-Host-Approval-Token"];
-            if (!FixedTimeEquals(_hostApprovalToken, hostApprovalToken))
+            await WriteTypedJsonResponseAsync(context, 501, new Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueResult
             {
-                await WriteTypedJsonResponseAsync(context, 403, new Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueResult
-                {
-                    Error = TestAgentRouteError(
-                        Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.HumanApprovalRequired,
-                        Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCategories.Authorization,
-                        "A trusted human host approval is required to issue a mutation grant.",
-                        retryable: false),
-                });
-                return;
-            }
-
-            var request = await ReadWorkflowRunBodyAsync<Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueRequest>(context, maxBodyChars);
-            if (request is null)
-                return;
-            request.TargetState = await GetLiveTestAgentTargetStateAsync(request.TargetState);
-            if (request.TargetState is null)
-            {
-                await WriteTypedJsonResponseAsync(context, 409, new Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueResult
-                {
-                    Error = TestAgentRouteError(
-                        Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.TargetStale,
-                        Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCategories.Target,
-                        "The human approval must name a currently connected explicit target.",
-                        retryable: false),
-                });
-                return;
-            }
-
-            var result = _testAgentSessions.IssueGrant(request);
-            await WriteTypedJsonResponseAsync(context, TestAgentStatusCode(result.Error), result);
+                Error = TestAgentRouteError(
+                    Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.HumanApprovalRequired,
+                    Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCategories.Unsupported,
+                    "Direct host bearer grant issuance is disabled. A native host must mint a scoped single-use Inspector confirmation for the exact request.",
+                    retryable: false),
+            });
             return;
         }
 
@@ -1655,7 +1701,7 @@ public partial class BrokerServer : IDisposable
             {
                 AgentId = registration.Id,
                 AgentInstanceId = registration.InstanceId,
-                AppBuildFingerprint = status.App?.Build,
+                AppBuildFingerprint = BuildTestAgentAppFingerprint(status),
                 // These values remain unavailable until the running agent or a trusted reset host
                 // attests them. Never turn caller-echoed values into broker-observed facts.
                 SeedFingerprint = null,
@@ -1673,6 +1719,24 @@ public partial class BrokerServer : IDisposable
         {
             return null;
         }
+    }
+
+    private static string? BuildTestAgentAppFingerprint(Microsoft.Maui.DevFlow.Driver.AgentStatus status)
+    {
+        static string? Normalize(string? value)
+        {
+            var normalized = value?.Trim();
+            return string.IsNullOrWhiteSpace(normalized) ||
+                   string.Equals(normalized, "unknown", StringComparison.OrdinalIgnoreCase)
+                ? null
+                : normalized;
+        }
+
+        var version = Normalize(status.App?.Version);
+        var build = Normalize(status.App?.Build);
+        return version is null && build is null
+            ? null
+            : $"{version ?? "unknown"}:{build ?? "unknown"}";
     }
 
     private static bool RequiresWorkflowRunCapabilities(MauiTestPlan? plan)
@@ -2146,18 +2210,20 @@ public partial class BrokerServer : IDisposable
                     Platform = liveStatus?.Device?.Platform ?? execution.Target.Platform,
                     AppId = liveStatus?.App?.PackageId ?? execution.Target.AppName,
                     AppBuildFingerprint = liveStatus?.App?.Build,
-                    AppSourceFingerprint = execution.Options.ReproductionExpectation?.AppSourceFingerprint,
-                    PackageDigest = execution.Options.ReproductionExpectation?.PackageDigest,
-                    DeviceProfile = execution.Options.ReproductionExpectation?.DeviceProfile ??
-                        string.Join(
+                    DeviceProfile = liveStatus?.Device is null ||
+                        string.IsNullOrWhiteSpace(liveStatus.Device.DeviceType) &&
+                        string.IsNullOrWhiteSpace(liveStatus.Device.Idiom)
+                        ? null
+                        : string.Join(
                             "|",
-                            liveStatus?.Device?.DeviceType ?? string.Empty,
-                            liveStatus?.Device?.Idiom ?? string.Empty),
+                            liveStatus.Device.DeviceType ?? string.Empty,
+                            liveStatus.Device.Idiom ?? string.Empty),
                 },
                 Plan = execution.SafetyRequest.Plan,
                 RunContext = execution.SafetyRequest.Context,
                 ThrowOnCancellation = false,
                 Progress = execution.Options.Progress,
+                StepObservationDelayMs = 900,
             },
             evidenceCapture);
         return (await runner.RunWithLegacyAsync(execution.Flow, file: null, cancellationToken)
@@ -2276,10 +2342,6 @@ public partial class BrokerServer : IDisposable
     // Unguessable per-broker token that lets local host shells (canvas, VS Code) embed the inspector
     // in an iframe. Written to broker.json (local-only) and honored by the inspector via ?embed=.
     private readonly string _embedToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant();
-    // Independent native-host approval bearer. Unlike _embedToken, this value is never passed to
-    // InspectorServer or placed in a browser-visible URL.
-    private readonly string _hostApprovalToken = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)).ToLowerInvariant();
-
     private async Task HandleInspectorRoute(HttpListenerContext context, string path)
     {
         // Routes:
@@ -2404,7 +2466,9 @@ public partial class BrokerServer : IDisposable
                     () => IsCurrentAgentConnection(connection),
                     _cts?.Token ?? CancellationToken.None),
                 testAgentSessions: _testAgentSessions,
-                testAgentTargetStateRefresh: supplied => GetLiveTestAgentTargetStateAsync(supplied));
+                testAgentTargetStateRefresh: supplied => GetLiveTestAgentTargetStateAsync(supplied),
+                previewFlags: _previewFlags,
+                trustedHostApprovalVerifier: _trustedHostApprovalVerifier);
             inspector = _inspectors.GetOrAdd(connection.Registration.Id, created);
             if (!ReferenceEquals(inspector, created))
             {

@@ -76,6 +76,23 @@ internal sealed class InspectorWorkflowServices
     public WorkflowRunAccessResult GetRunStatus(string runId, string? capabilityToken)
         => _runs.GetStatus(runId, capabilityToken);
 
+    public WorkflowRunRepairContextResult GetRunRepairContext(string runId, string? capabilityToken)
+    {
+        var result = _runs.GetRepairContext(runId, capabilityToken);
+        if (result.Context is null)
+            return result;
+        if (!string.Equals(result.Context.Target.AgentId, _target.AgentId, StringComparison.Ordinal) ||
+            !string.Equals(
+                result.Context.Target.AgentInstanceId,
+                _target.AgentInstanceId,
+                StringComparison.Ordinal))
+        {
+            return WorkflowRunRepairContextResult.Unavailable(
+                "The broker-owned run does not target this exact Inspector app instance.");
+        }
+        return result;
+    }
+
     public WorkflowRunCancelResult CancelRun(string runId, string? capabilityToken)
         => _runs.Cancel(runId, capabilityToken);
 
@@ -122,6 +139,12 @@ internal sealed class InspectorWorkflowServices
     public ArtifactTrustStoreReadResult GetArtifactProjection(string artifactId, string? capabilityToken)
         => _artifacts.GetSafeProjection(artifactId, capabilityToken);
 
+    public ArtifactTrustStoreRepairResult GetArtifactRepairTrust(
+        string artifactId,
+        string? capabilityToken,
+        string localRunId)
+        => _artifacts.GetRepairTrust(artifactId, capabilityToken, localRunId);
+
     public ArtifactTrustStoreBindResult BindLocalReproduction(
         string artifactId,
         string? capabilityToken,
@@ -145,26 +168,39 @@ internal sealed class InspectorWorkflowServices
             current);
     }
 
-    public WorkflowRepairStoreResult ProposeRepair(MauiFlowRepairProposal proposal, bool agentOriginated = false)
-        => _repairs.Propose(proposal, agentOriginated);
+    public WorkflowRepairStoreResult ProposeRepair(
+        MauiFlowRepairProposal proposal,
+        WorkflowRepairTrustedContext trustedContext,
+        bool agentOriginated = false,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
+        => _repairs.Propose(proposal, agentOriginated, trustedContext, historyWriter);
 
     public WorkflowRepairStoreResult GetRepair(string proposalId)
         => _repairs.Get(proposalId);
 
-    public WorkflowRepairStoreResult PreviewRepair(string proposalId)
-        => _repairs.Preview(proposalId);
+    public WorkflowRepairStoreResult PreviewRepair(
+        string proposalId,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
+        => _repairs.Preview(proposalId, historyWriter);
 
-    public WorkflowRepairStoreResult RejectRepair(string proposalId, string? reviewer, string? reasonCode)
-        => _repairs.Reject(proposalId, reviewer, reasonCode);
+    public WorkflowRepairStoreResult RejectRepair(
+        string proposalId,
+        string? reviewer,
+        string? reasonCode,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
+        => _repairs.Reject(proposalId, reviewer, reasonCode, historyWriter);
 
-    public WorkflowRepairGrantIssueResult IssueRepairGrant(WorkflowRepairGrantIssueRequest request)
-        => _repairs.IssueGrant(request);
+    public WorkflowRepairGrantIssueResult IssueRepairGrant(
+        WorkflowRepairGrantIssueRequest request,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
+        => _repairs.IssueGrant(request, historyWriter);
 
     public WorkflowRepairStoreResult RecordRepairValidation(
         string proposalId,
         string validationGrant,
-        WorkflowRepairValidationRecord validation)
-        => _repairs.RecordValidation(proposalId, validationGrant, validation);
+        WorkflowRepairValidationRecord validation,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
+        => _repairs.RecordValidation(proposalId, validationGrant, validation, historyWriter);
 
     public WorkflowRepairStoreResult BeginRepairApply(
         string proposalId,
@@ -179,8 +215,45 @@ internal sealed class InspectorWorkflowServices
 
     public WorkflowRepairStoreResult RecordRepairVerification(
         string proposalId,
-        IReadOnlyList<WorkflowRepairVerificationRun> verification)
-        => _repairs.RecordVerification(proposalId, verification);
+        IReadOnlyList<WorkflowRepairVerificationAccess> verification,
+        Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
+    {
+        var proposal = _repairs.Get(proposalId);
+        if (!proposal.Ok || proposal.Proposal is null)
+            return proposal;
+        if (verification.Count != 3 ||
+            verification.Select(static item => item.RunId)
+                .Where(static id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.Ordinal)
+                .Count() != 3)
+        {
+            return WorkflowRepairStoreResult.Failure(
+                "verification-runs-invalid",
+                "Verification requires exactly three distinct retained broker runs.");
+        }
+
+        var retained = new List<WorkflowRepairVerificationRun>(3);
+        foreach (var access in verification)
+        {
+            var run = _runs.GetRepairContext(access.RunId ?? string.Empty, access.CapabilityToken);
+            if (run.Context is null)
+            {
+                return WorkflowRepairStoreResult.Failure(
+                    "verification-run-unavailable",
+                    run.Error ?? "A verification run is unavailable or its capability is invalid.");
+            }
+            if (!string.Equals(run.Context.Target.AgentId, _target.AgentId, StringComparison.Ordinal) ||
+                !string.Equals(run.Context.Target.AgentInstanceId, _target.AgentInstanceId, StringComparison.Ordinal))
+            {
+                return WorkflowRepairStoreResult.Failure(
+                    "verification-target-mismatch",
+                    "Every verification run must target this exact retained broker agent instance.");
+            }
+
+            retained.Add(BuildVerificationRun(proposal.Proposal, run.Context));
+        }
+        return _repairs.RecordVerification(proposalId, retained, historyWriter);
+    }
 
     public WorkflowRepairStoreResult BeginRepairRollback(
         string proposalId,
@@ -255,6 +328,84 @@ internal sealed class InspectorWorkflowServices
         out string? expectedAppliedContentDigest)
         => _sources.TryGetRollbackBytes(proposalId, out originalBytes, out expectedAppliedContentDigest);
 
+    private static WorkflowRepairVerificationRun BuildVerificationRun(
+        WorkflowRepairProposalSnapshot proposal,
+        WorkflowRunRepairContext run)
+    {
+        var report = run.Report;
+        var step = report.Steps.FirstOrDefault(candidate =>
+            string.Equals(candidate.StepId, proposal.SourceStepId, StringComparison.Ordinal));
+        var flowMatches = !string.IsNullOrWhiteSpace(proposal.AppliedFlowDigest) &&
+            string.Equals(run.FlowDigest, proposal.AppliedFlowDigest, StringComparison.Ordinal) &&
+            string.Equals(report.FlowDigest, proposal.AppliedFlowDigest, StringComparison.Ordinal);
+        var cleanReset = report.Reset?.Succeeded == true &&
+            report.Reset.AppStateSucceeded != false &&
+            report.Reset.BackendTestDataSucceeded != false;
+        var checkpointMatched = CheckpointsMatch(
+            proposal.TrustedContext.ClassifiedCheckpoint,
+            step?.ObservedCheckpoint) &&
+            CheckpointsMatch(step?.ExpectedCheckpoint, step?.ObservedCheckpoint);
+        var fingerprintMatched = proposal.Proposal.Candidate?.Fingerprint is not null &&
+            MauiRepairFingerprintComparer.SemanticallyMatches(
+                proposal.Proposal.Candidate.Fingerprint,
+                step?.Fingerprint);
+        var uniqueResolution = step?.TargetResolution?.MatchCount == 1 &&
+            string.Equals(step.TargetResolution.Status, "resolved", StringComparison.Ordinal);
+        var assertionsPassed = proposal.Proposal.UnchangedAssertionsProof?.Unchanged == true &&
+            report.Steps.SelectMany(static candidate => candidate.Assertions)
+                .All(static assertion => assertion.Passed == true && assertion.Skipped != true);
+        var independentlyVerified = report.Verification?.Verified == true &&
+            run.Admission.RunVerificationAllowed;
+        var passed = flowMatches &&
+            string.Equals(report.Outcome?.Status, MauiFlowRunOutcomes.Passed, StringComparison.Ordinal);
+
+        return new WorkflowRepairVerificationRun
+        {
+            RunId = run.RunId,
+            EvidenceId = report.ReportPath ?? report.ReportDigest,
+            ReportDigest = report.ReportDigest,
+            StartedAt = report.StartedAt,
+            BrokerRetained = true,
+            CleanReset = cleanReset,
+            CheckpointMatched = checkpointMatched,
+            FingerprintMatched = fingerprintMatched,
+            UniqueResolution = uniqueResolution,
+            HardAssertionsUnchanged = assertionsPassed,
+            IndependentOracleSucceeded = independentlyVerified,
+            Passed = passed,
+            FailureCode = cleanReset &&
+                checkpointMatched &&
+                fingerprintMatched &&
+                uniqueResolution &&
+                assertionsPassed &&
+                independentlyVerified &&
+                passed
+                    ? null
+                    : "retained-verification-failed",
+        };
+    }
+
+    private static bool CheckpointsMatch(MauiFlowCheckpoint? expected, MauiFlowCheckpoint? observed)
+    {
+        if (expected is null || observed is null)
+            return false;
+        static bool Match(string? value, string? current)
+            => string.IsNullOrWhiteSpace(value) ||
+               string.Equals(value, current, StringComparison.Ordinal);
+        return Match(expected.AppBuildFingerprint, observed.AppBuildFingerprint) &&
+            Match(expected.AgentInstanceId, observed.AgentInstanceId) &&
+            Match(expected.SeedFingerprint, observed.SeedFingerprint) &&
+            Match(expected.BackendStateFingerprint, observed.BackendStateFingerprint) &&
+            Match(expected.Route, observed.Route) &&
+            Match(expected.Window, observed.Window) &&
+            Match(expected.Modal, observed.Modal) &&
+            Match(expected.Locale, observed.Locale) &&
+            Match(expected.Theme, observed.Theme) &&
+            Match(expected.Orientation, observed.Orientation) &&
+            Match(expected.DisplayProfile, observed.DisplayProfile) &&
+            Match(expected.CollectionItemKey, observed.CollectionItemKey);
+    }
+
     public WorkflowCSharpSourceStoreResult ProposeCSharpSource(MauiCSharpSourceProposal proposal)
         => _csharpSources.Propose(proposal);
 
@@ -308,6 +459,12 @@ internal sealed class InspectorWorkflowServices
         string proposalId,
         WorkflowCSharpSourceRollbackRecord rollback)
         => _csharpSources.CompleteRollback(proposalId, rollback);
+}
+
+internal sealed class WorkflowRepairVerificationAccess
+{
+    public string? RunId { get; init; }
+    public string? CapabilityToken { get; init; }
 }
 
 internal sealed class InspectorArtifactTrustResult

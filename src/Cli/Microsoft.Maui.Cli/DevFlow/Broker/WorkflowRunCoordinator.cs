@@ -214,6 +214,33 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         }
     }
 
+    public WorkflowRunRepairContextResult GetRepairContext(string runId, string? capabilityToken)
+    {
+        lock (_gate)
+        {
+            if (!_runs.TryGetValue(runId, out var run))
+                return WorkflowRunRepairContextResult.NotFound();
+            if (!HasCapability(run, capabilityToken))
+                return WorkflowRunRepairContextResult.Unauthorized();
+            if (!WorkflowRunStates.IsTerminal(run.State) || run.StructuredReport is null)
+            {
+                return WorkflowRunRepairContextResult.Unavailable(
+                    "The broker-owned run has not produced a terminal structured report.");
+            }
+
+            return WorkflowRunRepairContextResult.Success(new WorkflowRunRepairContext
+            {
+                RunId = run.RunId,
+                FlowDigest = run.FlowDigest,
+                Target = run.Target.ToSnapshot(),
+                Flow = CloneFlow(run.Flow),
+                Plan = ClonePlan(run.SafetyRequest.Plan),
+                Report = CloneRunReport(run.StructuredReport),
+                Admission = CloneReplayEligibility(run.Admission),
+            });
+        }
+    }
+
     /// <summary>
     /// Returns facts observed by a broker-owned local run for artifact-trust matching. This is
     /// deliberately internal: an imported-artifact capability can request only a derived binding,
@@ -872,7 +899,6 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             canonical.FlowDigest = run.FlowDigest;
             canonical.LegacyFlowIdentity ??= run.Flow.Name;
             canonical.Target = MergeTarget(canonical.Target, run.Target);
-            ApplyReproductionExpectation(canonical.Target, run.ExecutionOptions.ReproductionExpectation);
             canonical.StartedAt ??= run.StartedAt ?? run.CreatedAt;
             canonical.EndedAt = run.EndedAt;
             canonical.Outcome = new Testing.MauiFlowRunOutcome
@@ -1022,7 +1048,6 @@ internal sealed class WorkflowRunCoordinator : IDisposable
                 At = run.EndedAt
             }
         };
-        ApplyReproductionExpectation(fallback.Target, run.ExecutionOptions.ReproductionExpectation);
         if (run.LifecycleEventsTruncated)
         {
             fallback.Truncated = true;
@@ -1138,19 +1163,33 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             Testing.MauiTestingJsonContext.Default.MauiElementFingerprint)
             ?? throw new InvalidOperationException("Fingerprint clone failed.");
 
-    private static void ApplyReproductionExpectation(
-        Testing.MauiFlowRunTarget? target,
-        Testing.MauiLocalReproductionExpectation? expectation)
-    {
-        if (target is null || expectation is null)
-            return;
+    private static Testing.MauiFlow CloneFlow(Testing.MauiFlow flow)
+        => JsonSerializer.Deserialize(
+            JsonSerializer.SerializeToUtf8Bytes(flow, Testing.MauiFlowJsonContext.Default.MauiFlow),
+            Testing.MauiFlowJsonContext.Default.MauiFlow)
+            ?? throw new InvalidOperationException("Flow clone failed.");
 
-        target.AppBuildFingerprint ??= expectation.AppBuildFingerprint;
-        target.AppSourceFingerprint ??= expectation.AppSourceFingerprint;
-        target.PackageDigest ??= expectation.PackageDigest;
-        target.Platform ??= expectation.Platform;
-        target.DeviceProfile ??= expectation.DeviceProfile;
-    }
+    private static Testing.MauiTestPlan? ClonePlan(Testing.MauiTestPlan? plan)
+        => plan is null
+            ? null
+            : JsonSerializer.Deserialize(
+                JsonSerializer.SerializeToUtf8Bytes(plan, Testing.MauiTestingJsonContext.Default.MauiTestPlan),
+                Testing.MauiTestingJsonContext.Default.MauiTestPlan);
+
+    private static Testing.MauiFlowRunReport CloneRunReport(Testing.MauiFlowRunReport report)
+        => JsonSerializer.Deserialize(
+            JsonSerializer.SerializeToUtf8Bytes(report, Testing.MauiTestingJsonContext.Default.MauiFlowRunReport),
+            Testing.MauiTestingJsonContext.Default.MauiFlowRunReport)
+            ?? throw new InvalidOperationException("Run report clone failed.");
+
+    private static Testing.MauiFlowReplayEligibilityDecision CloneReplayEligibility(
+        Testing.MauiFlowReplayEligibilityDecision decision)
+        => JsonSerializer.Deserialize(
+            JsonSerializer.SerializeToUtf8Bytes(
+                decision,
+                Testing.MauiTestingJsonContext.Default.MauiFlowReplayEligibilityDecision),
+            Testing.MauiTestingJsonContext.Default.MauiFlowReplayEligibilityDecision)
+            ?? throw new InvalidOperationException("Replay eligibility clone failed.");
 
     private static List<Testing.MauiFlowRunEvent> MergeEvents(
         IReadOnlyList<Testing.MauiFlowRunEvent> runnerEvents,
@@ -2111,6 +2150,36 @@ internal sealed class WorkflowRunAccessResult
     public static WorkflowRunAccessResult Success(WorkflowRunSnapshot run) => new() { Run = run, StatusCode = 200 };
     public static WorkflowRunAccessResult NotFound() => new() { StatusCode = 404, Error = "Workflow run was not found." };
     public static WorkflowRunAccessResult Unauthorized() => new() { StatusCode = 403, Error = "A valid workflow run capability token is required." };
+}
+
+internal sealed class WorkflowRunRepairContextResult
+{
+    public WorkflowRunRepairContext? Context { get; private init; }
+    public int StatusCode { get; private init; }
+    public string? Error { get; private init; }
+
+    public static WorkflowRunRepairContextResult Success(WorkflowRunRepairContext context)
+        => new() { Context = context, StatusCode = 200 };
+
+    public static WorkflowRunRepairContextResult NotFound()
+        => new() { StatusCode = 404, Error = "Workflow run was not found." };
+
+    public static WorkflowRunRepairContextResult Unauthorized()
+        => new() { StatusCode = 403, Error = "A valid workflow run capability token is required." };
+
+    public static WorkflowRunRepairContextResult Unavailable(string error)
+        => new() { StatusCode = 409, Error = error };
+}
+
+internal sealed class WorkflowRunRepairContext
+{
+    public string RunId { get; init; } = "";
+    public string FlowDigest { get; init; } = "";
+    public WorkflowRunTargetSnapshot Target { get; init; } = new();
+    public Testing.MauiFlow Flow { get; init; } = new();
+    public Testing.MauiTestPlan? Plan { get; init; }
+    public Testing.MauiFlowRunReport Report { get; init; } = new();
+    public Testing.MauiFlowReplayEligibilityDecision Admission { get; init; } = new();
 }
 
 internal sealed class WorkflowRunLocalReproductionResult

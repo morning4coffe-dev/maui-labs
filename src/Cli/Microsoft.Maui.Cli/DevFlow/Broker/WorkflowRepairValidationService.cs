@@ -23,6 +23,7 @@ internal sealed class WorkflowRepairTransientValidationRequest
     public MauiFlowRepairProposal Proposal { get; init; } = new();
     public MauiFlowRepairEligibilityDecision? Eligibility { get; init; }
     public MauiFlowReplayEligibilityDecision? ReplaySafety { get; init; }
+    public MauiFlowCheckpoint? ClassifiedCheckpoint { get; init; }
     public string? ValidationGrantDigest { get; init; }
     public bool InMemorySelectorOverrideOnly { get; init; } = true;
     public bool AllowDownstreamContinuation { get; init; }
@@ -74,8 +75,22 @@ internal sealed class WorkflowRepairValidationService
         var facts = new List<string>();
         if (!request.InMemorySelectorOverrideOnly)
             facts.Add("in-memory-override-required");
-        if (request.Eligibility is not null && request.Eligibility.Eligible != true)
+        if (request.Eligibility?.Eligible != true)
             facts.Add("repair-eligibility-required");
+        if (request.ReplaySafety?.RepairValidationAllowed != true ||
+            request.ReplaySafety.RepairEligibility != true ||
+            string.Equals(
+                request.ReplaySafety.SideEffectPolicy,
+                MauiFlowSideEffectPolicies.NonReplayable,
+                StringComparison.Ordinal))
+        {
+            facts.Add("repair-replay-safety-required");
+        }
+        if (request.ClassifiedCheckpoint is null ||
+            !CheckpointsMatch(request.Eligibility?.CurrentCheckpoint, request.ClassifiedCheckpoint))
+        {
+            facts.Add("classified-checkpoint-required");
+        }
         if (request.Proposal.Candidate is null ||
             request.Proposal.ProposedSelector is null ||
             request.Proposal.UnchangedAssertionsProof?.Unchanged != true ||
@@ -104,7 +119,9 @@ internal sealed class WorkflowRepairValidationService
 
         if (!lifecycle.Succeeded)
             return Failed(["hard-reset-failed"], lifecycle.FailureCode ?? "reset-failed", lifecycle.EvidenceIds);
-        if (!CheckpointsMatch(lifecycle.ExpectedCheckpoint, lifecycle.ObservedCheckpoint))
+        if (!CheckpointsMatch(request.ClassifiedCheckpoint, lifecycle.ObservedCheckpoint) ||
+            lifecycle.ExpectedCheckpoint is not null &&
+            !CheckpointsMatch(request.ClassifiedCheckpoint, lifecycle.ExpectedCheckpoint))
             return Failed(["post-reset-checkpoint-mismatch"], "precondition-unsatisfied", lifecycle.EvidenceIds);
 
         WorkflowRepairReplayValidation replay;

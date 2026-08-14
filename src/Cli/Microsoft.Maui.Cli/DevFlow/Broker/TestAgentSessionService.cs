@@ -36,6 +36,8 @@ internal sealed class TestAgentSessionService
             _options.MaxGrants < 1 ||
             _options.MaxApprovalRequests < 1 ||
             _options.MaxAuditEntries < 1 ||
+            _options.MaxPatchesPerSession < 1 ||
+            _options.MaxPatchRequestBytes is < 1 or > 1_048_576 ||
             _options.MaxActionsPerGrant is < 1 or > 256 ||
             _options.SessionLifetime <= TimeSpan.Zero ||
             _options.ApprovalRequestLifetime <= TimeSpan.Zero ||
@@ -58,7 +60,7 @@ internal sealed class TestAgentSessionService
             if (error is not null)
                 return SessionFailure(error);
 
-            if (!TargetsMatch(envelope!.Target, request.TargetState))
+            if (!CanonicalTargetMatchesState(envelope!.Target, request.TargetState))
                 return SessionFailure(Error(
                     MauiTestAgentErrorCodes.TargetStale,
                     MauiTestAgentErrorCategories.Target,
@@ -72,10 +74,13 @@ internal sealed class TestAgentSessionService
                     previous.SessionId is { } priorSessionId &&
                     _sessions.TryGetValue(priorSessionId, out var prior))
                 {
+                    if (!TryValidateActiveSessionLocked(prior, out error))
+                        return SessionFailure(error!);
+
                     return new MauiTestAgentSessionResult
                     {
                         Ok = true,
-                        Snapshot = CreateSnapshot(prior, includeReadCapability: false),
+                        Snapshot = CreateSnapshot(prior, includeReadCapability: true),
                     };
                 }
 
@@ -133,6 +138,7 @@ internal sealed class TestAgentSessionService
             var readCapability = OpaqueSecret("read");
             var record = new SessionRecord(
                 sessionId,
+                readCapability,
                 Hash(readCapability),
                 envelope.Target!,
                 CloneTargetState(request.TargetState!),
@@ -152,7 +158,6 @@ internal sealed class TestAgentSessionService
             AppendAuditLocked(record, "session-begin", envelope, "accepted", null, null, null, null);
 
             var snapshot = CreateSnapshot(record, includeReadCapability: true);
-            snapshot.ReadCapabilityId = readCapability;
             return new MauiTestAgentSessionResult { Ok = true, Snapshot = snapshot };
         }
     }
@@ -163,7 +168,12 @@ internal sealed class TestAgentSessionService
         lock (_gate)
         {
             PurgeExpiredLocked();
-            if (!TryGetReadableSessionLocked(request.SessionId, request.ReadCapabilityId, out var session, out var error))
+            if (!TryGetReadableSessionLocked(
+                    request.SessionId,
+                    request.ReadCapabilityId,
+                    request.Envelope,
+                    out var session,
+                    out var error))
                 return SessionFailure(error!);
 
             return new MauiTestAgentSessionResult
@@ -180,7 +190,12 @@ internal sealed class TestAgentSessionService
         lock (_gate)
         {
             PurgeExpiredLocked();
-            if (!TryGetReadableSessionLocked(request.SessionId, request.ReadCapabilityId, out var session, out var error))
+            if (!TryGetReadableSessionLocked(
+                    request.SessionId,
+                    request.ReadCapabilityId,
+                    request.Envelope,
+                    out var session,
+                    out var error))
                 return SessionFailure(error!);
 
             if (session!.State == SessionState.Active)
@@ -241,9 +256,14 @@ internal sealed class TestAgentSessionService
             }
 
             var sessionId = envelope.Correlation!.AuthoringSessionId;
-            if (!TryGetReadableSessionLocked(sessionId, envelope.ReadCapabilityId, out var session, out error))
+            if (!TryGetReadableSessionLocked(
+                    sessionId,
+                    envelope.ReadCapabilityId,
+                    envelope,
+                    out var session,
+                    out error))
                 return ApprovalFailure(error!);
-            if (!TargetsMatch(session!.Target, envelope.Target) ||
+            if (!CanonicalTargetsMatch(session!.Target, envelope.Target) ||
                 !CorrelationMatches(session, envelope.Correlation, requireAll: true) ||
                 !ProvenanceMatches(session.Actor, envelope.Provenance))
             {
@@ -287,7 +307,9 @@ internal sealed class TestAgentSessionService
             }
 
             var now = _clock.GetUtcNow();
-            var expiresAt = request.ExpiresAt ?? now.Add(_options.ApprovalRequestLifetime);
+            var defaultExpiresAt = now.Add(_options.ApprovalRequestLifetime);
+            var expiresAt = request.ExpiresAt ??
+                (defaultExpiresAt <= session.ExpiresAt ? defaultExpiresAt : session.ExpiresAt);
             if (expiresAt <= now ||
                 expiresAt > now.Add(_options.ApprovalRequestLifetime) ||
                 expiresAt > session.ExpiresAt)
@@ -394,7 +416,7 @@ internal sealed class TestAgentSessionService
                     retryable: false));
             }
 
-            if (!TargetsMatch(pendingRequest.Target, currentTargetState) ||
+            if (!CanonicalTargetMatchesState(pendingRequest.Target, currentTargetState) ||
                 !TargetStatesMatch(pendingRequest.TargetState, currentTargetState) ||
                 !CorrelationMatches(owner, pendingRequest.Correlation, requireAll: true) ||
                 !ProvenanceMatches(owner.Actor, pendingRequest.Provenance))
@@ -508,7 +530,11 @@ internal sealed class TestAgentSessionService
         lock (_gate)
         {
             PurgeExpiredLocked();
-            if (!TryGetReadableSessionLocked(request.SessionId, request.ReadCapabilityId, out var session, out var error))
+            if (!TryGetReadableSessionCoreLocked(
+                    request.SessionId,
+                    request.ReadCapabilityId,
+                    out var session,
+                    out var error))
                 return GrantFailure(error!);
 
             if (!IsHumanHostApproval(request.Approval))
@@ -521,7 +547,7 @@ internal sealed class TestAgentSessionService
                     retryable: false));
             }
 
-            if (!TargetsMatch(session!.Target, request.TargetState) ||
+            if (!CanonicalTargetMatchesState(session!.Target, request.TargetState) ||
                 !TargetStatesMatch(session.TargetState, request.TargetState))
             {
                 AppendAuditLocked(session, "grant-denied", null, "denied", null, null, null, MauiTestAgentErrorCodes.MutationGrantStale);
@@ -632,8 +658,8 @@ internal sealed class TestAgentSessionService
             if (!TryValidateActiveSessionLocked(session, out error))
                 return AuthorizationFailure(error!);
 
-            if (!TargetsMatch(session.Target, envelope.Target) ||
-                !TargetsMatch(session.Target, request.CurrentTargetState) ||
+            if (!CanonicalTargetsMatch(session.Target, envelope.Target) ||
+                !CanonicalTargetMatchesState(session.Target, request.CurrentTargetState) ||
                 !TargetStatesMatch(session.TargetState, request.CurrentTargetState))
             {
                 AppendAuditLocked(session, "mutation-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.TargetStale);
@@ -877,12 +903,20 @@ internal sealed class TestAgentSessionService
         lock (_gate)
         {
             PurgeExpiredLocked();
-            if (!TryGetAuthorizedSessionLocked(sessionId, authorizationId, MauiTestAgentActions.All, out var session, out var error))
+            if (!TryGetAuthorizedSessionLocked(
+                    sessionId,
+                    authorizationId,
+                    new HashSet<string>(StringComparer.Ordinal) { MauiTestAgentActions.DraftAppend },
+                    out var session,
+                    out var error))
                 return SessionFailure(error!);
+            error = ValidateBoundSessionEnvelope(session!, request.Envelope);
+            if (error is not null)
+                return SessionFailure(error);
             if (!MatchesActionAuthorization(
                     authorizationId,
-                    request.Action,
-                    DigestAction(request),
+                    MauiTestAgentActions.DraftAppend,
+                    DigestDraftAppend(request),
                     out error))
             {
                 return SessionFailure(error!);
@@ -902,7 +936,7 @@ internal sealed class TestAgentSessionService
                 request.Envelope,
                 "draft-updated",
                 null,
-                DigestAction(request),
+                DigestDraftAppend(request),
                 null,
                 null);
             return new MauiTestAgentSessionResult
@@ -929,6 +963,9 @@ internal sealed class TestAgentSessionService
                 out var session,
                 out var error))
                 return SessionFailure(error!);
+            error = ValidateBoundSessionEnvelope(session!, request.Envelope);
+            if (error is not null)
+                return SessionFailure(error);
 
             var assertion = request.Assertion;
             if (assertion is null || string.IsNullOrWhiteSpace(assertion.Kind))
@@ -1006,6 +1043,9 @@ internal sealed class TestAgentSessionService
                 out var session,
                 out var error))
                 return SessionFailure(error!);
+            error = ValidateBoundSessionEnvelope(session!, request.Envelope);
+            if (error is not null)
+                return SessionFailure(error);
 
             var flowValidation = MauiFlowValidator.Validate(session!.Flow);
             if (!flowValidation.Ok)
@@ -1069,7 +1109,12 @@ internal sealed class TestAgentSessionService
         lock (_gate)
         {
             PurgeExpiredLocked();
-            if (!TryGetReadableSessionLocked(request.SessionId, request.ReadCapabilityId, out var session, out var error))
+            if (!TryGetReadableSessionLocked(
+                    request.SessionId,
+                    request.ReadCapabilityId,
+                    request.Envelope,
+                    out var session,
+                    out var error))
                 return SessionFailure(error!);
 
             var preview = MauiFlowMigration.Preview(session!.Flow);
@@ -1095,12 +1140,56 @@ internal sealed class TestAgentSessionService
                     "A read capability is required.",
                     retryable: false) };
             }
-            if (!TryGetReadableSessionLocked(sessionId, envelope.ReadCapabilityId, out var session, out var error))
+            if (!TryGetReadableSessionLocked(
+                    sessionId,
+                    envelope.ReadCapabilityId,
+                    envelope,
+                    out var session,
+                    out var error))
             {
                 return new MauiTestAgentPatchResult { Error = error };
             }
 
             var operation = request.Operation?.Trim().ToLowerInvariant();
+            var requestBytes = JsonSerializer.SerializeToUtf8Bytes(
+                request,
+                MauiTestingJsonContext.Default.MauiTestAgentPatchRequest);
+            if (requestBytes.Length > _options.MaxPatchRequestBytes)
+            {
+                return new MauiTestAgentPatchResult
+                {
+                    Error = Error(
+                        MauiTestAgentErrorCodes.ValueLimitExceeded,
+                        MauiTestAgentErrorCategories.Validation,
+                        "The inert patch request exceeds the bounded restricted-channel size.",
+                        retryable: false),
+                };
+            }
+
+            var requestDigest = Convert.ToHexString(SHA256.HashData(requestBytes)).ToLowerInvariant();
+            if (_idempotency.TryGetValue(envelope.IdempotencyKey!, out var prior))
+            {
+                if (FixedEquals(prior.RequestDigest, requestDigest) &&
+                    prior.PatchProposalId is { } priorProposalId &&
+                    session!.Patches.TryGetValue(priorProposalId, out var priorPatch))
+                {
+                    return new MauiTestAgentPatchResult
+                    {
+                        Ok = true,
+                        Record = ClonePatchRecord(priorPatch),
+                    };
+                }
+
+                return new MauiTestAgentPatchResult
+                {
+                    Error = Error(
+                        MauiTestAgentErrorCodes.IdempotencyReused,
+                        MauiTestAgentErrorCategories.Conflict,
+                        "The patch idempotency key was already used for a different restricted request.",
+                        retryable: false),
+                };
+            }
+
             if (operation is "apply" or "approve" or "rollback")
             {
                 AppendAuditLocked(session!, "patch-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.PatchApplyForbidden);
@@ -1117,25 +1206,45 @@ internal sealed class TestAgentSessionService
             switch (operation)
             {
                 case "proposal":
-                    if (request.Proposal is null)
+                    if (request.Proposal is null ||
+                        !TryCreateSafePatchProposal(session!, request.Proposal, out var proposal, out error))
+                    {
+                        return new MauiTestAgentPatchResult
+                        {
+                            Error = error ?? Error(
+                                MauiTestAgentErrorCodes.InvalidRequest,
+                                MauiTestAgentErrorCategories.Validation,
+                                "A strict selector-only inert patch proposal is required.",
+                                retryable: false),
+                        };
+                    }
+
+                    if (session!.Patches.TryGetValue(proposal!.ProposalId!, out var duplicate))
+                    {
+                        _idempotency.Add(
+                            envelope.IdempotencyKey!,
+                            new IdempotencyRecord(
+                                requestDigest,
+                                session.SessionId,
+                                _clock.GetUtcNow(),
+                                patchProposalId: duplicate.ProposalId));
+                        return new MauiTestAgentPatchResult
+                        {
+                            Ok = true,
+                            Record = ClonePatchRecord(duplicate),
+                        };
+                    }
+                    if (session.Patches.Count >= _options.MaxPatchesPerSession)
                     {
                         return new MauiTestAgentPatchResult
                         {
                             Error = Error(
                                 MauiTestAgentErrorCodes.InvalidRequest,
-                                MauiTestAgentErrorCategories.Validation,
-                                "An inert patch proposal is required.",
+                                MauiTestAgentErrorCategories.Capability,
+                                "The bounded inert patch proposal capacity was reached for this session.",
                                 retryable: false),
                         };
                     }
-
-                    var proposalNode = JsonSerializer.SerializeToNode(
-                        request.Proposal,
-                        MauiTestingJsonContext.Default.MauiFlowRepairProposal)!.AsObject();
-                    proposalNode["proposalId"] ??= OpaqueId("proposal");
-                    proposalNode.Remove("approval");
-                    var proposal = proposalNode.Deserialize(MauiTestingJsonContext.Default.MauiFlowRepairProposal)
-                        ?? throw new InvalidOperationException("The inert patch proposal could not be normalized.");
                     var record = new MauiTestAgentPatchRecord
                     {
                         ProposalId = proposal.ProposalId,
@@ -1143,7 +1252,14 @@ internal sealed class TestAgentSessionService
                         Proposal = proposal,
                         RecordedAt = _clock.GetUtcNow(),
                     };
-                    session!.Patches[record.ProposalId!] = record;
+                    session.Patches.Add(record.ProposalId!, record);
+                    _idempotency.Add(
+                        envelope.IdempotencyKey!,
+                        new IdempotencyRecord(
+                            requestDigest,
+                            session.SessionId,
+                            _clock.GetUtcNow(),
+                            patchProposalId: record.ProposalId));
                     AppendAuditLocked(session, "patch-proposed", envelope, "inert-proposal", null, HashProposal(proposal), null, null);
                     return new MauiTestAgentPatchResult { Ok = true, Record = ClonePatchRecord(record) };
 
@@ -1159,9 +1275,9 @@ internal sealed class TestAgentSessionService
                                 retryable: false),
                         };
                     }
-                    return session!.Patches.TryGetValue(request.ProposalId, out var existing)
-                        ? new MauiTestAgentPatchResult { Ok = true, Record = ClonePatchRecord(existing) }
-                        : new MauiTestAgentPatchResult
+                    if (!session!.Patches.TryGetValue(request.ProposalId, out var existing))
+                    {
+                        return new MauiTestAgentPatchResult
                         {
                             Error = Error(
                                 MauiTestAgentErrorCodes.InvalidRequest,
@@ -1169,6 +1285,17 @@ internal sealed class TestAgentSessionService
                                 "The inert patch proposal was not found.",
                                 retryable: false),
                         };
+                    }
+                    if (existing.State == MauiFlowRepairOutcomeStates.Proposed)
+                        existing.State = MauiFlowRepairOutcomeStates.Previewed;
+                    _idempotency.Add(
+                        envelope.IdempotencyKey!,
+                        new IdempotencyRecord(
+                            requestDigest,
+                            session.SessionId,
+                            _clock.GetUtcNow(),
+                            patchProposalId: existing.ProposalId));
+                    return new MauiTestAgentPatchResult { Ok = true, Record = ClonePatchRecord(existing) };
 
                 case "reject":
                     if (string.IsNullOrWhiteSpace(request.ProposalId) ||
@@ -1183,8 +1310,27 @@ internal sealed class TestAgentSessionService
                                 retryable: false),
                         };
                     }
-                    rejected.State = "rejected";
+                    if (rejected.State is not MauiFlowRepairOutcomeStates.Proposed and
+                        not MauiFlowRepairOutcomeStates.Previewed)
+                    {
+                        return new MauiTestAgentPatchResult
+                        {
+                            Error = Error(
+                                MauiTestAgentErrorCodes.InvalidRequest,
+                                MauiTestAgentErrorCategories.State,
+                                "Only a proposed or previewed inert patch can be rejected.",
+                                retryable: false),
+                        };
+                    }
+                    rejected.State = MauiFlowRepairOutcomeStates.Rejected;
                     rejected.ReasonDigest = Hash(Bounded(request.Reason, 1024) ?? string.Empty);
+                    _idempotency.Add(
+                        envelope.IdempotencyKey!,
+                        new IdempotencyRecord(
+                            requestDigest,
+                            session.SessionId,
+                            _clock.GetUtcNow(),
+                            patchProposalId: rejected.ProposalId));
                     AppendAuditLocked(session, "patch-rejected", envelope, "rejected", null, null, rejected.ReasonDigest, null);
                     return new MauiTestAgentPatchResult { Ok = true, Record = ClonePatchRecord(rejected) };
 
@@ -1207,7 +1353,12 @@ internal sealed class TestAgentSessionService
         lock (_gate)
         {
             PurgeExpiredLocked();
-            if (!TryGetReadableSessionLocked(request.SessionId, request.ReadCapabilityId, out var session, out var error))
+            if (!TryGetReadableSessionLocked(
+                    request.SessionId,
+                    request.ReadCapabilityId,
+                    request.Envelope,
+                    out var session,
+                    out var error))
                 return new MauiTestAgentAuditResult { Error = error };
 
             var entries = _journal
@@ -1230,7 +1381,12 @@ internal sealed class TestAgentSessionService
         lock (_gate)
         {
             PurgeExpiredLocked();
-            if (!TryGetReadableSessionLocked(request.SessionId, request.ReadCapabilityId, out var session, out var error))
+            if (!TryGetReadableSessionLocked(
+                    request.SessionId,
+                    request.ReadCapabilityId,
+                    request.Envelope,
+                    out var session,
+                    out var error))
                 return RunBindingFailure(error!);
             if (string.IsNullOrWhiteSpace(request.RunId) || string.IsNullOrWhiteSpace(request.RunCapabilityToken))
             {
@@ -1253,7 +1409,12 @@ internal sealed class TestAgentSessionService
         lock (_gate)
         {
             PurgeExpiredLocked();
-            if (!TryGetReadableSessionLocked(request.SessionId, request.ReadCapabilityId, out var session, out var error))
+            if (!TryGetReadableSessionLocked(
+                    request.SessionId,
+                    request.ReadCapabilityId,
+                    request.Envelope,
+                    out var session,
+                    out var error))
                 return RunBindingFailure(error!);
             if (string.IsNullOrWhiteSpace(request.RunId) || !session!.Runs.TryGetValue(request.RunId, out var capability))
             {
@@ -1277,7 +1438,12 @@ internal sealed class TestAgentSessionService
         lock (_gate)
         {
             PurgeExpiredLocked();
-            if (!TryGetReadableSessionLocked(request.SessionId, request.ReadCapabilityId, out var session, out var error))
+            if (!TryGetReadableSessionLocked(
+                    request.SessionId,
+                    request.ReadCapabilityId,
+                    request.Envelope,
+                    out var session,
+                    out var error))
                 return RunBindingFailure(error!);
             if (string.IsNullOrWhiteSpace(request.RunId) ||
                 string.IsNullOrWhiteSpace(request.RunCapabilityToken) ||
@@ -1296,7 +1462,19 @@ internal sealed class TestAgentSessionService
     }
 
     internal MauiTestAgentSessionResult GetSnapshotForRead(string? sessionId, string? readCapabilityId)
-        => Status(new MauiTestAgentSessionAccessRequest { SessionId = sessionId, ReadCapabilityId = readCapabilityId });
+    {
+        lock (_gate)
+        {
+            PurgeExpiredLocked();
+            return !TryGetReadableSessionCoreLocked(sessionId, readCapabilityId, out var session, out var error)
+                ? SessionFailure(error!)
+                : new MauiTestAgentSessionResult
+                {
+                    Ok = true,
+                    Snapshot = CreateSnapshot(session!, includeReadCapability: false),
+                };
+        }
+    }
 
     private static MauiTestAgentSessionResult SessionFailure(MauiTestAgentError error)
         => new() { Error = error };
@@ -1367,6 +1545,47 @@ internal sealed class TestAgentSessionService
     }
 
     private bool TryGetReadableSessionLocked(
+        string? sessionId,
+        string? readCapabilityId,
+        MauiTestAgentRequestEnvelope? envelope,
+        out SessionRecord? session,
+        out MauiTestAgentError? error)
+    {
+        if (!TryGetReadableSessionCoreLocked(sessionId, readCapabilityId, out session, out error))
+            return false;
+
+        var envelopeError = ValidateEnvelope(envelope, requireSession: true);
+        if (envelopeError is not null)
+        {
+            session = null;
+            error = envelopeError;
+            return false;
+        }
+
+        if (!string.Equals(
+                envelope!.Correlation!.AuthoringSessionId,
+                session!.SessionId,
+                StringComparison.Ordinal) ||
+            !CanonicalTargetsMatch(session.Target, envelope.Target) ||
+            !ProvenanceMatches(session.Actor, envelope.Provenance) ||
+            !string.Equals(
+                envelope.PolicyVersion,
+                MauiTestAgentProtocolVersions.PolicyVersion,
+                StringComparison.Ordinal))
+        {
+            session = null;
+            error = Error(
+                MauiTestAgentErrorCodes.TargetStale,
+                MauiTestAgentErrorCategories.Authorization,
+                "The read capability is valid only for its canonical authoring target, actor, and policy.",
+                retryable: false);
+            return false;
+        }
+
+        return true;
+    }
+
+    private bool TryGetReadableSessionCoreLocked(
         string? sessionId,
         string? readCapabilityId,
         out SessionRecord? session,
@@ -1440,6 +1659,31 @@ internal sealed class TestAgentSessionService
 
         session = found;
         return true;
+    }
+
+    private MauiTestAgentError? ValidateBoundSessionEnvelope(
+        SessionRecord session,
+        MauiTestAgentRequestEnvelope? envelope)
+    {
+        var error = ValidateEnvelope(envelope, requireSession: true);
+        if (error is not null)
+            return error;
+        if (!CanonicalTargetsMatch(session.Target, envelope!.Target) ||
+            !CorrelationMatches(session, envelope.Correlation, requireAll: true) &&
+            !CorrelationMatchesGrantSequence(session, envelope.Correlation) ||
+            !ProvenanceMatches(session.Actor, envelope.Provenance) ||
+            !string.Equals(
+                envelope.PolicyVersion,
+                MauiTestAgentProtocolVersions.PolicyVersion,
+                StringComparison.Ordinal))
+        {
+            return Error(
+                MauiTestAgentErrorCodes.MutationGrantStale,
+                MauiTestAgentErrorCategories.Authorization,
+                "The authorized mutation no longer matches the canonical target, actor, plan, or flow.",
+                retryable: false);
+        }
+        return null;
     }
 
     private void ConsumeAuthorizationLocked(string? authorizationId)
@@ -1788,7 +2032,7 @@ internal sealed class TestAgentSessionService
 
     private static bool GrantMatchesSession(GrantRecord grant, SessionRecord session)
         => string.Equals(grant.SessionId, session.SessionId, StringComparison.Ordinal) &&
-           TargetsMatch(grant.Target, session.Target) &&
+           CanonicalTargetsMatch(grant.Target, session.Target) &&
            TargetStatesMatch(grant.TargetState, session.TargetState) &&
            ProvenanceMatches(grant.Actor, session.Actor) &&
            CorrelationMatches(session, grant.Correlation, requireAll: true) &&
@@ -1835,11 +2079,25 @@ internal sealed class TestAgentSessionService
            string.Equals(expected.AgentId, actual.AgentId, StringComparison.Ordinal) &&
            string.Equals(expected.AgentInstanceId, actual.AgentInstanceId, StringComparison.Ordinal);
 
+    private static bool CanonicalTargetsMatch(MauiTestAgentTarget? expected, MauiTestAgentTarget? actual)
+        => TargetsMatch(expected, actual) &&
+           string.Equals(expected!.AppBuildFingerprint, actual!.AppBuildFingerprint, StringComparison.Ordinal) &&
+           string.Equals(expected.SeedFingerprint, actual.SeedFingerprint, StringComparison.Ordinal) &&
+           string.Equals(expected.BackendStateFingerprint, actual.BackendStateFingerprint, StringComparison.Ordinal);
+
     private static bool TargetsMatch(MauiTestAgentTarget? expected, MauiTestAgentTargetState? actual)
         => expected is not null &&
            actual is not null &&
            string.Equals(expected.AgentId, actual.AgentId, StringComparison.Ordinal) &&
            string.Equals(expected.AgentInstanceId, actual.AgentInstanceId, StringComparison.Ordinal);
+
+    private static bool CanonicalTargetMatchesState(
+        MauiTestAgentTarget? expected,
+        MauiTestAgentTargetState? actual)
+        => TargetsMatch(expected, actual) &&
+           string.Equals(expected!.AppBuildFingerprint, actual!.AppBuildFingerprint, StringComparison.Ordinal) &&
+           string.Equals(expected.SeedFingerprint, actual.SeedFingerprint, StringComparison.Ordinal) &&
+           string.Equals(expected.BackendStateFingerprint, actual.BackendStateFingerprint, StringComparison.Ordinal);
 
     private static bool TargetStatesMatch(MauiTestAgentTargetState? expected, MauiTestAgentTargetState? actual)
         => expected is not null &&
@@ -1922,6 +2180,154 @@ internal sealed class TestAgentSessionService
         return true;
     }
 
+    private static bool TryCreateSafePatchProposal(
+        SessionRecord session,
+        MauiFlowRepairProposal supplied,
+        out MauiFlowRepairProposal? proposal,
+        out MauiTestAgentError? error)
+    {
+        proposal = null;
+        error = null;
+        var flowPath = session.Plan.Flow?.Path;
+        if (string.IsNullOrWhiteSpace(flowPath) ||
+            string.IsNullOrWhiteSpace(supplied.SourceRunId) ||
+            !session.Runs.ContainsKey(supplied.SourceRunId) ||
+            string.IsNullOrWhiteSpace(supplied.SourceStepId) ||
+            !string.Equals(
+                supplied.SourceFailureCode,
+                MauiFlowFailureClasses.LocatorNotFound,
+                StringComparison.Ordinal) ||
+            supplied.PreDispatch != true ||
+            supplied.BaseFlow is null ||
+            !string.Equals(supplied.BaseFlow.Path, flowPath, StringComparison.Ordinal) ||
+            !FixedEquals(supplied.BaseFlow.Digest ?? string.Empty, session.FlowDigest) ||
+            supplied.BaseFlow.Revision != session.FlowRevision ||
+            supplied.ProposedSelector is null ||
+            !IsSafeRepairSelector(supplied.ProposedSelector) ||
+            supplied.OldSelector is null ||
+            supplied.Patch?.SelectorOnly != true ||
+            supplied.Patch.Operations.Count != 1 ||
+            supplied.UnchangedAssertionsProof?.Unchanged != true ||
+            supplied.UnchangedAssertionsProof.ActionsUnchanged != true ||
+            supplied.UnchangedAssertionsProof.ValuesUnchanged != true ||
+            supplied.UnchangedAssertionsProof.OrderUnchanged != true ||
+            !ProvenanceMatches(session.Actor, supplied.Provenance))
+        {
+            error = Error(
+                MauiTestAgentErrorCodes.InvalidRequest,
+                MauiTestAgentErrorCategories.Validation,
+                "The restricted patch channel accepts only a broker-run-bound, provenance-matched, single selector-only proposal for the canonical draft.",
+                retryable: false);
+            return false;
+        }
+
+        var sourceStep = FindFlowStep(session.Flow, supplied.SourceStepId);
+        var oldSelector = sourceStep is null ? null : sourceStep.Args?.Selector ?? sourceStep.Target;
+        if (oldSelector is null ||
+            !string.Equals(
+                SelectorScopeKey(oldSelector),
+                SelectorScopeKey(supplied.OldSelector),
+                StringComparison.Ordinal))
+        {
+            error = Error(
+                MauiTestAgentErrorCodes.InvalidRequest,
+                MauiTestAgentErrorCategories.Conflict,
+                "The proposed patch does not replace the canonical selector for its stable source step.",
+                retryable: false);
+            return false;
+        }
+
+        var rebuilt = MauiFlowRepairPatchBuilder.Build(
+            session.Flow,
+            supplied.SourceStepId,
+            supplied.ProposedSelector);
+        if (!rebuilt.Ok ||
+            rebuilt.Patch is null ||
+            rebuilt.Diff is null ||
+            rebuilt.Proof is null ||
+            string.IsNullOrWhiteSpace(rebuilt.PatchDigest) ||
+            !FixedEquals(rebuilt.PatchDigest, supplied.PatchDigest ?? string.Empty))
+        {
+            error = Error(
+                MauiTestAgentErrorCodes.InvalidRequest,
+                MauiTestAgentErrorCategories.Validation,
+                "The selector-only patch digest or invariant proof does not match the canonical draft.",
+                retryable: false);
+            return false;
+        }
+
+        var proposalId = "proposal_" + Hash(string.Join(
+            "\u001f",
+            session.SessionId,
+            supplied.SourceRunId,
+            supplied.SourceStepId,
+            rebuilt.PatchDigest))[..32];
+        proposal = new MauiFlowRepairProposal
+        {
+            ProposalId = proposalId,
+            Revision = 1,
+            State = MauiFlowRepairOutcomeStates.Proposed,
+            CreatedAt = DateTimeOffset.UtcNow,
+            SourceRunId = Bounded(supplied.SourceRunId, 256),
+            SourceStepId = Bounded(supplied.SourceStepId, 128),
+            SourceFailureId = Bounded(supplied.SourceFailureId, 256),
+            SourceFailureCode = MauiFlowFailureClasses.LocatorNotFound,
+            PreDispatch = true,
+            BaseFlow = new MauiFlowReference
+            {
+                Path = flowPath,
+                FlowId = session.Plan.Flow?.FlowId,
+                Revision = session.FlowRevision,
+                Digest = session.FlowDigest,
+            },
+            OldSelector = CloneSelector(oldSelector),
+            ProposedSelector = CloneSelector(supplied.ProposedSelector),
+            Patch = rebuilt.Patch,
+            PatchDigest = rebuilt.PatchDigest,
+            Diff = rebuilt.Diff,
+            UnchangedAssertionsProof = rebuilt.Proof,
+            Trust = "broker-current-local-run",
+            Provenance = CloneProvenance(session.Actor),
+        };
+        return true;
+    }
+
+    private static bool IsSafeRepairSelector(FlowSelector selector)
+        => !string.IsNullOrWhiteSpace(selector.AutomationId) &&
+           selector.AutomationId.Length <= 256 &&
+           string.IsNullOrWhiteSpace(selector.Text) &&
+           string.IsNullOrWhiteSpace(selector.Id) &&
+           selector.TypeIndex is null &&
+           string.IsNullOrWhiteSpace(selector.Type) &&
+           selector.Index is null &&
+           selector.ExtensionData is null &&
+           (!selector.HasScopedStableItem ||
+            FlowSelector.IsOpaqueStableItemKey(selector.StableItemKey) &&
+            selector.CollectionScope!.Length <= 256);
+
+    private static FlowStep? FindFlowStep(MauiFlow flow, string stepId)
+    {
+        var normalized = stepId.Trim();
+        var stable = flow.Steps.Where(step =>
+            !string.IsNullOrWhiteSpace(step.StepId) &&
+            string.Equals(step.StepId.Trim(), normalized, StringComparison.Ordinal)).Take(2).ToArray();
+        if (stable.Length == 1)
+            return stable[0];
+        if (stable.Length > 1)
+            return null;
+
+        var sequenceText = normalized.StartsWith("step-", StringComparison.Ordinal)
+            ? normalized[5..]
+            : normalized;
+        return int.TryParse(
+                sequenceText,
+                System.Globalization.NumberStyles.None,
+                System.Globalization.CultureInfo.InvariantCulture,
+                out var sequence)
+            ? flow.Steps.FirstOrDefault(step => step.Seq == sequence)
+            : null;
+    }
+
     private static string? SelectorScopeKey(FlowSelector selector)
         => MauiTestAgentSelectorScopeKey.FromSelector(selector);
 
@@ -1984,7 +2390,7 @@ internal sealed class TestAgentSessionService
             if (!_sessions.TryGetValue(approval.SessionId, out var owner) ||
                 owner.State != SessionState.Active ||
                 !CorrelationMatches(owner, approval.Correlation, requireAll: true) ||
-                !TargetsMatch(owner.Target, approval.Target) ||
+                !CanonicalTargetsMatch(owner.Target, approval.Target) ||
                 !ProvenanceMatches(owner.Actor, approval.Provenance))
             {
                 MarkApprovalLocked(approval, MauiTestAgentApprovalStates.Stale, "target-or-revision-stale");
@@ -2149,7 +2555,7 @@ internal sealed class TestAgentSessionService
                 .OrderByDescending(static request => request.CreatedAt)
                 .Select(request => CloneApprovalRequest(request, includeGrant: true))
                 .ToList(),
-            ReadCapabilityId = includeReadCapability ? string.Empty : null,
+            ReadCapabilityId = includeReadCapability ? session.ReadCapabilityId : null,
         };
 
     private static MauiTestPlan NormalizePlan(
@@ -2175,6 +2581,7 @@ internal sealed class TestAgentSessionService
         node["revision"] = revision;
         node["flow"] = JsonSerializer.SerializeToNode(new MauiFlowReference
         {
+            Path = plan.Flow?.Path,
             FlowId = flowId,
             Revision = Math.Max(1, envelope.Correlation?.FlowRevision ?? 1),
             Digest = MauiFlowRunReportSerializer.ComputeFlowDigest(flow),
@@ -2235,6 +2642,14 @@ internal sealed class TestAgentSessionService
     private static string DigestAction(MauiTestAgentActionRequest request)
         => BuildActionDigest(
             request.Action,
+            request.Selector,
+            request.Route,
+            request.Value is null ? null : Encoding.UTF8.GetByteCount(request.Value),
+            request.Value is null ? null : Hash(request.Value));
+
+    private static string DigestDraftAppend(MauiTestAgentActionRequest request)
+        => BuildActionDigest(
+            MauiTestAgentActions.DraftAppend,
             request.Selector,
             request.Route,
             request.Value is null ? null : Encoding.UTF8.GetByteCount(request.Value),
@@ -2453,6 +2868,7 @@ internal sealed class TestAgentSessionService
     {
         public SessionRecord(
             string sessionId,
+            string readCapabilityId,
             string readCapabilityDigest,
             MauiTestAgentTarget target,
             MauiTestAgentTargetState targetState,
@@ -2468,6 +2884,7 @@ internal sealed class TestAgentSessionService
             DateTimeOffset expiresAt)
         {
             SessionId = sessionId;
+            ReadCapabilityId = readCapabilityId;
             ReadCapabilityDigest = readCapabilityDigest;
             Target = CloneTarget(target);
             TargetState = CloneTargetState(targetState);
@@ -2485,6 +2902,7 @@ internal sealed class TestAgentSessionService
         }
 
         public string SessionId { get; }
+        public string ReadCapabilityId { get; }
         public string ReadCapabilityDigest { get; }
         public MauiTestAgentTarget Target { get; }
         public MauiTestAgentTargetState TargetState { get; }
@@ -2639,13 +3057,15 @@ internal sealed class TestAgentSessionService
             string? sessionId,
             DateTimeOffset createdAt,
             string? approvalRequestId = null,
-            string? authorizationId = null)
+            string? authorizationId = null,
+            string? patchProposalId = null)
         {
             RequestDigest = requestDigest;
             SessionId = sessionId;
             CreatedAt = createdAt;
             ApprovalRequestId = approvalRequestId;
             AuthorizationId = authorizationId;
+            PatchProposalId = patchProposalId;
         }
 
         public string RequestDigest { get; }
@@ -2653,6 +3073,7 @@ internal sealed class TestAgentSessionService
         public DateTimeOffset CreatedAt { get; }
         public string? ApprovalRequestId { get; }
         public string? AuthorizationId { get; }
+        public string? PatchProposalId { get; }
     }
 
     private enum SessionState
@@ -2674,6 +3095,8 @@ internal sealed class TestAgentSessionServiceOptions
     public int MaxGrants { get; init; } = 128;
     public int MaxApprovalRequests { get; init; } = 128;
     public int MaxAuditEntries { get; init; } = 512;
+    public int MaxPatchesPerSession { get; init; } = 32;
+    public int MaxPatchRequestBytes { get; init; } = 65_536;
     public int MaxActionsPerGrant { get; init; } = 64;
     public TimeSpan SessionLifetime { get; init; } = TimeSpan.FromMinutes(30);
     public TimeSpan ApprovalRequestLifetime { get; init; } = TimeSpan.FromMinutes(10);

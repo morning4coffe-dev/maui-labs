@@ -496,7 +496,7 @@ public sealed class InspectorWorkbenchBrokerRouteTests
 
             using var target = JsonDocument.Parse(await http.GetStringAsync($"{inspectorBase}/api/workbench/target"));
             var brokerCapabilities = target.RootElement.GetProperty("broker");
-            Assert.True(brokerCapabilities.GetProperty("repairValidationAvailable").GetBoolean());
+            Assert.False(brokerCapabilities.GetProperty("repairValidationAvailable").GetBoolean());
             var observed = target.RootElement.GetProperty("target").GetProperty("observedCheckpoint");
             Assert.Equal("build-2", observed.GetProperty("appBuildFingerprint").GetString());
             Assert.Equal("/checkout", observed.GetProperty("route").GetString());
@@ -1636,7 +1636,7 @@ public sealed class InspectorWorkbenchBrokerRouteTests
     }
 
     [Fact]
-    public async Task WorkbenchRepairValidate_IsWiredToABrokerLifecycleHostInsteadOfTheUnavailableFallback()
+    public async Task WorkbenchRepairValidate_ReportsItselfUnavailableWhileNoLifecycleAttesterExists()
     {
         var brokerPort = FreePort();
         var agentPort = FreePort();
@@ -1688,7 +1688,7 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             http.DefaultRequestHeaders.Add("X-DevFlow-Inspector-Token", inspectorToken);
 
             using var target = JsonDocument.Parse(await http.GetStringAsync($"{inspectorBase}/api/workbench/target"));
-            Assert.True(target.RootElement.GetProperty("broker")
+            Assert.False(target.RootElement.GetProperty("broker")
                 .GetProperty("repairValidationAvailable").GetBoolean());
 
             using var validate = await PostJsonAsync(
@@ -1697,9 +1697,11 @@ public sealed class InspectorWorkbenchBrokerRouteTests
                 new { validationGrant = "not-a-grant" });
             using var validateBody = JsonDocument.Parse(await validate.Content.ReadAsStringAsync());
 
-            // The unavailable-host fallback answered every request with 503 + hostFallback before a
-            // lifecycle host was wired. It must no longer be reachable.
-            Assert.False(validateBody.RootElement.TryGetProperty("hostFallback", out _));
+            // No component can attest a hard reset, so the broker supplies no lifecycle host and the
+            // workbench keeps saying so. Advertising availability here would promise a validation
+            // that structurally cannot pass.
+            Assert.Equal(503, (int)validate.StatusCode);
+            Assert.True(validateBody.RootElement.GetProperty("hostFallback").GetBoolean());
             Assert.False(validateBody.RootElement.GetProperty("ok").GetBoolean());
         }
         finally

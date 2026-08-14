@@ -184,6 +184,7 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
                 merged,
                 attestation.Reset,
                 attestation.BusinessOracles,
+                evidence.FirstOrDefault(),
                 DateTimeOffset.UtcNow);
         }
 
@@ -244,11 +245,15 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
             transient.Steps.RemoveAll(step => step.Seq > repairedStep.Seq);
 
         // Replay is admitted against the reset the host just attested, not against caller-supplied
-        // state. Without a matching attestation there is no honest precondition or oracle evidence.
+        // state. The attestation is single-use and short-lived so a replay can never inherit a
+        // reset that some other replay has already dirtied.
         AttestedReset? reset;
         lock (_gate)
+        {
             reset = _lastReset;
-        if (reset is null || !reset.Matches(proposal))
+            _lastReset = null;
+        }
+        if (reset is null || !reset.Matches(proposal) || reset.IsStale(DateTimeOffset.UtcNow))
             return ReplayFailed("repair-reset-attestation-required");
 
         var context = new MauiFlowRunContext
@@ -259,6 +264,7 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
                 Expected = reset.Expected,
                 Observed = reset.Observed,
                 CheckedAt = reset.AttestedAt,
+                EvidenceReference = reset.EvidenceReference,
             },
             Reset = reset.Reset,
             BusinessOracles = [.. reset.BusinessOracles],
@@ -290,18 +296,22 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
             proposal.Candidate.Fingerprint,
             attempt?.Fingerprint);
         // The proof is re-derived from the transient flow rather than trusted from the proposal.
-        // The replay must also show every hard assertion the executed prefix declares actually
-        // observed and passing — a prefix whose assertions were never evaluated proves nothing.
+        // The claim is only made when the executed prefix actually declares hard assertions and
+        // every one of them was evaluated and passed — a prefix that asserted nothing, or whose
+        // report was truncated, proves nothing about invariance.
         var declaredAssertions = transient.Steps
             .SelectMany(static step => step.Asserts)
-            .Count(IsHardAssertion);
-        var observedAssertions = report.Steps.SelectMany(static step => step.Assertions).ToList();
+            .Count(static assertion => assertion.Verify);
+        var passedAssertions = report.Steps
+            .SelectMany(static step => step.Assertions)
+            .Count(static assertion => assertion.Passed == true && assertion.Skipped != true);
         var assertionsUnchanged = patched.Proof?.Unchanged == true &&
             patched.Proof.ActionsUnchanged == true &&
             patched.Proof.ValuesUnchanged == true &&
             patched.Proof.OrderUnchanged == true &&
-            observedAssertions.All(static assertion => assertion.Passed == true && assertion.Skipped != true) &&
-            observedAssertions.Count >= declaredAssertions;
+            report.Truncated != true &&
+            declaredAssertions > 0 &&
+            passedAssertions == declaredAssertions;
         // Verified is the run path's own answer to "did an oracle independent of the UI selector
         // confirm the effect", and any recorded oracle must itself be independent and successful.
         var oracleSucceeded = report.Verification?.Verified == true &&
@@ -338,11 +348,6 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
         };
     }
 
-    /// <summary>A declared assertion the runner is expected to evaluate and report.</summary>
-    private static bool IsHardAssertion(FlowAssert assertion)
-        => assertion.Verify &&
-           !string.Equals(assertion.Kind, "pageChanged", StringComparison.Ordinal);
-
     /// <summary>Mirrors the canonical step identity so retained ids resolve to executable steps.</summary>
     private static FlowStep? FindStep(MauiFlow flow, string stepId)
         => flow.Steps.FirstOrDefault(step => string.Equals(
@@ -378,8 +383,9 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
             .ToList();
 
     /// <summary>
-    /// The reset the host itself attested and observed, retained only long enough for the paired
-    /// replay. It is bound to the proposal so a later replay can never inherit an unrelated reset.
+    /// The reset the host itself attested and observed, retained only for the single paired replay.
+    /// It is bound to the proposal and expires, so a replay can never inherit an unrelated or
+    /// already-consumed reset.
     /// </summary>
     private sealed record AttestedReset(
         string? ProposalId,
@@ -388,12 +394,17 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
         MauiFlowCheckpoint Observed,
         MauiFlowResetResult? Reset,
         List<MauiIndependentBusinessOracleResult> BusinessOracles,
+        string? EvidenceReference,
         DateTimeOffset AttestedAt)
     {
+        private static readonly TimeSpan MaximumAge = TimeSpan.FromMinutes(10);
+
         public bool Matches(MauiFlowRepairProposal proposal)
             => !string.IsNullOrWhiteSpace(ProposalId) &&
                string.Equals(ProposalId, proposal.ProposalId, StringComparison.Ordinal) &&
                !string.IsNullOrWhiteSpace(PatchDigest) &&
                string.Equals(PatchDigest, proposal.PatchDigest, StringComparison.Ordinal);
+
+        public bool IsStale(DateTimeOffset now) => now - AttestedAt > MaximumAge;
     }
 }

@@ -5822,6 +5822,17 @@ public sealed partial class InspectorServer : IDisposable
         }
 
         var sourceWorkspace = historyStore.Load(lookup.Proposal.Proposal.BaseFlow?.Path);
+        // The plan drives replay admission, reset requirements, and the independent oracles, so a
+        // plan edited after review must not silently admit a device-mutating validation run.
+        var trusted = lookup.Proposal.TrustedContext;
+        var reviewedPlan = sourceWorkspace.Ok &&
+            sourceWorkspace.Snapshot?.Plan is { } snapshotPlan &&
+            !string.IsNullOrWhiteSpace(sourceWorkspace.Snapshot.PlanDigest) &&
+            string.Equals(sourceWorkspace.Snapshot.PlanDigest, trusted.PlanDigest, StringComparison.Ordinal) &&
+            snapshotPlan.Revision == trusted.PlanRevision &&
+            string.Equals(snapshotPlan.SideEffectPolicy, trusted.SafetyPolicy, StringComparison.Ordinal)
+                ? snapshotPlan
+                : null;
         var validation = await _repairValidation.ValidateAsync(
             new WorkflowRepairTransientValidationRequest
             {
@@ -5832,7 +5843,7 @@ public sealed partial class InspectorServer : IDisposable
                 ValidationGrantDigest = request.ValidationGrant,
                 InMemorySelectorOverrideOnly = true,
                 SourceFlow = sourceWorkspace.Ok ? sourceWorkspace.Snapshot?.Flow : null,
-                SourcePlan = sourceWorkspace.Ok ? sourceWorkspace.Snapshot?.Plan : null,
+                SourcePlan = reviewedPlan,
                 AllowDownstreamContinuation =
                     lookup.Proposal.TrustedContext.ReplaySafety?.DownstreamContinuationAllowed == true,
             },

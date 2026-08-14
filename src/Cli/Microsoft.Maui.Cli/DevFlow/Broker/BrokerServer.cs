@@ -2581,18 +2581,30 @@ public partial class BrokerServer : IDisposable
     /// composes primitives the broker already owns: live checkpoint observation, route restore,
     /// and one retained workflow run. No source file, flow, or plan is written.
     /// </summary>
-    private BrokerWorkflowRepairValidationHost CreateRepairValidationHost(AgentConnection connection)
-        => new(
+    /// <summary>
+    /// Builds the lifecycle host for bounded transient repair validation, or returns null when no
+    /// component can attest a hard reset. Returning a host that cannot reset would flip the
+    /// workbench's <c>repairValidationAvailable</c> flag to true and replace an honest
+    /// "no lifecycle host is connected" answer with a validation that can never pass.
+    /// </summary>
+    private BrokerWorkflowRepairValidationHost? CreateRepairValidationHost(AgentConnection connection)
+    {
+        // Seed, backend-state, and collection-item facts require a lifecycle host that builds,
+        // resets, and seeds outside the broker. None is registered, so no reset attestation is
+        // ever fabricated and the repair validation route keeps reporting itself unavailable.
+        IWorkflowRepairResetAttester? resetAttester = null;
+        if (resetAttester is null)
+            return null;
+
+        return new BrokerWorkflowRepairValidationHost(
             observeCheckpoint: cancellationToken =>
                 ObserveRepairCheckpointAsync(connection, cancellationToken),
             restoreRoute: (route, cancellationToken) =>
                 RestoreRepairRouteAsync(connection, route, cancellationToken),
             replay: (flow, plan, context, cancellationToken) =>
                 ReplayTransientRepairFlowAsync(connection, flow, plan, context, cancellationToken),
-            // Seed, backend-state, and collection-item facts require a lifecycle host that builds,
-            // resets, and seeds outside the broker. None is registered, so a reset attestation is
-            // never fabricated and validation fails closed with an explicit reason.
-            resetAttester: null);
+            resetAttester: resetAttester);
+    }
 
     private async Task<MauiFlowCheckpoint?> ObserveRepairCheckpointAsync(
         AgentConnection connection,
@@ -2645,30 +2657,49 @@ public partial class BrokerServer : IDisposable
         if (!IsCurrentAgentConnection(connection) || string.IsNullOrWhiteSpace(route))
             return false;
 
+        var leaseId = $"repair-validation-{Guid.NewGuid():N}";
         try
         {
-            // An implicit lease would be claimed under a fresh id this scope never releases, and
-            // would then collide with the mutation lease the paired replay run acquires.
+            // The implicit lease is disabled so the claim is explicit and, above all, released:
+            // an auto-acquired lease is never released and would collide with the paired replay
+            // run for the whole 10s lease duration.
             using var client = new Microsoft.Maui.DevFlow.Driver.AgentClient(
                 "localhost",
                 connection.Registration.Port)
             {
                 AutoAcquireMutationLease = false,
             };
-            using var leaseScope = client.UseMutationLease(
-                $"repair-validation-{Guid.NewGuid():N}",
-                "repair-validation",
-                "route-restore");
-            if (!await client.NavigateAsync(route).WaitAsync(cancellationToken).ConfigureAwait(false))
+            using var leaseScope = client.UseMutationLease(leaseId, "repair-validation", "route-restore");
+            var claim = await client
+                .ControlMutationLeaseAsync("claim", false, leaseId, "repair-validation", "route-restore")
+                .WaitAsync(cancellationToken)
+                .ConfigureAwait(false);
+            if (!claim.YouHold)
                 return false;
-            var observed = await client.GetStatusAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
-            return string.Equals(SafeCheckpointText(observed?.Route), route, StringComparison.Ordinal);
+
+            try
+            {
+                if (!await client.NavigateAsync(route).WaitAsync(cancellationToken).ConfigureAwait(false))
+                    return false;
+                var observed = await client.GetStatusAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
+                return string.Equals(SafeCheckpointText(observed?.Route), route, StringComparison.Ordinal);
+            }
+            finally
+            {
+                await client
+                    .ControlMutationLeaseAsync("release", false, leaseId, "repair-validation", "route-restore")
+                    .ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException)
         {
             throw;
         }
-        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Net.Sockets.SocketException or InvalidOperationException)
+        catch (Microsoft.Maui.DevFlow.Driver.MutationLeaseException)
+        {
+            return false;
+        }
+        catch (Exception ex) when (ex is HttpRequestException or IOException or System.Net.Sockets.SocketException)
         {
             return false;
         }
@@ -2685,8 +2716,9 @@ public partial class BrokerServer : IDisposable
             return new WorkflowRepairTransientReplayOutcome { FailureCode = "agent-instance-replaced" };
 
         var registration = connection.Registration;
-        // The plan keeps every requirement, oracle, and checkpoint it was reviewed with; only its
-        // flow binding is rebound to the verified selector-only patch actually being replayed.
+        // The plan is the one the proposal was reviewed against — the Inspector re-verifies its
+        // digest, revision, and side-effect policy before validation. Only its flow binding is
+        // rebound, to the verified selector-only patch actually being replayed.
         var transientPlan = RebindPlanToTransientFlow(plan, flow);
         var capabilities = RequiresWorkflowRunCapabilities(transientPlan)
             ? await ReadWorkflowRunCapabilitiesAsync(registration).ConfigureAwait(false)

@@ -2460,6 +2460,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalRecord.ApprovedScope[]:Mic
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalRecord.Correlation[]:Microsoft.Maui.DevFlow.Testing.MauiTestAgentCorrelation{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalRecord.CreatedAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalRecord.DecidedAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalRecord.DecidedBy[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalRecord.ExpiresAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalRecord.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalRecord.GrantExpiresAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
@@ -2493,6 +2494,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuditEntry.ActionDigest[]:System.S
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuditEntry.AgentId[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuditEntry.AgentInstanceId[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuditEntry.At[]:System.DateTimeOffset{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuditEntry.DecidedBy[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuditEntry.ErrorCode[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuditEntry.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuditEntry.FlowRevision[]:System.Nullable`1[System.Int32]{get:public;set:public}

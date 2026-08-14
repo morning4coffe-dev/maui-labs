@@ -774,24 +774,40 @@ public sealed partial class InspectorServer : IDisposable
             if (IsTokenGatedPath(request.Path))
             {
                 var token = request.Headers.TryGetValue("x-devflow-inspector-token", out var t) ? t : null;
+                var normalizedPath = request.Path.TrimEnd('/');
+                var hostTokenVerified = IsTrustedHostApprovalRequest(request);
                 var trustedHostConfirmationIssue =
                     request.Method == "POST" &&
                     string.Equals(
-                        request.Path.TrimEnd('/'),
+                        normalizedPath,
                         "/api/workbench/approval-confirmations/issue",
                         StringComparison.OrdinalIgnoreCase) &&
-                    _trustedHostApprovalVerifier?.Invoke(
-                        request.Headers.TryGetValue("x-devflow-host-approval-token", out var hostToken)
-                            ? hostToken
-                            : null) == true;
+                    hostTokenVerified;
                 var consumesTrustedHostConfirmation =
                     request.Method == "POST" &&
                     request.Path.StartsWith(
                         "/api/workbench/agent-requests/",
                         StringComparison.OrdinalIgnoreCase) &&
                     request.Path.EndsWith("/approve", StringComparison.OrdinalIgnoreCase);
+                // A native host reviews and rejects with the same owner-only broker-state token it
+                // needs to issue a confirmation, so it never needs the browser's per-process read
+                // token. Unlike the /approve shape above, these carry no later capability check, so
+                // the host token itself must be verified here.
+                var trustedHostAgentRequestReview =
+                    hostTokenVerified &&
+                    ((request.Method == "GET" &&
+                      string.Equals(
+                          normalizedPath,
+                          "/api/workbench/agent-requests",
+                          StringComparison.OrdinalIgnoreCase)) ||
+                     (request.Method == "POST" &&
+                      request.Path.StartsWith(
+                          "/api/workbench/agent-requests/",
+                          StringComparison.OrdinalIgnoreCase) &&
+                      request.Path.EndsWith("/reject", StringComparison.OrdinalIgnoreCase)));
                 if (!trustedHostConfirmationIssue &&
                     !consumesTrustedHostConfirmation &&
+                    !trustedHostAgentRequestReview &&
                     (string.IsNullOrEmpty(token) || !string.Equals(token, _readToken, StringComparison.Ordinal)))
                     return (403, "application/json", Encoding.UTF8.GetBytes("{\"ok\":false,\"error\":\"forbidden\"}"));
             }
@@ -2995,10 +3011,11 @@ public sealed partial class InspectorServer : IDisposable
                 return JsonResponse(405, new { ok = false, error = "Method not allowed." });
 
             var approvalRequestId = Uri.UnescapeDataString(agentRequestSegments[3]);
+            var trustedHost = IsTrustedHostApprovalRequest(request);
             return agentRequestSegments[4].ToLowerInvariant() switch
             {
-                "approve" => await HandleWorkbenchAgentRequestApproveAsync(approvalRequestId, request.Body),
-                "reject" => HandleWorkbenchAgentRequestReject(approvalRequestId, request.Body),
+                "approve" => await HandleWorkbenchAgentRequestApproveAsync(approvalRequestId, request.Body, trustedHost),
+                "reject" => HandleWorkbenchAgentRequestReject(approvalRequestId, request.Body, trustedHost),
                 _ => JsonResponse(404, new { ok = false, error = "Not found." }),
             };
         }
@@ -3276,12 +3293,7 @@ public sealed partial class InspectorServer : IDisposable
             });
         }
 
-        var hostToken = httpRequest.Headers.TryGetValue(
-            "x-devflow-host-approval-token",
-            out var supplied)
-            ? supplied
-            : null;
-        if (_trustedHostApprovalVerifier.Invoke(hostToken) != true)
+        if (!IsTrustedHostApprovalRequest(httpRequest))
             return TrustedHostApprovalRequired();
         if (!TryReadWorkbenchApprovalConfirmationIssue(
                 httpRequest.Body,
@@ -3424,6 +3436,17 @@ public sealed partial class InspectorServer : IDisposable
             code = "trusted-host-required",
             error = "A trusted native host must confirm this exact target and proposal. Browser or chat text cannot issue a grant.",
         });
+
+    /// <summary>
+    /// True when the request presents the owner-only native-host approval token minted by the
+    /// broker. This proves the caller can read owner-restricted local state; it is not, and must
+    /// never be described as, proof that a human rather than a local agent process made the call.
+    /// </summary>
+    private bool IsTrustedHostApprovalRequest(HttpRequestInfo request)
+        => _trustedHostApprovalVerifier?.Invoke(
+            request.Headers.TryGetValue("x-devflow-host-approval-token", out var hostToken)
+                ? hostToken
+                : null) == true;
 
     private bool TryConsumeWorkbenchApprovalConfirmation(
         string? capability,
@@ -3724,7 +3747,8 @@ public sealed partial class InspectorServer : IDisposable
 
     private async Task<(int, string, byte[])> HandleWorkbenchAgentRequestApproveAsync(
         string approvalRequestId,
-        string? body)
+        string? body,
+        bool trustedHost)
     {
         if (_testAgentSessions is null || _testAgentTargetStateRefresh is null)
             return JsonResponse(503, new { ok = false, error = "Broker-owned test-agent approvals are unavailable." });
@@ -3780,7 +3804,7 @@ public sealed partial class InspectorServer : IDisposable
             approvalRequestId,
             decision.ApprovedScope,
             currentTargetState,
-            WorkbenchHumanDecision(approved: true),
+            HumanDecision(approved: true, trustedHost, decision.DecidedBy),
             grantExpiresAt);
         return JsonResponse(WorkbenchTestAgentStatusCode(result.Error), new
         {
@@ -3795,7 +3819,8 @@ public sealed partial class InspectorServer : IDisposable
 
     private (int, string, byte[]) HandleWorkbenchAgentRequestReject(
         string approvalRequestId,
-        string? body)
+        string? body,
+        bool trustedHost)
     {
         if (_testAgentSessions is null)
             return JsonResponse(503, new { ok = false, error = "Broker-owned test-agent approvals are unavailable." });
@@ -3812,7 +3837,7 @@ public sealed partial class InspectorServer : IDisposable
 
         var result = _testAgentSessions.RejectApprovalRequest(
             approvalRequestId,
-            WorkbenchHumanDecision(approved: false),
+            HumanDecision(approved: false, trustedHost, decision.DecidedBy),
             decision.ReasonCode);
         return JsonResponse(WorkbenchTestAgentStatusCode(result.Error), new
         {
@@ -3841,6 +3866,55 @@ public sealed partial class InspectorServer : IDisposable
                 Provider = "inspector-server",
             },
         };
+
+    /// <summary>
+    /// Builds the decision recorded by the broker. A caller that presented the owner-only native
+    /// host approval token is recorded on the "host" channel with its own bounded provenance label,
+    /// so an operator can later tell a CLI decision from a Workbench one. The labels are provenance
+    /// only: both channels already satisfy the broker's human/host approval rule, so supplying them
+    /// neither widens nor narrows what the decision authorizes.
+    /// </summary>
+    private static Testing.MauiTestAgentHumanApproval HumanDecision(
+        bool approved,
+        bool trustedHost,
+        WorkbenchDecisionProvenance? decidedBy)
+    {
+        if (!trustedHost)
+            return WorkbenchHumanDecision(approved);
+
+        return new Testing.MauiTestAgentHumanApproval
+        {
+            Approved = approved,
+            ApprovalChannel = "host",
+            ApprovedAt = DateTimeOffset.UtcNow,
+            Actor = new Testing.MauiActorProvenance
+            {
+                ActorKind = "host",
+                ActorId = SafeProvenanceLabel(decidedBy?.ActorId, 128) ?? "native-host-user",
+                Channel = SafeProvenanceLabel(decidedBy?.Channel, 64) ?? "host",
+                Provider = SafeProvenanceLabel(decidedBy?.Provider, 128) ?? "native-host",
+            },
+        };
+    }
+
+    /// <summary>
+    /// Restricts a caller-supplied provenance label to a short single-line slug so it cannot smuggle
+    /// separators, control characters, or markup into audit records and CLI output.
+    /// </summary>
+    private static string? SafeProvenanceLabel(string? value, int maximum)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        var builder = new StringBuilder(Math.Min(value.Length, maximum));
+        foreach (var character in value)
+        {
+            if (char.IsAsciiLetterOrDigit(character) || character is '-' or '_' or '.')
+                builder.Append(character);
+            if (builder.Length == maximum)
+                break;
+        }
+        return builder.Length == 0 ? null : builder.ToString();
+    }
 
     private static int WorkbenchTestAgentStatusCode(Testing.MauiTestAgentError? error)
     {
@@ -7367,6 +7441,18 @@ public sealed partial class InspectorServer : IDisposable
         [JsonPropertyName("approvedScope")] public Testing.MauiTestAgentMutationScope? ApprovedScope { get; set; }
         [JsonPropertyName("grantDurationSeconds")] public int? GrantDurationSeconds { get; set; }
         [JsonPropertyName("reasonCode")] public string? ReasonCode { get; set; }
+        [JsonPropertyName("decidedBy")] public WorkbenchDecisionProvenance? DecidedBy { get; set; }
+    }
+
+    /// <summary>
+    /// Optional, bounded provenance labels a native host may attach to its decision so the broker
+    /// audit records which issuer decided. Never consulted by any authorization check.
+    /// </summary>
+    private sealed class WorkbenchDecisionProvenance
+    {
+        [JsonPropertyName("actorId")] public string? ActorId { get; set; }
+        [JsonPropertyName("channel")] public string? Channel { get; set; }
+        [JsonPropertyName("provider")] public string? Provider { get; set; }
     }
 
     private sealed class WorkbenchEvidenceRequest

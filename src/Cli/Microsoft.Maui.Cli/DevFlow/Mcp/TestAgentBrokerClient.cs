@@ -253,6 +253,83 @@ internal static class TestAgentBrokerClient
         }
     }
 
+    internal static Task<TestAgentBrokerRawResponse> GetInspectorWorkbenchAsync(
+        int brokerPort,
+        string agentId,
+        string path,
+        string? hostApprovalToken = null,
+        CancellationToken cancellationToken = default)
+        => SendInspectorWorkbenchAsync(
+            HttpMethod.Get,
+            brokerPort,
+            agentId,
+            path,
+            null,
+            hostApprovalToken,
+            cancellationToken);
+
+    internal static Task<TestAgentBrokerRawResponse> PostInspectorWorkbenchAsync(
+        int brokerPort,
+        string agentId,
+        string path,
+        string json,
+        string? hostApprovalToken = null,
+        CancellationToken cancellationToken = default)
+        => SendInspectorWorkbenchAsync(
+            HttpMethod.Post,
+            brokerPort,
+            agentId,
+            path,
+            json,
+            hostApprovalToken,
+            cancellationToken);
+
+    private static async Task<TestAgentBrokerRawResponse> SendInspectorWorkbenchAsync(
+        HttpMethod method,
+        int brokerPort,
+        string agentId,
+        string path,
+        string? json,
+        string? hostApprovalToken,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var uri = $"http://localhost:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}{path}";
+            using var message = new HttpRequestMessage(method, uri);
+            if (json is not null)
+                message.Content = new StringContent(json, Encoding.UTF8, "application/json");
+            if (!string.IsNullOrEmpty(hostApprovalToken))
+                message.Headers.TryAddWithoutValidation("X-DevFlow-Host-Approval-Token", hostApprovalToken);
+            using var response = await Http.SendAsync(message, cancellationToken).ConfigureAwait(false);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+            try
+            {
+                using var document = JsonDocument.Parse(body);
+                return new TestAgentBrokerRawResponse((int)response.StatusCode, document.RootElement.Clone(), null);
+            }
+            catch (JsonException)
+            {
+                return new TestAgentBrokerRawResponse(
+                    (int)response.StatusCode,
+                    default,
+                    "The Inspector returned an invalid structured response.");
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (HttpRequestException)
+        {
+            return new TestAgentBrokerRawResponse(0, default, "The local DevFlow broker is unavailable.");
+        }
+        catch (TaskCanceledException)
+        {
+            return new TestAgentBrokerRawResponse(0, default, "The local DevFlow broker did not respond before the bounded deadline.");
+        }
+    }
+
     private static async Task<TestAgentBrokerResponse<TResponse>> PostAsync<TRequest, TResponse>(
         int brokerPort,
         string path,

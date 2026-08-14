@@ -1221,6 +1221,420 @@ public sealed class InspectorWorkbenchBrokerRouteTests
         }
     }
 
+    [Fact]
+    public async Task AgentRequest_NativeHostReviewsAndDecidesWithoutTheBrowserReadToken()
+    {
+        var brokerPort = FreePort();
+        var agentPort = FreePort();
+        var previewFlags = PreviewTestFeatures.AllEnabled();
+        var hostApprovalToken = Guid.NewGuid().ToString("N");
+        using var broker = new BrokerServer(
+            brokerPort,
+            TimeSpan.FromMinutes(1),
+            previewFlags,
+            trustedHostApprovalVerifier: supplied =>
+                string.Equals(supplied, hostApprovalToken, StringComparison.Ordinal));
+        using var cancellation = new CancellationTokenSource();
+        var brokerTask = broker.RunAsync(cancellation.Token);
+        await WaitForBrokerAsync(brokerPort);
+
+        using var agent = new AgentHttpServer(agentPort);
+        agent.MapGet("/api/v1/agent/status", _ => Task.FromResult(HttpResponse.Json(new
+        {
+            running = true,
+            agent = new { name = "DevFlow", instanceId = "host-approval-instance", version = "1" },
+            app = new { name = "Host Approval Test", build = "build-host", packageId = "com.example.host", version = "1.0" },
+            device = new { platform = "android", deviceType = "emulator", idiom = "phone" },
+            capabilities = new { ui = true, mutations = true },
+            route = "/todos",
+        })));
+        agent.Start();
+
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri($"ws://127.0.0.1:{brokerPort}/ws/agent"), CancellationToken.None);
+        await SendAsync(socket, $$"""
+            {"type":"register","project":"host-approval-test","tfm":"net10.0-android","platform":"android","appName":"Host Approval Test","currentPort":{{agentPort}}}
+            """);
+        await ReceiveAsync(socket);
+
+        try
+        {
+            using var http = new HttpClient();
+            using var agents = JsonDocument.Parse(await http.GetStringAsync($"http://127.0.0.1:{brokerPort}/api/agents"));
+            var registration = agents.RootElement[0];
+            var agentId = registration.GetProperty("id").GetString()!;
+            var instanceId = registration.GetProperty("instanceId").GetString()!;
+            var target = new MauiTestAgentTarget
+            {
+                AgentId = agentId,
+                AgentInstanceId = instanceId,
+            };
+            var provenance = new
+            {
+                actorKind = "agent",
+                actorId = "host-approval-agent",
+                channel = "mcp",
+                provider = "host-owned",
+            };
+
+            using var beginResponse = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/test-agent/sessions/begin",
+                new
+                {
+                    envelope = new
+                    {
+                        schema = 1,
+                        requestId = "begin-host-approval",
+                        idempotencyKey = "begin-host-approval",
+                        target,
+                        correlation = new { },
+                        provenance,
+                        intent = "Add one disposable todo",
+                        deadlineMs = 30_000,
+                        policyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+                    },
+                    targetState = new { agentId, agentInstanceId = instanceId, seedFingerprint = "seed-host" },
+                });
+            Assert.Equal(HttpStatusCode.OK, beginResponse.StatusCode);
+            using var begin = JsonDocument.Parse(await beginResponse.Content.ReadAsStringAsync());
+            var snapshot = begin.RootElement.GetProperty("snapshot");
+            target.AppBuildFingerprint = snapshot.GetProperty("target")
+                .GetProperty("appBuildFingerprint")
+                .GetString();
+            var sessionId = snapshot.GetProperty("sessionId").GetString()!;
+            var readCapabilityId = snapshot.GetProperty("readCapabilityId").GetString()!;
+            var plan = snapshot.GetProperty("plan");
+            var correlation = new
+            {
+                authoringSessionId = sessionId,
+                planId = plan.GetProperty("planId").GetString(),
+                planRevision = plan.GetProperty("revision").GetInt32(),
+                planDigest = snapshot.GetProperty("planDigest").GetString(),
+                flowId = plan.GetProperty("flow").GetProperty("flowId").GetString(),
+                flowRevision = snapshot.GetProperty("flowRevision").GetInt32(),
+                flowDigest = snapshot.GetProperty("flowDigest").GetString(),
+            };
+
+            var approvedScope = new
+            {
+                allowedActions = new[] { MauiTestAgentActions.Tap },
+                allowedSelectors = new[] { "automationId:AddButton" },
+                allowedSideEffectClasses = new[] { "ui" },
+                maxActionCount = 1,
+                maxValueBytes = 0,
+            };
+
+            async Task<string> SubmitAsync(string key)
+            {
+                using var response = await PostJsonAsync(
+                    http,
+                    $"http://127.0.0.1:{brokerPort}/api/test-agent/approvals/request",
+                    new
+                    {
+                        envelope = new
+                        {
+                            schema = 1,
+                            requestId = key,
+                            idempotencyKey = key,
+                            target,
+                            correlation,
+                            provenance,
+                            intent = "Tap AddButton after review",
+                            readCapabilityId,
+                            deadlineMs = 30_000,
+                            policyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+                        },
+                        kind = MauiTestAgentApprovalKinds.DraftChange,
+                        scope = approvedScope,
+                    });
+                Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+                using var submitted = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
+                return submitted.RootElement.GetProperty("request").GetProperty("approvalRequestId").GetString()!;
+            }
+
+            var approveId = await SubmitAsync("request-host-approve");
+            var rejectId = await SubmitAsync("request-host-reject");
+
+            var inspectorBase = $"http://127.0.0.1:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}";
+
+            // Without any credential the browser-facing gate still refuses every workbench route.
+            using var deniedList = await http.GetAsync($"{inspectorBase}/api/workbench/agent-requests");
+            Assert.Equal(HttpStatusCode.Forbidden, deniedList.StatusCode);
+            using var deniedReject = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests/{Uri.EscapeDataString(rejectId)}/reject",
+                new { humanConfirmed = true, reasonCode = "no-credential" });
+            Assert.Equal(HttpStatusCode.Forbidden, deniedReject.StatusCode);
+
+            // A wrong host token is not a credential either.
+            using var wrongTokenList = await GetTrustedAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests",
+                "not-the-host-token");
+            Assert.Equal(HttpStatusCode.Forbidden, wrongTokenList.StatusCode);
+
+            // The native host reviews with its own token and never needs the per-process read token.
+            using var listResponse = await GetTrustedAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests",
+                hostApprovalToken);
+            Assert.Equal(HttpStatusCode.OK, listResponse.StatusCode);
+            using var listing = JsonDocument.Parse(await listResponse.Content.ReadAsStringAsync());
+            Assert.Equal(2, listing.RootElement.GetProperty("pendingCount").GetInt32());
+            Assert.False(listing.RootElement.GetProperty("browserApprovalAvailable").GetBoolean());
+
+            using var confirmationResponse = await PostTrustedJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/approval-confirmations/issue",
+                hostApprovalToken,
+                new
+                {
+                    action = "agent-request-approve",
+                    subjectId = approveId,
+                    approvedScope,
+                    grantDurationSeconds = 60,
+                });
+            Assert.Equal(HttpStatusCode.Created, confirmationResponse.StatusCode);
+            using var confirmation = JsonDocument.Parse(await confirmationResponse.Content.ReadAsStringAsync());
+            var confirmationCapability = confirmation.RootElement.GetProperty("confirmationCapability").GetString()!;
+
+            using var approveResponse = await PostTrustedJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests/{Uri.EscapeDataString(approveId)}/approve",
+                hostApprovalToken,
+                new
+                {
+                    humanConfirmed = true,
+                    confirmationCapability,
+                    approvedScope,
+                    grantDurationSeconds = 60,
+                    decidedBy = new { actorId = "maui-cli-operator", channel = "cli", provider = "maui-cli" },
+                });
+            Assert.Equal(HttpStatusCode.OK, approveResponse.StatusCode);
+            using var approved = JsonDocument.Parse(await approveResponse.Content.ReadAsStringAsync());
+            Assert.True(approved.RootElement.GetProperty("ok").GetBoolean());
+            Assert.Equal("cli/maui-cli", approved.RootElement.GetProperty("request").GetProperty("decidedBy").GetString());
+
+            using var rejectResponse = await PostTrustedJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests/{Uri.EscapeDataString(rejectId)}/reject",
+                hostApprovalToken,
+                new
+                {
+                    humanConfirmed = true,
+                    reasonCode = "host-rejected",
+                    decidedBy = new { actorId = "maui-cli-operator", channel = "cli", provider = "maui-cli" },
+                });
+            Assert.Equal(HttpStatusCode.OK, rejectResponse.StatusCode);
+            using var rejected = JsonDocument.Parse(await rejectResponse.Content.ReadAsStringAsync());
+            Assert.Equal("cli/maui-cli", rejected.RootElement.GetProperty("request").GetProperty("decidedBy").GetString());
+
+            // The grant really was delivered through the restricted session status, so the CLI
+            // ceremony authorizes exactly what the Workbench ceremony authorizes.
+            using var statusResponse = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/test-agent/sessions/status",
+                new
+                {
+                    sessionId,
+                    readCapabilityId,
+                    envelope = new
+                    {
+                        requestId = "status-host-approved",
+                        idempotencyKey = "status-host-approved",
+                        target,
+                        correlation,
+                        provenance,
+                        intent = "Read the host-approved request.",
+                        readCapabilityId,
+                        policyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+                    },
+                });
+            using var status = JsonDocument.Parse(await statusResponse.Content.ReadAsStringAsync());
+            var delivered = status.RootElement
+                .GetProperty("snapshot")
+                .GetProperty("approvalRequests")
+                .EnumerateArray()
+                .Single(request => string.Equals(
+                    request.GetProperty("approvalRequestId").GetString(),
+                    approveId,
+                    StringComparison.Ordinal));
+            Assert.Equal(MauiTestAgentApprovalStates.Approved, delivered.GetProperty("state").GetString());
+            Assert.False(string.IsNullOrWhiteSpace(delivered.GetProperty("grantId").GetString()));
+            Assert.Equal("cli/maui-cli", delivered.GetProperty("decidedBy").GetString());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            broker.Dispose();
+            await brokerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
+    public async Task WorkbenchDecision_WithoutHostToken_StaysOnTheWorkbenchChannel()
+    {
+        var brokerPort = FreePort();
+        var agentPort = FreePort();
+        var previewFlags = PreviewTestFeatures.AllEnabled();
+        var hostApprovalToken = Guid.NewGuid().ToString("N");
+        using var broker = new BrokerServer(
+            brokerPort,
+            TimeSpan.FromMinutes(1),
+            previewFlags,
+            trustedHostApprovalVerifier: supplied =>
+                string.Equals(supplied, hostApprovalToken, StringComparison.Ordinal));
+        using var cancellation = new CancellationTokenSource();
+        var brokerTask = broker.RunAsync(cancellation.Token);
+        await WaitForBrokerAsync(brokerPort);
+
+        using var agent = new AgentHttpServer(agentPort);
+        agent.MapGet("/api/v1/agent/status", _ => Task.FromResult(HttpResponse.Json(new
+        {
+            running = true,
+            agent = new { name = "DevFlow", instanceId = "workbench-channel-instance", version = "1" },
+            app = new { name = "Workbench Channel Test", build = "build-wb", packageId = "com.example.wb", version = "1.0" },
+            device = new { platform = "android", deviceType = "emulator", idiom = "phone" },
+            capabilities = new { ui = true, mutations = true },
+            route = "/todos",
+        })));
+        agent.Start();
+
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri($"ws://127.0.0.1:{brokerPort}/ws/agent"), CancellationToken.None);
+        await SendAsync(socket, $$"""
+            {"type":"register","project":"workbench-channel-test","tfm":"net10.0-android","platform":"android","appName":"Workbench Channel Test","currentPort":{{agentPort}}}
+            """);
+        await ReceiveAsync(socket);
+
+        try
+        {
+            using var http = new HttpClient();
+            using var agents = JsonDocument.Parse(await http.GetStringAsync($"http://127.0.0.1:{brokerPort}/api/agents"));
+            var registration = agents.RootElement[0];
+            var agentId = registration.GetProperty("id").GetString()!;
+            var instanceId = registration.GetProperty("instanceId").GetString()!;
+            var target = new MauiTestAgentTarget
+            {
+                AgentId = agentId,
+                AgentInstanceId = instanceId,
+            };
+            var provenance = new
+            {
+                actorKind = "agent",
+                actorId = "workbench-channel-agent",
+                channel = "mcp",
+                provider = "host-owned",
+            };
+
+            using var beginResponse = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/test-agent/sessions/begin",
+                new
+                {
+                    envelope = new
+                    {
+                        schema = 1,
+                        requestId = "begin-workbench-channel",
+                        idempotencyKey = "begin-workbench-channel",
+                        target,
+                        correlation = new { },
+                        provenance,
+                        intent = "Add one disposable todo",
+                        deadlineMs = 30_000,
+                        policyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+                    },
+                    targetState = new { agentId, agentInstanceId = instanceId, seedFingerprint = "seed-wb" },
+                });
+            using var begin = JsonDocument.Parse(await beginResponse.Content.ReadAsStringAsync());
+            var snapshot = begin.RootElement.GetProperty("snapshot");
+            target.AppBuildFingerprint = snapshot.GetProperty("target")
+                .GetProperty("appBuildFingerprint")
+                .GetString();
+            var sessionId = snapshot.GetProperty("sessionId").GetString()!;
+            var readCapabilityId = snapshot.GetProperty("readCapabilityId").GetString()!;
+            var plan = snapshot.GetProperty("plan");
+            var correlation = new
+            {
+                authoringSessionId = sessionId,
+                planId = plan.GetProperty("planId").GetString(),
+                planRevision = plan.GetProperty("revision").GetInt32(),
+                planDigest = snapshot.GetProperty("planDigest").GetString(),
+                flowId = plan.GetProperty("flow").GetProperty("flowId").GetString(),
+                flowRevision = snapshot.GetProperty("flowRevision").GetInt32(),
+                flowDigest = snapshot.GetProperty("flowDigest").GetString(),
+            };
+
+            using var requestResponse = await PostJsonAsync(
+                http,
+                $"http://127.0.0.1:{brokerPort}/api/test-agent/approvals/request",
+                new
+                {
+                    envelope = new
+                    {
+                        schema = 1,
+                        requestId = "request-workbench-channel",
+                        idempotencyKey = "request-workbench-channel",
+                        target,
+                        correlation,
+                        provenance,
+                        intent = "Tap AddButton after review",
+                        readCapabilityId,
+                        deadlineMs = 30_000,
+                        policyVersion = MauiTestAgentProtocolVersions.PolicyVersion,
+                    },
+                    kind = MauiTestAgentApprovalKinds.DraftChange,
+                    scope = new
+                    {
+                        allowedActions = new[] { MauiTestAgentActions.Tap },
+                        allowedSelectors = new[] { "automationId:AddButton" },
+                        allowedSideEffectClasses = new[] { "ui" },
+                        maxActionCount = 1,
+                        maxValueBytes = 0,
+                    },
+                });
+            using var submitted = JsonDocument.Parse(await requestResponse.Content.ReadAsStringAsync());
+            var approvalRequestId = submitted.RootElement
+                .GetProperty("request")
+                .GetProperty("approvalRequestId")
+                .GetString()!;
+
+            var inspectorBase = $"http://127.0.0.1:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}";
+            // The broker creates an Inspector lazily on the first request routed to it.
+            using var priming = await http.GetAsync($"{inspectorBase}/api/workbench/agent-requests");
+            Assert.Equal(HttpStatusCode.Forbidden, priming.StatusCode);
+            var inspector = await GetInspectorAsync(broker, agentId);
+            var inspectorToken = (string)typeof(InspectorServer)
+                .GetField("_readToken", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(inspector)!;
+            http.DefaultRequestHeaders.Add("X-DevFlow-Inspector-Token", inspectorToken);
+
+            // A browser caller cannot claim host provenance: it holds only the read token, so the
+            // decision is recorded on the workbench channel no matter what it sends.
+            using var rejectResponse = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/agent-requests/{Uri.EscapeDataString(approvalRequestId)}/reject",
+                new
+                {
+                    humanConfirmed = true,
+                    reasonCode = "not-now",
+                    decidedBy = new { actorId = "spoofed", channel = "cli", provider = "maui-cli" },
+                });
+            Assert.Equal(HttpStatusCode.OK, rejectResponse.StatusCode);
+            using var rejected = JsonDocument.Parse(await rejectResponse.Content.ReadAsStringAsync());
+            Assert.Equal(
+                "workbench/inspector-server",
+                rejected.RootElement.GetProperty("request").GetProperty("decidedBy").GetString());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            broker.Dispose();
+            await brokerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
     private static MauiFlow AssertOnlyFlow() => new()
     {
         Name = "inspector-workbench",
@@ -1287,6 +1701,16 @@ public sealed class InspectorWorkbenchBrokerRouteTests
         using var request = new HttpRequestMessage(HttpMethod.Post, url);
         request.Headers.TryAddWithoutValidation("X-DevFlow-Host-Approval-Token", hostApprovalToken);
         request.Content = new StringContent(JsonSerializer.Serialize(value), Encoding.UTF8, "application/json");
+        return await client.SendAsync(request);
+    }
+
+    private static async Task<HttpResponseMessage> GetTrustedAsync(
+        HttpClient client,
+        string url,
+        string hostApprovalToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        request.Headers.TryAddWithoutValidation("X-DevFlow-Host-Approval-Token", hostApprovalToken);
         return await client.SendAsync(request);
     }
 

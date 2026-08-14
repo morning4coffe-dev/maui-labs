@@ -1766,6 +1766,14 @@ public class DevFlowCommands
 
         devflowCommand.Add(brokerCommand);
 
+        // ===== human approval command (operator convenience; not an authorization boundary) =====
+        devflowCommand.Add(Approvals.ApprovalCommands.Create(
+            jsonOption,
+            noJsonOption,
+            agentPortOption,
+            output,
+            static () => _errorOccurred = true));
+
         // ===== list command (agent discovery) =====
         var listCmd = new Command("list", "List all connected agents");
         listCmd.SetAction(async (ctx, ct) =>

@@ -465,6 +465,7 @@ internal sealed class TestAgentSessionService
             pendingRequest.State = MauiTestAgentApprovalStates.Approved;
             pendingRequest.ApprovedScope = CloneScope(scope!);
             pendingRequest.DecidedAt = _clock.GetUtcNow();
+            pendingRequest.DecidedBy = DescribeDecisionIssuer(approval);
             pendingRequest.GrantId = grant.GrantId;
             pendingRequest.GrantDigest = grant.GrantDigest;
             pendingRequest.GrantExpiresAt = grant.ExpiresAt;
@@ -476,7 +477,8 @@ internal sealed class TestAgentSessionService
                 grant.GrantDigest,
                 null,
                 null,
-                null);
+                null,
+                decidedBy: pendingRequest.DecidedBy);
             return new MauiTestAgentApprovalResult
             {
                 Ok = true,
@@ -507,6 +509,7 @@ internal sealed class TestAgentSessionService
             }
 
             MarkApprovalLocked(pendingRequest, MauiTestAgentApprovalStates.Rejected, Bounded(reasonCode, 128) ?? "human-rejected");
+            pendingRequest.DecidedBy = DescribeDecisionIssuer(decision);
             AppendAuditLocked(
                 owner,
                 "approval-rejected",
@@ -515,7 +518,8 @@ internal sealed class TestAgentSessionService
                 null,
                 null,
                 null,
-                null);
+                null,
+                decidedBy: pendingRequest.DecidedBy);
             return new MauiTestAgentApprovalResult
             {
                 Ok = true,
@@ -2090,6 +2094,19 @@ internal sealed class TestAgentSessionService
         => decision?.Actor is { ActorKind: "human" or "host", ActorId: { Length: > 0 }, Channel: { Length: > 0 }, Provider: { Length: > 0 } } &&
            decision.ApprovalChannel is "workbench" or "host";
 
+    /// <summary>
+    /// Bounded, non-secret provenance label for the surface that issued a human decision, such as
+    /// <c>workbench/inspector-server</c> or <c>cli/maui-cli</c>. It is recorded so an operator can
+    /// tell after the fact which issuer approved, and never participates in any authorization check.
+    /// The actor identity is deliberately excluded so reading the record cannot reveal a local user.
+    /// </summary>
+    private static string? DescribeDecisionIssuer(MauiTestAgentHumanApproval? decision)
+    {
+        if (decision?.Actor is not { Channel: { Length: > 0 } channel, Provider: { Length: > 0 } provider })
+            return null;
+        return Bounded($"{channel}/{provider}", 128);
+    }
+
     private static bool GrantMatchesSession(GrantRecord grant, SessionRecord session)
         => string.Equals(grant.SessionId, session.SessionId, StringComparison.Ordinal) &&
            CanonicalTargetsMatch(grant.Target, session.Target) &&
@@ -2571,7 +2588,8 @@ internal sealed class TestAgentSessionService
         string? actionDigest,
         string? resultDigest,
         string? errorCode,
-        string? runId = null)
+        string? runId = null,
+        string? decidedBy = null)
     {
         _journal.AddLast(new MauiTestAgentAuditEntry
         {
@@ -2586,6 +2604,7 @@ internal sealed class TestAgentSessionService
             FlowRevision = session.FlowRevision,
             RunId = Bounded(runId ?? envelope?.Correlation?.RunId, 256),
             PolicyDecision = Bounded(decision, 128),
+            DecidedBy = Bounded(decidedBy, 128),
             IntentDigest = string.IsNullOrWhiteSpace(envelope?.Intent) ? null : Hash(envelope.Intent),
             GrantDigest = BoundedDigest(grantDigest),
             ActionDigest = BoundedDigest(actionDigest),
@@ -2822,6 +2841,7 @@ internal sealed class TestAgentSessionService
             CreatedAt = source.CreatedAt,
             ExpiresAt = source.ExpiresAt,
             DecidedAt = source.DecidedAt,
+            DecidedBy = source.DecidedBy,
             ReasonCode = source.ReasonCode,
             GrantId = includeGrant && source.State == MauiTestAgentApprovalStates.Approved
                 ? source.GrantId
@@ -2917,6 +2937,7 @@ internal sealed class TestAgentSessionService
         FlowRevision = source.FlowRevision,
         RunId = source.RunId,
         PolicyDecision = source.PolicyDecision,
+        DecidedBy = source.DecidedBy,
         IntentDigest = source.IntentDigest,
         GrantDigest = source.GrantDigest,
         ActionDigest = source.ActionDigest,
@@ -3028,6 +3049,7 @@ internal sealed class TestAgentSessionService
         public string State { get; set; } = MauiTestAgentApprovalStates.Pending;
         public MauiTestAgentMutationScope? ApprovedScope { get; set; }
         public DateTimeOffset? DecidedAt { get; set; }
+        public string? DecidedBy { get; set; }
         public string? ReasonCode { get; set; }
         public string? GrantId { get; set; }
         public string? GrantDigest { get; set; }

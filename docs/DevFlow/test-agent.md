@@ -80,6 +80,43 @@ is ten minutes; a future issued grant would have its own shorter expiration.
 > and GitHub Copilot Canvas only when the broker reports approval available and the embedding host
 > advertises `nativeApproval`. The standalone browser and chat remain read-only and
 > non-authoritative; they cannot approve, narrow, or issue a usable grant.
+> The `maui devflow approve` CLI command below is a third issuer for people running no IDE
+> extension.
+
+### `maui devflow approve` — an issuer, not a boundary
+
+```
+maui devflow approve --list                       # show what the agent is asking for
+maui devflow approve <approval-request-id>        # approve it (default grant lifetime 300s)
+maui devflow approve <id> --grant-seconds 120     # narrower grant lifetime (1-900)
+maui devflow approve <id> --reject --reason scope-too-broad
+```
+
+The command reads the owner-only native-host approval token from the local broker state file, then
+performs the same two-step ceremony an IDE extension performs: mint a single-use, digest-bound
+confirmation capability, then present it on the decision call. Decisions it makes are recorded on
+the `host` approval channel with `decidedBy: "cli/maui-cli"`.
+
+> **This command is operator convenience, not an authorization boundary.**
+> A DevFlow MCP agent runs as the same OS user with the same file permissions, so it can read the
+> same broker token and call the same routes. Nothing this command does proves that a human rather
+> than a local agent process made the decision, and nothing it could do would prove that on a shared
+> user account:
+>
+> - A one-time code derived from the approval digest would be theater — every input to that digest
+>   is already in the agent's own session snapshot.
+> - A TTY check is defeated by ConPTY, `node-pty`, or `AllocConsole`.
+> - A non-interactive mode gated on an environment secret is defeated by reading the environment.
+>
+> The command's value is availability and reviewability: without it, a user with no IDE extension
+> has no way at all to approve a commit or a run, and no record of who approved. It does not change
+> what an agent that already controls the account can do. `--yes` skips the interactive prompt for
+> exactly this reason: the prompt was never a protection, so hiding it behind a flag costs nothing.
+
+The `decidedBy` field on an approval record and its audit entry names the issuing *surface*
+(`workbench/inspector-server`, `cli/maui-cli`), never the operating-system user. It is provenance
+only and is deliberately excluded from the confirmation digest: it records which issuer decided, and
+participates in no authorization check.
 
 A trusted native host lets a human reduce the requested scope and issues an opaque, short-lived
 grant server-side only after revalidating the live app instance and current plan/flow revision. The
@@ -99,6 +136,11 @@ design. Every request envelope also needs a positive bounded `deadlineMs`.
 Selector scope entries use canonical `automationId:<id>`,
 `scopedItem:<collection>:<itemKey>:<automationId>`, or `typeIndex:<type>:<index>` keys. The
 protocol also accepts equivalent typed selector objects and normalizes them to those keys.
+
+A `run` approval is always single-purpose and single-use: the broker forces `maxActionCount` to 1
+and refuses a run scope that bundles any other action, so one human "approve this run" decision
+authorizes exactly one dispatch. Cancelling a run needs its own approval; reading run status is
+read-only and needs none.
 
 For a plan with `sideEffectPolicy: non-replayable`, an approved `run` grant is the explicit one-shot
 human authorization required for that single run. It does not permit a retry, repeated replay,
@@ -181,7 +223,8 @@ grants a selector repair, and a flow-repair approval never grants source writing
 ## Audit and privacy
 
 The broker retains a bounded append-only journal of intent digest, policy decision, grant digest,
-action/result digest, target, revision, and run IDs. Retention and capacity are bounded. Raw
+action/result digest, target, revision, and run IDs. Human approval and rejection entries also carry
+`decidedBy`, the bounded label of the issuing surface. Retention and capacity are bounded. Raw
 secrets, prompts, source, screenshots, UI text, logs, network content, and imported artifact
 content are excluded. Imported data and UI/log/network observations are untrusted diagnostic input
 and never become policy instructions or execution authority.

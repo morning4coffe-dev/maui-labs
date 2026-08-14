@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -415,6 +416,36 @@ public static class BrokerClient
         }
         catch
         {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Reads the owner-file-only native-host approval token so an in-process native host surface,
+    /// such as the <c>maui devflow approve</c> command, can present it to the Inspector.
+    /// <para>
+    /// This is NOT an authorization boundary. Reading the token requires nothing more than local
+    /// read access to the broker state file, which every process running as the same OS user
+    /// already has — including an MCP agent. It only proves same-user locality, never that a human
+    /// is at the keyboard.
+    /// </para>
+    /// </summary>
+    internal static bool TryReadNativeApprovalToken([NotNullWhen(true)] out string? token)
+    {
+        token = null;
+        try
+        {
+            if (!File.Exists(BrokerPaths.StateFile))
+                return false;
+            var state = CliJson.Deserialize<BrokerState>(File.ReadAllText(BrokerPaths.StateFile));
+            if (state is not { Port: > 0, NativeApprovalToken: { Length: > 0 } approvalToken })
+                return false;
+            token = approvalToken;
+            return true;
+        }
+        catch
+        {
+            token = null;
             return false;
         }
     }

@@ -1678,6 +1678,73 @@ public class TestAgentSessionServiceTests
     }
 
     [Fact]
+    public void ApprovalRequest_RecordsWhichIssuerDecidedWithoutNamingTheOperatingSystemUser()
+    {
+        var fixture = BeginFixture();
+        var submitted = fixture.Service.SubmitApprovalRequest(new MauiTestAgentApprovalSubmitRequest
+        {
+            Envelope = fixture.Envelope("request-decided-by", grantId: null),
+            Kind = MauiTestAgentApprovalKinds.DraftChange,
+            Scope = Scope(MauiTestAgentActions.Tap),
+        });
+        Assert.True(submitted.Ok, submitted.Error?.Message);
+
+        var decision = fixture.HumanDecision(approved: true);
+        decision.ApprovalChannel = "host";
+        decision.Actor = new MauiActorProvenance
+        {
+            ActorKind = "host",
+            ActorId = "maui-cli-operator",
+            Channel = "cli",
+            Provider = "maui-cli",
+        };
+
+        var approved = fixture.Service.ApproveApprovalRequest(
+            submitted.Request!.ApprovalRequestId,
+            approvedScope: null,
+            fixture.State,
+            decision,
+            grantExpiresAt: null);
+
+        Assert.True(approved.Ok, approved.Error?.Message);
+        Assert.Equal("cli/maui-cli", approved.Request!.DecidedBy);
+
+        var status = fixture.Service.Status(fixture.ReadAccess("status-decided-by"));
+        Assert.Equal("cli/maui-cli", Assert.Single(status.Snapshot!.ApprovalRequests).DecidedBy);
+
+        var audit = fixture.Service.Audit(fixture.ReadAccess("audit-decided-by"));
+        Assert.True(audit.Ok);
+        var entry = Assert.Single(audit.Entries, candidate => candidate.Kind == "approval-approved");
+        Assert.Equal("cli/maui-cli", entry.DecidedBy);
+    }
+
+    [Fact]
+    public void ApprovalRequest_RecordsTheWorkbenchIssuerOnARejection()
+    {
+        var fixture = BeginFixture();
+        var submitted = fixture.Service.SubmitApprovalRequest(new MauiTestAgentApprovalSubmitRequest
+        {
+            Envelope = fixture.Envelope("request-rejected-by", grantId: null),
+            Kind = MauiTestAgentApprovalKinds.DraftChange,
+            Scope = Scope(MauiTestAgentActions.Tap),
+        });
+        Assert.True(submitted.Ok, submitted.Error?.Message);
+
+        var rejected = fixture.Service.RejectApprovalRequest(
+            submitted.Request!.ApprovalRequestId,
+            fixture.HumanDecision(approved: false),
+            reasonCode: "scope-too-broad");
+
+        Assert.True(rejected.Ok, rejected.Error?.Message);
+        Assert.Equal(MauiTestAgentApprovalStates.Rejected, rejected.Request!.State);
+        Assert.Equal("workbench/host-owned", rejected.Request.DecidedBy);
+
+        var audit = fixture.Service.Audit(fixture.ReadAccess("audit-rejected-by"));
+        var entry = Assert.Single(audit.Entries, candidate => candidate.Kind == "approval-rejected");
+        Assert.Equal("workbench/host-owned", entry.DecidedBy);
+    }
+
+    [Fact]
     public void ApprovalRequest_DefaultDecisionWindowAllowsTenMinutesForHumanReview()
     {
         var clock = new MutableTimeProvider(DateTimeOffset.Parse("2026-01-01T00:00:00Z"));

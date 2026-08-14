@@ -496,7 +496,7 @@ public sealed class InspectorWorkbenchBrokerRouteTests
 
             using var target = JsonDocument.Parse(await http.GetStringAsync($"{inspectorBase}/api/workbench/target"));
             var brokerCapabilities = target.RootElement.GetProperty("broker");
-            Assert.False(brokerCapabilities.GetProperty("repairValidationAvailable").GetBoolean());
+            Assert.True(brokerCapabilities.GetProperty("repairValidationAvailable").GetBoolean());
             var observed = target.RootElement.GetProperty("target").GetProperty("observedCheckpoint");
             Assert.Equal("build-2", observed.GetProperty("appBuildFingerprint").GetString());
             Assert.Equal("/checkout", observed.GetProperty("route").GetString());
@@ -1626,6 +1626,81 @@ public sealed class InspectorWorkbenchBrokerRouteTests
             Assert.Equal(
                 "workbench/inspector-server",
                 rejected.RootElement.GetProperty("request").GetProperty("decidedBy").GetString());
+        }
+        finally
+        {
+            cancellation.Cancel();
+            broker.Dispose();
+            await brokerTask.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+    }
+
+    [Fact]
+    public async Task WorkbenchRepairValidate_IsWiredToABrokerLifecycleHostInsteadOfTheUnavailableFallback()
+    {
+        var brokerPort = FreePort();
+        var agentPort = FreePort();
+        using var broker = new BrokerServer(
+            brokerPort,
+            TimeSpan.FromMinutes(1),
+            previewFlags: PreviewTestFeatures.AllEnabled());
+        using var cancellation = new CancellationTokenSource();
+        var brokerTask = broker.RunAsync(cancellation.Token);
+        await WaitForBrokerAsync(brokerPort);
+
+        using var agent = new AgentHttpServer(agentPort);
+        agent.MapGet("/api/v1/agent/status", _ => Task.FromResult(HttpResponse.Json(new
+        {
+            running = true,
+            agent = new { name = "DevFlow", instanceId = "repair-instance", version = "1" },
+            app = new { name = "Repair Test", build = "build-repair", packageId = "com.example.repair", version = "1.0" },
+            device = new { platform = "android", deviceType = "emulator", idiom = "phone" },
+            capabilities = new { ui = true, logs = true, mutations = true },
+            route = "/checkout",
+            window = "main",
+            modal = "none",
+            locale = "en-US",
+            theme = "light",
+            orientation = "portrait",
+            displayProfile = "phone",
+        })));
+        agent.Start();
+
+        using var socket = new ClientWebSocket();
+        await socket.ConnectAsync(new Uri($"ws://127.0.0.1:{brokerPort}/ws/agent"), CancellationToken.None);
+        await SendAsync(socket, $$"""
+            {"type":"register","project":"workbench-repair-test","tfm":"net10.0","platform":"android","appName":"Repair Test","currentPort":{{agentPort}}}
+            """);
+        await ReceiveAsync(socket);
+
+        try
+        {
+            using var http = new HttpClient();
+            using var agents = JsonDocument.Parse(await http.GetStringAsync($"http://127.0.0.1:{brokerPort}/api/agents"));
+            var agentId = agents.RootElement[0].GetProperty("id").GetString()!;
+            var inspectorBase = $"http://127.0.0.1:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}";
+
+            _ = await http.GetAsync($"{inspectorBase}/");
+            var inspector = await GetInspectorAsync(broker, agentId);
+            var inspectorToken = (string)typeof(InspectorServer)
+                .GetField("_readToken", BindingFlags.Instance | BindingFlags.NonPublic)!
+                .GetValue(inspector)!;
+            http.DefaultRequestHeaders.Add("X-DevFlow-Inspector-Token", inspectorToken);
+
+            using var target = JsonDocument.Parse(await http.GetStringAsync($"{inspectorBase}/api/workbench/target"));
+            Assert.True(target.RootElement.GetProperty("broker")
+                .GetProperty("repairValidationAvailable").GetBoolean());
+
+            using var validate = await PostJsonAsync(
+                http,
+                $"{inspectorBase}/api/workbench/repair/{Uri.EscapeDataString("missing-proposal")}/validate",
+                new { validationGrant = "not-a-grant" });
+            using var validateBody = JsonDocument.Parse(await validate.Content.ReadAsStringAsync());
+
+            // The unavailable-host fallback answered every request with 503 + hostFallback before a
+            // lifecycle host was wired. It must no longer be reachable.
+            Assert.False(validateBody.RootElement.TryGetProperty("hostFallback", out _));
+            Assert.False(validateBody.RootElement.GetProperty("ok").GetBoolean());
         }
         finally
         {

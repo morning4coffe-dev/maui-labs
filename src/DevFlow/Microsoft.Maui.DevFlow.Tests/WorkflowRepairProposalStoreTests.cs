@@ -518,6 +518,141 @@ public sealed class WorkflowRepairProposalStoreTests : IDisposable
         }
     }
 
+    [Fact]
+    public void ApplyGrant_AllowedOnlyAfterPassedValidation()
+    {
+        var proposal = Proposal("repair.md", new string('a', 64));
+        var store = new WorkflowRepairProposalStore();
+        Assert.True(store.Propose(proposal, trustedContext: TrustedContext(proposal)).Ok);
+        var previewed = store.Preview(proposal.ProposalId!);
+        Assert.True(previewed.Ok);
+        var binding = Binding(previewed.Proposal!);
+
+        var beforeValidation = store.IssueGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposal.ProposalId,
+            Kind = WorkflowRepairGrantKinds.Apply,
+            Reviewer = "reviewer",
+            HumanConfirmed = true,
+            Binding = binding,
+        });
+        Assert.False(beforeValidation.Ok);
+        Assert.Contains(
+            "bounded transient validation is required",
+            beforeValidation.Error,
+            StringComparison.Ordinal);
+
+        var failingGrant = store.IssueGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposal.ProposalId,
+            Kind = WorkflowRepairGrantKinds.Validation,
+            Reviewer = "reviewer",
+            HumanConfirmed = true,
+            Binding = binding,
+        });
+        Assert.True(failingGrant.Ok);
+        Assert.True(store.RecordValidation(proposal.ProposalId, failingGrant.Grant, new WorkflowRepairValidationRecord
+        {
+            Passed = false,
+            FailureCode = "transient-replay-failed",
+            FailureFacts = ["candidate-not-uniquely-resolved"],
+            RecordedAt = DateTimeOffset.UtcNow,
+        }).Ok);
+
+        var afterFailedValidation = store.IssueGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposal.ProposalId,
+            Kind = WorkflowRepairGrantKinds.Apply,
+            Reviewer = "reviewer",
+            HumanConfirmed = true,
+            Binding = binding,
+        });
+        Assert.False(afterFailedValidation.Ok);
+
+        var passingGrant = store.IssueGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposal.ProposalId,
+            Kind = WorkflowRepairGrantKinds.Validation,
+            Reviewer = "reviewer",
+            HumanConfirmed = true,
+            Binding = binding,
+        });
+        Assert.True(passingGrant.Ok);
+        Assert.True(store.RecordValidation(proposal.ProposalId, passingGrant.Grant, new WorkflowRepairValidationRecord
+        {
+            Passed = true,
+            RunIds = ["validation-run"],
+            EvidenceIds = ["evidence-1"],
+            RecordedAt = DateTimeOffset.UtcNow,
+        }).Ok);
+
+        var afterPassedValidation = store.IssueGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposal.ProposalId,
+            Kind = WorkflowRepairGrantKinds.Apply,
+            Reviewer = "reviewer",
+            HumanConfirmed = true,
+            Binding = binding,
+        });
+        Assert.True(afterPassedValidation.Ok);
+        Assert.Equal(MauiFlowRepairOutcomeStates.Approved, afterPassedValidation.Proposal!.State);
+    }
+
+    [Fact]
+    public void CanRedeemGrant_ChecksTheGrantWithoutConsumingOrMutatingIt()
+    {
+        var proposal = Proposal("repair.md", new string('a', 64));
+        var store = new WorkflowRepairProposalStore();
+        Assert.True(store.Propose(proposal, trustedContext: TrustedContext(proposal)).Ok);
+        var previewed = store.Preview(proposal.ProposalId!);
+        Assert.True(previewed.Ok);
+
+        Assert.False(store.CanRedeemGrant(
+            proposal.ProposalId,
+            "not-a-grant",
+            WorkflowRepairGrantKinds.Validation,
+            out var unknownError));
+        Assert.False(string.IsNullOrWhiteSpace(unknownError));
+
+        var grant = store.IssueGrant(new WorkflowRepairGrantIssueRequest
+        {
+            ProposalId = proposal.ProposalId,
+            Kind = WorkflowRepairGrantKinds.Validation,
+            Reviewer = "reviewer",
+            HumanConfirmed = true,
+            Binding = Binding(previewed.Proposal!),
+        });
+        Assert.True(grant.Ok);
+
+        // A pre-check must remain repeatable and must not spend the single-use grant.
+        Assert.True(store.CanRedeemGrant(
+            proposal.ProposalId,
+            grant.Grant,
+            WorkflowRepairGrantKinds.Validation,
+            out _));
+        Assert.True(store.CanRedeemGrant(
+            proposal.ProposalId,
+            grant.Grant,
+            WorkflowRepairGrantKinds.Validation,
+            out _));
+        Assert.False(store.CanRedeemGrant(
+            proposal.ProposalId,
+            grant.Grant,
+            WorkflowRepairGrantKinds.Apply,
+            out _));
+        Assert.True(store.RecordValidation(proposal.ProposalId, grant.Grant, new WorkflowRepairValidationRecord
+        {
+            Passed = true,
+            RunIds = ["validation-run"],
+            RecordedAt = DateTimeOffset.UtcNow,
+        }).Ok);
+        Assert.False(store.CanRedeemGrant(
+            proposal.ProposalId,
+            grant.Grant,
+            WorkflowRepairGrantKinds.Validation,
+            out _));
+    }
+
     private static WorkflowRepairVerificationRun VerifiedRun(string id) => new()
     {
         RunId = id,

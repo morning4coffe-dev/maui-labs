@@ -193,6 +193,19 @@ test("one-way operations can never be awaited as if they completed", async () =>
     addEventListener() {}, removeEventListener() {},
     setTimeout() {}, clearTimeout() {},
   });
+
+  test("native approval is unavailable to a standalone browser", async () => {
+    const browser = createInspectorHostBridge({
+      location: { hash: "" },
+      addEventListener() {}, removeEventListener() {},
+      setTimeout() {}, clearTimeout() {},
+    });
+    assert.equal(browser.has("nativeApproval"), false);
+    assert.equal(browser.resolve("nativeApproval").state, "unavailable");
+    const result = await browser.request("nativeApproval", {});
+    assert.equal(result.ok, false);
+    assert.equal(result.code, "capability-missing");
+  });
   for (const [name, operation] of Object.entries(HOST_OPERATIONS)) {
     if (operation.mode !== "notify") continue;
     const result = await bridge.request(name, {});

@@ -64,9 +64,16 @@ test('Layout discovery uses a smart top-level toolbar entry and shared cached st
   assert.match(html, /id="df-layout-entry-status"[^>]*data-state="idle"[^>]*>Start</);
   assert.match(source, /function openLayoutDiagnostics\(options = \{\}\)/);
   assert.match(source, /propertyGrid\.refreshDiagnostics\(\)/);
-  assert.match(source, /!latestLayoutReport && !layoutError && !layoutScanBusy/);
+  assert.match(source, /openLayoutDiagnostics\(\{ forceScan: !latestLayoutReport \}\)/);
+  assert.match(source, /if \(options\.forceScan === true\)[\s\S]*await runLayoutScan\(\)/);
+  assert.doesNotMatch(source, /function renderLegacyLayoutDiagnostics/);
+  assert.ok(source.indexOf('  function renderLayoutDiagnostics() {') <
+    source.indexOf('  async function runLayoutScan() {'));
   assert.match(source, /tab\.textContent = latestLayoutReport && issues\.length \? `Layout \(\$\{issues\.length\}\)` : 'Layout'/);
-  assert.match(source, /layoutError \? 'Retry' : 'Start'/);
+  assert.match(source, /title: layoutScanBusy \? 'Checking layout' : layoutError \? 'Layout check unavailable' : 'Layout not checked'/);
+  assert.match(html, /id="df-dock-panel" role="tabpanel"[\s\S]*id="df-dock-action-strip"[\s\S]*id="df-dock-body" role="region"/);
+  assert.doesNotMatch(source, /class: 'df-layout-strip'/);
+  assert.doesNotMatch(source, /class: 'df-performance-strip'/);
 });
 
 test('Evidence dialog redirects tab focus back inside when focus escapes', () => {

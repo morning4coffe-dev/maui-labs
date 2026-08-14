@@ -21,6 +21,7 @@ import { Recorder } from "./recorder.mjs";
 import { renderShell, renderDisconnected } from "./shell.mjs";
 import { readJsonBody, selectInspectorAgent } from "./http.mjs";
 import { dispatchAgentRequest } from "./agent-request.mjs";
+import { isNativeApprovalRequest, performCanvasNativeApproval } from "./native-approval.mjs";
 import {
   isInspectorQueryResult,
   isInspectorSnapshot,
@@ -577,6 +578,33 @@ function saveBridgeRecording(st, body) {
   return persistRecording(st, body);
 }
 
+async function approveBridgeAgentRequest(st, body) {
+  if (!body || body.bridgeId !== st.bridgeId || !isNativeApprovalRequest(body.approval)) {
+    return { ok: false, error: "unauthorized or invalid native approval request" };
+  }
+  const inspectorUrl = await resolveInspectorUrl(st);
+  if (!inspectorUrl) {
+    return { ok: false, error: "The shared DevFlow Inspector is unavailable." };
+  }
+  let inspector;
+  try {
+    inspector = new URL(inspectorUrl);
+  } catch {
+    return { ok: false, error: "The shared DevFlow Inspector target is invalid." };
+  }
+  const state = readBrokerState();
+  const path = inspector.pathname.match(/^\/inspector\/([^/]+)\/?$/);
+  if (!state?.port || Number(inspector.port) !== state.port || !path) {
+    return { ok: false, error: "The local broker state no longer matches the embedded Inspector." };
+  }
+  let agentId;
+  try { agentId = decodeURIComponent(path[1]); } catch { return { ok: false, error: "The Inspector agent target is invalid." }; }
+  return performCanvasNativeApproval(body.approval, {
+    brokerPort: state.port,
+    agentId,
+  }, readBrokerState);
+}
+
 function persistRecording(st, body) {
   return st.recorder.persist(st.store, body);
 }
@@ -844,6 +872,34 @@ async function startServer(instanceId, input = {}) {
       }
       res.setHeader("Content-Type", "application/json");
       res.end(JSON.stringify(r ?? { ok: true }));
+      return;
+    }
+
+    // Only the outer Canvas shell can reach this route: it uses application/json and the
+    // per-instance bridge nonce after its own confirm dialog. The embedded Inspector has neither
+    // a CORS grant nor the native broker token or confirmation capability.
+    if (url.pathname === "/native-approval" && req.method === "POST") {
+      if (!String(req.headers["content-type"] || "").includes("application/json")) {
+        res.statusCode = 415;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ ok: false, error: "unsupported media type" }));
+        return;
+      }
+      const parsed = await readJsonBody(req);
+      if (!parsed.ok) {
+        res.statusCode = parsed.status;
+        res.setHeader("Content-Type", "application/json");
+        res.end(JSON.stringify({ ok: false, error: parsed.error }));
+        return;
+      }
+      let r;
+      try {
+        r = await approveBridgeAgentRequest(st, parsed.value);
+      } catch {
+        r = { ok: false, error: "The Canvas native approval host failed." };
+      }
+      res.setHeader("Content-Type", "application/json");
+      res.end(JSON.stringify(r));
       return;
     }
 

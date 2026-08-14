@@ -17,7 +17,7 @@ import { createInspectorHostManifest } from "@maui-devflow/client";
 const UI_FONT_STACK = '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif';
 const CANVAS_HOST_CAPABILITIES = Object.freeze([
   "saveRecording", "selection", "copilot", "copilotContext", "attachData",
-  "saveTestBundle", "requestTestProposal",
+  "saveTestBundle", "requestTestProposal", "nativeApproval",
 ]);
 
 export function renderShell(inspectorUrl, appName, bridgeId) {
@@ -287,6 +287,60 @@ export function renderShell(inspectorUrl, appName, bridgeId) {
               ok: !!(result && result.ok),
               message: result && result.status ? String(result.status) : null,
               error: result && result.error ? String(result.error) : null,
+            }, frameOrigin);
+          });
+          return;
+        }
+        if (d.type === 'devflow:nativeApproval') {
+          const approval = {
+            approvalRequestId: d.approvalRequestId,
+            kind: d.kind,
+            intent: d.intent,
+            approvedScope: d.approvedScope,
+            grantDurationSeconds: d.grantDurationSeconds,
+            appName: d.appName,
+            platform: d.platform,
+            scopeSummary: d.scopeSummary
+          };
+          const scope = approval.approvedScope || {};
+          const confirmed = window.confirm(
+            'Approve this exact DevFlow ' + String(approval.kind || 'request') + ' for ' +
+            String(approval.appName || 'the app') + ' (' + String(approval.platform || 'unknown platform') + ')?\\n\\n' +
+            'Intent: ' + String(approval.intent || '') + '\\n' +
+            'Scope: ' + String(approval.scopeSummary || '') + '\\n' +
+            'Actions: ' + (Array.isArray(scope.allowedActions) ? scope.allowedActions.join(', ') : '') + '\\n' +
+            'Selectors: ' + (Array.isArray(scope.allowedSelectors) ? scope.allowedSelectors.join(', ') : 'none') + '\\n' +
+            'Routes: ' + (Array.isArray(scope.allowedRoutes) ? scope.allowedRoutes.join(', ') : 'none') + '\\n' +
+            'Side effects: ' + (Array.isArray(scope.allowedSideEffectClasses) ? scope.allowedSideEffectClasses.join(', ') : 'none') + '\\n' +
+            'Limits: ' + String(scope.maxActionCount || '') + ' actions; ' +
+            String(scope.maxValueBytes || '') + ' value bytes; ' +
+            String(approval.grantDurationSeconds || '') + ' seconds.'
+          );
+          if (!confirmed) {
+            if (frame.contentWindow && d.requestId) frame.contentWindow.postMessage({
+              type: 'devflow:hostResult', v: 1, bridgeId: bridgeId, requestId: d.requestId,
+              ok: false, cancelled: true, error: 'The Canvas user did not approve the exact DevFlow request.'
+            }, frameOrigin);
+            return;
+          }
+          fetch('/native-approval', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ bridgeId: bridgeId, approval: approval })
+          }).then(function (r) {
+            return r.json().catch(function () { return { ok: false, error: 'The Canvas native approval host returned invalid JSON.' }; });
+          }).then(function (result) {
+            if (!frame.contentWindow || !d.requestId) return;
+            frame.contentWindow.postMessage({
+              type: 'devflow:hostResult', v: 1, bridgeId: bridgeId, requestId: d.requestId,
+              ok: !!(result && result.ok),
+              message: result && result.status ? String(result.status) : null,
+              error: result && result.error ? String(result.error) : null
+            }, frameOrigin);
+          }).catch(function () {
+            if (frame.contentWindow && d.requestId) frame.contentWindow.postMessage({
+              type: 'devflow:hostResult', v: 1, bridgeId: bridgeId, requestId: d.requestId,
+              ok: false, error: 'The Canvas native approval host did not respond.'
             }, frameOrigin);
           });
           return;

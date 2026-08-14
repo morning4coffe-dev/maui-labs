@@ -31,6 +31,10 @@ import { registerLanguageModelTools } from "./language-model-tools";
 import { registerDevFlowMcpProvider } from "./mcp-provider";
 import { registerDevFlowUriHandler } from "./uri-handler";
 import type { DevFlowUriTarget } from "./uri-contract";
+import {
+  isNativeApprovalRequest,
+  performNativeApproval,
+} from "./native-approval";
 
 /**
  * MAUI DevFlow Inspector — VS Code host shell.
@@ -104,7 +108,7 @@ const VSCODE_HOST_CAPABILITIES = [
   "copilot", "copilotContext", "workflowFilePicker", "attachData", "openSource",
   "saveRecording", "selection", "saveTestBundle", "loadTestBundle", "pickTrace",
   "requestTestProposal", "openSourceDiff", "applySourceProposal",
-  "applyCSharpSourceProposal", "getCSharpSourceSelection",
+  "applyCSharpSourceProposal", "getCSharpSourceSelection", "nativeApproval",
 ] as const;
 
 type HostServicesWithDiagnostics = DevFlowHostServices & vscode.Disposable & {
@@ -487,6 +491,13 @@ interface BridgeMessage {
   baseContentDigest?: string;
   patch?: SourcePatch;
   rollback?: boolean;
+  approvalRequestId?: string;
+  kind?: string;
+  approvedScope?: unknown;
+  grantDurationSeconds?: number;
+  appName?: string;
+  platform?: string;
+  scopeSummary?: string;
   requestId?: string;
 }
 
@@ -541,6 +552,8 @@ async function handleBridgeMessage(msg: BridgeMessage | undefined, panelState: P
       return await applyCSharpSourceProposal(msg);
     case "devflow:getCSharpSourceSelection":
       return await getCSharpSourceSelection();
+    case "devflow:nativeApproval":
+      return await approveAgentRequestNatively(msg);
     case "devflow:selectionChanged":
       panelState.selection = msg.element ?? null;
       return { ok: true };
@@ -548,6 +561,46 @@ async function handleBridgeMessage(msg: BridgeMessage | undefined, panelState: P
       return await attachDataToCopilot(msg.snapshot, panelState);
     default:
       return { ok: false, error: "Unsupported DevFlow bridge message." };
+  }
+
+  async function approveAgentRequestNatively(message: BridgeMessage): Promise<BridgeResult> {
+    const request = {
+      approvalRequestId: message.approvalRequestId,
+      kind: message.kind,
+      intent: message.intent,
+      approvedScope: message.approvedScope,
+      grantDurationSeconds: message.grantDurationSeconds,
+      appName: message.appName,
+      platform: message.platform,
+      scopeSummary: message.scopeSummary,
+    };
+    if (!isNativeApprovalRequest(request)) {
+      return { ok: false, error: "The Inspector supplied an invalid native approval request." };
+    }
+    const action = "Approve exact DevFlow request";
+    const choice = await vscode.window.showWarningMessage(
+      [
+        `Approve this exact DevFlow ${request.kind} request for ${request.appName} (${request.platform})?`,
+        `Intent: ${request.intent}`,
+        `Scope: ${request.scopeSummary}`,
+        `Actions: ${request.approvedScope.allowedActions.join(", ")}`,
+        `Selectors: ${request.approvedScope.allowedSelectors.join(", ") || "none"}`,
+        `Routes: ${request.approvedScope.allowedRoutes.join(", ") || "none"}`,
+        `Side effects: ${request.approvedScope.allowedSideEffectClasses.join(", ") || "none"}`,
+        `Limits: ${request.approvedScope.maxActionCount} actions; ${request.approvedScope.maxValueBytes} value bytes; ${request.grantDurationSeconds}s grant.`,
+      ].join("\n"),
+      { modal: true },
+      action,
+    );
+    if (choice !== action) {
+      return { ok: false, error: "The VS Code user did not approve the exact DevFlow request." };
+    }
+
+    const { readBrokerState } = await import("@maui-devflow/client");
+    return performNativeApproval(request, {
+      brokerPort: panelState.brokerPort ?? 0,
+      agentId: panelState.agent?.id ?? "",
+    }, readBrokerState);
   }
 
   async function openSourceDiff(diff: string | undefined, fileRelativePath: string | undefined): Promise<BridgeResult> {
@@ -1483,7 +1536,7 @@ function renderHost(inspectorUrl: string, title: string, nonce: string, bridgeId
         }
         if (!d || d.bridgeId !== bridgeId) return;                // nonce-authenticated
         if (d.type === 'devflow:ready') { announce(); return; }
-        if (d.type === 'devflow:sendToCopilot' || d.type === 'devflow:attachCopilot' || d.type === 'devflow:requestTestProposal' || d.type === 'devflow:pickWorkflow' || d.type === 'devflow:attachData' || d.type === 'devflow:openSource' || d.type === 'devflow:recordingComplete' || d.type === 'devflow:selectionChanged' || d.type === 'devflow:saveTestBundle' || d.type === 'devflow:loadTestBundle' || d.type === 'devflow:pickTrace' || d.type === 'devflow:openSourceDiff' || d.type === 'devflow:applySourceProposal' || d.type === 'devflow:applyCSharpSourceProposal' || d.type === 'devflow:getCSharpSourceSelection') {
+        if (d.type === 'devflow:sendToCopilot' || d.type === 'devflow:attachCopilot' || d.type === 'devflow:requestTestProposal' || d.type === 'devflow:pickWorkflow' || d.type === 'devflow:attachData' || d.type === 'devflow:openSource' || d.type === 'devflow:recordingComplete' || d.type === 'devflow:selectionChanged' || d.type === 'devflow:saveTestBundle' || d.type === 'devflow:loadTestBundle' || d.type === 'devflow:pickTrace' || d.type === 'devflow:openSourceDiff' || d.type === 'devflow:applySourceProposal' || d.type === 'devflow:applyCSharpSourceProposal' || d.type === 'devflow:getCSharpSourceSelection' || d.type === 'devflow:nativeApproval') {
           vscode.postMessage(d);                                  // relay to the extension host
         }
       });

@@ -42,3 +42,13 @@ test("Canvas shell relays test saves and direct agent requests without adding re
   assert.doesNotMatch(html, /const capabilities = \[[^\]]*'attachTestContext'/);
   assert.doesNotMatch(html, /devflow:attachTestContext/);
 });
+
+test("Canvas shell advertises native approval and never posts after a human cancellation", () => {
+  const html = renderShell("http://localhost:19223/inspector/app/?embed=token", "App", "bridge-secret");
+  assert.match(html, /"nativeApproval"/);
+  assert.match(html, /d\.type === 'devflow:nativeApproval'/);
+  assert.match(html, /window\.confirm/);
+  assert.match(html, /if \(!confirmed\)[\s\S]{0,500}cancelled: true/);
+  assert.match(html, /fetch\('\/native-approval'/);
+  assert.match(html, /JSON\.stringify\(\{ bridgeId: bridgeId, approval: approval \}\)/);
+});

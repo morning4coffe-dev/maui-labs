@@ -13,6 +13,7 @@ const REQUEST_BRIDGE_TYPES = new Set([
   "devflow:applySourceProposal",
   "devflow:applyCSharpSourceProposal",
   "devflow:getCSharpSourceSelection",
+  "devflow:nativeApproval",
 ]);
 
 export function requiresBridgeRequestId(type: string | undefined): boolean {

@@ -4,6 +4,7 @@ import http from "node:http";
 import { join } from "node:path";
 import test from "node:test";
 import { DevFlowWorkspaceSession } from "../src/index.js";
+import { readBrokerState } from "../src/broker.js";
 
 test("workspace session resolves an exact agent and uses broker-hosted Inspector reads", async (t) => {
   let instanceId = "instance-1";
@@ -140,7 +141,8 @@ test("workspace session resolves an exact agent and uses broker-hosted Inspector
   t.after(() => server.close());
   const address = server.address();
   assert.ok(address && typeof address !== "string");
-  installBrokerState(t, address.port, "trusted-embed-token");
+  installBrokerState(t, address.port, "trusted-embed-token", "native-approval-token-12345678901234567890");
+  assert.equal(readBrokerState()?.nativeApprovalToken, "native-approval-token-12345678901234567890");
 
   const session = new DevFlowWorkspaceSession({
     brokerPort: address.port,
@@ -364,6 +366,7 @@ function installBrokerState(
   t: { after(callback: () => void): void },
   port: number,
   embedToken: string,
+  nativeApprovalToken?: string,
 ): void {
   const previousUserProfile = process.env.USERPROFILE;
   const previousHome = process.env.HOME;
@@ -375,6 +378,7 @@ function installBrokerState(
     port,
     startedAt: "2026-01-01T00:00:00Z",
     embedToken,
+    nativeApprovalToken,
   }));
   process.env.USERPROFILE = home;
   process.env.HOME = home;

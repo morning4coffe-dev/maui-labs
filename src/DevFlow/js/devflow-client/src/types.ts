@@ -97,6 +97,11 @@ export interface BrokerState {
   startedAt: string;
   /** Unguessable token that lets a local host shell embed the Inspector via `?embed={token}`. */
   embedToken?: string | null;
+  /**
+   * Per-broker-process secret for trusted local native hosts to request an exact, single-use
+   * Inspector approval confirmation. It must never be passed to an Inspector iframe or agent.
+   */
+  nativeApprovalToken?: string | null;
 }
 
 /**

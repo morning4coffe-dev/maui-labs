@@ -132,7 +132,8 @@ test("study journal allows only value-free event kinds and rejects sensitive inp
     "improve-scanned", "agent-requested", "agent-approved", "agent-rejected",
     "agent-expired", "agent-stale", "agent-consumed",
     "repair-proposed", "repair-approved", "repair-rejected",
-    "repair-applied", "repair-verified", "repair-rollback",
+    "repair-applied", "repair-verified", "repair-rollback-required",
+    "repair-rollback-failed", "repair-reverted",
   ]);
 });
 
@@ -231,7 +232,10 @@ test("study summary calculates authoring, selector, replay, diagnosis, repair, a
     rejected: 0,
     applied: 1,
     verified: 1,
-    rollback: 0,
+    rollbackRequired: 0,
+    rollbackFailed: 0,
+    reverted: 0,
+    unresolvedRollback: 0,
   });
   assert.deepEqual(summary.improve, { scans: 1, findings: 4 });
   assert.deepEqual(summary.agentApprovals, {
@@ -247,6 +251,30 @@ test("study summary calculates authoring, selector, replay, diagnosis, repair, a
   });
   assert.deepEqual(summary.humanInvolvement.needsAttention, []);
   assert.deepEqual(journal.summary(), summary);
+});
+
+test("rollback study events keep unresolved and failed rollback out of completed repairs", () => {
+  const time = clock();
+  const journal = createPrototypeStudyJournal(journalOptions(time));
+
+  journal.record("repair-proposed", { proposalId: "proposal-one" });
+  journal.record("repair-approved", { proposalId: "proposal-one" });
+  journal.record("repair-applied", { proposalId: "proposal-one" });
+  journal.record("repair-rollback-required", { proposalId: "proposal-one" });
+  journal.record("repair-rollback-failed", { proposalId: "proposal-one" });
+
+  let summary = journal.summary();
+  assert.equal(summary.repair.rollbackRequired, 1);
+  assert.equal(summary.repair.rollbackFailed, 1);
+  assert.equal(summary.repair.reverted, 0);
+  assert.equal(summary.repair.unresolvedRollback, 1);
+  assert.ok(summary.humanInvolvement.needsAttention.includes("repair-verification-or-rollback"));
+
+  journal.record("repair-reverted", { proposalId: "proposal-one" });
+  summary = journal.summary();
+  assert.equal(summary.repair.reverted, 1);
+  assert.equal(summary.repair.unresolvedRollback, 0);
+  assert.ok(!summary.humanInvolvement.needsAttention.includes("repair-verification-or-rollback"));
 });
 
 test("study journal reports unavailable and corrupt storage without claiming persistence", () => {

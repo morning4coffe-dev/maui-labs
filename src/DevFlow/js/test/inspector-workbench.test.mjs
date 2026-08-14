@@ -43,13 +43,14 @@ test("workbench shell separates the guided journey from contextual test tools", 
   assert.match(html, /class="df-panel-tab-list df-workbench-stage-list"[^>]*role="tablist"[^>]*aria-label="Test workflow"/);
   assert.match(html, /id="df-workbench-advanced-tools"[^>]*class="df-workbench-tools"/);
   assert.match(html, /class="df-panel-tab-list df-workbench-tool-list"[^>]*role="tablist"[^>]*aria-label="Test tools"/);
-  for (const stage of ["Goal", "Steps", "Review", "Run", "Results"]) {
+  for (const stage of ["Goal", "Steps", "Review", "Run", "Results &amp; import"]) {
     assert.match(html, new RegExp(`data-workbench-stage="[^"]+"[^>]*[\\s\\S]*?>${stage}<`));
   }
   for (const tab of ["requests", "repair", "improve", "source"]) {
     assert.match(html, new RegExp(`data-workbench-tab="${tab}"`));
   }
-  assert.match(html, /Approve or reject actions requested by a test agent/);
+  assert.match(html, /Review agent requests/);
+  assert.match(html, /both this broker and embedding host advertise trusted native approval/);
   assert.match(html, /id="df-test-agent-request-badge"/);
   for (const tab of ["record", "review", "run", "results"]) {
     assert.match(html, new RegExp(`id="df-workbench-stage-${tab}"[^>]*disabled`));
@@ -104,9 +105,11 @@ test("guided stage tabs preserve Review as a distinct destination", async () => 
   assert.match(read("inspector-workbench.js"), /renderJourney/);
   assert.match(read("inspector-workbench.js"), /const reviewed = saved && readiness\.hardOutcomeCheck === true/);
   assert.match(read("inspector-workbench.js"), /function toolAvailability/);
+  assert.match(read("inspector-workbench.js"), /Math\.max\(Number\(draft\.recordingSteps\) \|\| 0, visibleSteps\)/);
+  assert.match(read("devflow.js"), /timelineAdd\(Number\(j\.seq\) \|\| j\.stepCount, action, el, extra\)/);
   assert.match(
     read("inspector-workbench.js"),
-    /tabs\.filter\(\(button\) => !button\.disabled && button\.closest\('\[role="tablist"\]'\) === tabList\)/,
+    /const enabled = enabledWorkbenchTabs\(tabs, tabList\)/,
   );
   assert.match(read("inspector-workbench.js"), /scrollIntoView/);
 });
@@ -130,7 +133,7 @@ test("repair panel exposes human-only selector repair boundaries", () => {
 
   for (const text of [
     "Nothing to repair yet", "Check latest failure", "Create suggested update",
-    "Review suggested update", "Try this update", "Approve update", "Apply update",
+    "Review suggested update", "Try this update", "Approve update",
     "Diagnose with your agent",
     "How this stays safe",
   ]) {
@@ -139,6 +142,8 @@ test("repair panel exposes human-only selector repair boundaries", () => {
   assert.match(repair, /one selector only; actions, checks, values, order, and source stay unchanged/i);
   assert.match(repair, /only a current local missing-selector failure can qualify/i);
   assert.match(repair, /agent-originated suggestions are never applied directly/i);
+  assert.match(repair, /trusted native host confirmation/i);
+  assert.match(repair, /browser does not receive the grant/i);
 });
 
 test("failed-result agent guidance prepares one exact restricted handoff", () => {
@@ -158,6 +163,9 @@ test("failed-result agent guidance prepares one exact restricted handoff", () =>
   assert.match(repair, /prepareFailureAgentPrompt/);
   assert.match(shell, /typeof prompt === 'function' \? await prompt\(\)/);
   assert.match(shell, /Preparing agent request/);
+  assert.match(source, /agent: inspectorAgent/);
+  assert.match(source, /agentId: inspectorAgent\.id/);
+  assert.match(source, /agentInstanceId: inspectorAgent\.instanceId/);
 });
 
 test("source proposal panel keeps XAML/C# review and flow repair separate", () => {
@@ -165,14 +173,16 @@ test("source proposal panel keeps XAML/C# review and flow repair separate", () =
 
   for (const text of [
     "Select a control first", "Check source", "Create source proposal",
-    "Preview exact change", "Approve source change", "Apply approved XAML change",
-    "Apply in IDE", "Download patch", "How this stays safe",
+    "Preview exact change", "Approve source change",
+    "Download patch", "How this stays safe",
   ]) {
     assert.match(source, new RegExp(text));
   }
   assert.match(source, /Exact \$\{languageLabel\} diff/);
   assert.match(source, /Approval never changes a test selector/i);
   assert.match(source, /C# changes require a Roslyn-proven selection/i);
+  assert.match(source, /trusted native host confirmation bound to this exact patch digest/i);
+  assert.match(source, /browser does not receive the single-use grant/i);
   assert.match(read("devflow.js"), /hasSource: info\.hasSource/);
   assert.match(read("devflow.js"), /\/api\/workbench\/source\/csharp/);
   assert.match(read("devflow.js"), /applySourceProposal/);
@@ -200,7 +210,24 @@ test("workbench assets are embedded, routed, and responsive", () => {
   assert.match(css, /\.df-agent-action/);
 });
 
-test("agent request inbox permits narrowing only and never treats chat as approval", async () => {
+test("preview capabilities hide immature surfaces but reveal already-pending safe review", () => {
+  const devflow = read("devflow.js");
+  const requests = read("inspector-agent-requests.js");
+
+  assert.match(devflow, /devflow-preview-workbench/);
+  assert.match(devflow, /devflow-preview-agent-authoring/);
+  assert.match(devflow, /devflow-preview-repair/);
+  assert.match(devflow, /devflow-preview-source/);
+  assert.match(devflow, /workbenchToggle\.hidden = !previewFeatures\.workbench && !previewFeatures\.agentAuthoring/);
+  assert.match(devflow, /repairTab\.hidden = !previewFeatures\.repair/);
+  assert.match(devflow, /sourceTab\.hidden = !previewFeatures\.source/);
+  assert.match(devflow, /featureCapabilities: previewFeatures/);
+  assert.match(devflow, /baseWorkbenchAvailable: previewFeatures\.workbench \|\| previewFeatures\.agentAuthoring/);
+  assert.match(requests, /workbenchToggle\.hidden = !baseWorkbenchAvailable && !available/);
+  assert.doesNotMatch(devflow, /df-workbench-tab-requests['"]\)\.hidden/);
+});
+
+test("agent request scope comparison rejects expansion while preview remains read-only", async () => {
   const approvals = await loadPanelModule("inspector-agent-requests.js");
   const requested = {
     allowedActions: ["fill", "tap"],
@@ -235,22 +262,117 @@ test("agent request inbox permits narrowing only and never treats chat as approv
   assert.equal(approvals.agentRequestGrantDurationSeconds({ kind: "commit" }), 600);
   assert.equal(approvals.agentRequestGrantDurationSeconds({ kind: "run" }), 300);
   assert.match(
-    approvals.agentRequestStarterPrompt("MauiTodo", "WinUI"),
+    approvals.agentRequestStarterPrompt("MauiTodo", "WinUI", "agent-42", "instance-99"),
     /restricted DevFlow test-agent tools.*MauiTodo on WinUI.*commit review.*separate run request/i
+  );
+  assert.match(
+    approvals.agentRequestStarterPrompt("MauiTodo", "WinUI", "agent-42", "instance-99"),
+    /agentId "agent-42".*agentInstanceId "instance-99".*Chat approval.*current Test Workbench broker grant/is
   );
 
   const source = read("inspector-agent-requests.js");
   assert.match(source, /humanConfirmed: true/);
   assert.match(source, /\/api\/workbench\/agent-requests/);
-  assert.match(source, /Your agent can continue; you do not need to copy anything into chat/i);
+  assert.match(source, /nativeApprovalAvailable/);
+  assert.match(source, /Approve in native host/);
+  assert.match(source, /hostBridge\.request\('nativeApproval'/);
+  assert.match(source, /renderScope\(request, true, expandByDefault\)/);
+  assert.match(source, /type = 'checkbox'/);
+  assert.match(source, /type = 'number'/);
+  assert.doesNotMatch(source, /Your agent can continue/i);
+  assert.match(source, /approvedScope/);
+  assert.doesNotMatch(source, /agent-requests\/\$\{encodeURIComponent\(id\)\}\/approve/);
   assert.match(source, /scrollIntoView/);
   assert.match(source, /openPanel/);
   assert.match(source, /df-workbench-tab-requests/);
   assert.doesNotMatch(source, /Back to tests|df-agent-requests-open|setOpen\(|hasNewPending|seenPending/);
-  assert.match(source, /Allow one run/);
+  assert.doesNotMatch(source, /Allow one run/);
   assert.match(source, /Your agent prepared a test/);
   assert.match(source, /Copy prompt for your agent/);
   assert.doesNotMatch(source, /approvalGrantId/);
+});
+
+test("agent-request polling updates badges without replacing a focused review", () => {
+  const requests = read("inspector-agent-requests.js");
+
+  assert.match(requests, /let needsRender = false/);
+  assert.match(requests, /const panelFocused = panel\.contains\?\.\(doc\.activeElement\)/);
+  assert.match(requests, /if \(!force && panelFocused\) \{[\s\S]*needsRender = true;[\s\S]*syncChrome\(\);[\s\S]*return;/);
+  assert.match(requests, /nextFingerprint === responseFingerprint && !needsRender/);
+  assert.match(requests, /render\(\);\s+needsRender = false;/);
+});
+
+test("focused agent-request review receives pending counts without a destructive rerender", async () => {
+  const approvals = await loadPanelModule("inspector-agent-requests.js");
+  const node = () => ({
+    children: [],
+    attributes: new Map(),
+    classList: { contains() { return false; }, toggle() {} },
+    dataset: {},
+    append(...children) { this.children.push(...children); },
+    addEventListener() {},
+    setAttribute(name, value) { this.attributes.set(name, String(value)); },
+    removeAttribute(name) { this.attributes.delete(name); },
+  });
+  const body = {
+    ...node(),
+    replaceCount: 0,
+    replaceChildren(...children) {
+      this.replaceCount += 1;
+      this.children = children;
+    },
+  };
+  const focusedReviewControl = {};
+  const panel = { contains: (candidate) => candidate === focusedReviewControl };
+  const tab = node();
+  const toolbarBadge = node();
+  const tabBadge = node();
+  const documentLike = {
+    activeElement: null,
+    createElement() { return node(); },
+    getElementById(id) {
+      return {
+        "df-workbench-tab-requests": tab,
+        "df-test-agent-request-badge": toolbarBadge,
+        "df-agent-requests-badge": tabBadge,
+      }[id] || null;
+    },
+  };
+  const responses = [
+    { ok: true, body: { ok: true, requests: [] } },
+    {
+      ok: true,
+      body: {
+        ok: true,
+        requests: [{
+          approvalRequestId: "approval-one",
+          state: "pending",
+          kind: "commit",
+          requestedScope: { allowedActions: ["tap"] },
+        }],
+      },
+    },
+  ];
+  const inbox = approvals.createAgentRequestController({
+    document: documentLike,
+    window: { setInterval() {}, clearInterval() {} },
+    inspectorApi: { getDetailed: async () => responses.shift() },
+    panel,
+    body,
+    tab,
+    toolbarBadge,
+    tabBadge,
+  });
+
+  await inbox.refresh(true);
+  const rendersBeforeFocusedPoll = body.replaceCount;
+  documentLike.activeElement = focusedReviewControl;
+  await inbox.refresh();
+
+  assert.equal(body.replaceCount, rendersBeforeFocusedPoll);
+  assert.equal(inbox.pendingCount(), 1);
+  assert.equal(toolbarBadge.textContent, "1");
+  assert.equal(tabBadge.textContent, "1");
 });
 
 test("host bridge registry covers every negotiated capability", () => {
@@ -283,7 +405,7 @@ test("agent assistance is a direct host-aware button with browser copy fallback"
 });
 
 test("agent requests dispatch directly when supported and copy safely otherwise", async () => {
-  const { deliverAgentRequest } = await loadWorkbenchStateModule();
+  const { bindAgentPrompt, deliverAgentRequest } = await loadWorkbenchStateModule();
   const sent = [];
   let copied = "";
   const bridge = {
@@ -330,6 +452,141 @@ test("agent requests dispatch directly when supported and copy safely otherwise"
   });
   assert.equal(hostClipboard.delivery, "clipboard");
   assert.equal(hostClipboard.buttonLabel, "Prompt copied");
+
+  const bound = bindAgentPrompt("Prepare the test", {
+    id: "agent-exact",
+    instanceId: "instance-exact",
+  });
+  assert.match(bound, /agentId "agent-exact"/);
+  assert.match(bound, /agentInstanceId "instance-exact"/);
+  assert.match(bound, /Chat approval or affirmative text expresses intent only/);
+  assert.match(bound, /current Test Workbench broker grant is required separately for each commit or run/);
+});
+
+test("disabled Source capability blocks keyboard and programmatic navigation without stealing focus", () => {
+  const workbench = read("inspector-workbench.js");
+  const improve = read("inspector-improve.js");
+  const devflow = read("devflow.js");
+
+  assert.match(workbench, /if \(!featureEnabled\('source'\)\)/);
+  assert.match(workbench, /Source preview is disabled in this Inspector/);
+  assert.match(workbench, /const retainedFocus = doc\.activeElement/);
+  assert.match(workbench, /retainWorkbenchFocus\(retainedFocus/);
+  assert.match(workbench, /if \(!availability\.enabled && tab !== 'requests'\)/);
+  assert.match(workbench, /!button\.hidden/);
+  assert.match(improve, /Ask agent about testability/);
+  assert.match(improve, /Ask agent about source anchor/);
+  assert.match(devflow, /testWorkbench\?\.featureEnabled\?\.\('source'\) !== true/);
+  const improveStart = devflow.indexOf("improveTestability(match)");
+  const capabilityCheck = devflow.indexOf("featureEnabled?.('source') !== true", improveStart);
+  const selection = devflow.indexOf("selectElement(candidate.id);", improveStart);
+  assert.ok(
+    improveStart >= 0 && capabilityCheck > improveStart && selection > capabilityCheck,
+    "disabled Source must be checked before changing selection or focus",
+  );
+});
+
+test("repair kill switch removes repair actions and blocks every Inspector repair entry point", () => {
+  const workbench = read("inspector-workbench.js");
+  const trace = read("inspector-trace.js");
+  const devflow = read("devflow.js");
+
+  assert.match(workbench, /repair: options\.featureCapabilities\?\.repair === true/);
+  assert.match(workbench, /if \(!featureEnabled\('repair'\)\)/);
+  assert.match(workbench, /Selector repair is disabled in this Inspector/);
+  assert.match(trace, /repairEligible && helpers\.featureEnabled\?\.\('repair'\)/);
+  assert.match(devflow, /function repairDisabled\(\)/);
+  for (const action of ["classify", "propose", "preview", "refresh", "reject", "requestApproval", "validate", "apply"]) {
+    assert.match(devflow, new RegExp(`async ${action}\\(\\) \\{\\s+if \\(repairDisabled\\(\\)\\) return;`));
+  }
+});
+
+test("data overflow keeps a focused command visible and trace pickers clean up cancellation", () => {
+  const dataUi = read("inspector-data-ui.js");
+  const devflow = read("devflow.js");
+
+  assert.match(dataUi, /const focused = host\.contains\(documentLike\.activeElement\)/);
+  assert.match(dataUi, /if \(focused && moreMenu\.contains\(focused\)\)/);
+  assert.match(dataUi, /more\.open = true/);
+  assert.match(dataUi, /focused\.focus\(\{ preventScroll: true \}\)/);
+  assert.match(devflow, /input\.tabIndex = -1/);
+  assert.match(devflow, /input\.setAttribute\('aria-hidden', 'true'\)/);
+  assert.match(devflow, /input\.addEventListener\('cancel', \(\) => finish\(null, true\)/);
+  assert.match(devflow, /window\.addEventListener\('focus', onWindowFocus, \{ once: true \}\)/);
+  assert.match(devflow, /if \(!input\.files\?\.length\) finish\(null, true\);\s*\}, 500\)/);
+  assert.match(devflow, /if \(!kind \|\| file\.size > maximumBytes\)/);
+  assert.ok(
+    devflow.indexOf("if (!kind || file.size > maximumBytes)") <
+      devflow.indexOf("new Uint8Array(await file.arrayBuffer())"),
+    "artifact size must be checked before browser bytes are read",
+  );
+  assert.match(devflow, /picked = await browserPickTrace\(pickerReturnFocus\)/);
+});
+
+test("stale authoring responses preserve the unsaved local flow and plan", () => {
+  const devflow = read("devflow.js");
+
+  assert.match(devflow, /const preserveLocalDraft = response\.stale === true && response\.ok !== true/);
+  assert.match(devflow, /if \(response\.flow && !preserveLocalDraft\)/);
+  assert.match(devflow, /if \(response\.plan && !preserveLocalDraft\)/);
+});
+
+test("review selection keys are stable with persisted ids and unique for legacy collisions", () => {
+  const steps = read("inspector-steps.js");
+
+  assert.match(steps, /if \(step\?\.stepId\) return `stepId:\$\{step\.stepId\}`/);
+  assert.match(steps, /return Number\.isFinite\(seq\) \? `seq:\$\{seq\}:\$\{index\}` : `legacy:\$\{index\}`/);
+});
+
+test("keyboard navigation excludes hidden Source and blocked navigation restores the visible control", async () => {
+  const { enabledWorkbenchTabs, retainWorkbenchFocus } = await loadWorkbenchStateModule();
+  const tabList = {};
+  const visible = {
+    disabled: false,
+    hidden: false,
+    closest: () => tabList,
+  };
+  const hiddenSource = {
+    disabled: false,
+    hidden: true,
+    closest: () => tabList,
+  };
+  const otherList = {
+    disabled: false,
+    hidden: false,
+    closest: () => ({}),
+  };
+  assert.deepEqual(enabledWorkbenchTabs([visible, hiddenSource, otherList], tabList), [visible]);
+
+  let focused = 0;
+  const control = {
+    isConnected: true,
+    getClientRects: () => [{}],
+    focus: ({ preventScroll }) => {
+      assert.equal(preventScroll, true);
+      focused += 1;
+    },
+  };
+  assert.equal(retainWorkbenchFocus(control, (callback) => callback()), true);
+  assert.equal(focused, 1);
+  assert.equal(retainWorkbenchFocus({ ...control, getClientRects: () => [] }), false);
+});
+
+test("disabled trace import removes file disclosure and blocks pickers before selection", async () => {
+  const trace = read("inspector-trace.js");
+  const devflow = read("devflow.js");
+  const traceModule = await loadPanelModule("inspector-trace.js");
+
+  assert.equal(traceModule.shouldShowTraceImport({ importEnabled: false }), false);
+  assert.equal(traceModule.shouldShowTraceImport({ importEnabled: true }), true);
+  assert.equal(traceModule.shouldShowTraceImport({ importEnabled: true, run: {} }), false);
+  assert.match(trace, /if \(shouldShowTraceImport\(state\)\)/);
+  assert.match(devflow, /state: \(\) => \(\{ \.\.\.state, importEnabled: previewFeatures\.traceImport \}\)/);
+  const guard = devflow.indexOf("if (!previewFeatures.traceImport) {");
+  const hostPicker = devflow.indexOf("if (hostBridge.has('pickTrace'))");
+  const browserPicker = devflow.indexOf("picked = await browserPickTrace(pickerReturnFocus)");
+  assert.ok(guard >= 0 && guard < hostPicker && guard < browserPicker);
+  assert.match(devflow, /No file picker was opened/);
 });
 
 test("run preflight summaries retain action classes but never fill values", async () => {
@@ -392,6 +649,23 @@ test("trace rendering selects divergence and uses disclosure envelopes only", as
   });
   assert.match(disclosure, /redacted.*length 24.*sha256:abc/);
   assert.doesNotMatch(disclosure, /CorrectHorseBatteryStaple/);
+
+  assert.deepEqual(trace.passPresentation({
+    businessOracles: [{ independent: true, succeeded: true }],
+    replayEligibility: { runVerificationAllowed: true },
+    verification: { verified: true },
+  }), {
+    title: "Test passed (independently verified)",
+    classification: "Independently verified pass",
+  });
+  assert.deepEqual(trace.passPresentation({
+    businessOracles: [{ independent: false, succeeded: true }],
+    replayEligibility: { runVerificationAllowed: true },
+    verification: { verified: true },
+  }), {
+    title: "Test passed (replay only)",
+    classification: "Replay pass",
+  });
 
   const untrusted = trace.importedTrustPresentation({ verification: { state: "untrusted" } });
   const attested = trace.importedTrustPresentation({ verification: { state: "attested" } });
@@ -534,7 +808,8 @@ test("authoring panels retain explicit recording, validation, diff, and commit c
   assert.match(plan, /Download current draft/);
   assert.match(plan, /What should this test prove\? \(required\)/);
   assert.match(plan, /Create your first test/);
-  assert.match(plan, /Create this test with your agent/);
+  assert.match(plan, /Prepare a draft with your agent/);
+  assert.match(plan, /trusted approval is not available yet/);
   assert.match(plan, /required: true/);
   assert.match(plan, /ariaInvalid/);
   assert.match(plan, /ariaDescribedBy/);
@@ -557,6 +832,8 @@ test("authoring panels retain explicit recording, validation, diff, and commit c
     "Record more steps", "Select a step", "Save step", "Move up", "Move down", "Remove step",
     "Step details \\(optional\\)",
     "Add expected result", "Download recording draft", "Check current app now", "exactly one element", "never prefilled",
+    "The target no longer exists", "Target no longer exists",
+    "Target AutomationId", "AutomationId of the target that should disappear",
     "Resolve step", "Check matching controls", "Use this control", "stable item key",
   ]) {
     assert.match(steps, new RegExp(text));
@@ -566,6 +843,9 @@ test("authoring panels retain explicit recording, validation, diff, and commit c
   assert.match(steps, /draft\.diffReviewed !== true/);
   assert.match(steps, /function selectorCheckKey/);
   assert.match(steps, /selectorChecks\.clear\(\)/);
+  assert.match(steps, /assertion\.kind === 'exists' \|\| assertion\.kind === 'propEquals'/);
+  assert.match(steps, /assertion\.kind === 'notExists'/);
+  assert.match(steps, /stepId:\$\{step\.stepId\}/);
   assert.doesNotMatch(steps, /Recording status|className: 'df-steps-more'/);
   assert.doesNotMatch(steps, /At least one hard outcome check|Typed assertion composer/);
   assert.match(devflow, /const retainedPlan = source === 'recording'/);
@@ -663,7 +943,10 @@ test("run uses a concise confirmed run check with visual progress and advanced l
 
   assert.match(devflow, /async openPreflight\(\)/);
   assert.match(devflow, /async function legacyQuickReplay/);
-  assert.match(run, /Review and start/);
+  assert.match(run, /Review, confirm, and start/);
+  assert.match(run, /starts only after the confirmation dialog/);
+  assert.match(read("inspector-repair.js"), /candidate\.unique === true \|\| candidate\.validation\?\.unique === true/);
+  assert.match(read("inspector-trace.js"), /report\.replayEligibility\?\.repairEligibility === true/);
   assert.match(run, /Go to Review/);
   assert.match(run, /readiness\?\.hardOutcomeCheck !== true/);
   assert.match(run, /Run details \(optional\)/);
@@ -680,12 +963,17 @@ test("results show persistent summaries and contextual next actions", () => {
   const trace = read("inspector-trace.js");
 
   for (const text of [
-    "Test passed", "Test needs attention", "Run again", "Improve test",
+    "Test needs attention", "Run again", "Improve test",
     "View failed step", "Review repair", "Improve selector", "Resolve", "Technical trace details",
   ]) {
     assert.match(trace, new RegExp(text));
   }
+  assert.match(trace, /Test passed \(replay only\)/);
+  assert.match(trace, /Test passed \(independently verified\)/);
+  assert.match(trace, /Replay pass/);
+  assert.match(trace, /passPresentation\(report\)/);
   assert.match(trace, /Diagnose this failure with your agent/);
+  assert.match(trace, /report\.failure\?\.category === 'selector'/);
   assert.match(trace, /df-results-summary/);
   assert.match(trace, /df-results-banner/);
   for (const next of ["Go to Goal", "Go to Steps", "Go to Review", "Go to Run"]) {

@@ -7,6 +7,10 @@ import {
   selectRefreshedAgent,
 } from "../dist-test/agent-identity.js";
 import { requiresBridgeRequestId } from "../dist-test/bridge-contract.js";
+import {
+  isNativeApprovalRequest,
+  performNativeApproval,
+} from "../dist-test/native-approval.js";
 import { BoundedReferenceStore } from "../dist-test/context-store.js";
 import {
   createDevFlowUriQuery,
@@ -65,6 +69,50 @@ test("request-gated bridge actions are enumerated", () => {
   assert.equal(requiresBridgeRequestId("devflow:requestTestProposal"), true);
   assert.equal(requiresBridgeRequestId("devflow:selectionChanged"), false);
   assert.equal(requiresBridgeRequestId("devflow:openSource"), true);
+  assert.equal(requiresBridgeRequestId("devflow:nativeApproval"), true);
+});
+
+test("native approval validates bounds and keeps native credentials out of results", async () => {
+  const request = {
+    approvalRequestId: "approval-1",
+    kind: "commit",
+    intent: "Save the reviewed login test",
+    approvedScope: {
+      allowedActions: ["author-commit"],
+      allowedSelectors: ["automationId:Save"],
+      allowedRoutes: ["/login"],
+      allowedSideEffectClasses: ["none"],
+      maxActionCount: 1,
+      maxValueBytes: 0,
+    },
+    grantDurationSeconds: 600,
+    appName: "Demo",
+    platform: "windows",
+    scopeSummary: "save the test, 1 exact selector, up to 1 action",
+  };
+  assert.equal(isNativeApprovalRequest(request), true);
+  assert.equal(isNativeApprovalRequest({ ...request, approvalRequestId: "../bad" }), false);
+
+  const calls = [];
+  const token = "a".repeat(43);
+  const result = await performNativeApproval(
+    request,
+    { brokerPort: 19223, agentId: "agent-1" },
+    () => ({ pid: 1, port: 19223, startedAt: "2026-01-01T00:00:00Z", nativeApprovalToken: token }),
+    async (url, options) => {
+      calls.push({ url, options });
+      return calls.length === 1
+        ? { ok: true, status: 201, json: async () => ({ confirmationCapability: "b".repeat(43) }) }
+        : { ok: true, status: 200, json: async () => ({ ok: true, message: "Approved." }) };
+    },
+  );
+  assert.deepEqual(result, { ok: true, message: "Approved." });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].options.headers["X-DevFlow-Host-Approval-Token"], token);
+  assert.equal(calls[1].options.headers["X-DevFlow-Host-Approval-Token"], undefined);
+  assert.deepEqual(JSON.parse(calls[0].options.body).approvedScope, JSON.parse(calls[1].options.body).approvedScope);
+  assert.equal(JSON.parse(calls[0].options.body).grantDurationSeconds, JSON.parse(calls[1].options.body).grantDurationSeconds);
+  assert.equal(JSON.stringify(result).includes(token), false);
 });
 
 test("DevFlow URIs round-trip bounded identifiers", () => {

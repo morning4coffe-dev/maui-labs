@@ -79,7 +79,7 @@ is ten minutes; a future issued grant would have its own shorter expiration.
 > **Current approval availability:** trusted native approval is available in the VS Code Inspector
 > and GitHub Copilot Canvas only when the broker reports approval available and the embedding host
 > advertises `nativeApproval`. The standalone browser and chat remain read-only and
-> non-authoritative; they cannot approve, narrow, reject, or issue a usable grant.
+> non-authoritative; they cannot approve, narrow, or issue a usable grant.
 
 A trusted native host lets a human reduce the requested scope and issues an opaque, short-lived
 grant server-side only after revalidating the live app instance and current plan/flow revision. The
@@ -134,7 +134,8 @@ a reused idempotency key fails before app dispatch. A lost response is reported 
 5. The human opens **Tests > Agent requests** and reviews the exact scope. In a trusted VS Code or
    Canvas host they explicitly confirm it natively; browser and chat cannot substitute for that step.
 6. Use `maui_test_author await-approval` only after the native confirmation request is presented.
-   If native approval is unavailable, keep the draft inert and do not poll or attempt a grant-dependent flow.
+   Do **not** call `maui_test_author await-approval`, poll for an approval, or attempt a
+   grant-dependent flow when native approval is unavailable; keep the draft inert instead.
 7. Only after a bound native-issued commit grant may the agent commit, refresh status, and request a
    separate run approval.
 8. Only after that distinct native-issued run grant may it start exactly one run and use its

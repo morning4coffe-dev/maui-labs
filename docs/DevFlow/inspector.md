@@ -126,7 +126,7 @@ Copilot Canvas it sends the bounded request directly to the host agent through t
 bridge. In a standalone browser it copies the same ready-to-paste prompt. Saving and running remain
 separate human decisions. Trusted approval is available only when a VS Code or Copilot Canvas host
 advertises `nativeApproval` and the broker reports approval available. A standalone browser is
-read-only and cannot approve, narrow, reject, or issue a grant. Do not call `maui_test_author await-approval`, poll for an
+read-only and cannot approve, narrow, or issue a grant. Do not call `maui_test_author await-approval`, poll for an
 approval, or attempt a grant-dependent save/run from this preview; browser or chat confirmation
 cannot authorize a save or run. Failed Results and Improve expose equivalent direct buttons for
 diagnosis and read-only quality review; agent repair suggestions are never applied directly.

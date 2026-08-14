@@ -18,7 +18,7 @@ public static class FlowValidator
 
     // routeIs has an authoritative AgentStatus.Route value. pageChanged is report-only because a
     // generic flow does not retain authoritative before/after page identity.
-    private static readonly IReadOnlySet<string> VerifiableAssertKinds =
+    internal static readonly IReadOnlySet<string> VerifiableAssertKinds =
         new HashSet<string>(StringComparer.Ordinal) { "propEquals", "exists", "notExists", "routeIs" };
 
     private static readonly IReadOnlySet<string> Themes =

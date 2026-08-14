@@ -370,8 +370,17 @@ public sealed class MauiFlowRunner
                         if (assertionResult.Ok == false)
                         {
                             legacyStep.Ok = false;
-                            legacyStep.FailureKind ??= FlowFailureKinds.Assertion;
-                            legacyStep.Error ??= $"{assertion.Kind} assertion failed.";
+                            if (FlowValidator.VerifiableAssertKinds.Contains(assertion.Kind))
+                            {
+                                legacyStep.FailureKind ??= FlowFailureKinds.Assertion;
+                                legacyStep.Error ??= $"{assertion.Kind} assertion failed.";
+                            }
+                            else
+                            {
+                                // An unevaluatable kind is an authoring defect, not an app regression.
+                                legacyStep.FailureKind ??= FlowFailureKinds.Validation;
+                                legacyStep.Error ??= $"assert kind '{assertion.Kind}' is marked verify:true but cannot be evaluated on replay.";
+                            }
                         }
                     }
                 }
@@ -1003,7 +1012,9 @@ public sealed class MauiFlowRunner
                 }
                 else
                 {
-                    result.Skipped = true;
+                    // A verify:true assertion we cannot evaluate fails closed. Skipping it would
+                    // report a green step that checked nothing.
+                    result.Ok = false;
                     return result;
                 }
             }

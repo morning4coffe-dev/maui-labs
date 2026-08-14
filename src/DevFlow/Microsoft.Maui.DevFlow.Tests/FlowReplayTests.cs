@@ -148,6 +148,58 @@ public class FlowReplayTests
     }
 
     [Fact]
+    public async Task Replay_UnevaluatableVerifiedAssertKind_FailsClosedAndNeverReportsGreen()
+    {
+        await using var agentSrv = new RoutingAgent();
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        var flow = new MauiFlow
+        {
+            Name = "unevaluatable-hard-assert",
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1, Action = "assert",
+                    Asserts = new() { new FlowAssert { Kind = "contains", Selector = new FlowSelector { AutomationId = "submit" }, Expected = "Go", Verify = true } },
+                },
+            },
+        };
+
+        var report = await new FlowReplayer(client, pollTries: 2, pollGapMs: 10).ReplayAsync(flow);
+
+        Assert.False(report.Ok, JsonSerializer.Serialize(report));
+        Assert.Equal(0, report.Passed);
+        Assert.Equal(FlowFailureKinds.Validation, report.Results[0].FailureKind);
+        Assert.Empty(agentSrv.Taps);                       // fails closed before driving anything
+    }
+
+    [Fact]
+    public async Task Replay_UnevaluatableReportOnlyAssertKind_IsSkippedAndStepPasses()
+    {
+        await using var agentSrv = new RoutingAgent();
+        using var client = new AgentClient("127.0.0.1", agentSrv.Port);
+        var flow = new MauiFlow
+        {
+            Name = "unevaluatable-soft-assert",
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1, Action = "tap",
+                    Args = new FlowStepArgs { Selector = new FlowSelector { AutomationId = "submit" } },
+                    Asserts = new() { new FlowAssert { Kind = "contains", Note = "observation only", Verify = false } },
+                },
+            },
+        };
+
+        var report = await new FlowReplayer(client, pollTries: 2, pollGapMs: 10).ReplayAsync(flow);
+
+        Assert.True(report.Ok, JsonSerializer.Serialize(report));
+        Assert.True(report.Results[0].Asserts[0].Skipped);
+        Assert.Null(report.Results[0].Asserts[0].Ok);      // report-only kinds stay non-blocking
+    }
+
+    [Fact]
     public async Task Replay_AssertOnlyStep_FailsWhenExpectationWrong()
     {
         await using var agentSrv = new RoutingAgent();

@@ -294,8 +294,17 @@ public sealed class FlowReplayer
                     if (ar.Ok == false)
                     {
                         res.Ok = false;
-                        res.FailureKind ??= FlowFailureKinds.Assertion;
-                        res.Error ??= $"{a.Kind} assertion failed.";
+                        if (FlowValidator.VerifiableAssertKinds.Contains(a.Kind))
+                        {
+                            res.FailureKind ??= FlowFailureKinds.Assertion;
+                            res.Error ??= $"{a.Kind} assertion failed.";
+                        }
+                        else
+                        {
+                            // An unevaluatable kind is an authoring defect, not an app regression.
+                            res.FailureKind ??= FlowFailureKinds.Validation;
+                            res.Error ??= $"assert kind '{a.Kind}' is marked verify:true but cannot be evaluated on replay.";
+                        }
                     }
                 }
             }
@@ -494,8 +503,9 @@ public sealed class FlowReplayer
                 }
                 else
                 {
-                    // Unknown verify:true kind — don't fail the step on something we can't evaluate.
-                    r.Skipped = true;
+                    // A verify:true assertion we cannot evaluate fails closed. Skipping it would
+                    // report a green step that checked nothing.
+                    r.Ok = false;
                     return r;
                 }
             }

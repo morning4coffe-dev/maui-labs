@@ -248,7 +248,7 @@
       "properties": {
         "kind": {
           "type": "string",
-          "description": "Unknown report-only assertion kinds are retained as warnings by the runtime."
+          "description": "Unknown kinds are retained as warnings when verify is false. A kind that cannot be evaluated on replay fails the step when verify is true."
         },
         "selector": {
           "$ref": "#/$defs/NullableFlowSelector"

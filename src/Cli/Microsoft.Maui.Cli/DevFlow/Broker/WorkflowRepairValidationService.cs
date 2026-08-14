@@ -15,6 +15,14 @@ internal interface IWorkflowRepairValidationHost
     Task<WorkflowRepairReplayValidation> ReplayWithInMemorySelectorOverrideAsync(
         WorkflowRepairTransientValidationRequest request,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The seed, backend, and collection facts a lifecycle owner has applied to the connected app,
+    /// or null when no component can attest them. A host that cannot attest them returns null so the
+    /// classification records the fact as missing rather than inventing one.
+    /// </summary>
+    Task<WorkflowRepairAttestedState?> ObserveAttestedStateAsync(CancellationToken cancellationToken)
+        => Task.FromResult<WorkflowRepairAttestedState?>(null);
 }
 
 /// <summary>One bounded transient validation request. It contains no source-write operation.</summary>

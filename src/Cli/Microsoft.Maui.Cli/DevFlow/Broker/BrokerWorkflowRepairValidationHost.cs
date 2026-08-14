@@ -14,6 +14,24 @@ internal interface IWorkflowRepairResetAttester
     Task<WorkflowRepairResetAttestation?> AttestAsync(
         WorkflowRepairTransientValidationRequest request,
         CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The seed, backend, and collection facts the lifecycle owner currently has applied to the
+    /// connected app. A broker uses these to classify repair eligibility, because the app itself has
+    /// no way to report them and a request that carries them is only an echo.
+    /// </summary>
+    Task<WorkflowRepairAttestedState?> ObserveAttestedStateAsync(CancellationToken cancellationToken);
+}
+
+/// <summary>
+/// The three checkpoint facts no running app can prove about itself, as attested by the component
+/// that applied them.
+/// </summary>
+internal sealed record WorkflowRepairAttestedState
+{
+    public required string SeedFingerprint { get; init; }
+    public required string BackendStateFingerprint { get; init; }
+    public required string CollectionItemKey { get; init; }
 }
 
 /// <summary>Reset, seed, backend, and oracle facts attested by a lifecycle-capable host.</summary>
@@ -88,6 +106,28 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
         _restoreRoute = restoreRoute ?? throw new ArgumentNullException(nameof(restoreRoute));
         _replay = replay ?? throw new ArgumentNullException(nameof(replay));
         _resetAttester = resetAttester;
+    }
+
+    /// <summary>
+    /// Asks the lifecycle attester what it currently has applied. Without an attester the answer is
+    /// null, which keeps the classification honest about the facts it cannot establish.
+    /// </summary>
+    public async Task<WorkflowRepairAttestedState?> ObserveAttestedStateAsync(CancellationToken cancellationToken)
+    {
+        if (_resetAttester is null)
+            return null;
+        try
+        {
+            return await _resetAttester.ObserveAttestedStateAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     public async Task<WorkflowRepairLifecycleValidation> HardResetAsync(

@@ -1393,6 +1393,7 @@ public sealed class FlowExecutionPlatformAdapterTests
     {
         public int DeployCalls { get; private set; }
         public int CleanupCalls { get; private set; }
+        public int ResetCalls { get; private set; }
 
         public Task<AndroidAppDeploymentSession> DeployAndLaunchAsync(
             AndroidAppDeploymentRequest request,
@@ -1408,6 +1409,21 @@ public sealed class FlowExecutionPlatformAdapterTests
                 InstalledByInvocation = true,
                 InstallAttempted = true,
                 LaunchedByInvocation = true,
+            });
+        }
+
+        public Task<AndroidAppDataResetResult> ResetAppDataAndRelaunchAsync(
+            AndroidAppDeploymentSession session,
+            CancellationToken cancellationToken = default)
+        {
+            ResetCalls++;
+            return Task.FromResult(new AndroidAppDataResetResult
+            {
+                Succeeded = true,
+                DataCleared = true,
+                Relaunched = true,
+                ProcessId = 654,
+                DetailCode = "reset-complete",
             });
         }
 

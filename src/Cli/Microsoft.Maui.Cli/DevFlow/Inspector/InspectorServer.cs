@@ -51,6 +51,10 @@ public sealed partial class InspectorServer : IDisposable
         Testing.MauiTestAgentTargetState,
         Task<Testing.MauiTestAgentTargetState?>>? _testAgentTargetStateRefresh;
     private readonly WorkflowRepairValidationService _repairValidation;
+    // The same lifecycle host the validation service uses. The classification asks it for the three
+    // checkpoint facts a running app cannot report about itself, rather than leaving them blank or
+    // echoing them from the request.
+    private readonly IWorkflowRepairValidationHost? _repairValidationHost;
     private readonly bool _repairValidationAvailable;
     private readonly XamlSourcePropertyEditor _sourcePropertyEditor;
     private readonly XamlAutomationIdProposalService _xamlSourceProposalService;
@@ -205,6 +209,7 @@ public sealed partial class InspectorServer : IDisposable
         _testAgentSessions = testAgentSessions;
         _testAgentTargetStateRefresh = testAgentTargetStateRefresh;
         _repairValidationAvailable = repairValidationHost is not null;
+        _repairValidationHost = repairValidationHost;
         _repairValidation = new WorkflowRepairValidationService(
             repairValidationHost ?? UnavailableWorkflowRepairValidationHost.Instance);
         _sourcePropertyEditor = new XamlSourcePropertyEditor(project, sessionId);
@@ -5417,10 +5422,20 @@ public sealed partial class InspectorServer : IDisposable
         try
         {
             var status = await _client.GetStatusAsync().ConfigureAwait(false);
+            // Seed, backend-state, and collection-item facts are invisible to the app itself, so they
+            // come from the registered lifecycle owner or stay absent. They are never read back from
+            // the caller's request.
+            var attested = _repairValidationHost is null
+                ? null
+                : await _repairValidationHost
+                    .ObserveAttestedStateAsync(_lifetimeCts.Token)
+                    .ConfigureAwait(false);
             var current = new Testing.MauiFlowCheckpoint
             {
                 AppBuildFingerprint = SafeWorkbenchText(status?.App?.Build),
                 AgentInstanceId = _agentInstanceId,
+                SeedFingerprint = SafeWorkbenchText(attested?.SeedFingerprint),
+                BackendStateFingerprint = SafeWorkbenchText(attested?.BackendStateFingerprint),
                 Route = SafeWorkbenchText(status?.Route),
                 Window = SafeWorkbenchText(status?.Window),
                 Modal = SafeWorkbenchText(status?.Modal),
@@ -5428,6 +5443,7 @@ public sealed partial class InspectorServer : IDisposable
                 Theme = SafeWorkbenchText(status?.Theme),
                 Orientation = SafeWorkbenchText(status?.Orientation),
                 DisplayProfile = SafeWorkbenchText(status?.DisplayProfile),
+                CollectionItemKey = SafeWorkbenchText(attested?.CollectionItemKey),
             };
 
             var prior = services.GetPriorSelectorResolution(runContext.RunId, failedStep.StepId!).Resolution;

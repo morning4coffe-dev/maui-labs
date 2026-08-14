@@ -53,6 +53,10 @@ public partial class BrokerServer : IDisposable
     // construction remains explicitly unavailable unless a test supplies its own verifier.
     private readonly Func<string?, bool>? _trustedHostApprovalVerifier;
     private readonly string? _nativeApprovalToken;
+    // Resolves the component that owns the connected app's lifecycle, when one has registered
+    // itself with this broker process. It stays null in an ordinary broker, which is why repair
+    // validation reports itself unavailable rather than promising a reset nobody can perform.
+    private readonly Func<AgentRegistration, IWorkflowRepairResetAttester?>? _repairResetAttesterResolver;
     private readonly HashSet<int> _assignedPorts = new();
     private readonly object _portLock = new();
     private DateTime _lastActivity = DateTime.UtcNow;
@@ -131,12 +135,14 @@ public partial class BrokerServer : IDisposable
         MauiPreviewFeatureFlags? previewFlags = null,
         Func<string?, bool>? trustedHostApprovalVerifier = null,
         string? nativeApprovalToken = null,
-        bool requireWorkflowRunAuthorization = true)
+        bool requireWorkflowRunAuthorization = true,
+        Func<AgentRegistration, IWorkflowRepairResetAttester?>? repairResetAttesterResolver = null)
     {
         _port = port;
         _idleTimeout = idleTimeout ?? TimeSpan.FromMinutes(5);
         _log = log;
         _requireWorkflowRunAuthorization = requireWorkflowRunAuthorization;
+        _repairResetAttesterResolver = repairResetAttesterResolver;
         _previewFlags = previewFlags ?? MauiPreviewFeatureFlagConfiguration.FromEnvironment();
         _nativeApprovalToken = nativeApprovalToken;
         _trustedHostApprovalVerifier = nativeApprovalToken is null
@@ -2589,7 +2595,7 @@ public partial class BrokerServer : IDisposable
     /// </summary>
     private BrokerWorkflowRepairValidationHost? CreateRepairValidationHost(AgentConnection connection)
     {
-        if (CreateRepairResetAttester() is not { } resetAttester)
+        if (CreateRepairResetAttester(connection.Registration) is not { } resetAttester)
             return null;
 
         return new BrokerWorkflowRepairValidationHost(
@@ -2603,11 +2609,13 @@ public partial class BrokerServer : IDisposable
     }
 
     /// <summary>
-    /// Resolves the component that can attest a hard reset. Seed, backend-state, and collection-item
-    /// facts require a lifecycle host that builds, resets, and seeds outside the broker, and none is
-    /// registered — so no reset attestation is ever fabricated from what a running app reports.
+    /// Resolves the component that can attest a hard reset for this exact agent. Seed, backend-state,
+    /// and collection-item facts require a host that installed, wiped, and seeded the app itself, so
+    /// only a registered lifecycle owner can supply one. Without a registration the broker returns
+    /// null and never fabricates a reset attestation from what a running app reports.
     /// </summary>
-    private static IWorkflowRepairResetAttester? CreateRepairResetAttester() => null;
+    private IWorkflowRepairResetAttester? CreateRepairResetAttester(AgentRegistration registration)
+        => _repairResetAttesterResolver?.Invoke(registration);
 
     private async Task<MauiFlowCheckpoint?> ObserveRepairCheckpointAsync(
         AgentConnection connection,

@@ -487,6 +487,15 @@ public sealed class BrokerWorkflowRepairValidationHostTests
 
         public string? SeedFingerprint { get; set; }
 
+        public Task<WorkflowRepairAttestedState?> ObserveAttestedStateAsync(
+            CancellationToken cancellationToken)
+            => Task.FromResult<WorkflowRepairAttestedState?>(new WorkflowRepairAttestedState
+            {
+                SeedFingerprint = SeedFingerprint,
+                BackendStateFingerprint = _attested.BackendStateFingerprint,
+                CollectionItemKey = _attested.CollectionItemKey,
+            });
+
         public Task<WorkflowRepairResetAttestation?> AttestAsync(
             WorkflowRepairTransientValidationRequest request,
             CancellationToken cancellationToken)

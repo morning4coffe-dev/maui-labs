@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Text.Json.Nodes;
+using Microsoft.Maui.Cli.DevFlow.Broker;
 using Microsoft.Maui.Cli.DevFlow.Mcp;
 using Microsoft.Maui.DevFlow.Testing;
 using ModelContextProtocol.Server;
@@ -94,6 +95,7 @@ public sealed class TestAgentCapabilitiesTool
         var capabilities = await agent.GetCapabilitiesAsync().ConfigureAwait(false);
         var agentSupportsWorkflowLedger = capabilities.ValueKind == System.Text.Json.JsonValueKind.Object &&
             capabilities.TryGetProperty("agent.workflowCommandLedger", out _);
+        var nativeHostApprovalAvailable = BrokerClient.HasNativeHostApprovalAuthority();
 
         return TestAgentToolSupport.Success(null, new
         {
@@ -103,11 +105,13 @@ public sealed class TestAgentCapabilitiesTool
             requiresExplicitTarget = true,
             requiresReadCapability = true,
             requiresHumanMutationGrant = true,
+            nativeHostApprovalAvailable,
+            mutationGrantIssuanceAvailable = nativeHostApprovalAvailable,
             supports = new
             {
                 authoring = true,
                 typedActions = new[] { "tap", "fill", "scroll", "navigate", "back" },
-                typedAssertions = new[] { "propEquals", "exists", "routeIs", "pageChanged" },
+                typedAssertions = new[] { "propEquals", "exists", "notExists", "routeIs", "pageChanged" },
                 staticValidation = true,
                 liveValidation = true,
                 runStart = true,
@@ -125,6 +129,15 @@ public sealed class TestAgentCapabilitiesTool
                 repairApply = false,
                 workflowCommandLedger = agentSupportsWorkflowLedger,
             },
+            limitations = nativeHostApprovalAvailable
+                ? new[]
+                {
+                    "Approval still requires a trusted VS Code or Copilot Canvas native host and an explicit human confirmation. Browser and chat text are non-authoritative.",
+                }
+                : new[]
+                {
+                    "Native host approval is unavailable for the current broker. Grant-gated mutations fail closed.",
+                },
             prohibited = new[]
             {
                 "secure-storage", "preferences-mutation", "raw-files", "raw-network-bodies",

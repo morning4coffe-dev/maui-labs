@@ -13,7 +13,7 @@ namespace Microsoft.Maui.Cli.DevFlow.Mcp.Tools;
 public sealed class TestAgentActionTool
 {
     [McpServerTool(Name = "maui_test_action"),
-     System.ComponentModel.Description("Execute only a human-approved typed semantic action (tap, fill, scroll, navigate, or back) against an explicit target, optionally append its normalized form to the broker draft, and never invoke arbitrary actions or mutate arbitrary properties.")]
+     System.ComponentModel.Description("Execute only a human-approved typed semantic action (tap, fill, scroll, navigate, or back) against the authoring session's canonical target. Appending its normalized form requires a separately authorized and consumed draft-append action; execute+append therefore needs a grant scope containing both actions with maxActionCount at least 2. Never invokes arbitrary actions or mutates arbitrary properties.")]
     public static async Task<string> Action(
         [System.ComponentModel.Description("MCP session injected by the server and used for the local broker and exact target")] McpAgentSession session,
         [System.ComponentModel.Description("Typed semantic action request containing a complete envelope, durable selector or route, bounded value, and optional draft append")] MauiTestAgentActionRequest request)
@@ -55,29 +55,27 @@ public sealed class TestAgentActionTool
         if (!TryCreateActionFlow(request, out var actionFlow, out var error))
             return TestAgentToolSupport.Failure(envelope.RequestId, error!);
 
+        TestAgentSessionTargetResolution? sessionTarget = null;
         string? runJson = null;
         if (request.Execute)
         {
-            var snapshot = await TestAgentToolSupport.SessionAsync(session, envelope).ConfigureAwait(false);
-            if (snapshot.Value?.Ok != true || snapshot.Value.Snapshot is null)
-                return TestAgentToolSupport.BrokerFailure(envelope.RequestId, snapshot);
-            var target = await TestAgentToolSupport.ResolveTargetAsync(session, envelope.Target).ConfigureAwait(false);
-            if (target.Error is not null)
-                return TestAgentToolSupport.Failure(envelope.RequestId, target.Error);
+            sessionTarget = await TestAgentToolSupport.ResolveSessionTargetAsync(session, envelope).ConfigureAwait(false);
+            if (sessionTarget.Error is not null)
+                return TestAgentToolSupport.Failure(envelope.RequestId, sessionTarget.Error);
 
             var flowDigest = MauiFlowRunReportSerializer.ComputeFlowDigest(actionFlow!);
-            var actionPlan = CreateActionPlan(snapshot.Value.Snapshot.Plan, flowDigest);
+            var actionPlan = CreateActionPlan(sessionTarget.Snapshot!.Plan, flowDigest);
             var runRequest = new WorkflowRunStartRequest
             {
-                AgentId = envelope.Target!.AgentId,
-                AgentInstanceId = envelope.Target.AgentInstanceId,
+                AgentId = sessionTarget.Target!.AgentId,
+                AgentInstanceId = sessionTarget.Target.AgentInstanceId,
                 IdempotencyKey = envelope.IdempotencyKey,
                 Flow = actionFlow,
                 Plan = actionPlan,
                 Context = TestAgentRunTool.CreateRunContext(
                     actionPlan,
-                    snapshot.Value.Snapshot.TargetState,
-                    target.State),
+                    sessionTarget.Snapshot.TargetState,
+                    sessionTarget.LiveTarget!.State),
                 TimeoutMs = 30_000,
                 DeadlineMs = envelope.DeadlineMs,
             };
@@ -86,18 +84,54 @@ public sealed class TestAgentActionTool
                 DevFlowCliJsonContext.Default.WorkflowRunStartRequest);
         }
 
-        var authorization = await TestAgentToolSupport.AuthorizeAsync(
-            session,
-            envelope,
-            request.Action ?? string.Empty,
-            request.Selector,
-            request.Route,
-            ResolveSideEffectClass(request),
-            request.Value).ConfigureAwait(false);
-        if (authorization.Value?.Ok != true || authorization.Value.AuthorizationId is null)
-            return TestAgentToolSupport.BrokerFailure(envelope.RequestId, authorization);
+        TestAgentBrokerResponse<MauiTestAgentMutationAuthorizationResult>? executeAuthorization = null;
+        if (request.Execute)
+        {
+            executeAuthorization = await TestAgentToolSupport.AuthorizeAsync(
+                session,
+                envelope,
+                request.Action ?? string.Empty,
+                request.Selector,
+                request.Route,
+                ResolveSideEffectClass(request),
+                request.Value).ConfigureAwait(false);
+            if (executeAuthorization.Value?.Ok != true ||
+                executeAuthorization.Value.AuthorizationId is null)
+            {
+                return TestAgentToolSupport.BrokerFailure(envelope.RequestId, executeAuthorization);
+            }
+        }
 
-        request.AuthorizationId = authorization.Value.AuthorizationId;
+        MauiTestAgentRequestEnvelope? appendEnvelope = null;
+        TestAgentBrokerResponse<MauiTestAgentMutationAuthorizationResult>? appendAuthorization = null;
+        if (request.AppendDraft)
+        {
+            appendEnvelope = TestAgentToolSupport.CreateSubrequestEnvelope(envelope, "draft-append");
+            appendAuthorization = await TestAgentToolSupport.AuthorizeAsync(
+                session,
+                appendEnvelope,
+                MauiTestAgentActions.DraftAppend,
+                request.Selector,
+                request.Route,
+                sideEffectClass: "authoring",
+                request.Value).ConfigureAwait(false);
+            if (appendAuthorization.Value?.Ok != true ||
+                appendAuthorization.Value.AuthorizationId is null)
+            {
+                if (executeAuthorization?.Value?.AuthorizationId is { } unusedExecuteAuthorization)
+                {
+                    await CompleteAsync(
+                        session,
+                        unusedExecuteAuthorization,
+                        "rejected",
+                        request,
+                        null,
+                        MauiTestAgentErrorCodes.MutationGrantScopeDenied).ConfigureAwait(false);
+                }
+                return TestAgentToolSupport.BrokerFailure(envelope.RequestId, appendAuthorization);
+            }
+        }
+
         var brokerPort = await session.GetBrokerPortAsync().ConfigureAwait(false);
         string? runId = null;
         string? runCapability = null;
@@ -113,7 +147,7 @@ public sealed class TestAgentActionTool
                 // grant stays consumed and the caller must not retry this idempotency key.
                 await CompleteAsync(
                     session,
-                    authorization.Value.AuthorizationId,
+                    executeAuthorization!.Value!.AuthorizationId!,
                     "unknown-completion",
                     request,
                     null,
@@ -128,7 +162,7 @@ public sealed class TestAgentActionTool
             {
                 await CompleteAsync(
                     session,
-                    authorization.Value.AuthorizationId,
+                    executeAuthorization!.Value!.AuthorizationId!,
                     "rejected",
                     request,
                     null,
@@ -153,12 +187,13 @@ public sealed class TestAgentActionTool
                         {
                             SessionId = sessionId,
                             ReadCapabilityId = envelope.ReadCapabilityId,
+                            Envelope = envelope,
                             RunId = runId,
                             RunCapabilityToken = runCapability,
                         }),
                     () => CompleteAsync(
                         session,
-                        authorization.Value.AuthorizationId,
+                        executeAuthorization!.Value!.AuthorizationId!,
                         "unknown-completion",
                         request,
                         runId,
@@ -171,28 +206,50 @@ public sealed class TestAgentActionTool
         MauiTestAgentSessionResult? appended = null;
         if (request.AppendDraft)
         {
+            request.Envelope = appendEnvelope;
+            request.AuthorizationId = appendAuthorization!.Value!.AuthorizationId;
             var append = await TestAgentBrokerClient.AppendActionAsync(brokerPort, request).ConfigureAwait(false);
             if (append.Value?.Ok != true)
             {
                 await CompleteAsync(
                     session,
-                    authorization.Value.AuthorizationId,
-                    request.Execute ? "queued" : "rejected",
+                    appendAuthorization.Value.AuthorizationId!,
+                    "rejected",
                     request,
-                    runId,
+                    null,
                     append.Value?.Error?.Code).ConfigureAwait(false);
+                if (executeAuthorization?.Value?.AuthorizationId is { } completedExecuteAuthorization)
+                {
+                    await CompleteAsync(
+                        session,
+                        completedExecuteAuthorization,
+                        request.Execute ? "queued" : "rejected",
+                        request,
+                        runId,
+                        append.Value?.Error?.Code).ConfigureAwait(false);
+                }
                 return TestAgentToolSupport.BrokerFailure(envelope.RequestId, append);
             }
             appended = append.Value;
+            await CompleteAsync(
+                session,
+                appendAuthorization.Value.AuthorizationId!,
+                "completed",
+                request,
+                null,
+                null).ConfigureAwait(false);
         }
 
-        await CompleteAsync(
-            session,
-            authorization.Value.AuthorizationId,
-            request.Execute ? "queued" : "completed",
-            request,
-            runId,
-            null).ConfigureAwait(false);
+        if (executeAuthorization?.Value?.AuthorizationId is { } executeAuthorizationId)
+        {
+            await CompleteAsync(
+                session,
+                executeAuthorizationId,
+                "queued",
+                request,
+                runId,
+                null).ConfigureAwait(false);
+        }
         return TestAgentToolSupport.Success(envelope.RequestId, new
         {
             action = request.Action,
@@ -395,7 +452,7 @@ public sealed class TestAgentAssertionTool
         if (normalized == "verify")
         {
             var sessionResult = await TestAgentToolSupport.SessionAsync(session, request.Envelope).ConfigureAwait(false);
-            if (sessionResult.Value?.Ok != true)
+            if (sessionResult.Value?.Ok != true || sessionResult.Value.Snapshot is null)
                 return TestAgentToolSupport.BrokerFailure(request.Envelope.RequestId, sessionResult);
             if (request.Assertion is null)
             {
@@ -406,10 +463,12 @@ public sealed class TestAgentAssertionTool
                     retryable: false));
             }
 
-            var target = await TestAgentToolSupport.ResolveTargetAsync(session, request.Envelope.Target).ConfigureAwait(false);
+            var target = await TestAgentToolSupport.ResolveTargetAsync(
+                session,
+                sessionResult.Value.Snapshot.Target).ConfigureAwait(false);
             if (target.Error is not null)
                 return TestAgentToolSupport.Failure(request.Envelope.RequestId, target.Error);
-            using var agent = await session.GetTestAgentClientAsync(request.Envelope.Target).ConfigureAwait(false);
+            using var agent = await session.GetTestAgentClientAsync(sessionResult.Value.Snapshot.Target).ConfigureAwait(false);
             var verified = await MauiFlowAssertionVerifier.VerifyAsync(
                 new AgentClientMauiFlowDriver(agent),
                 request.Assertion,

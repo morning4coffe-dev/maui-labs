@@ -57,11 +57,13 @@ public sealed class TestAgentValidationTool
                 retryable: false));
         }
 
-        var target = await TestAgentToolSupport.ResolveTargetAsync(session, request.Envelope.Target).ConfigureAwait(false);
+        var target = await TestAgentToolSupport.ResolveTargetAsync(
+            session,
+            snapshotResult.Value.Snapshot.Target).ConfigureAwait(false);
         if (target.Error is not null)
             return TestAgentToolSupport.Failure(request.Envelope.RequestId, target.Error);
 
-        using var agent = await session.GetTestAgentClientAsync(request.Envelope.Target).ConfigureAwait(false);
+        using var agent = await session.GetTestAgentClientAsync(snapshotResult.Value.Snapshot.Target).ConfigureAwait(false);
         var tree = await agent.GetTreeAsync(maxDepth: 8).ConfigureAwait(false);
         var findings = new List<object>();
         foreach (var step in snapshot.Flow?.Steps ?? [])
@@ -154,14 +156,17 @@ public sealed class TestAgentRunTool
         var snapshot = await TestAgentToolSupport.SessionAsync(session, envelope).ConfigureAwait(false);
         if (snapshot.Value?.Ok != true || snapshot.Value.Snapshot is null)
             return TestAgentToolSupport.BrokerFailure(envelope.RequestId, snapshot);
-        var target = await TestAgentToolSupport.ResolveTargetAsync(session, envelope.Target).ConfigureAwait(false);
+        var target = await TestAgentToolSupport.ResolveTargetAsync(
+            session,
+            snapshot.Value.Snapshot.Target).ConfigureAwait(false);
         if (target.Error is not null)
             return TestAgentToolSupport.Failure(envelope.RequestId, target.Error);
 
+        var canonicalTarget = snapshot.Value.Snapshot.Target!;
         var startRequest = new WorkflowRunStartRequest
         {
-            AgentId = envelope.Target!.AgentId,
-            AgentInstanceId = envelope.Target.AgentInstanceId,
+            AgentId = canonicalTarget.AgentId,
+            AgentInstanceId = canonicalTarget.AgentInstanceId,
             IdempotencyKey = envelope.IdempotencyKey,
             Flow = snapshot.Value.Snapshot.Flow,
             Plan = snapshot.Value.Snapshot.Plan,
@@ -228,6 +233,7 @@ public sealed class TestAgentRunTool
                 {
                     SessionId = sessionId,
                     ReadCapabilityId = envelope.ReadCapabilityId,
+                    Envelope = envelope,
                     RunId = runId,
                     RunCapabilityToken = capabilityToken,
                 }),
@@ -311,6 +317,13 @@ public sealed class TestAgentRunTool
         Func<Task> recordUnknownCompletion)
     {
         var binding = await bind().ConfigureAwait(false);
+        if (binding.Value?.Ok == true)
+            return null;
+
+        // The workflow start is never retried. Persisting its session binding is idempotent,
+        // however, and can briefly race the broker's accepted-run registration.
+        await Task.Delay(100).ConfigureAwait(false);
+        binding = await bind().ConfigureAwait(false);
         if (binding.Value?.Ok == true)
             return null;
 

@@ -3,6 +3,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol;
 using Microsoft.Maui.Cli.DevFlow.Mcp.Tools;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Mcp;
 
@@ -57,8 +58,6 @@ public static class McpServerHost
 	{
 		switch (value?.Trim().ToLowerInvariant())
 		{
-			case null:
-			case "":
 			case "full":
 				profile = McpServerProfile.Full;
 				return true;
@@ -72,18 +71,65 @@ public static class McpServerHost
 	}
 
 	/// <summary>Returns the exact MCP tool inventory used by a profile for testable policy review.</summary>
-	public static IReadOnlyList<string> GetToolInventory(McpServerProfile profile)
-		=> profile switch
+	public static bool IsProfileEnabled(McpServerProfile profile)
+		=> IsProfileEnabled(profile, MauiPreviewFeatureFlagConfiguration.FromEnvironment());
+
+	internal static bool IsProfileEnabled(
+		McpServerProfile profile,
+		MauiPreviewFeatureFlags previewFlags)
 	{
-		McpServerProfile.Full => FullToolNames.OrderBy(static name => name, StringComparer.Ordinal).ToArray(),
-		McpServerProfile.TestAgent => TestAgentToolNames.OrderBy(static name => name, StringComparer.Ordinal).ToArray(),
-		_ => throw new ArgumentOutOfRangeException(nameof(profile)),
-	};
+		ArgumentNullException.ThrowIfNull(previewFlags);
+		return profile switch
+		{
+			McpServerProfile.Full => true,
+			McpServerProfile.TestAgent =>
+				DevFlowPreviewPolicy.IsAgentAuthoringEnabled(previewFlags) &&
+				!previewFlags.AutoApplyRepair &&
+				!previewFlags.AutoApplySource &&
+				!previewFlags.ModelProviderEnabled &&
+				!previewFlags.TelemetryEgressEnabled,
+			_ => false,
+		};
+	}
+
+	public static IReadOnlyList<string> GetToolInventory(McpServerProfile profile)
+		=> GetToolInventory(profile, MauiPreviewFeatureFlagConfiguration.FromEnvironment());
+
+	internal static IReadOnlyList<string> GetToolInventory(
+		McpServerProfile profile,
+		MauiPreviewFeatureFlags previewFlags)
+	{
+		if (profile is not McpServerProfile.Full and not McpServerProfile.TestAgent)
+			throw new ArgumentOutOfRangeException(nameof(profile));
+		if (!IsProfileEnabled(profile, previewFlags))
+			return [];
+
+		return profile switch
+		{
+			McpServerProfile.Full => FullToolNames.OrderBy(static name => name, StringComparer.Ordinal).ToArray(),
+			McpServerProfile.TestAgent => TestAgentToolNames.OrderBy(static name => name, StringComparer.Ordinal).ToArray(),
+			_ => throw new ArgumentOutOfRangeException(nameof(profile)),
+		};
+	}
 
 	public static Task RunAsync() => RunAsync(McpServerProfile.Full);
 
-	public static async Task RunAsync(McpServerProfile profile)
+	public static Task RunAsync(McpServerProfile profile)
+		=> RunAsync(profile, MauiPreviewFeatureFlagConfiguration.FromEnvironment());
+
+	internal static async Task RunAsync(
+		McpServerProfile profile,
+		MauiPreviewFeatureFlags previewFlags)
 	{
+		ArgumentNullException.ThrowIfNull(previewFlags);
+		if (profile is not McpServerProfile.Full and not McpServerProfile.TestAgent)
+			throw new ArgumentOutOfRangeException(nameof(profile));
+		if (!IsProfileEnabled(profile, previewFlags))
+		{
+			throw new InvalidOperationException(
+				"The test-agent MCP profile is disabled. Enable the effective agent-authoring preview flag before registering its tools.");
+		}
+
 		var version = typeof(McpServerHost).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";
 
 		var builder = new HostApplicationBuilder(new HostApplicationBuilderSettings { Args = [] });

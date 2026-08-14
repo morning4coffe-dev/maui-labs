@@ -120,6 +120,7 @@ public sealed class TestAgentTraceTool
             {
                 SessionId = authoringSessionId,
                 ReadCapabilityId = envelope.ReadCapabilityId,
+                Envelope = envelope,
                 RunId = runId,
                 RunCapabilityToken = capabilityToken,
             }).ConfigureAwait(false);
@@ -208,8 +209,18 @@ public sealed class TestAgentFailureTool
         var facts = ReadFailureFacts(run, report, failure, failedStep);
         var classification = MauiFlowFailureClassifier.Classify(facts);
         var projection = ReadFailedStep(failedStep);
+        var admission = Object(run, "admission");
+        var nonReplayable = string.Equals(
+            String(admission, "sideEffectPolicy"),
+            MauiFlowSideEffectPolicies.NonReplayable,
+            StringComparison.Ordinal);
+        var replayAdviceAllowed = !nonReplayable &&
+            Bool(admission, "ordinaryReplayAllowed") != false;
+        var repairAllowed = !nonReplayable &&
+            Bool(admission, "repairEligibility") != false &&
+            classification.RepairEligible;
         var explanation = Explain(classification, projection);
-        var nextAction = NextSafeAction(classification, projection);
+        var nextAction = NextSafeAction(classification, projection, replayAdviceAllowed);
         return new TestAgentFailureDiagnostic
         {
             Classification = new TestAgentFailureClassification
@@ -219,7 +230,7 @@ public sealed class TestAgentFailureTool
                 Category = classification.Category,
                 Phase = classification.Phase,
                 Retryable = classification.Retryable,
-                RepairEligible = classification.RepairEligible,
+                RepairEligible = repairAllowed,
             },
             Facts = new TestAgentFailureFactsProjection
             {
@@ -236,12 +247,14 @@ public sealed class TestAgentFailureTool
             NextSafeAction = nextAction,
             SelectorRepair = new TestAgentSelectorRepairAdvice
             {
-                Status = classification.RepairEligible ? "eligible" : "ineligible",
-                Eligible = classification.RepairEligible,
-                ProposalRecommended = classification.RepairEligible,
-                Reason = classification.RepairEligible
+                Status = repairAllowed ? "eligible" : "ineligible",
+                Eligible = repairAllowed,
+                ProposalRecommended = repairAllowed,
+                Reason = repairAllowed
                     ? "The failure is a verified pre-dispatch missing-selector failure, so one inert selector-only proposal may be prepared for human review."
-                    : "This failure is not a verified pre-dispatch missing-selector failure. Do not create a selector repair proposal.",
+                    : nonReplayable
+                        ? "The retained admission marks this run non-replayable. Do not replay it or create a repair proposal."
+                        : "This failure is not a verified pre-dispatch missing-selector failure. Do not create a selector repair proposal.",
             },
         };
     }
@@ -380,8 +393,15 @@ public sealed class TestAgentFailureTool
 
     private static string NextSafeAction(
         MauiFlowFailureClassification classification,
-        TestAgentFailedStepProjection? step)
-        => classification.Code switch
+        TestAgentFailedStepProjection? step,
+        bool replayAdviceAllowed)
+    {
+        if (!replayAdviceAllowed)
+        {
+            return "The retained replay admission does not allow another replay. Inspect the current app state manually; do not retry, continue, or create a selector repair.";
+        }
+
+        return classification.Code switch
         {
             MauiFlowFailureClasses.LocatorNotFound when classification.RepairEligible =>
                 "Review one inert selector-only proposal. Validate it against the live app before any human approval or apply action.",
@@ -402,6 +422,7 @@ public sealed class TestAgentFailureTool
             _ =>
                 "Open the failed step in Results and address the reported failure class. Do not create a selector repair unless selectorRepair.status is 'eligible'.",
         };
+    }
 
     private static string? SelectorKind(JsonElement selector)
     {
@@ -590,11 +611,13 @@ public sealed class TestAgentImprovementsTool
         if (snapshotResult.Value?.Ok != true || snapshotResult.Value.Snapshot is null)
             return TestAgentToolSupport.BrokerFailure(envelope?.RequestId, snapshotResult);
 
-        var target = await TestAgentToolSupport.ResolveTargetAsync(session, envelope.Target).ConfigureAwait(false);
+        var target = await TestAgentToolSupport.ResolveTargetAsync(
+            session,
+            snapshotResult.Value.Snapshot.Target).ConfigureAwait(false);
         if (target.Error is not null)
             return TestAgentToolSupport.Failure(envelope.RequestId, target.Error);
 
-        using var agent = await session.GetTestAgentClientAsync(envelope.Target).ConfigureAwait(false);
+        using var agent = await session.GetTestAgentClientAsync(snapshotResult.Value.Snapshot.Target).ConfigureAwait(false);
         var tree = await agent.GetTreeAsync(maxDepth: 8).ConfigureAwait(false);
         var input = new MauiSelectorHealthAnalysisInput
         {

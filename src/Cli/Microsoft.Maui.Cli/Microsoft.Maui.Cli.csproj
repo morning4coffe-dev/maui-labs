@@ -11,6 +11,9 @@
     <ToolCommandName>maui</ToolCommandName>
     <PackageId>Microsoft.Maui.Cli</PackageId>
     <Description>CLI for .NET MAUI development environment setup and device management</Description>
+    <PackageTags>maui;dotnet;cli;android;apple;devflow;diagnostics;tool</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackRepoRootReadme>false</PackRepoRootReadme>
     <IsPackable>true</IsPackable>
     <IsShipping>true</IsShipping>
     <IsAotCompatible>true</IsAotCompatible>
@@ -81,6 +84,12 @@
     <Compile Remove="Build\MauiProfilingHelper.AutoInitialize.cs" />
     <Content Include="Build\MauiProfilingHelperInjection.targets" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Build\MauiProfilingHelper.AutoInitialize.cs" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\README.md" Link="README.md" Pack="true" PackagePath="/" />
+    <None Include="..\..\AppProjectReference\Microsoft.Maui.Build.AppProjectReference\build\**\*"
+             Link="Build\AppProjectReference\%(RecursiveDir)%(Filename)%(Extension)"
+             Pack="false"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
@@ -91,6 +100,9 @@
       <WithCulture>false</WithCulture>
     </EmbeddedResource>
     <EmbeddedResource Include="..\..\..\plugins\dotnet-maui\skills\maui-devflow-session-review\**\*" LogicalName="devflow.skills/maui-devflow-session-review/%(RecursiveDir)%(Filename)%(Extension)">
+      <WithCulture>false</WithCulture>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\..\plugins\dotnet-maui\skills\maui-devflow-test\**\*" LogicalName="devflow.skills/maui-devflow-test/%(RecursiveDir)%(Filename)%(Extension)">
       <WithCulture>false</WithCulture>
     </EmbeddedResource>
   </ItemGroup>

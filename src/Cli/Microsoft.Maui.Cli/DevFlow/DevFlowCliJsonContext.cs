@@ -1,6 +1,7 @@
 using System.Text.Json.Serialization;
 using Microsoft.Maui.Cli.DevFlow.Android;
 using Microsoft.Maui.Cli.DevFlow.Broker;
+using Microsoft.Maui.Cli.DevFlow.Execution;
 using Microsoft.Maui.DevFlow.Driver;
 using Testing = Microsoft.Maui.DevFlow.Testing;
 
@@ -47,6 +48,7 @@ namespace Microsoft.Maui.Cli.DevFlow;
 [JsonSerializable(typeof(PropertyMutationResponse))]
 [JsonSerializable(typeof(FlowValidationCliResult))]
 [JsonSerializable(typeof(FlowReplayCliResult))]
+[JsonSerializable(typeof(FlowRunCliResult))]
 [JsonSerializable(typeof(InspectorLaunchCliResult))]
 [JsonSerializable(typeof(AppleQaArtifactVerificationResult))]
 [JsonSerializable(typeof(AppleQaVerifiedArtifact))]
@@ -55,6 +57,7 @@ namespace Microsoft.Maui.Cli.DevFlow;
 [JsonSerializable(typeof(Testing.FlowStepResult))]
 [JsonSerializable(typeof(List<Testing.FlowStepResult>))]
 [JsonSerializable(typeof(Testing.MauiFlowRunReport))]
+[JsonSerializable(typeof(Testing.MauiTestExecutionManifest))]
 [JsonSerializable(typeof(Testing.MauiPreviewQualificationReport))]
 internal sealed partial class DevFlowCliJsonContext : JsonSerializerContext;
 
@@ -81,6 +84,30 @@ internal sealed class FlowReplayCliResult
     [JsonPropertyName("report")] public Testing.MauiFlowRunReport? Report { get; init; }
     [JsonPropertyName("reportPath")] public string? ReportPath { get; init; }
     [JsonPropertyName("reportDigest")] public string? ReportDigest { get; init; }
+}
+
+internal sealed class FlowRunCliResult
+{
+    [JsonPropertyName("ok")] public bool Ok { get; init; }
+    [JsonPropertyName("exitCategory")] public string ExitCategory { get; init; } = "";
+    [JsonPropertyName("message")] public string? Message { get; init; }
+    [JsonPropertyName("outputDirectory")] public string? OutputDirectory { get; init; }
+    [JsonPropertyName("manifestPath")] public string? ManifestPath { get; init; }
+    [JsonPropertyName("reportPath")] public string? ReportPath { get; init; }
+    [JsonPropertyName("junitPath")] public string? JUnitPath { get; init; }
+    [JsonPropertyName("evidencePath")] public string? EvidencePath { get; init; }
+
+    public static FlowRunCliResult From(FlowExecutionResult result) => new()
+    {
+        Ok = result.Ok,
+        ExitCategory = result.ExitCategory,
+        Message = result.Message,
+        OutputDirectory = result.OutputDirectory,
+        ManifestPath = result.ManifestPath,
+        ReportPath = result.ReportPath,
+        JUnitPath = result.JUnitPath,
+        EvidencePath = result.EvidencePath,
+    };
 }
 
 internal sealed class InspectorLaunchCliResult

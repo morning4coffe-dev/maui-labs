@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Maui.Cli.DevFlow.Android;
+using Microsoft.Maui.Cli.DevFlow.Execution;
 using Microsoft.Maui.Cli.DevFlow.Inspector;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.Cli.DevFlow.Skills;
@@ -41,6 +42,12 @@ public class DevFlowCommands
     internal static Func<AndroidDevFlowPortForwarder> CreateAndroidPortForwarder { get; set; } = AndroidDevFlowPortForwarder.CreateDefault;
     internal static Func<bool> IsAndroidAdbLikelyAvailable { get; set; } = AndroidDevFlowPortForwarder.IsAdbLikelyAvailable;
     internal static Func<string, bool> LaunchInspectorUrl { get; set; } = LaunchInspectorUrlInSystemBrowser;
+    internal static Func<IFlowExecutionCoordinator> CreateFlowExecutionCoordinator { get; set; } =
+        static () => Program.Services.GetRequiredService<IFlowExecutionCoordinator>();
+    internal static Func<IFlowReproductionCoordinator> CreateFlowReproductionCoordinator { get; set; } =
+        static () => Program.Services.GetRequiredService<IFlowReproductionCoordinator>();
+    internal static Func<IFlowTriageCoordinator> CreateFlowTriageCoordinator { get; set; } =
+        static () => Program.Services.GetRequiredService<IFlowTriageCoordinator>();
 
     private static IDevFlowOutputWriter Output => s_output ?? throw new InvalidOperationException("DevFlowCommands not initialized. Call CreateDevFlowCommand first.");
 
@@ -53,6 +60,12 @@ public class DevFlowCommands
         CreateAndroidPortForwarder = AndroidDevFlowPortForwarder.CreateDefault;
         IsAndroidAdbLikelyAvailable = AndroidDevFlowPortForwarder.IsAdbLikelyAvailable;
         LaunchInspectorUrl = LaunchInspectorUrlInSystemBrowser;
+        CreateFlowExecutionCoordinator =
+            static () => Program.Services.GetRequiredService<IFlowExecutionCoordinator>();
+        CreateFlowReproductionCoordinator =
+            static () => Program.Services.GetRequiredService<IFlowReproductionCoordinator>();
+        CreateFlowTriageCoordinator =
+            static () => Program.Services.GetRequiredService<IFlowTriageCoordinator>();
         _errorOccurred = false;
         _agentLabelEmitted = false;
     }
@@ -76,8 +89,8 @@ public class DevFlowCommands
         // ambiguity/refusal sentinel (issue #343) must be skipped when targeting a remote host.
         var agentHostOption = new Option<string>("--agent-host", "-ah") { Description = "Agent HTTP host", DefaultValueFactory = _ => "localhost" };
         var agentPortOption = new Option<int>("--agent-port", "-ap") { Description = "Agent HTTP port (auto-discovered via broker, .mauidevflow, or default 9223)", DefaultValueFactory = ar => ResolveAgentPort(ar.GetValue(agentHostOption)) };
-        var deviceOption = new Option<string?>("--device") { Description = "Device/emulator/simulator identifier for platform-specific DevFlow setup (currently used as an Android serial for ADB forwarding)" };
-        var platformOption = new Option<string>("--platform", "-p") { Description = "Target platform (maccatalyst, android, ios, windows)", DefaultValueFactory = _ => "maccatalyst" };
+        var deviceOption = new Option<string?>("--device") { Description = "Exact device serial or simulator UDID for platform-specific DevFlow setup" };
+        var platformOption = new Option<string>("--platform", "-p") { Description = "Target platform (android, ios, maccatalyst, windows; experimental: macos, wpf)", DefaultValueFactory = _ => "maccatalyst" };
         var noJsonOption = new Option<bool>("--no-json") { Description = "Force human-readable output even when piped", DefaultValueFactory = _ => false };
 
         agentPortOption.Recursive = true;
@@ -1385,7 +1398,7 @@ public class DevFlowCommands
             static () => _errorOccurred = true));
 
         // ===== replayable workflow commands =====
-        var flowCommand = new Command("flow", "Validate and replay recorded Markdown workflow tests");
+        var flowCommand = new Command("flow", "Validate, replay, and execute recorded Markdown workflow tests");
         var flowValidateFile = new Argument<string>("file") { Description = "Path to a .md workflow test containing a maui-test block" };
         var flowValidate = new Command("validate", "Parse and validate a workflow without connecting to or driving an app")
         {
@@ -1503,8 +1516,123 @@ public class DevFlowCommands
                 _errorOccurred = true;
             }
         });
+
+        var flowRunFile = new Argument<string>("file")
+        {
+            Description = "Committed Markdown flow path; the matching .maui-plan.json sidecar is required"
+        };
+        var flowRunPlan = new Option<string?>("--plan")
+        {
+            Description = "Matching plan sidecar path (defaults to <flow-base>.maui-plan.json beside the flow)"
+        };
+        var flowRunProject = new Option<string?>("--project")
+        {
+            Description = "MAUI app .csproj to build, deploy, and bind exactly"
+        };
+        var flowRunFramework = new Option<string?>("--framework", "-f")
+        {
+            Description = "Platform target framework (required only when the project has multiple matching TFMs)"
+        };
+        var flowRunConfiguration = new Option<string>("--configuration", "-c")
+        {
+            Description = "App build configuration",
+            DefaultValueFactory = _ => "Debug"
+        };
+        var flowRunOutput = new Option<string?>("--output", "-o")
+        {
+            Description = "New or empty immutable first-attempt output directory"
+        };
+        var flowRunCleanup = new Option<string>("--cleanup")
+        {
+            Description = "Owned app cleanup: none, stop, or uninstall (package removal applies only to a package newly installed by this invocation)",
+            DefaultValueFactory = _ => FlowExecutionCleanupPolicies.Stop
+        };
+        var flowRunAgentWait = new Option<int>("--agent-wait-seconds")
+        {
+            Description = "Maximum time to wait for a matching new agent instance",
+            DefaultValueFactory = _ => 90
+        };
+        var flowRunEvidence = new Option<bool>("--evidence-on-failure")
+        {
+            Description = "Capture the existing redacted failure .mauitrace into the output directory"
+        };
+        var flowRun = new Command(
+            "run",
+            "Build, launch, exactly bind, and execute a committed flow plus matching plan on supported local platform adapters")
+        {
+            flowRunFile,
+            flowRunPlan,
+            flowRunProject,
+            flowRunFramework,
+            flowRunConfiguration,
+            flowRunOutput,
+            flowRunCleanup,
+            flowRunAgentWait,
+            flowRunEvidence,
+        };
+        flowRun.SetAction(async (ctx, ct) =>
+        {
+            var json = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+            try
+            {
+                var result = await CreateFlowExecutionCoordinator().RunAsync(new FlowExecutionRequest
+                {
+                    FlowPath = ctx.GetValue(flowRunFile)!,
+                    PlanPath = ctx.GetValue(flowRunPlan),
+                    ProjectPath = ctx.GetValue(flowRunProject) ?? "",
+                    Platform = ctx.GetResult(platformOption)?.Tokens.Count > 0
+                        ? ctx.GetValue(platformOption)!
+                        : "android",
+                    TargetFramework = ctx.GetValue(flowRunFramework),
+                    Configuration = ctx.GetValue(flowRunConfiguration)!,
+                    AgentHost = ctx.GetValue(agentHostOption)!,
+                    DeviceSerial = ctx.GetValue(deviceOption),
+                    OutputDirectory = ctx.GetValue(flowRunOutput),
+                    CleanupPolicy = ctx.GetValue(flowRunCleanup)!,
+                    CaptureFailureEvidence = ctx.GetValue(flowRunEvidence),
+                    AgentWaitTimeout = TimeSpan.FromSeconds(ctx.GetValue(flowRunAgentWait)),
+                }, ct);
+                var cliResult = FlowRunCliResult.From(result);
+                Output.WriteResult(cliResult, json, static value =>
+                {
+                    Console.WriteLine($"Flow run: {value.ExitCategory}");
+                    if (!string.IsNullOrWhiteSpace(value.Message))
+                        Console.WriteLine(value.Message);
+                    if (!string.IsNullOrWhiteSpace(value.OutputDirectory))
+                        Console.WriteLine($"Output: {value.OutputDirectory}");
+                });
+                if (!result.Ok)
+                    _errorOccurred = true;
+            }
+            catch (FlowExecutionException ex)
+            {
+                Output.WriteError(ex.Message, json, ex.ExitCategory);
+                _errorOccurred = true;
+            }
+            catch (Exception ex)
+            {
+                Output.WriteError($"Flow execution failed: {ex.Message}", json);
+                _errorOccurred = true;
+            }
+        });
         flowCommand.Add(flowValidate);
         flowCommand.Add(flowReplay);
+        flowCommand.Add(flowRun);
+        flowCommand.Add(FlowHandoffCommands.CreateReproduce(
+            jsonOption,
+            noJsonOption,
+            agentHostOption,
+            deviceOption,
+            platformOption,
+            output,
+            static () => CreateFlowReproductionCoordinator(),
+            static () => _errorOccurred = true));
+        flowCommand.Add(FlowHandoffCommands.CreateTriage(
+            jsonOption,
+            noJsonOption,
+            output,
+            static () => CreateFlowTriageCoordinator(),
+            static () => _errorOccurred = true));
         flowCommand.Add(Flows.FlowQualificationCommands.Create(
             jsonOption,
             noJsonOption,
@@ -1829,7 +1957,7 @@ public class DevFlowCommands
         mcpCmd.Aliases.Add("mcp-serve");
         var mcpProfileOption = new Option<string>("--profile")
         {
-            Description = "MCP capability profile: full (default, legacy compatible) or test-agent (restricted typed test authoring/run protocol)",
+            Description = "MCP capability profile: full (default) or test-agent (restricted preview; requires DEVFLOW_PREVIEW_AGENT_AUTHORING)",
             DefaultValueFactory = _ => "full",
         };
         mcpCmd.Add(mcpProfileOption);

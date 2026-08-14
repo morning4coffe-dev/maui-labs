@@ -397,6 +397,48 @@ public sealed class MauiFlowRunReportTests : IDisposable
         Assert.Null(Redact(new string('A', 80) + "b").Steps[0].Fingerprint!.Managed!.FullType);
     }
 
+    /// <summary>
+    /// Pins a known, unresolved gap rather than asserting a desired behaviour. The opaque-secret
+    /// heuristic classifies any whitespace-free mixed-case token of twenty or more alphanumeric
+    /// characters as a secret, so a realistic PascalCase AutomationId is dropped from the report.
+    /// A managed type name recovers as a digest because a digest is still comparable; an
+    /// AutomationId cannot, because a selector has to stay executable. Repair therefore still
+    /// abstains for apps whose AutomationIds are that long. Loosening the classifier is a
+    /// redaction-safety change and is deliberately not made here.
+    /// </summary>
+    [Fact]
+    public void ApplyLimits_RealisticLongAutomationId_IsStillDroppedWhichBlocksSelectorRepair()
+    {
+        var report = new MauiFlowRunReport
+        {
+            RunId = "run-automation-id",
+            Steps =
+            [
+                new MauiFlowStepAttempt
+                {
+                    StepId = "step-1",
+                    Sequence = 1,
+                    Fingerprint = new MauiElementFingerprint
+                    {
+                        FingerprintId = "fp1_automation",
+                        Managed = new MauiManagedElementIdentity
+                        {
+                            Type = "Button",
+                            AutomationId = "CheckoutSaveOrderButton",
+                        },
+                    },
+                },
+            ],
+        };
+
+        MauiFlowRunReportSerializer.ApplyLimits(report, new MauiFlowRunReportLimits());
+
+        Assert.Null(report.Steps[0].Fingerprint!.Managed!.AutomationId);
+        // A shorter id in the same position survives, which is what makes this a length artefact
+        // rather than a deliberate policy about AutomationIds.
+        Assert.Equal("SaveOrder", MauiFlowReportRedactor.SafeIdentifier("SaveOrder"));
+    }
+
     [Fact]
     public async Task RunAsync_UnknownCompletion_UsesTypedFailureAndLegacyMapping()
     {

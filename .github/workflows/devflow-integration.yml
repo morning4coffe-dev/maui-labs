@@ -74,6 +74,10 @@ concurrency:
   group: devflow-integration-${{ github.ref }}
   cancel-in-progress: true
 
+# Least privilege by default. These jobs execute pull-request-author-controlled code from
+# samples/** and eng/devflow/**, so no job may hold a write scope.
+permissions: {}
+
 env:
   DOTNET_CLI_TELEMETRY_OPTOUT: 1
   DOTNET_NOLOGO: 1
@@ -84,6 +88,8 @@ jobs:
   # This is deliberately advisory: it validates deterministic static corpus/security/performance
   # evidence and publishes a not-qualified report until real Android device evidence exists.
   static-qualification:
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -116,6 +122,7 @@ jobs:
   # XCTest flow QA are advisory canaries until their external evidence gates are accepted.
   plan:
     if: github.event_name == 'workflow_dispatch' || github.event_name == 'schedule' || github.event_name == 'pull_request'
+    permissions: {}
     runs-on: ubuntu-latest
     outputs:
       run-android: ${{ steps.decide.outputs.android }}
@@ -211,6 +218,8 @@ jobs:
   android:
     needs: plan
     if: needs.plan.outputs.run-android == 'true'
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -293,6 +302,8 @@ jobs:
   android-flow-pilot:
     needs: plan
     if: needs.plan.outputs.run-android-flow-pilot == 'true'
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     timeout-minutes: 90
     env:
@@ -443,6 +454,8 @@ jobs:
   ios:
     needs: plan
     if: needs.plan.outputs.run-ios == 'true'
+    permissions:
+      contents: read
     runs-on: macos-15
     timeout-minutes: 90
     env:
@@ -510,6 +523,8 @@ jobs:
   maccatalyst:
     needs: plan
     if: needs.plan.outputs.run-maccatalyst == 'true'
+    permissions:
+      contents: read
     runs-on: macos-15
     timeout-minutes: 60
     env:
@@ -575,6 +590,8 @@ jobs:
   ios-flow-qa:
     needs: plan
     if: needs.plan.outputs.run-ios-flow-qa == 'true'
+    permissions:
+      contents: read
     runs-on: macos-15
     continue-on-error: true
     timeout-minutes: 120
@@ -664,6 +681,8 @@ jobs:
   maccatalyst-flow-qa:
     needs: plan
     if: needs.plan.outputs.run-maccatalyst-flow-qa == 'true'
+    permissions:
+      contents: read
     runs-on: macos-15
     continue-on-error: true
     timeout-minutes: 120
@@ -729,6 +748,8 @@ jobs:
   macos-appkit-flow-qa:
     needs: plan
     if: needs.plan.outputs.run-macos-appkit-flow-qa == 'true'
+    permissions:
+      contents: read
     runs-on: macos-15
     continue-on-error: true
     timeout-minutes: 120
@@ -795,6 +816,8 @@ jobs:
   windows:
     needs: plan
     if: needs.plan.outputs.run-windows == 'true'
+    permissions:
+      contents: read
     runs-on: windows-latest
     timeout-minutes: 90
     env:
@@ -877,7 +900,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: devflow-integration-windows-results
           path: .\artifacts\TestResults\devflow-integration\windows\
@@ -887,6 +910,8 @@ jobs:
   windows-flow-qa:
     needs: plan
     if: needs.plan.outputs.run-windows-flow-qa == 'true'
+    permissions:
+      contents: read
     runs-on: windows-latest
     continue-on-error: true
     timeout-minutes: 120

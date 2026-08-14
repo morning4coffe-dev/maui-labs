@@ -235,8 +235,10 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
         // The patch builder resolves the canonical step identity the runner also reports, so the
         // replay is compared against the same step the patch replaced.
         var repairedStepId = patched.Diff?.StepId;
+        if (string.IsNullOrWhiteSpace(repairedStepId))
+            return ReplayFailed("repair-source-step-unavailable");
         var repairedStep = FindStep(transient, repairedStepId);
-        if (repairedStep is null || string.IsNullOrWhiteSpace(repairedStepId))
+        if (repairedStep is null)
             return ReplayFailed("repair-source-step-unavailable");
 
         var downstreamAllowed = request.AllowDownstreamContinuation &&
@@ -300,7 +302,7 @@ internal sealed class BrokerWorkflowRepairValidationHost : IWorkflowRepairValida
         // every one of them was evaluated and passed — a prefix that asserted nothing, or whose
         // report was truncated, proves nothing about invariance.
         var declaredAssertions = transient.Steps
-            .SelectMany(static step => step.Asserts)
+            .SelectMany(static step => step.Asserts ?? [])
             .Count(static assertion => assertion.Verify);
         var passedAssertions = report.Steps
             .SelectMany(static step => step.Assertions)

@@ -2589,11 +2589,7 @@ public partial class BrokerServer : IDisposable
     /// </summary>
     private BrokerWorkflowRepairValidationHost? CreateRepairValidationHost(AgentConnection connection)
     {
-        // Seed, backend-state, and collection-item facts require a lifecycle host that builds,
-        // resets, and seeds outside the broker. None is registered, so no reset attestation is
-        // ever fabricated and the repair validation route keeps reporting itself unavailable.
-        IWorkflowRepairResetAttester? resetAttester = null;
-        if (resetAttester is null)
+        if (CreateRepairResetAttester() is not { } resetAttester)
             return null;
 
         return new BrokerWorkflowRepairValidationHost(
@@ -2605,6 +2601,13 @@ public partial class BrokerServer : IDisposable
                 ReplayTransientRepairFlowAsync(connection, flow, plan, context, cancellationToken),
             resetAttester: resetAttester);
     }
+
+    /// <summary>
+    /// Resolves the component that can attest a hard reset. Seed, backend-state, and collection-item
+    /// facts require a lifecycle host that builds, resets, and seeds outside the broker, and none is
+    /// registered — so no reset attestation is ever fabricated from what a running app reports.
+    /// </summary>
+    private static IWorkflowRepairResetAttester? CreateRepairResetAttester() => null;
 
     private async Task<MauiFlowCheckpoint?> ObserveRepairCheckpointAsync(
         AgentConnection connection,

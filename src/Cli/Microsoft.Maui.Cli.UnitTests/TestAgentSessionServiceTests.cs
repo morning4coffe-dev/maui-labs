@@ -930,6 +930,110 @@ public class TestAgentSessionServiceTests
     }
 
     [Theory]
+    [InlineData(2)]
+    [InlineData(64)]
+    public void Grant_RejectsMultiUseRunScope(int maxActionCount)
+    {
+        var fixture = BeginFixture();
+        var grant = fixture.IssueGrant(new MauiTestAgentMutationScope
+        {
+            AllowedActions = [MauiTestAgentActions.Run],
+            AllowedSideEffectClasses = ["run"],
+            MaxActionCount = maxActionCount,
+            MaxValueBytes = 0,
+        });
+
+        Assert.False(grant.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.InvalidRequest, grant.Error?.Code);
+    }
+
+    [Fact]
+    public void Grant_RejectsRunScopeBundledWithAnotherAction()
+    {
+        var fixture = BeginFixture();
+        var grant = fixture.IssueGrant(new MauiTestAgentMutationScope
+        {
+            AllowedActions = [MauiTestAgentActions.Run, MauiTestAgentActions.Cancel],
+            AllowedSideEffectClasses = ["run"],
+            MaxActionCount = 1,
+            MaxValueBytes = 0,
+        });
+
+        Assert.False(grant.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.InvalidRequest, grant.Error?.Code);
+    }
+
+    [Theory]
+    [InlineData(2)]
+    [InlineData(64)]
+    public void ApprovalRequest_NormalizesRunScopeToASingleDispatch(int requestedMaxActionCount)
+    {
+        var fixture = BeginFixture();
+        var submitted = fixture.Service.SubmitApprovalRequest(new MauiTestAgentApprovalSubmitRequest
+        {
+            Envelope = fixture.Envelope($"run-single-use-{requestedMaxActionCount}", grantId: null),
+            Kind = MauiTestAgentApprovalKinds.Run,
+            Scope = new MauiTestAgentMutationScope
+            {
+                AllowedActions = [MauiTestAgentActions.Run],
+                AllowedSideEffectClasses = ["run"],
+                MaxActionCount = requestedMaxActionCount,
+                MaxValueBytes = 0,
+            },
+        });
+
+        Assert.True(submitted.Ok, submitted.Error?.Message);
+        Assert.Equal(1, submitted.Request!.RequestedScope!.MaxActionCount);
+
+        var approved = fixture.Service.ApproveApprovalRequest(
+            submitted.Request.ApprovalRequestId,
+            approvedScope: new MauiTestAgentMutationScope
+            {
+                AllowedActions = [MauiTestAgentActions.Run],
+                AllowedSideEffectClasses = ["run"],
+                MaxActionCount = requestedMaxActionCount,
+                MaxValueBytes = 0,
+            },
+            fixture.State,
+            fixture.HumanDecision(approved: true),
+            grantExpiresAt: null);
+
+        Assert.True(approved.Ok, approved.Error?.Message);
+        Assert.Equal(1, approved.Request!.ApprovedScope!.MaxActionCount);
+    }
+
+    [Fact]
+    public void RunGrant_AuthorizesExactlyOneDispatch()
+    {
+        var fixture = BeginFixture();
+        var grant = fixture.IssueGrant(new MauiTestAgentMutationScope
+        {
+            AllowedActions = [MauiTestAgentActions.Run],
+            AllowedSideEffectClasses = ["run"],
+            MaxActionCount = 1,
+            MaxValueBytes = 0,
+        });
+        Assert.True(grant.Ok, grant.Error?.Message);
+        Assert.Equal(1, grant.RemainingActions);
+
+        var first = fixture.Authorize(
+            "run-dispatch-1",
+            grant.GrantId!,
+            MauiTestAgentActions.Run,
+            sideEffectClass: "run");
+        Assert.True(first.Ok, first.Error?.Message);
+        Assert.Equal(0, first.RemainingActions);
+
+        var second = fixture.Authorize(
+            "run-dispatch-2",
+            grant.GrantId!,
+            MauiTestAgentActions.Run,
+            sideEffectClass: "run");
+        Assert.False(second.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.MutationGrantReused, second.Error?.Code);
+    }
+
+    [Theory]
     [InlineData("authoring-commit", "commit", MauiTestAgentApprovalKinds.Commit, MauiTestAgentActions.AuthorCommit)]
     [InlineData("test-run", "start-run", MauiTestAgentApprovalKinds.Run, MauiTestAgentActions.Run)]
     [InlineData("assertions", "assert", MauiTestAgentApprovalKinds.Assertion, MauiTestAgentActions.Assert)]

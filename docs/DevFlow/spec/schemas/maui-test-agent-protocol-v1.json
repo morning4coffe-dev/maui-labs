@@ -92,6 +92,24 @@
               "maxActionCount": { "const": 1 }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "allowedActions": { "contains": { "const": "run" } }
+            },
+            "required": [ "allowedActions" ]
+          },
+          "then": {
+            "properties": {
+              "allowedActions": {
+                "minItems": 1,
+                "maxItems": 1,
+                "items": { "const": "run" }
+              },
+              "maxActionCount": { "const": 1 }
+            }
+          }
         }
       ],
       "additionalProperties": true

@@ -1918,6 +1918,15 @@ internal sealed class TestAgentSessionService
                 "An author-commit grant must be single-purpose and single-use because commit advances the plan and flow revisions.",
                 retryable: false);
         }
+        if (scope.AllowedActions.Contains(MauiTestAgentActions.Run, StringComparer.Ordinal) &&
+            (scope.AllowedActions.Count != 1 || scope.MaxActionCount != 1))
+        {
+            return Error(
+                MauiTestAgentErrorCodes.InvalidRequest,
+                MauiTestAgentErrorCategories.Validation,
+                "A run grant must be single-purpose and single-use because one human run approval authorizes exactly one dispatch of the approved flow against the live app.",
+                retryable: false);
+        }
         return null;
     }
 
@@ -1983,6 +1992,11 @@ internal sealed class TestAgentSessionService
             // The restricted run tool always authorizes the fixed "run" side-effect class.
             // Normalize model/host vocabulary rather than forcing trial-and-error approvals.
             scope.AllowedSideEffectClasses = ["run"];
+
+            // One human run decision authorizes exactly one dispatch. A run replays the whole
+            // approved flow against the live app, so a multi-use run grant would let the agent
+            // re-drive the app without a second human decision.
+            scope.MaxActionCount = 1;
         }
         else if (kind is MauiTestAgentApprovalKinds.DraftChange or
                  MauiTestAgentApprovalKinds.Assertion or

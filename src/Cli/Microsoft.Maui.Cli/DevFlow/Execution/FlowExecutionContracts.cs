@@ -43,6 +43,7 @@ internal sealed record FlowExecutionRequest
     public string? OutputDirectory { get; init; }
     public string CleanupPolicy { get; init; } = FlowExecutionCleanupPolicies.Stop;
     public bool CaptureFailureEvidence { get; init; }
+    public bool CaptureFailureEvidenceScreenshot { get; init; }
     public TimeSpan AgentWaitTimeout { get; init; } = TimeSpan.FromSeconds(90);
 }
 

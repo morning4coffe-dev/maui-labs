@@ -267,7 +267,8 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
                     client,
                     Path.Combine(outputDirectory, "failure.mauitrace"),
                     Path.GetDirectoryName(bundle.FlowPath),
-                    "flow-run");
+                    "flow-run",
+                    request.CaptureFailureEvidenceScreenshot);
             }
 
             currentStage = "execute-flow";

@@ -11,13 +11,20 @@ internal sealed class FlowReplayEvidenceCapture : IFlowRunEvidenceCapture
     private readonly string? _outputPath;
     private readonly string? _projectHint;
     private readonly string _source;
+    private readonly bool _includeScreenshot;
 
-    public FlowReplayEvidenceCapture(AgentClient client, string? outputPath, string? projectHint, string source)
+    public FlowReplayEvidenceCapture(
+        AgentClient client,
+        string? outputPath,
+        string? projectHint,
+        string source,
+        bool includeScreenshot = false)
     {
         _client = client;
         _outputPath = outputPath;
         _projectHint = projectHint;
         _source = source;
+        _includeScreenshot = includeScreenshot;
     }
 
     public string? CapturedPath { get; private set; }
@@ -55,9 +62,9 @@ internal sealed class FlowReplayEvidenceCapture : IFlowRunEvidenceCapture
         CancellationToken cancellationToken)
         => EvidenceCapture.CaptureAsync(_client, new EvidenceRequest
         {
-            // Screenshots remain an explicit opt-in. Flow failure evidence is metadata/tree/log
-            // oriented by default and follows the normal redaction policy.
-            IncludeScreenshot = false,
+            // Screenshots stay an explicit opt-in: raw pixels are never redacted, so only a caller
+            // that asked for them gets them. Everything else follows the normal redaction policy.
+            IncludeScreenshot = _includeScreenshot,
             OutputPath = _outputPath,
             ProjectHint = _projectHint,
             Source = _source,
@@ -72,7 +79,9 @@ internal sealed class FlowReplayEvidenceCapture : IFlowRunEvidenceCapture
                 ReportReference = context.ReportPath is null
                     ? $"run:{context.Report.RunId}"
                     : $"flow-run:{context.Report.RunId}",
-                CaptureCompleteness = "failure-only-redacted",
+                CaptureCompleteness = _includeScreenshot
+                    ? "failure-only-redacted+screenshot"
+                    : "failure-only-redacted",
             }
         }, cancellationToken);
 

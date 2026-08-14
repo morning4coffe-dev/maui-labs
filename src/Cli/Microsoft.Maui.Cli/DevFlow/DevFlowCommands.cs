@@ -1556,6 +1556,10 @@ public class DevFlowCommands
         {
             Description = "Capture the existing redacted failure .mauitrace into the output directory"
         };
+        var flowRunEvidenceScreenshot = new Option<bool>("--evidence-screenshot")
+        {
+            Description = "Include a screenshot in the failure .mauitrace. Screenshot pixels are never redacted and may show on-screen data, so this requires --evidence-on-failure and explicit opt-in"
+        };
         var flowRun = new Command(
             "run",
             "Build, launch, exactly bind, and execute a committed flow plus matching plan on supported local platform adapters")
@@ -1569,6 +1573,7 @@ public class DevFlowCommands
             flowRunCleanup,
             flowRunAgentWait,
             flowRunEvidence,
+            flowRunEvidenceScreenshot,
         };
         flowRun.SetAction(async (ctx, ct) =>
         {
@@ -1590,6 +1595,7 @@ public class DevFlowCommands
                     OutputDirectory = ctx.GetValue(flowRunOutput),
                     CleanupPolicy = ctx.GetValue(flowRunCleanup)!,
                     CaptureFailureEvidence = ctx.GetValue(flowRunEvidence),
+                    CaptureFailureEvidenceScreenshot = ctx.GetValue(flowRunEvidenceScreenshot),
                     AgentWaitTimeout = TimeSpan.FromSeconds(ctx.GetValue(flowRunAgentWait)),
                 }, ct);
                 var cliResult = FlowRunCliResult.From(result);

@@ -202,6 +202,14 @@ internal sealed class InspectorWorkflowServices
         Func<WorkflowRepairProposalSnapshot, string, WorkflowRepairHistoryAppendResult>? historyWriter = null)
         => _repairs.RecordValidation(proposalId, validationGrant, validation, historyWriter);
 
+    /// <summary>Confirms a repair grant is redeemable before any device-visible work begins.</summary>
+    public bool CanRedeemRepairGrant(
+        string proposalId,
+        string? grant,
+        string kind,
+        out string? error)
+        => _repairs.CanRedeemGrant(proposalId, grant, kind, out error);
+
     public WorkflowRepairStoreResult BeginRepairApply(
         string proposalId,
         string approvalGrant,

@@ -282,6 +282,37 @@ internal sealed class WorkflowRepairProposalStore
         }
     }
 
+    /// <summary>
+    /// Checks — without consuming, expiring, or transitioning anything — whether a grant can still
+    /// be redeemed for a proposal. Hosts call this before any device-visible work so a bounded
+    /// transient replay never runs on an unauthorised or stale grant.
+    /// </summary>
+    internal bool CanRedeemGrant(string? proposalId, string? secret, string expectedKind, out string? error)
+    {
+        lock (_gate)
+        {
+            if (!TryGetLocked(proposalId, out var record, out error))
+                return false;
+            if (string.IsNullOrWhiteSpace(secret) || !_grants.TryGetValue(secret, out var grant))
+            {
+                error = "The repair grant is missing, stale, or already used.";
+                return false;
+            }
+            if (grant.Used || grant.ExpiresAt <= _clock.GetUtcNow())
+            {
+                error = grant.Used ? "The repair grant was already used." : "The repair grant expired.";
+                return false;
+            }
+            if (!GrantBindsToRecord(grant, record!, expectedKind))
+            {
+                error = "The repair grant is not bound to this current proposal revision.";
+                return false;
+            }
+            error = null;
+            return true;
+        }
+    }
+
     internal WorkflowRepairStoreResult RecordValidation(
         string? proposalId,
         string? validationGrant,
@@ -741,34 +772,7 @@ internal sealed class WorkflowRepairProposalStore
             error = grant.Used ? "The repair grant was already used." : "The repair grant expired.";
             return false;
         }
-        if (grant.Kind != expectedKind ||
-            !string.Equals(grant.ProposalId, record.Proposal.ProposalId, StringComparison.Ordinal) ||
-            grant.ProposalRevision != record.Revision ||
-            !FixedEquals(grant.PatchDigest, record.Proposal.PatchDigest) ||
-            !FixedEquals(
-                grant.BaseFlowDigest,
-                expectedKind == WorkflowRepairGrantKinds.Rollback
-                    ? record.AppliedFlowDigest
-                    : record.Proposal.BaseFlow?.Digest) ||
-            grant.FlowRevision !=
-                (expectedKind == WorkflowRepairGrantKinds.Rollback
-                    ? record.NewFlowRevision
-                    : record.Proposal.BaseFlow?.Revision) ||
-            !FixedEquals(
-                grant.PlanDigest,
-                expectedKind == WorkflowRepairGrantKinds.Rollback
-                    ? record.AppliedPlanDigest
-                    : record.TrustedContext.PlanDigest) ||
-            grant.PlanRevision !=
-                (expectedKind == WorkflowRepairGrantKinds.Rollback
-                    ? record.AppliedPlanRevision
-                    : record.TrustedContext.PlanRevision) ||
-            !string.Equals(
-                grant.SafetyPolicy,
-                expectedKind == WorkflowRepairGrantKinds.Rollback
-                    ? record.AppliedSafetyPolicy
-                    : record.TrustedContext.SafetyPolicy,
-                StringComparison.Ordinal))
+        if (!GrantBindsToRecord(grant, record, expectedKind))
         {
             error = "The repair grant is not bound to this current proposal revision.";
             return false;
@@ -777,6 +781,36 @@ internal sealed class WorkflowRepairProposalStore
         grant.Used = true;
         return true;
     }
+
+    private static bool GrantBindsToRecord(GrantRecord grant, RepairRecord record, string expectedKind)
+        => grant.Kind == expectedKind &&
+            string.Equals(grant.ProposalId, record.Proposal.ProposalId, StringComparison.Ordinal) &&
+            grant.ProposalRevision == record.Revision &&
+            FixedEquals(grant.PatchDigest, record.Proposal.PatchDigest) &&
+            FixedEquals(
+                grant.BaseFlowDigest,
+                expectedKind == WorkflowRepairGrantKinds.Rollback
+                    ? record.AppliedFlowDigest
+                    : record.Proposal.BaseFlow?.Digest) &&
+            grant.FlowRevision ==
+                (expectedKind == WorkflowRepairGrantKinds.Rollback
+                    ? record.NewFlowRevision
+                    : record.Proposal.BaseFlow?.Revision) &&
+            FixedEquals(
+                grant.PlanDigest,
+                expectedKind == WorkflowRepairGrantKinds.Rollback
+                    ? record.AppliedPlanDigest
+                    : record.TrustedContext.PlanDigest) &&
+            grant.PlanRevision ==
+                (expectedKind == WorkflowRepairGrantKinds.Rollback
+                    ? record.AppliedPlanRevision
+                    : record.TrustedContext.PlanRevision) &&
+            string.Equals(
+                grant.SafetyPolicy,
+                expectedKind == WorkflowRepairGrantKinds.Rollback
+                    ? record.AppliedSafetyPolicy
+                    : record.TrustedContext.SafetyPolicy,
+                StringComparison.Ordinal);
 
     private bool GrantMatchesCurrentBinding(
         string? secret,

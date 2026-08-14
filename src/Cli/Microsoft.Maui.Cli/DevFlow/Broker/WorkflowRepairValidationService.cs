@@ -27,6 +27,15 @@ internal sealed class WorkflowRepairTransientValidationRequest
     public string? ValidationGrantDigest { get; init; }
     public bool InMemorySelectorOverrideOnly { get; init; } = true;
     public bool AllowDownstreamContinuation { get; init; }
+
+    /// <summary>
+    /// The trusted workspace flow the proposal was generated against. A host clones it in memory
+    /// to apply the proposed selector; neither the clone nor the override is ever persisted.
+    /// </summary>
+    public MauiFlow? SourceFlow { get; init; }
+
+    /// <summary>The trusted workspace plan that carries the flow's safety policy.</summary>
+    public MauiTestPlan? SourcePlan { get; init; }
 }
 
 /// <summary>Observed reset/seed/checkpoint proof returned by a platform lifecycle implementation.</summary>

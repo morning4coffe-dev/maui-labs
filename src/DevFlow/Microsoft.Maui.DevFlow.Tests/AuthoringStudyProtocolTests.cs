@@ -31,7 +31,8 @@ public class AuthoringStudyProtocolTests
         Assert.Equal(0, report.ControlSessions);
         var task = Assert.Single(report.Tasks);
         Assert.Equal("insufficient-evidence", task.Status);
-        Assert.Null(task.MedianDifferenceMs);
+        Assert.Null(task.MedianTimeToFirstResultDifferenceMs);
+        Assert.Null(task.MedianTimeToGoalDifferenceMs);
         Assert.Contains("control-session-count-insufficient", task.Blockers);
         Assert.Contains("control-participant-count-insufficient", task.Blockers);
     }
@@ -52,7 +53,10 @@ public class AuthoringStudyProtocolTests
         var task = Assert.Single(report.Tasks);
         Assert.Equal("comparable", task.Status);
         Assert.Empty(task.Blockers);
-        Assert.Equal(-60_000d, task.MedianDifferenceMs);
+        // Time to first result is the primary comparison; the goal-time delta is reported beside
+        // it but includes the participant reading the result.
+        Assert.Equal(-60_000d, task.MedianTimeToFirstResultDifferenceMs);
+        Assert.Equal(-60_000d, task.MedianTimeToGoalDifferenceMs);
         Assert.Equal(5, task.Assisted.Participants);
         Assert.Equal(5, task.Control.Participants);
         Assert.DoesNotContain("significant", report.Statement, StringComparison.OrdinalIgnoreCase);
@@ -127,6 +131,53 @@ public class AuthoringStudyProtocolTests
 
         Assert.Null(session);
         Assert.Equal("study-session-protocol-version-mismatch", rejection);
+    }
+
+    [Fact]
+    public void TryReadSession_HonoursTheExportersOwnIneligibilityVerdict()
+    {
+        var json = ExportJson().Replace(
+            "\"missingFields\": []",
+            "\"missingFields\": [], \"eligibleForAggregation\": false",
+            StringComparison.Ordinal);
+
+        var session = MauiAuthoringStudyProtocol.TryReadSession(json, out var rejection);
+
+        Assert.Null(session);
+        Assert.Equal("study-session-marked-ineligible", rejection);
+    }
+
+    [Theory]
+    [InlineData("-1")]
+    [InlineData("1e999")]
+    public void TryReadSession_WithAnImplausibleDuration_IsRejected(string value)
+    {
+        var json = ExportJson().Replace("\"timeToGoalMs\": 42000", $"\"timeToGoalMs\": {value}", StringComparison.Ordinal);
+
+        var session = MauiAuthoringStudyProtocol.TryReadSession(json, out var rejection);
+
+        Assert.Null(session);
+        Assert.Equal("study-session-duration-implausible", rejection);
+    }
+
+    [Fact]
+    public void Aggregate_WithAParticipantInBothArms_RefusesToCompare()
+    {
+        // A participant who has already done the task in one arm carries that knowledge into the
+        // other, so the difference would measure learning rather than tooling.
+        var sessions = new List<MauiAuthoringStudySession>();
+        for (var index = 0; index < 5; index++)
+        {
+            sessions.Add(Session($"a{index}", $"participant-x{index:x7}", MauiAuthoringStudyProtocol.AssistedArm, 100_000));
+            sessions.Add(Session($"c{index}", $"participant-x{index:x7}", MauiAuthoringStudyProtocol.ControlArm, 160_000));
+        }
+
+        var report = MauiAuthoringStudyProtocol.Aggregate(sessions);
+
+        var task = Assert.Single(report.Tasks);
+        Assert.Equal("insufficient-evidence", task.Status);
+        Assert.Contains("participant-in-both-arms", task.Blockers);
+        Assert.Null(task.MedianTimeToFirstResultDifferenceMs);
     }
 
     private static MauiAuthoringStudySession Session(string id, string participant, string arm, double timeToGoalMs)

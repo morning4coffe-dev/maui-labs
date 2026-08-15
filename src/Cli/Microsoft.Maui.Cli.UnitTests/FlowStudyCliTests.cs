@@ -53,7 +53,8 @@ public sealed class FlowStudyCliTests : IDisposable
 
         // The assisted median exists but no difference is published without the control arm.
         Assert.True(task.GetProperty("assisted").GetProperty("medianTimeToGoalMs").GetDouble() > 0);
-        Assert.False(task.TryGetProperty("medianDifferenceMs", out _));
+        Assert.False(task.TryGetProperty("medianTimeToFirstResultDifferenceMs", out _));
+        Assert.False(task.TryGetProperty("medianTimeToGoalDifferenceMs", out _));
         Assert.False(task.GetProperty("control").TryGetProperty("medianTimeToGoalMs", out _));
         var blockers = task.GetProperty("blockers").EnumerateArray().Select(item => item.GetString()).ToList();
         Assert.Contains("control-session-count-insufficient", blockers);
@@ -88,7 +89,12 @@ public sealed class FlowStudyCliTests : IDisposable
         var report = root.GetProperty("report");
         Assert.Equal("comparable", report.GetProperty("status").GetString());
         var task = Assert.Single(report.GetProperty("tasks").EnumerateArray().ToList());
-        Assert.Equal(-60_000d, task.GetProperty("medianDifferenceMs").GetDouble());
+
+        // The primary endpoint is time-to-first-result; time-to-goal is reported beside it but is
+        // not the number the protocol is powered for.
+        Assert.Equal(-60_000d, task.GetProperty("medianTimeToFirstResultDifferenceMs").GetDouble());
+        Assert.Equal(-60_000d, task.GetProperty("medianTimeToGoalDifferenceMs").GetDouble());
+        Assert.False(task.TryGetProperty("medianDifferenceMs", out _));
     }
 
     [Fact]

@@ -12,6 +12,8 @@ namespace Microsoft.Maui.Cli.DevFlow.Flows;
 /// </summary>
 internal static class FlowStudyCommands
 {
+    private const int MaxStudySessionFileBytes = 4_194_304;
+
     internal static Command Create(
         Option<bool> jsonOption,
         Option<bool> noJsonOption,
@@ -65,9 +67,17 @@ internal static class FlowStudyCommands
                 string content;
                 try
                 {
+                    // Bounded like every other evidence reader here: an unbounded export would
+                    // otherwise let one file exhaust memory before it is even validated.
+                    var info = new FileInfo(file);
+                    if (info.Length > MaxStudySessionFileBytes)
+                    {
+                        rejected.Add(new StudyRejection(file, "study-session-file-too-large"));
+                        continue;
+                    }
                     content = await File.ReadAllTextAsync(file, ct);
                 }
-                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
                 {
                     rejected.Add(new StudyRejection(file, "study-session-unreadable"));
                     continue;
@@ -120,7 +130,7 @@ internal static class FlowStudyCommands
                     files.Count,
                     deduped.Count,
                     duplicates,
-                    rejected.Select(static item => new StudyRejectionResult(item.File, item.Reason)).ToArray(),
+                    rejected.Select(static item => new StudyRejectionResult(Path.GetFileName(item.File), item.Reason)).ToArray(),
                     writtenTo), json: true);
             }
             else
@@ -137,10 +147,12 @@ internal static class FlowStudyCommands
                 foreach (var task in report.Tasks)
                 {
                     Console.WriteLine($"  {task.TaskId}: {task.Status}");
-                    Console.WriteLine($"    assisted           : n={task.Assisted.Sessions} participants={task.Assisted.Participants} medianTimeToGoalMs={Format(task.Assisted.MedianTimeToGoalMs)}");
-                    Console.WriteLine($"    unassisted-control : n={task.Control.Sessions} participants={task.Control.Participants} medianTimeToGoalMs={Format(task.Control.MedianTimeToGoalMs)}");
-                    if (task.MedianDifferenceMs is { } difference)
-                        Console.WriteLine($"    median difference  : {difference:0} ms (assisted minus control)");
+                    Console.WriteLine($"    assisted           : n={task.Assisted.Sessions} participants={task.Assisted.Participants} medianTimeToFirstResultMs={Format(task.Assisted.MedianTimeToFirstResultMs)} medianTimeToGoalMs={Format(task.Assisted.MedianTimeToGoalMs)}");
+                    Console.WriteLine($"    unassisted-control : n={task.Control.Sessions} participants={task.Control.Participants} medianTimeToFirstResultMs={Format(task.Control.MedianTimeToFirstResultMs)} medianTimeToGoalMs={Format(task.Control.MedianTimeToGoalMs)}");
+                    if (task.MedianTimeToFirstResultDifferenceMs is { } primary)
+                        Console.WriteLine($"    time-to-first-result difference : {primary:0} ms (assisted minus control, primary comparison)");
+                    if (task.MedianTimeToGoalDifferenceMs is { } secondary)
+                        Console.WriteLine($"    time-to-goal difference         : {secondary:0} ms (includes participant reading time)");
                     if (task.Blockers.Count > 0)
                         Console.WriteLine($"    blockers           : {string.Join(", ", task.Blockers)}");
                 }

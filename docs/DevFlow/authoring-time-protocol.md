@@ -128,8 +128,14 @@ an error rather than a paragraph nobody reads.
 | `MinimumSessionsPerArm` | 5 | Below this a median is a single person's day |
 | `MinimumParticipantsPerArm` | 3 | Stops one participant's repeated sessions standing in for a sample |
 
-A task is `comparable` only when **both** arms clear **both** thresholds and both have a recorded
-`timeToGoalMs`. Otherwise the task reports `insufficient-evidence` with explicit `blockers`.
+A task is `comparable` only when **both** arms clear **both** thresholds, both have a recorded
+`timeToFirstResultMs`, and **no participant appears in both arms** (a participant who has already
+done the task carries that knowledge across, so the difference would measure learning rather than
+tooling). Otherwise the task reports `insufficient-evidence` with explicit `blockers`.
+
+The reported difference is `medianTimeToFirstResultDifferenceMs` — the primary comparison.
+`medianTimeToGoalDifferenceMs` is reported beside it for completeness but must not be read as a
+tooling effect: goal time includes the participant reading the task card.
 
 These thresholds are a floor for *reporting anything at all*, not a claim of statistical power.
 The aggregator emits medians and a median difference. It does **not** emit a p-value, a

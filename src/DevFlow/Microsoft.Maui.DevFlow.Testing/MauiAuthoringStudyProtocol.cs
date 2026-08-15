@@ -116,6 +116,27 @@ public static class MauiAuthoringStudyProtocol
             rejection = "study-session-event-history-truncated";
             return null;
         }
+        // The exporter is the only thing that saw the raw event stream. When it says a session is
+        // not fit to aggregate, that judgement is authoritative here too.
+        if (summary.TryGetProperty("eligibleForAggregation", out var eligible) &&
+            eligible.ValueKind == JsonValueKind.False)
+        {
+            rejection = "study-session-marked-ineligible";
+            return null;
+        }
+
+        var timeToGoal = Number(summary, "timeToGoalMs");
+        var timeToFirstResult = Number(summary, "timeToFirstResultMs");
+        var recordingDuration = Number(summary, "recordingDurationMs");
+        var reviewToSave = Number(summary, "reviewToSaveDurationMs");
+        // A negative or non-finite duration is a broken clock, not a fast participant. Silently
+        // averaging one in would drag a median toward whatever the defect happened to produce.
+        if (!IsUsableDuration(timeToGoal) || !IsUsableDuration(timeToFirstResult) ||
+            !IsUsableDuration(recordingDuration) || !IsUsableDuration(reviewToSave))
+        {
+            rejection = "study-session-duration-implausible";
+            return null;
+        }
 
         return new MauiAuthoringStudySession
         {
@@ -123,13 +144,16 @@ public static class MauiAuthoringStudyProtocol
             ParticipantSalt = participantSalt!,
             TaskId = taskId,
             Arm = arm,
-            TimeToGoalMs = Number(summary, "timeToGoalMs"),
-            TimeToFirstResultMs = Number(summary, "timeToFirstResultMs"),
-            RecordingDurationMs = Number(summary, "recordingDurationMs"),
-            ReviewToSaveDurationMs = Number(summary, "reviewToSaveDurationMs"),
+            TimeToGoalMs = timeToGoal,
+            TimeToFirstResultMs = timeToFirstResult,
+            RecordingDurationMs = recordingDuration,
+            ReviewToSaveDurationMs = reviewToSave,
             SavedTest = !Strings(summary, "missingFields").Contains("savedTestMetrics"),
         };
     }
+
+    private static bool IsUsableDuration(double? value) =>
+        value is null || (double.IsFinite(value.Value) && value.Value >= 0);
 
     /// <summary>Aggregates sessions per task and refuses to report without both arms.</summary>
     public static MauiAuthoringStudyReport Aggregate(IEnumerable<MauiAuthoringStudySession> sessions)
@@ -174,8 +198,20 @@ public static class MauiAuthoringStudyProtocol
         if (control.Sessions < MinimumSessionsPerArm) blockers.Add("control-session-count-insufficient");
         if (assisted.Participants < MinimumParticipantsPerArm) blockers.Add("assisted-participant-count-insufficient");
         if (control.Participants < MinimumParticipantsPerArm) blockers.Add("control-participant-count-insufficient");
-        if (assisted.MedianTimeToGoalMs is null) blockers.Add("assisted-time-to-goal-missing");
-        if (control.MedianTimeToGoalMs is null) blockers.Add("control-time-to-goal-missing");
+        // The protocol forbids one participant appearing in both arms for the same task: they
+        // would carry knowledge of the task across, and the difference would measure learning.
+        var crossArm = sessions.Where(static session => session.Arm == AssistedArm)
+            .Select(static session => session.ParticipantSalt)
+            .Intersect(
+                sessions.Where(static session => session.Arm == ControlArm).Select(static session => session.ParticipantSalt),
+                StringComparer.Ordinal)
+            .Any();
+        if (crossArm) blockers.Add("participant-in-both-arms");
+        // Time to first result is the primary comparison: it is the interval the tool actually
+        // acts on. Time to goal includes the participant reading the result, which no tooling
+        // change can shorten.
+        if (assisted.MedianTimeToFirstResultMs is null) blockers.Add("assisted-time-to-first-result-missing");
+        if (control.MedianTimeToFirstResultMs is null) blockers.Add("control-time-to-first-result-missing");
 
         var result = new MauiAuthoringStudyTaskResult
         {
@@ -187,7 +223,9 @@ public static class MauiAuthoringStudyProtocol
         };
         if (blockers.Count == 0)
         {
-            result.MedianDifferenceMs = assisted.MedianTimeToGoalMs - control.MedianTimeToGoalMs;
+            result.MedianTimeToFirstResultDifferenceMs =
+                assisted.MedianTimeToFirstResultMs - control.MedianTimeToFirstResultMs;
+            result.MedianTimeToGoalDifferenceMs = assisted.MedianTimeToGoalMs - control.MedianTimeToGoalMs;
         }
         return result;
     }
@@ -271,7 +309,8 @@ public sealed class MauiAuthoringStudyTaskResult
     [JsonPropertyName("status")] public string Status { get; set; } = "insufficient-evidence";
     [JsonPropertyName("assisted")] public MauiAuthoringStudyArmSummary Assisted { get; set; } = new();
     [JsonPropertyName("control")] public MauiAuthoringStudyArmSummary Control { get; set; } = new();
-    [JsonPropertyName("medianDifferenceMs")] public double? MedianDifferenceMs { get; set; }
+    [JsonPropertyName("medianTimeToFirstResultDifferenceMs")] public double? MedianTimeToFirstResultDifferenceMs { get; set; }
+    [JsonPropertyName("medianTimeToGoalDifferenceMs")] public double? MedianTimeToGoalDifferenceMs { get; set; }
     [JsonPropertyName("blockers")] public List<string> Blockers { get; set; } = [];
 }
 

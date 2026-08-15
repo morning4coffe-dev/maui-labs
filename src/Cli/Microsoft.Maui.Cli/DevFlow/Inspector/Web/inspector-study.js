@@ -5,7 +5,7 @@
 export const PROTOTYPE_STUDY_SCHEMA = 'maui-devflow-prototype-study';
 export const PROTOTYPE_STUDY_KIND = 'local-session-evidence';
 export const PROTOTYPE_STUDY_VERSION = 1;
-export const PROTOTYPE_STUDY_STORAGE_KEY = 'maui-devflow-prototype-study-v1';
+export const PROTOTYPE_STUDY_STORAGE_KEY = 'maui-devflow-prototype-study-v2';
 export const PROTOTYPE_STUDY_MAX_EVENTS = 256;
 
 // Authoring-time protocol identity. Sessions recorded under different protocol
@@ -792,6 +792,9 @@ export function createPrototypeStudyJournal(options = {}) {
     if (session.events.length > 0) return { assigned: false, reason: 'session-already-has-evidence' };
     if (!resolved.arm) return { assigned: false, reason: 'unknown-arm' };
     if (!resolved.taskId) return { assigned: false, reason: 'unknown-task' };
+    // A malformed salt would silently become null and the session would export as unlinkable,
+    // so reject it here where the operator can still fix it.
+    if (!resolved.participantSalt) return { assigned: false, reason: 'unknown-participant' };
     const previous = { participantSalt: session.participantSalt, taskId: session.taskId, arm: session.arm };
     session.participantSalt = resolved.participantSalt;
     session.taskId = resolved.taskId;

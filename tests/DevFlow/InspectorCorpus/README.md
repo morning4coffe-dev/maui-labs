@@ -15,8 +15,8 @@ this way on real applications".
 | --- | --- | --- |
 | `schema` | yes | Always `1`. |
 | `id` | yes | Stable case id, also the file name. |
-| `kind` | yes | `selector-health` or `source-advisory`. |
-| `disposition` | yes | `repair`, `no-repair`, `advisory`, or `no-proposal`. |
+| `kind` | yes | `baseline`, `mutation`, `no-repair`, `product-regression`, `repair-positive`, or `repair-negative`. |
+| `disposition` | yes | `diagnostic-only`, `no-repair`, or `repair-eligible`. |
 | `expectedFailureClass` | no | Hand-assigned ground truth (see below). |
 | `provenance` | yes | Who labeled the case, when, how, and from what source. |
 | `fixture` | yes | The evaluator input. |
@@ -70,10 +70,15 @@ corpus summary:
 | Field | Current value |
 | --- | --- |
 | `curatedCases` | 58 |
+| `curatedDerivedCases` | 30 |
 | `curatedRepairPositiveCases` | 31 |
 | `curatedNoRepairCases` | 16 |
 | `generatedNoRepairCases` | 300 |
 | `curatedClassificationLabeledCases` | 45 |
+| `undeclaredProjectionCollisions` | 0 |
+
+Read `curatedCases` **with** `curatedDerivedCases`: 58 files are 28 original cases plus 30
+restatements of one of them.
 
 So the false-heal metric reads `0/316` = **16 curated + 300 generated**, and never `316` independent
 observations.
@@ -100,8 +105,19 @@ Rather than leave that to be discovered, the artifact records it:
   reports `repair-evaluation-count-insufficient` at an independent count of 1, exactly as it did
   before the 30 cases were added.
 - `maui devflow flow qualify --accumulate` counts static evidence **once** no matter how many runs
-  report it, because every accumulated run must share a corpus fingerprint and therefore re-reads
-  the same files. Only `device-backed` counts are summed across runs.
+  report it, because every accumulated run must share a corpus fingerprint — which covers the case
+  file contents, not just the manifest — and therefore re-reads the same files. Only
+  `device-backed` counts are summed across runs.
+
+**The split is still self-declared.** Nothing forces a case that copies a seed to say so. A clone
+that simply omits `provenance.derivedFrom` and claims `hand-authored` would be counted as a 31st
+independent trial. `corpus.undeclaredProjectionCollisions` is the check on that: it counts cases
+that do *not* declare a seed yet evaluate to byte-identical evidence (same kind, disposition,
+repair eligibility, pass/fail, expected and observed class, classification basis, diagnostic ids,
+candidate kinds, and ineligibility codes) as another case. It is currently `0`, it must not grow —
+the baseline diff fails if it does —
+and it is a **disclosure, not a rejection**, because genuinely distinct cases can legitimately
+coincide.
 
 Closing the repair-precision gate honestly needs ~100 *materially different* repair scenarios —
 different failure shapes, different candidate sets, different checkpoint outcomes — or real
@@ -150,6 +166,13 @@ The report splits the two rather than pooling them:
 **Read the pooled 42/45 as "the corpus mostly labels itself".** Genuine inference is exercised by 8
 cases. The gate requires 100 independent, genuinely inferred evaluations and reports
 `classification-evaluation-count-insufficient` until it has them.
+
+Be sceptical of the 8 as well. Only 3 of them exercise a discriminating rule (duplicate automation
+ids → `ambiguous`; recorded route ≠ observed route → `route-state-drift`; assertion mismatch →
+`assertion-failed`). The other 5 resolve to `locator-not-found` purely because the fixture contains
+a selector-shaped key, and all 5 are labelled `locator-not-found` — so they are correct by
+construction. The independent classification evidence is not just small, it is concentrated on one
+rule.
 
 (The 3 errors sit in the stamped bucket: those cases carry a `failure` stamp that a maintainer judged
 wrong, so honouring the stamp disagrees with ground truth. That disagreement is a real finding and is

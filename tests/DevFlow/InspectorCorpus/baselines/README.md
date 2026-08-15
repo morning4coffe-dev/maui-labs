@@ -1,8 +1,8 @@
 # Committed qualification baseline
 
-`qualification.json` is a real, unedited `maui devflow flow qualify` report for the static corpus on
-`--platform android`. It is committed so CI can fail on a **regression** rather than only on a
-threshold breach.
+`qualification.json` is a real `maui devflow flow qualify` report for the static corpus on
+`--platform android`, unedited apart from a `generatedAt` pinned to the epoch so the file does not
+churn. It is committed so CI can fail on a **regression** rather than only on a threshold breach.
 
 ## What it currently says
 
@@ -57,25 +57,39 @@ The comparison fails (nonzero exit) when:
   `flakeFirstAttemptStability` **rate** drops below the baseline rate;
 - any of those metrics' **denominator** or **independentEvaluations** falls below the baseline;
 - the `falseHeals` **numerator** rises above the baseline (any escape is a regression);
-- the `falseHeals` **denominator** falls below the baseline — otherwise a clean sweep could be
-  manufactured by evaluating fewer cases;
+- the `falseHeals` **denominator** or **independentEvaluations** falls below the baseline — otherwise
+  a clean sweep could be manufactured by evaluating fewer cases, or by relabelling the independent
+  ones as derived; `abstention` is guarded the same way;
 - any of `corpus.curatedCases`, `curatedRepairPositiveCases`, `curatedNoRepairCases`,
   `curatedClassificationLabeledCases`, or `generatedNoRepairCases` falls below the baseline;
+- `corpus.curatedOriginalCases` (curated minus derived) falls below the baseline — `curatedDerivedCases`
+  itself is deliberately *not* frozen, because losing disclosure is not a regression but growing
+  clones while originals stay flat is;
+- `corpus.undeclaredProjectionCollisions` rises above the baseline;
 - a metric that had evidence in the baseline has none in the current run;
 - a gate that was `pass` in the baseline is no longer `pass`, or has disappeared;
 - with `--accumulate`, any accumulated metric regresses against its per-run baseline counterpart —
   including `accumulated.falseHeals` and `accumulated.abstention`, which are compared as counts.
 
+A metric with **no** baseline evidence (denominator 0) is not protected by the rate comparison — it
+has nothing to fall below. `selectorStability` and `flakeFirstAttemptStability` are in that state
+today, so the diff currently guards neither. That is a consequence of having no device evidence at
+all, not a design choice, and it stops being true the moment a real run is committed.
+
 Improvements never fail. `.github/workflows/ci-devflow.yml` runs this on every DevFlow PR.
 
-The diff is monotone, so it cannot by itself detect a baseline that was *weakened* in the same
-commit that weakened the corpus. `PreviewQualificationTests.Baseline_MatchesAFreshlyGeneratedReport`
-closes that hole: it regenerates the report from the corpus on disk and asserts that the committed
-`corpus` block, the committed `status`, and every metric the diff gates on (`repairPrecision`,
-`repairRecall`, `falseHeals`, `abstention`, `classificationAccuracy`, `classificationMatrix`,
-`selectorStability`, `recordingValidity`, `privacySecurityEscapes`) match exactly. A hand-lowered
-baseline is a hard test failure. It deliberately does not compare `metrics.runtimeOverhead`,
+`PreviewQualificationTests.Baseline_MatchesAFreshlyGeneratedReport` regenerates the report from the
+corpus on disk and asserts that the committed `corpus` block, the committed `status`, and every
+metric the diff gates on (`repairPrecision`, `repairRecall`, `falseHeals`, `abstention`,
+`classificationAccuracy`, `classificationMatrix`, `selectorStability`, `recordingValidity`,
+`privacySecurityEscapes`) match exactly. It deliberately does not compare `metrics.runtimeOverhead`,
 `generatedAt`, or the assembly-derived fingerprints, which are machine dependent.
+
+Be clear about what that test does and does not do: it catches a **hand-edited or stale** baseline.
+It does **not** catch a corpus weakened and re-baselined in the same commit — regenerating the file
+makes both artifacts consistent again. What catches that is the set of monotone floors above:
+`corpus.*`, `independentEvaluations`, and the gate-status comparison, none of which the corpus can
+lower without a visible regression line.
 
 ## Regenerating
 
@@ -113,8 +127,28 @@ do not add up to its totals (`accumulate-incoherent-metric`); or when its static
 with the reference under a matching corpus fingerprint (`accumulate-static-evidence-mismatch`).
 
 **Static evidence is counted once, not summed.** Every accumulated run must share a corpus
-fingerprint, so its curated, curated-derived, and generated counts are re-reads of the same files.
-Only `device-backed` counts are summed across runs. Running the same static corpus 100 times — under
-100 different `--mutation-seed` values, which do produce 100 distinct evidence fingerprints — still
-yields `independentEvaluations` of 1 for `repairPrecision`. Accumulation is for real device runs;
-it cannot manufacture trials out of re-reading files.
+fingerprint — which now covers the case file *contents*, not just the manifest — so its curated,
+curated-derived, and generated counts are re-reads of the same files. Only `device-backed` counts
+are summed across runs; an unrecognised source name is refused outright
+(`accumulate-unknown-sample-source`) rather than quietly treated as one or the other. Running the
+same static corpus 100 times — under 100 different `--mutation-seed` values, which do produce 100
+distinct evidence fingerprints — still yields `independentEvaluations` of 1 for `repairPrecision`.
+Accumulation is for real device runs; it cannot manufacture trials out of re-reading files.
+
+**Clean first attempts do accumulate**, because they are the one thing here that is a fresh device
+observation per run. `accumulation.firstAttemptFlows` sums `cleanFirstAttempts` and
+`passedFirstAttempts` per `flowId` across accepted runs, and `accumulated-tier1-first-attempts`
+gates them at the same per-flow threshold as the single-run gate. A flow counts as device-backed
+only if *every* contributing run said so. This is what makes 5 jobs × `--repeat 20` reach the ≥100
+threshold without raising the cap. No run has produced any first-attempt evidence yet, so the
+committed baseline reports none.
+
+**Runs must be distinguishable to count.** `accumulate-duplicate-run` rejects any run whose
+evidence fingerprint — contract version, platform, status, identity fingerprints, corpus summary,
+platform profiles, merged rates, and per-flow first attempts — matches one already accepted. This
+is what stops the same `qualification.json` being submitted five times. The practical consequence
+is that CI shards must record what actually distinguishes them: a per-shard
+`profiles[].deviceFingerprint`. Two shards that both report a bare 20/20 on an unnamed device are
+indistinguishable evidence, and the second is dropped rather than added. That is the fail-closed
+direction — it undercounts rather than inflates — but it means an accumulate job that forgets to
+stamp device identity will silently plateau at one run's worth of attempts.

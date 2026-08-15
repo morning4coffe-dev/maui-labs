@@ -273,12 +273,15 @@ internal static class FlowQualificationCommands
             baseline.Metrics.FlakeFirstAttemptStability.Stability,
             report.Metrics.FlakeFirstAttemptStability.Stability);
 
-        // False heals are a count, not a rate: any increase is a regression, and the denominator
-        // must not shrink either or a clean sweep could be faked by evaluating fewer cases.
+        // False heals are a count, not a rate: any increase is a regression, and neither the
+        // denominator nor the independent share may shrink or a clean sweep could be faked by
+        // evaluating fewer cases — or by relabelling the independent ones as derived.
         if (report.Metrics.FalseHeals.Numerator > baseline.Metrics.FalseHeals.Numerator)
             comparison.Regressions.Add($"falseHeals numerator {baseline.Metrics.FalseHeals.Numerator} -> {report.Metrics.FalseHeals.Numerator}");
-        if (report.Metrics.FalseHeals.Denominator < baseline.Metrics.FalseHeals.Denominator)
-            comparison.Regressions.Add($"falseHeals denominator {baseline.Metrics.FalseHeals.Denominator} -> {report.Metrics.FalseHeals.Denominator}");
+        CompareCount(comparison, "falseHeals denominator", baseline.Metrics.FalseHeals.Denominator, report.Metrics.FalseHeals.Denominator);
+        CompareCount(comparison, "falseHeals independentEvaluations", baseline.Metrics.FalseHeals.IndependentEvaluations, report.Metrics.FalseHeals.IndependentEvaluations);
+        CompareCount(comparison, "abstention denominator", baseline.Metrics.Abstention.Denominator, report.Metrics.Abstention.Denominator);
+        CompareCount(comparison, "abstention independentEvaluations", baseline.Metrics.Abstention.IndependentEvaluations, report.Metrics.Abstention.IndependentEvaluations);
 
         // Evidence may grow or improve, never shrink. Without this, deleting the cases that fail
         // is reported as a rate improvement and CI goes green.
@@ -287,9 +290,20 @@ internal static class FlowQualificationCommands
         CompareCount(comparison, "corpus.curatedNoRepairCases", baseline.Corpus.CuratedNoRepairCases, report.Corpus.CuratedNoRepairCases);
         CompareCount(comparison, "corpus.curatedClassificationLabeledCases", baseline.Corpus.CuratedClassificationLabeledCases, report.Corpus.CuratedClassificationLabeledCases);
         CompareCount(comparison, "corpus.generatedNoRepairCases", baseline.Corpus.GeneratedNoRepairCases, report.Corpus.GeneratedNoRepairCases);
-        // Derived cases are disclosure, not evidence, so losing them is not a regression. The
-        // opposite is: growing them while curated originals stay flat is inflation, and the
-        // independent-evaluation comparisons above are what actually catch it.
+        // Derived cases are disclosure, not evidence, so losing them is not a regression and
+        // curatedDerivedCases is deliberately not frozen. Growing them while curated originals stay
+        // flat is inflation, so the originals are what gets the floor.
+        CompareCount(
+            comparison,
+            "corpus.curatedOriginalCases",
+            baseline.Corpus.CuratedCases - baseline.Corpus.CuratedDerivedCases,
+            report.Corpus.CuratedCases - report.Corpus.CuratedDerivedCases);
+        // Undeclared clones are the one way past the provenance split, so they must not grow.
+        if (report.Corpus.UndeclaredProjectionCollisions > baseline.Corpus.UndeclaredProjectionCollisions)
+        {
+            comparison.Regressions.Add(
+                $"corpus.undeclaredProjectionCollisions {baseline.Corpus.UndeclaredProjectionCollisions} -> {report.Corpus.UndeclaredProjectionCollisions}");
+        }
 
         foreach (var baselineGate in baseline.Gates.Where(static gate => gate.Status == MauiPreviewQualificationStates.Pass))
         {

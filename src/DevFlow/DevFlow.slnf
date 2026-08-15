@@ -15,7 +15,9 @@
       "src\\DevFlow\\Microsoft.Maui.DevFlow.TestAgent.Core\\Microsoft.Maui.DevFlow.TestAgent.Core.csproj",
       "src\\DevFlow\\Microsoft.Maui.DevFlow.TestAgent.Host\\Microsoft.Maui.DevFlow.TestAgent.Host.csproj",
       "src\\DevFlow\\Microsoft.Maui.DevFlow.Tests\\Microsoft.Maui.DevFlow.Tests.csproj",
-      "src\\DevFlow\\Microsoft.Maui.DevFlow.Inspector.Tests\\Microsoft.Maui.DevFlow.Inspector.Tests.csproj"
+      "src\\DevFlow\\Microsoft.Maui.DevFlow.Inspector.Tests\\Microsoft.Maui.DevFlow.Inspector.Tests.csproj",
+      "src\\DevFlow\\Microsoft.Maui.DevFlow.Agent.IntegrationTests\\Microsoft.Maui.DevFlow.Agent.IntegrationTests.csproj",
+      "src\\DevFlow\\Microsoft.Maui.DevFlow.Appium.SmokeTests\\Microsoft.Maui.DevFlow.Appium.SmokeTests.csproj"
     ]
   }
 }

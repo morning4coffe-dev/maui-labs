@@ -167,7 +167,13 @@ public static class MauiPreviewQualificationGateEvaluator
                     NormalizeFailureClass(sample.ObservedFailureClass),
                     StringComparison.Ordinal),
                 independentDeviceRuns: classification.Count > 0 && classification.All(IsRealDeviceSample),
-                thresholds.ConfidenceLevel),
+                thresholds.ConfidenceLevel,
+                // A case whose evidence already stamped its failure class is answered by copying,
+                // not by classifying. Those cases are reported but never count toward the gate's
+                // minimum, or the accuracy headline would measure the corpus, not the classifier.
+                independent: static sample =>
+                    MauiQualificationSampleSources.IsIndependent(NormalizeSource(sample.Source)) &&
+                    sample.FailureClassInferred == true),
             ClassificationMatrix = BuildClassificationMatrix(classification),
             Calibration = calibration,
             TimeToDiagnosis = diagnosis,
@@ -183,10 +189,12 @@ public static class MauiPreviewQualificationGateEvaluator
         IReadOnlyList<MauiQualificationExecutionSample> samples,
         Func<MauiQualificationExecutionSample, bool> success,
         bool independentDeviceRuns,
-        double confidenceLevel)
+        double confidenceLevel,
+        Func<MauiQualificationExecutionSample, bool>? independent = null)
     {
         var denominator = samples.Count;
         var numerator = samples.Count(success);
+        independent ??= static sample => MauiQualificationSampleSources.IsIndependent(NormalizeSource(sample.Source));
         return new MauiQualificationRateMetric
         {
             State = denominator == 0 ? "missing" : "measured",
@@ -213,6 +221,7 @@ public static class MauiPreviewQualificationGateEvaluator
                     Denominator = group.Count(),
                 })
                 .ToList(),
+            IndependentEvaluations = samples.Count(independent),
             IndependentDeviceRuns = denominator == 0 ? null : independentDeviceRuns,
         };
     }
@@ -278,6 +287,16 @@ public static class MauiPreviewQualificationGateEvaluator
             SampleCount = pairs.Count,
             Correct = pairs.Count(static pair => pair.Expected == pair.Observed),
             LabelCount = labels.Count,
+            // Splits the headline: cases whose evidence already named the failure class are
+            // answered by copying it, so pooling them with genuine inference overstates accuracy.
+            InferredSampleCount = samples.Count(static sample => sample.FailureClassInferred == true),
+            InferredCorrect = samples.Count(static sample =>
+                sample.FailureClassInferred == true &&
+                NormalizeFailureClass(sample.ExpectedFailureClass) == NormalizeFailureClass(sample.ObservedFailureClass)),
+            StampHonouredSampleCount = samples.Count(static sample => sample.FailureClassInferred != true),
+            StampHonouredCorrect = samples.Count(static sample =>
+                sample.FailureClassInferred != true &&
+                NormalizeFailureClass(sample.ExpectedFailureClass) == NormalizeFailureClass(sample.ObservedFailureClass)),
             Cells = cells,
             PerClass = perClass,
         };
@@ -579,7 +598,7 @@ public static class MauiPreviewQualificationGateEvaluator
     {
         var metric = report.Metrics.RepairPrecision;
         var lower = metric.ConfidenceInterval?.Lower;
-        var status = metric.Denominator < thresholds.MinimumRepairEvaluations
+        var status = metric.IndependentEvaluations < thresholds.MinimumRepairEvaluations
             ? MauiPreviewQualificationStates.NotQualified
             : lower >= thresholds.MinimumRepairPrecision
                 ? MauiPreviewQualificationStates.Pass
@@ -593,7 +612,7 @@ public static class MauiPreviewQualificationGateEvaluator
                 : "Repair precision lacks enough evaluations or misses the conservative lower-bound threshold.",
             ReasonCodes = status == MauiPreviewQualificationStates.Pass
                 ? []
-                : metric.Denominator < thresholds.MinimumRepairEvaluations
+                : metric.IndependentEvaluations < thresholds.MinimumRepairEvaluations
                     ? ["repair-evaluation-count-insufficient"]
                     : ["repair-precision-lower-bound-below-threshold"],
         });
@@ -602,7 +621,7 @@ public static class MauiPreviewQualificationGateEvaluator
     private static void AddFalseHealGate(MauiPreviewQualificationReport report, MauiQualificationGateThresholds thresholds)
     {
         var metric = report.Metrics.FalseHeals;
-        var status = metric.Denominator < thresholds.MinimumNoRepairEvaluations
+        var status = metric.IndependentEvaluations < thresholds.MinimumNoRepairEvaluations
             ? MauiPreviewQualificationStates.NotQualified
             : metric.Numerator <= thresholds.MaximumFalseHeals
                 ? MauiPreviewQualificationStates.Pass
@@ -616,7 +635,7 @@ public static class MauiPreviewQualificationGateEvaluator
                 : "No-repair evidence is insufficient or includes a false heal.",
             ReasonCodes = status == MauiPreviewQualificationStates.Pass
                 ? []
-                : metric.Denominator < thresholds.MinimumNoRepairEvaluations
+                : metric.IndependentEvaluations < thresholds.MinimumNoRepairEvaluations
                     ? ["no-repair-evaluation-count-insufficient"]
                     : ["false-heal-observed"],
         });
@@ -628,7 +647,7 @@ public static class MauiPreviewQualificationGateEvaluator
     {
         var metric = report.Metrics.ClassificationAccuracy;
         var lower = metric.ConfidenceInterval?.Lower;
-        var status = metric.Denominator < thresholds.MinimumClassificationEvaluations
+        var status = metric.IndependentEvaluations < thresholds.MinimumClassificationEvaluations
             ? MauiPreviewQualificationStates.NotQualified
             : lower >= thresholds.MinimumClassificationAccuracy
                 ? MauiPreviewQualificationStates.Pass
@@ -642,7 +661,7 @@ public static class MauiPreviewQualificationGateEvaluator
                 : "Failure-class accuracy lacks enough labeled evaluations or misses the conservative lower-bound threshold.",
             ReasonCodes = status == MauiPreviewQualificationStates.Pass
                 ? []
-                : metric.Denominator < thresholds.MinimumClassificationEvaluations
+                : metric.IndependentEvaluations < thresholds.MinimumClassificationEvaluations
                     ? ["classification-evaluation-count-insufficient"]
                     : ["classification-accuracy-lower-bound-below-threshold"],
         });

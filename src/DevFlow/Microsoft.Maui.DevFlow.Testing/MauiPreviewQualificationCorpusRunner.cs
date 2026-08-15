@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -35,6 +36,7 @@ public sealed class MauiQualificationCorpusCaseResult
     public bool RepairEligible { get; init; }
     public string? ExpectedFailureClass { get; init; }
     public string? ObservedFailureClass { get; init; }
+    public bool? FailureClassInferred { get; init; }
     public string? ProvenanceMethod { get; init; }
     public string? ProvenanceSourceKind { get; init; }
     public List<string> DiagnosticIds { get; init; } = [];
@@ -50,6 +52,13 @@ public static class MauiPreviewQualificationCorpusRunner
 {
     public const string GeneratorVersion = "qualification-no-repair-generator-v1";
     private const int MaxCorpusFileBytes = 1_048_576;
+
+    /// <summary>Case-root keys the schema permits; anything else fails the corpus.</summary>
+    private static readonly HashSet<string> KnownCaseRootProperties = new(StringComparer.Ordinal)
+    {
+        "schema", "id", "kind", "disposition", "fixture", "expect", "provenance", "expectedFailureClass",
+    };
+
 
     /// <summary>Loads, validates, and deterministically evaluates the repository corpus.</summary>
     public static MauiPreviewQualificationCorpusRunResult Run(MauiPreviewQualificationCorpusRunRequest request)
@@ -109,12 +118,17 @@ public static class MauiPreviewQualificationCorpusRunner
                 continue;
             }
 
+            // A case adapted from another case is one piece of evidence restated. It is reported, but it
+            // never counts toward a gate's minimum-evaluation requirement.
+            var caseSource = metadata.ProvenanceMethod == MauiQualificationCorpusProvenanceMethods.AdaptedFromCase
+                ? MauiQualificationSampleSources.CuratedDerived
+                : MauiQualificationSampleSources.Curated;
             var evaluation = EvaluateFixture(fixture, metadata.Id);
             var passed = MatchesExpectations(fixture, evaluation);
             var caseResult = new MauiQualificationCorpusCaseResult
             {
                 CaseId = MauiQualificationSanitizer.Fingerprint(metadata.Id),
-                Source = MauiQualificationSampleSources.Curated,
+                Source = caseSource,
                 Kind = metadata.Kind,
                 Disposition = metadata.Disposition,
                 SchemaValid = true,
@@ -122,6 +136,7 @@ public static class MauiPreviewQualificationCorpusRunner
                 RepairEligible = evaluation.RepairEligible,
                 ExpectedFailureClass = metadata.ExpectedFailureClass,
                 ObservedFailureClass = metadata.ExpectedFailureClass is null ? null : evaluation.ObservedFailureClass,
+                FailureClassInferred = metadata.ExpectedFailureClass is null ? null : evaluation.FailureClassInferred,
                 ProvenanceMethod = metadata.ProvenanceMethod,
                 ProvenanceSourceKind = metadata.ProvenanceSourceKind,
                 DiagnosticIds = evaluation.DiagnosticIds,
@@ -139,7 +154,7 @@ public static class MauiPreviewQualificationCorpusRunner
             samples.Add(new MauiQualificationExecutionSample
             {
                 SampleId = MauiQualificationSanitizer.Fingerprint(metadata.Id),
-                Source = MauiQualificationSampleSources.Curated,
+                Source = caseSource,
                 Category = metadata.Kind,
                 Platform = request.Platform,
                 NoRepairExpected = string.Equals(metadata.Disposition, "no-repair", StringComparison.Ordinal),
@@ -152,6 +167,7 @@ public static class MauiPreviewQualificationCorpusRunner
                 // classification denominator instead of being scored against a fabricated label.
                 ExpectedFailureClass = metadata.ExpectedFailureClass,
                 ObservedFailureClass = metadata.ExpectedFailureClass is null ? null : evaluation.ObservedFailureClass,
+                FailureClassInferred = metadata.ExpectedFailureClass is null ? null : evaluation.FailureClassInferred,
             });
         }
 
@@ -353,6 +369,17 @@ public static class MauiPreviewQualificationCorpusRunner
             error = "corpus-case-provenance-invalid";
             return false;
         }
+        // The schema declares additionalProperties:false at the case root; enforce it here so a
+        // typo such as "expectedFailureclass" fails the corpus instead of silently dropping the
+        // case out of the classification denominator.
+        foreach (var property in fixture.EnumerateObject())
+        {
+            if (!KnownCaseRootProperties.Contains(property.Name))
+            {
+                error = "corpus-case-unknown-property";
+                return false;
+            }
+        }
         string? expectedFailureClass = null;
         if (fixture.TryGetProperty("expectedFailureClass", out var expectedClass))
         {
@@ -399,14 +426,21 @@ public static class MauiPreviewQualificationCorpusRunner
         {
             return false;
         }
+        // A derived case must name the case it came from, otherwise the artifact cannot show that
+        // its denominator is one seed restated rather than independent evidence.
+        if (candidateMethod == MauiQualificationCorpusProvenanceMethods.AdaptedFromCase &&
+            (!TryGetString(provenance, "derivedFrom", out var derivedFrom) ||
+             derivedFrom.Length is 0 or > 128))
+        {
+            return false;
+        }
         method = candidateMethod;
         sourceKind = candidateSource;
         return true;
     }
 
     private static bool IsIsoDate(string value) =>
-        value.Length == 10 && value[4] == '-' && value[7] == '-' &&
-        value.Where(static (_, index) => index is not (4 or 7)).All(static character => character is >= '0' and <= '9');
+        DateOnly.TryParseExact(value, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out _);
 
     private static CorpusEvaluation EvaluateFixture(JsonElement document, string id)
     {
@@ -519,7 +553,12 @@ public static class MauiPreviewQualificationCorpusRunner
             candidates.Distinct(StringComparer.Ordinal).ToList(),
             ineligibility.OrderBy(static value => value, StringComparer.Ordinal).ToList(),
             repairEligible,
-            MauiFlowFailureClassifier.Classify(BuildFailureFacts(fixture)).FailureClass);
+            MauiFlowFailureClassifier.Classify(BuildFailureFacts(fixture)).FailureClass,
+            // The classifier short-circuits on a failure class the facts already carry. When the
+            // fixture stamps one, the answer is copied, not inferred, and must not be presented as
+            // evidence that classification works.
+            !(TryGetString(fixture, "failure", out var stampedClass) &&
+              MauiFlowFailureClassifier.IsKnownFailureClass(stampedClass)));
     }
 
     /// <summary>
@@ -975,7 +1014,8 @@ public static class MauiPreviewQualificationCorpusRunner
         List<string> CandidateKinds,
         List<string> IneligibilityCodes,
         bool RepairEligible,
-        string ObservedFailureClass);
+        string ObservedFailureClass,
+        bool FailureClassInferred);
 
     private struct DeterministicRandom
     {

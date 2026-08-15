@@ -140,6 +140,11 @@
         "numerator": { "type": "integer", "minimum": 0 },
         "denominator": { "type": "integer", "minimum": 0 },
         "rate": { "type": [ "number", "null" ] },
+        "independentEvaluations": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Evaluations that are independent evidence, excluding cases derived from another case and machine-generated mutants. Count gates compare this, never the pooled denominator."
+        },
         "independentDeviceRuns": { "type": [ "boolean", "null" ] },
         "sourceCounts": {
           "type": "array",
@@ -167,6 +172,18 @@
         "sampleCount": { "type": "integer", "minimum": 0 },
         "correct": { "type": "integer", "minimum": 0 },
         "labelCount": { "type": "integer", "minimum": 0 },
+        "inferredSampleCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Cases where the classifier derived the class from replay facts rather than honouring a class the evidence already carried."
+        },
+        "inferredCorrect": { "type": "integer", "minimum": 0 },
+        "stampHonouredSampleCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Cases whose evidence already named a known failure class, so the answer was copied rather than inferred."
+        },
+        "stampHonouredCorrect": { "type": "integer", "minimum": 0 },
         "missingReason": { "type": [ "string", "null" ] },
         "cells": {
           "type": "array",

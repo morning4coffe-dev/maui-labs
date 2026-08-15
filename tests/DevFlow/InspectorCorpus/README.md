@@ -78,6 +78,27 @@ corpus summary:
 So the false-heal metric reads `0/316` = **16 curated + 300 generated**, and never `316` independent
 observations.
 
+### `curated-derived`: the repair-positive denominator is one seed restated
+
+**30 of the 31 repair-positive cases are `adapted-from-case` copies of
+`repair-positive-unique-locator-drift.json`.** They differ only in `id`, `route`, `oldSelector`, and
+`candidate` — none of which `EvaluateRepairFixture` reads. Every one of them satisfies the same six
+conjuncts for the same reason, so `repairPrecision` reading `31/31` rests on **one** independent
+trial, not thirty-one. Growing the file count did not grow the evidence.
+
+Rather than leave that to be discovered, the artifact records it:
+
+- Cases whose `provenance.method` is `adapted-from-case` are emitted with sample source
+  **`curated-derived`**, and such a case must name its seed in `provenance.derivedFrom`.
+- `metrics.*.independentEvaluations` counts only `curated` and `device-backed` samples.
+- **Every count gate compares `independentEvaluations`, not `denominator`.** `repair-precision`
+  therefore reports `repair-evaluation-count-insufficient` at an independent count of 1, exactly as
+  it did before the 30 cases were added.
+
+Closing the repair-precision gate honestly needs ~100 *materially different* repair scenarios —
+different failure shapes, different candidate sets, different checkpoint outcomes — or real
+device-backed runs. Restating this seed again will not move `independentEvaluations`.
+
 ## `expectedFailureClass` ground truth
 
 `expectedFailureClass` is the class **a maintainer expects the product to report**, judged from the
@@ -96,14 +117,29 @@ Rules:
   redaction policy cases, and the baseline healthy cases). `curatedClassificationLabeledCases`
   versus `curatedCases` shows that coverage gap explicitly.
 
-### Known limitation
+### Known limitation: most of the accuracy headline is not inference
 
 Where a fixture carries a `failure` field, that value is passed through as
-`MauiFlowFailureFacts.FailureClass` — the class the replayer stamped at failure time. The classifier
-honours a known stamp before it falls back to inference. For those cases the metric is measuring
-**stamp-to-report mapping fidelity**, not inference from raw evidence. Cases without a `failure`
-field (for example `no-repair-route-state-drift`) exercise the inference path, including the
-route/checkpoint downgrade.
+`MauiFlowFailureFacts.FailureClass`, and the classifier **honours a known stamp before it falls back
+to inference**. For those cases the metric measures stamp-to-report mapping fidelity, not inference
+from raw evidence.
+
+The report splits the two rather than pooling them:
+
+| Bucket | Current value | Meaning |
+| --- | --- | --- |
+| `classificationMatrix.inferredSampleCount` / `inferredCorrect` | **8 / 8** | The classifier derived the class from replay facts. |
+| `classificationMatrix.stampHonouredSampleCount` / `stampHonouredCorrect` | **37 / 34** | The evidence already named a known class. |
+| `classificationAccuracy` (pooled) | 42/45 | Reported, but dominated by the stamped bucket. |
+| `classificationAccuracy.independentEvaluations` | **8** | What the gate actually counts. |
+
+**Read the pooled 42/45 as "the corpus mostly labels itself".** Genuine inference is exercised by 8
+cases. The gate requires 100 independent, genuinely inferred evaluations and reports
+`classification-evaluation-count-insufficient` until it has them.
+
+(The 3 errors sit in the stamped bucket: those cases carry a `failure` stamp that a maintainer judged
+wrong, so honouring the stamp disagrees with ground truth. That disagreement is a real finding and is
+visible in `classificationMatrix.cells`.)
 
 ### Class skew
 
@@ -123,6 +159,9 @@ Notes:
 
 - Any id containing `virtualized` force-adds the `target-virtualized-unscoped` ineligibility code.
 - `expect.candidateKinds` must match the evaluated candidate list exactly, in order.
+- The case root is `additionalProperties: false` and the runner **enforces it**: an unrecognised
+  root key fails the corpus with `corpus-case-unknown-property` rather than silently dropping the
+  case out of a denominator.
 - `SelectorHealthTests.Corpus_ContainsStaticSchemaAndAtLeastQuarterNoRepairCases` requires
   `noRepairCount * 4 >= caseCount`. At 16 no-repair and 58 total there are 6 cases of headroom;
   adding more non-no-repair cases needs matching no-repair cases.

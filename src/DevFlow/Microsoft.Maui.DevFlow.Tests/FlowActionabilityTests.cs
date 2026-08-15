@@ -543,7 +543,7 @@ public class FlowActionabilityTests
             Element("a", automationId: "Dup"),
             Element("b", automationId: "Dup"),
         ]);
-        var engine = new FlowActionabilityEngine(driver, tries: 4, gapMs: 5_000);
+        var engine = new FlowActionabilityEngine(driver, tries: 4, gapMs: 50);
 
         var resolution = await engine.WaitForActionableAsync(
             new FlowSelector { AutomationId = "Dup" },
@@ -552,6 +552,8 @@ public class FlowActionabilityTests
         Assert.False(resolution.Ok);
         Assert.Equal(FlowFailureKinds.Ambiguous, resolution.Kind);
         // Ambiguity is a defect in the selector, not a timing problem: retrying only wastes time.
+        // The query count, not the gap, is the signal, so the gap stays small enough that a
+        // regression fails fast instead of sleeping through every retry.
         Assert.Equal(1, driver.QueryCount);
     }
 
@@ -594,7 +596,7 @@ public class FlowActionabilityTests
             Element("a", automationId: "Dup"),
             Element("b", automationId: "Dup"),
         ]);
-        var engine = new FlowActionabilityEngine(driver, tries: 4, gapMs: 5_000);
+        var engine = new FlowActionabilityEngine(driver, tries: 4, gapMs: 50);
 
         var resolution = await engine.WaitForResolvedAsync(new FlowSelector { AutomationId = "Dup" });
 
@@ -635,6 +637,128 @@ public class FlowActionabilityTests
         var open = error.LastIndexOf('(');
         var close = error.LastIndexOf(')');
         return error[(open + 1)..close];
+    }
+
+    private static readonly string StableItemKey = "sha256:" + new string('a', 64);
+
+    [Fact]
+    public void Constructor_NullDriver_Throws()
+        => Assert.Throws<ArgumentNullException>(() => new FlowActionabilityEngine((IMauiFlowDriver)null!));
+
+    [Fact]
+    public async Task Constructor_ClampsNonPositiveTriesToASingleAttempt()
+    {
+        var driver = new FakeDriver();
+        var engine = new FlowActionabilityEngine(driver, tries: 0, gapMs: -5);
+
+        var resolution = await engine.WaitForResolvedAsync(new FlowSelector { AutomationId = "missing" });
+
+        Assert.False(resolution.Ok);
+        Assert.Equal(1, driver.QueryCount);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_AmbiguousText_SummarisesCandidatesWithoutAnAutomationId()
+    {
+        // The candidate summary has a second shape for elements with no AutomationId, which is
+        // the normal case for a text selector.
+        var driver = new FakeDriver(
+        [
+            Element("lbl-1", type: "Label", text: "Go"),
+            Element("lbl-2", type: "Label", text: "Go"),
+        ]);
+
+        var resolution = await new FlowActionabilityEngine(driver).ResolveAsync(new FlowSelector { Text = "Go" });
+
+        Assert.False(resolution.Ok);
+        Assert.Equal(FlowFailureKinds.Ambiguous, resolution.Kind);
+        Assert.Equal(2, resolution.MatchCount);
+        Assert.StartsWith("text selector is ambiguous", resolution.Error, StringComparison.Ordinal);
+        Assert.Equal("Label#lbl-1, Label#lbl-2", CandidateList(resolution.Error!));
+    }
+
+    [Fact]
+    public async Task ResolveAsync_AmbiguousScopedItem_IsReportedAsAScopedItemFailure()
+    {
+        // Two rows carrying the same opaque identity in the same collection is a data defect the
+        // engine must refuse to guess about, and it must say which selector form was ambiguous.
+        var driver = new FakeDriver(
+        [
+            Element("row-1", automationId: "Row", stableItemKey: StableItemKey, collectionScope: "orders"),
+            Element("row-2", automationId: "Row", stableItemKey: StableItemKey, collectionScope: "orders"),
+        ]);
+
+        var resolution = await new FlowActionabilityEngine(driver).ResolveAsync(new FlowSelector
+        {
+            AutomationId = "Row",
+            StableItemKey = StableItemKey,
+            CollectionScope = "orders",
+        });
+
+        Assert.False(resolution.Ok);
+        Assert.Equal(FlowFailureKinds.Ambiguous, resolution.Kind);
+        Assert.StartsWith("scoped item selector is ambiguous", resolution.Error, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task ResolveAsync_TypeIndexKindWithoutAnIndex_FallsThroughToTheRawId()
+    {
+        // A recorder that writes selectorKind=typeIndex but omits the index has produced an
+        // incomplete selector; it must not silently become "index 0".
+        var driver = new FakeDriver([Element("btn", automationId: "submit")]);
+
+        var resolution = await new FlowActionabilityEngine(driver).ResolveAsync(new FlowSelector
+        {
+            SelectorKind = "typeIndex",
+            Type = "Button",
+            Id = "btn",
+        });
+
+        Assert.True(resolution.Ok);
+        Assert.Equal("btn", resolution.Element?.Id);
+        Assert.Equal("fragile", resolution.Quality);
+        Assert.Equal(0, driver.QueryCount);
+        Assert.Equal(1, driver.GetElementCount);
+    }
+
+    [Fact]
+    public async Task Observer_SeesAFailedResolutionWithNoElement()
+    {
+        var observations = new List<FlowActionabilityObservation>();
+        var engine = new FlowActionabilityEngine(
+            new FakeDriver(),
+            tries: 1,
+            gapMs: 0,
+            observe: observations.Add);
+
+        await engine.WaitForActionableAsync(new FlowSelector { AutomationId = "missing" }, requireStableBounds: true);
+
+        var observation = Assert.Single(observations);
+        Assert.False(observation.Resolved);
+        Assert.Null(observation.Visible);
+        Assert.Null(observation.Enabled);
+        Assert.Equal(FlowFailureKinds.NotFound, observation.Outcome);
+        Assert.False(observation.HasBounds);
+    }
+
+    [Fact]
+    public async Task WithFailure_KeepsTheResolvedElementMatchCountQualityAndCandidates()
+    {
+        // A downstream repair proposal reads Candidates and Quality off the failure, so demoting a
+        // resolved element to not-visible must not erase what was resolved.
+        var driver = new FakeDriver([Element("btn", automationId: "submit", visible: false)]);
+        var engine = new FlowActionabilityEngine(driver, tries: 1, gapMs: 0);
+
+        var resolution = await engine.WaitForActionableAsync(
+            new FlowSelector { AutomationId = "submit" },
+            requireStableBounds: true);
+
+        Assert.False(resolution.Ok);
+        Assert.Equal(FlowFailureKinds.NotVisible, resolution.Kind);
+        Assert.Equal("btn", resolution.Element?.Id);
+        Assert.Equal(1, resolution.MatchCount);
+        Assert.Equal("AutomationId", resolution.Quality);
+        Assert.Equal("btn", Assert.Single(resolution.Candidates).Id);
     }
 
     private static ElementInfo Element(

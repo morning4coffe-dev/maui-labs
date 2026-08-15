@@ -621,7 +621,7 @@ public class FlowReplayTests
             .ReplayAsync(flow);
         Assert.False(drifted.Ok);
         Assert.Equal(FlowFailureKinds.NotFound, drifted.Results[0].FailureKind);
-        Assert.Empty(drifted.Results[0].Asserts.Where(a => a.Ok == true));
+        Assert.True(Assert.Single(drifted.Results[0].Asserts).Skipped);
         Assert.Equal(1, capture.Count);
 
         var run = drifted.StructuredReport;
@@ -724,12 +724,15 @@ public class FlowReplayTests
         Assert.Equal("submit", flow.Steps[0].Args?.Selector?.AutomationId);
         Assert.Equal("submit", flow.Steps[0].Asserts[0].Selector?.AutomationId);
         Assert.Equal(new[] { "btn" }, agentSrv.Taps.ToArray());
-        Assert.Equal(1, capture.Count);
 
-        var stillBroken = await new FlowReplayer(client, pollTries: 1, pollGapMs: 0).ReplayAsync(flow);
+        // Replaying the untouched flow fails the same way, and evidence capture is per run: this
+        // second capture proves the first one was not a one-shot latch, and that proposing a
+        // repair did not quietly rewrite the flow the replayer reads.
+        var stillBroken = await new FlowReplayer(client, pollTries: 1, pollGapMs: 0, evidenceCapture: capture)
+            .ReplayAsync(flow);
         Assert.False(stillBroken.Ok);
         Assert.Equal(FlowFailureKinds.NotFound, stillBroken.Results[0].FailureKind);
-        Assert.Equal(1, capture.Count);
+        Assert.Equal(2, capture.Count);
     }
 
     private static MauiFlowTriageInput LoopTriageInput(

@@ -19,6 +19,7 @@ on:
   pull_request:
     paths:
       - 'plugins/**/skills/**'
+      - '.github/skills/**'
       - 'tests/**'
 
   issue_comment:

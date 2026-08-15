@@ -11,6 +11,9 @@ namespace Microsoft.Maui.Cli.UnitTests;
 [Collection("CLI")]
 public sealed class DevFlowSkillManagerTests
 {
+    // Skills that ship in the CLI bundle but are not installed by `maui devflow init`.
+    static readonly string[] OptionalSkillIds = ["maui-devflow-test", "maui-devflow-artifact"];
+
     [Fact]
     public async Task InstallRecommended_ProjectScope_WritesBundledSkillsAndUserLevelState()
     {
@@ -24,6 +27,7 @@ public sealed class DevFlowSkillManagerTests
         Assert.True(File.Exists(Path.Combine(workspace.Path, ".claude", "skills", "maui-devflow-session-review", "SKILL.md")));
         Assert.True(File.Exists(Path.Combine(workspace.Path, ".claude", "skills", "maui-devflow-session-review", "references", "friction-rubric.md")));
         Assert.False(File.Exists(Path.Combine(workspace.Path, ".claude", "skills", "maui-devflow-test", "SKILL.md")));
+        Assert.False(File.Exists(Path.Combine(workspace.Path, ".claude", "skills", "maui-devflow-artifact", "SKILL.md")));
         Assert.False(File.Exists(Path.Combine(workspace.Path, ".claude", "skills", "maui-devflow-connect", "SKILL.md")));
         Assert.False(File.Exists(Path.Combine(workspace.Path, ".maui", "devflow-skills.lock.json")));
 
@@ -50,10 +54,14 @@ public sealed class DevFlowSkillManagerTests
         var statuses = await DevFlowSkillManager.CheckAsync("project", "claude", online: false, cancellationToken: CancellationToken.None);
         var skills = Assert.IsType<JsonArray>(statuses["skills"]);
         Assert.All(
-            skills.OfType<JsonObject>().Where(skill => skill["skillId"]?.GetValue<string>() != "maui-devflow-test"),
+            skills.OfType<JsonObject>().Where(skill => !OptionalSkillIds.Contains(skill["skillId"]?.GetValue<string>())),
             skill => Assert.Equal("up-to-date", skill["status"]?.GetValue<string>()));
-        var testSkill = Assert.Single(skills.OfType<JsonObject>(), skill => skill["skillId"]?.GetValue<string>() == "maui-devflow-test");
-        Assert.Equal("missing", testSkill["status"]?.GetValue<string>());
+        foreach (var optionalSkillId in OptionalSkillIds)
+        {
+            var optionalSkill = Assert.Single(skills.OfType<JsonObject>(), skill => skill["skillId"]?.GetValue<string>() == optionalSkillId);
+            Assert.Equal("missing", optionalSkill["status"]?.GetValue<string>());
+        }
+
         Assert.DoesNotContain(skills.OfType<JsonObject>(), skill => skill["skillId"]?.GetValue<string>() == "maui-devflow-connect");
     }
 
@@ -592,10 +600,13 @@ public sealed class DevFlowSkillManagerTests
 
         var skills = Assert.IsType<JsonArray>(result["skills"]);
         Assert.All(
-            skills.OfType<JsonObject>().Where(skill => skill["skillId"]?.GetValue<string>() != "maui-devflow-test"),
+            skills.OfType<JsonObject>().Where(skill => !OptionalSkillIds.Contains(skill["skillId"]?.GetValue<string>())),
             skill => Assert.Equal("unknown-or-unmanaged", skill["status"]?.GetValue<string>()));
-        var testSkill = Assert.Single(skills.OfType<JsonObject>(), skill => skill["skillId"]?.GetValue<string>() == "maui-devflow-test");
-        Assert.Equal("missing", testSkill["status"]?.GetValue<string>());
+        foreach (var optionalSkillId in OptionalSkillIds)
+        {
+            var optionalSkill = Assert.Single(skills.OfType<JsonObject>(), skill => skill["skillId"]?.GetValue<string>() == optionalSkillId);
+            Assert.Equal("missing", optionalSkill["status"]?.GetValue<string>());
+        }
     }
 
     [Fact]

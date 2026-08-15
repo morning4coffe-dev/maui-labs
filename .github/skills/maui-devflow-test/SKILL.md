@@ -104,22 +104,22 @@ Use this workflow only to author an inert draft or execute a committed flow.
 3. **Request human review only when supported.** Present the draft and inspect
    the approval capability. When native approval is unavailable, stop at the
    validated inert draft and do not call `approval-request`. When it is
-   available in the trusted VS Code or Canvas host, use `maui_test_author` with `approval-request`, then
-   `maui_test_author await-approval`, and finally `maui_test_author` with
-   `commit` and that approved grant. Do not manufacture, reuse, or broaden a
-   grant. A committed Markdown flow and its current digest are the only
-   executable artifact.
+   available in the trusted VS Code or Canvas host, use `maui_test_author` with
+   `approval-request`, then `maui_test_author await-approval`, and finally
+   `maui_test_author` with `commit` and that approved grant. Do not manufacture,
+   reuse, or broaden a grant. A committed Markdown flow and its current digest
+   are the only executable artifact.
 4. **Run only after another approval.** `maui_test_run` is intentionally bound
    to the current authoring session. A checked-in Markdown flow and matching
    plan remain a committed disk artifact, but this restricted tool cannot route
-   them without a session. Request a separate exact-scope run
-   grant for the committed flow, exact process, build/seed, selectors, and
-   actions only when native approval is available. Otherwise stop without
-   submitting a doomed request or querying unrelated draft status. Await an
-   available request, then use `maui_test_run` with `start` exactly once only
-   for the bound, native-client-issued single-use grant. A timeout or lost
-   response is `unknown-completion`, not permission to retry, re-request, or
-   continue into repair.
+   them without a session. Request a separate exact-scope run grant for the
+   committed flow, exact process, build/seed, selectors, and actions only when
+   native approval is available. Otherwise stop without submitting a doomed
+   request or querying unrelated draft status. Await an available request, then
+   use `maui_test_run` with `start` exactly once only for the bound,
+   native-client-issued single-use grant. A timeout or lost response is
+   `unknown-completion`, not permission to retry, re-request, or continue into
+   repair.
 5. **Keep evidence bounded.** Use `maui_test_run` with `status`, then
    `maui_test_trace` and `maui_test_failure` to explain a completed run. Check
    the run's terminal state before triage; for a terminal failure, call

@@ -152,6 +152,8 @@ chooses to progress to a local reproduction or executable draft.
 - Verify the route before calling a missing element selector drift. A wrong
   route, modal, seed, locale, build, window, or checkpoint mismatch is not
   selector repairable.
+- Preserve reset, seed, and oracle requirements from the committed plan. Never
+  erase them because a scenario appears UI-only.
 
 ## Safety Boundaries
 

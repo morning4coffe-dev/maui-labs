@@ -45,6 +45,9 @@ public sealed class FlowStudyCliTests : IDisposable
 
         Assert.Equal(1, result.ExitCode);
         var root = result.ParseJsonOutput();
+        // `ok` has to agree with the exit code, or a JSON consumer reads success from an
+        // invocation a shell consumer reads as failure.
+        Assert.False(root.GetProperty("ok").GetBoolean());
         var report = root.GetProperty("report");
         Assert.Equal("insufficient-evidence", report.GetProperty("status").GetString());
         Assert.Equal(6, report.GetProperty("assistedSessions").GetInt32());

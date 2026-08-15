@@ -1228,7 +1228,7 @@ public sealed class PreviewQualificationTests
     }
 
     [Fact]
-    public void Accumulator_SumsCleanFirstAttemptsAcrossRunsButNotUnknownSources()
+    public void Accumulator_SumsCleanFirstAttemptsAcrossRuns()
     {
         // The whole argument for --accumulate over a higher --repeat cap: 20 attempts per run is
         // the harness limit, so 100 clean first attempts per flow has to come from separate jobs.
@@ -1277,7 +1277,144 @@ public sealed class PreviewQualificationTests
         Assert.Equal(100, flow.CleanFirstAttempts);
         Assert.Equal(100, flow.PassedFirstAttempts);
         Assert.True(flow.RealDeviceEvidence);
+        // The independence of those 5 runs is self-reported, so the merge publishes the shape of
+        // the claim rather than pretending to have verified it.
+        Assert.Equal(5, flow.ContributingRuns);
+        Assert.Equal(5, flow.ContributingDevices);
         Assert.Equal(MauiPreviewQualificationStates.Pass, Gate(merged, "accumulated-tier1-first-attempts").Status);
+    }
+
+    [Fact]
+    public void Accumulator_RefusesARunThatRepeatsOneFlowToReachTheAttemptThreshold()
+    {
+        // Without a coherence check on the flow list, repeating one 20/20 entry five times inside
+        // a single file reaches the 100-attempt threshold from 20 real attempts.
+        var input = new MauiPreviewQualificationInput { Platform = "android" };
+        input.Tier1Flows.Add("checkout");
+        input.Profiles.Add(new MauiQualificationPlatformProfile
+        {
+            Platform = "android",
+            Scope = "tier1",
+            DeviceEvidenceKind = "physical-device",
+            RealDevice = true,
+            DeviceFingerprint = "device-0",
+        });
+        var report = MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch);
+        for (var copy = 0; copy < 5; copy++)
+        {
+            report.Metrics.FlakeFirstAttemptStability.Flows.Add(new MauiQualificationFlowAttemptSummary
+            {
+                FlowId = "checkout",
+                CleanFirstAttempts = 20,
+                PassedFirstAttempts = 20,
+                Stability = 1,
+                RealDeviceEvidence = true,
+            });
+        }
+
+        var accumulation = MauiPreviewQualificationAccumulator.Accumulate([report], DateTimeOffset.UnixEpoch);
+        Assert.Equal(0, accumulation.AcceptedRuns);
+        Assert.Contains(
+            accumulation.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-incoherent-flow-evidence"));
+        Assert.Empty(accumulation.FirstAttemptFlows);
+        Assert.NotEqual(MauiPreviewQualificationStates.Pass, Gate(accumulation, "accumulated-tier1-first-attempts").Status);
+    }
+
+    [Fact]
+    public void Accumulator_RefusesDeviceEvidenceThatNamesNoDevice()
+    {
+        var input = new MauiPreviewQualificationInput { Platform = "android" };
+        input.Tier1Flows.Add("checkout");
+        var report = MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch);
+        report.Metrics.FlakeFirstAttemptStability.Flows.Add(new MauiQualificationFlowAttemptSummary
+        {
+            FlowId = "checkout",
+            CleanFirstAttempts = 200,
+            PassedFirstAttempts = 200,
+            Stability = 1,
+            RealDeviceEvidence = true,
+        });
+
+        var accumulation = MauiPreviewQualificationAccumulator.Accumulate([report], DateTimeOffset.UnixEpoch);
+        Assert.Equal(0, accumulation.AcceptedRuns);
+        Assert.Contains(
+            accumulation.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-unattributed-device-evidence"));
+    }
+
+    [Fact]
+    public void Accumulator_KeepsTheEvidenceWhenOneStaleRunNamesADifferentCorpus()
+    {
+        // With the oldest run as reference, one leftover file from a superseded corpus rejected
+        // every current run as a fingerprint mismatch and the merge reported almost nothing.
+        static MauiPreviewQualificationReport Run(string corpusFingerprint, int hours, int attempts)
+        {
+            var input = new MauiPreviewQualificationInput { Platform = "android" };
+            input.Tier1Flows.Add("checkout");
+            input.Profiles.Add(new MauiQualificationPlatformProfile
+            {
+                Platform = "android",
+                RealDevice = true,
+                DeviceFingerprint = $"device-{hours}",
+            });
+            var report = MauiPreviewQualificationGateEvaluator.Evaluate(
+                input,
+                DateTimeOffset.UnixEpoch.AddHours(hours));
+            report.Fingerprints.CorpusFingerprint = corpusFingerprint;
+            report.Metrics.FlakeFirstAttemptStability.Flows.Add(new MauiQualificationFlowAttemptSummary
+            {
+                FlowId = "checkout",
+                CleanFirstAttempts = attempts,
+                PassedFirstAttempts = attempts,
+                Stability = 1,
+                RealDeviceEvidence = true,
+            });
+            return report;
+        }
+
+        var accumulation = MauiPreviewQualificationAccumulator.Accumulate(
+            [Run("sha256:stale", 0, 7), Run("sha256:current", 1, 20), Run("sha256:current", 2, 20)],
+            DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(2, accumulation.AcceptedRuns);
+        Assert.Equal(
+            40,
+            accumulation.FirstAttemptFlows.Single(static flow => flow.FlowId == "checkout").CleanFirstAttempts);
+        // The stale run is discarded loudly, not silently.
+        Assert.Contains(
+            accumulation.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-corpus-fingerprint-mismatch"));
+    }
+
+    [Fact]
+    public void GateEvaluator_FailsAMeasuredFlowEvenWhenAnotherFlowHasNotRun()
+    {
+        // Pooling the reason codes let one unexercised flow downgrade another flow's measured
+        // stability failure to not-qualified, which reports exit 0 on a real regression.
+        var input = new MauiPreviewQualificationInput { Platform = "android" };
+        input.Tier1Flows.Add("measured");
+        input.Tier1Flows.Add("not-yet-run");
+        for (var attempt = 0; attempt < 200; attempt++)
+        {
+            input.Samples.Add(new MauiQualificationExecutionSample
+            {
+                SampleId = $"measured-{attempt}",
+                Source = MauiQualificationSampleSources.DeviceBacked,
+                Platform = "android",
+                RealDevice = true,
+                DeviceEvidenceKind = "physical-device",
+                FlowId = "measured",
+                FirstAttempt = true,
+                CleanState = true,
+                Outcome = attempt < 190 ? MauiFlowRunOutcomes.Passed : MauiFlowRunOutcomes.Failed,
+            });
+        }
+
+        var report = MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch);
+        var gate = Assert.Single(report.Gates, candidate => candidate.GateId == "android-tier1-first-attempts");
+        Assert.Equal(MauiPreviewQualificationStates.Fail, gate.Status);
+        Assert.Contains("android-first-attempt-stability-below-threshold", gate.ReasonCodes);
     }
 
     [Fact]
@@ -1286,8 +1423,9 @@ public sealed class PreviewQualificationTests
         var honest = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput(), DateTimeOffset.UnixEpoch);
         var smuggled = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput(), DateTimeOffset.UnixEpoch.AddDays(1));
         // A source name the merge does not model would be classified as "not static" and summed as
-        // fresh evidence. 300 zero-false-heal samples under a plausible-looking label is all it
-        // would take to clear the 300-evaluation minimum.
+        // fresh evidence. This check is a spell-checker, not an authenticity check: it rejects the
+        // label it does not recognise, and would merge the same 300 samples verbatim if they were
+        // labelled `device-backed`. Nothing in a JSON file proves a number came from a device.
         smuggled.Metrics.FalseHeals.SourceCounts.Add(new MauiQualificationRateSourceCount
         {
             Source = "device-backed-lab",
@@ -1347,10 +1485,76 @@ public sealed class PreviewQualificationTests
             Assert.Equal(before.CuratedCases + 1, after.CuratedCases);
             Assert.Equal(before.CuratedDerivedCases, after.CuratedDerivedCases);
             Assert.True(after.UndeclaredProjectionCollisions > 0);
+            Assert.True(after.UndeclaredShapeCollisions > 0);
 
-            // Editing a case without touching the manifest must change the corpus fingerprint, or
+            // Perturbing an evidence-neutral fixture value until the diagnostics differ evades the
+            // projection check. The fixture-shape check is what still sees it.
+            var evasive = JsonNode.Parse(File.ReadAllText(seedPath))!.AsObject();
+            evasive["id"] = "repair-positive-evasive-clone";
+            evasive["provenance"]!.AsObject()["method"] = "hand-authored";
+            evasive["provenance"]!.AsObject().Remove("derivedFrom");
+            evasive["fixture"]!.AsObject()["checkpointMismatches"] = new JsonArray("modal", "orientation");
+            File.WriteAllText(Path.Combine(scratch, "cases", "repair-positive-evasive-clone.json"), evasive.ToJsonString());
+            manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+            manifest["cases"]!.AsArray().Add(new JsonObject
+            {
+                ["id"] = "repair-positive-evasive-clone",
+                ["file"] = "cases/repair-positive-evasive-clone.json",
+                ["kind"] = "repair-positive",
+                ["disposition"] = "repair-eligible",
+            });
+            File.WriteAllText(manifestPath, manifest.ToJsonString());
+            var evaded = RunCorpus(scratch).Summary;
+            Assert.True(evaded.UndeclaredShapeCollisions > after.UndeclaredShapeCollisions);
+        }
+        finally
+        {
+            try { Directory.Delete(scratch, recursive: true); }
+            catch (IOException) { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void CorpusRunner_PinsCaseAndSecurityContentsInTheFingerprintWithoutTouchingTheManifest()
+    {
+        var scratch = Path.Combine(
+            Path.GetDirectoryName(typeof(PreviewQualificationTests).Assembly.Location)!,
+            "corpus-fingerprint-tests",
+            Guid.NewGuid().ToString("N"));
+        CopyDirectory(Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus"), scratch);
+        try
+        {
+            var manifestPath = Path.Combine(scratch, "corpus-manifest.json");
+            var manifestBytes = File.ReadAllBytes(manifestPath);
+            var before = RunCorpus(scratch).Summary;
+
+            // A case edit with the manifest byte-for-byte untouched must move the fingerprint, or
             // the accumulator would treat two different corpora as the same static evidence.
-            Assert.NotEqual(before.ManifestFingerprint, after.ManifestFingerprint);
+            var casePath = Directory.GetFiles(Path.Combine(scratch, "cases"), "*.json")
+                .OrderBy(static path => path, StringComparer.Ordinal)
+                .First();
+            var edited = JsonNode.Parse(File.ReadAllText(casePath))!.AsObject();
+            edited["provenance"]!.AsObject()["labeledBy"] = "someone-else";
+            File.WriteAllText(casePath, edited.ToJsonString());
+            Assert.Equal(manifestBytes, File.ReadAllBytes(manifestPath));
+
+            var afterCaseEdit = RunCorpus(scratch).Summary;
+            Assert.NotEqual(before.ManifestFingerprint, afterCaseEdit.ManifestFingerprint);
+
+            // The privacy/security corpus feeds a published gate but lives outside cases/, so the
+            // fingerprint has to cover the whole tree, not just the case directory.
+            var securityPath = Directory.GetFiles(scratch, "*.json", SearchOption.AllDirectories)
+                .First(static path => path.Contains("security", StringComparison.OrdinalIgnoreCase));
+            File.AppendAllText(securityPath, " ");
+            var afterSecurityEdit = RunCorpus(scratch).Summary;
+            Assert.NotEqual(afterCaseEdit.ManifestFingerprint, afterSecurityEdit.ManifestFingerprint);
+
+            // baselines/ holds the report generated *from* this fingerprint. If it counted, no
+            // regenerated baseline would ever match the corpus it was generated from.
+            var baselineDirectory = Path.Combine(scratch, "baselines");
+            Directory.CreateDirectory(baselineDirectory);
+            File.WriteAllText(Path.Combine(baselineDirectory, "qualification.json"), "{\"status\":\"rewritten\"}");
+            Assert.Equal(afterSecurityEdit.ManifestFingerprint, RunCorpus(scratch).Summary.ManifestFingerprint);
         }
         finally
         {
@@ -1446,6 +1650,16 @@ public sealed class PreviewQualificationTests
             Tier1Flows = ["tier-one"],
         };
 
+        // A run that claims real-device evidence has to say which device produced it; the
+        // accumulator refuses unattributed device claims.
+        input.Profiles.Add(new MauiQualificationPlatformProfile
+        {
+            Platform = "android",
+            Scope = "tier1",
+            DeviceEvidenceKind = "physical-device",
+            RealDevice = true,
+            DeviceFingerprint = "qualified-device",
+        });
         for (var index = 0; index < 100; index++)
         {
             input.Samples.Add(new MauiQualificationExecutionSample

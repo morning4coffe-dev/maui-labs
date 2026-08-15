@@ -134,6 +134,38 @@ public class AuthoringStudyProtocolTests
     }
 
     [Fact]
+    public void TryReadSession_TrimsAParticipantSaltInsteadOfSplittingOnePersonInTwo()
+    {
+        // .NET's `$` also matches before a trailing newline, so a salt round-tripped through a
+        // text file would validate yet compare ordinally unequal to the same salt without it —
+        // counting one participant as two and emptying the cross-arm intersection.
+        var json = ExportJson().Replace(
+            "\"participantSalt\": \"participant-abcdef01\"",
+            "\"participantSalt\": \"participant-abcdef01\\n\"",
+            StringComparison.Ordinal);
+
+        var session = MauiAuthoringStudyProtocol.TryReadSession(json, out var rejection);
+
+        Assert.Null(rejection);
+        Assert.NotNull(session);
+        Assert.Equal("participant-abcdef01", session!.ParticipantSalt);
+    }
+
+    [Fact]
+    public void TryReadSession_RejectsAParticipantSaltThatIsNotTheDocumentedShape()
+    {
+        var json = ExportJson().Replace(
+            "\"participantSalt\": \"participant-abcdef01\"",
+            "\"participantSalt\": \"alice@example.com\"",
+            StringComparison.Ordinal);
+
+        var session = MauiAuthoringStudyProtocol.TryReadSession(json, out var rejection);
+
+        Assert.Null(session);
+        Assert.Equal("study-session-participant-salt-invalid", rejection);
+    }
+
+    [Fact]
     public void TryReadSession_HonoursTheExportersOwnIneligibilityVerdict()
     {
         var json = ExportJson().Replace(

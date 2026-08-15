@@ -65,6 +65,7 @@
     "generatedCases": 300,
     "deviceBackedCases": 0,
     "curatedRepairPositiveCases": 31,
+    "curatedDerivedCases": 30,
     "curatedNoRepairCases": 16,
     "generatedNoRepairCases": 300,
     "curatedClassificationLabeledCases": 45,
@@ -115,6 +116,7 @@
       "sampleSources": [],
       "sourceCounts": [],
       "independentEvaluations": 0,
+      "independentNumerator": 0,
       "exclusions": []
     },
     "selectorStability": {
@@ -124,6 +126,7 @@
       "sampleSources": [],
       "sourceCounts": [],
       "independentEvaluations": 0,
+      "independentNumerator": 0,
       "exclusions": []
     },
     "repairPrecision": {
@@ -145,15 +148,24 @@
         {
           "source": "curated",
           "numerator": 1,
-          "denominator": 1
+          "denominator": 1,
+          "independentEvaluations": 1
         },
         {
           "source": "curated-derived",
           "numerator": 30,
-          "denominator": 30
+          "denominator": 30,
+          "independentEvaluations": 0
         }
       ],
       "independentEvaluations": 1,
+      "independentNumerator": 1,
+      "independentConfidenceInterval": {
+        "method": "wilson-95",
+        "confidenceLevel": 0.95,
+        "lower": 0.20654931437723745,
+        "upper": 1
+      },
       "independentDeviceRuns": false,
       "exclusions": []
     },
@@ -176,15 +188,24 @@
         {
           "source": "curated",
           "numerator": 1,
-          "denominator": 1
+          "denominator": 1,
+          "independentEvaluations": 1
         },
         {
           "source": "curated-derived",
           "numerator": 30,
-          "denominator": 30
+          "denominator": 30,
+          "independentEvaluations": 0
         }
       ],
       "independentEvaluations": 1,
+      "independentNumerator": 1,
+      "independentConfidenceInterval": {
+        "method": "wilson-95",
+        "confidenceLevel": 0.95,
+        "lower": 0.20654931437723745,
+        "upper": 1
+      },
       "independentDeviceRuns": false,
       "exclusions": []
     },
@@ -207,15 +228,24 @@
         {
           "source": "curated",
           "numerator": 12,
-          "denominator": 15
+          "denominator": 15,
+          "independentEvaluations": 8
         },
         {
           "source": "curated-derived",
           "numerator": 30,
-          "denominator": 30
+          "denominator": 30,
+          "independentEvaluations": 0
         }
       ],
       "independentEvaluations": 8,
+      "independentNumerator": 8,
+      "independentConfidenceInterval": {
+        "method": "wilson-95",
+        "confidenceLevel": 0.95,
+        "lower": 0.6755924351161198,
+        "upper": 1
+      },
       "independentDeviceRuns": false,
       "exclusions": []
     },
@@ -340,15 +370,24 @@
         {
           "source": "curated",
           "numerator": 0,
-          "denominator": 16
+          "denominator": 16,
+          "independentEvaluations": 16
         },
         {
           "source": "generated",
           "numerator": 0,
-          "denominator": 300
+          "denominator": 300,
+          "independentEvaluations": 0
         }
       ],
       "independentEvaluations": 16,
+      "independentNumerator": 0,
+      "independentConfidenceInterval": {
+        "method": "wilson-95",
+        "confidenceLevel": 0.95,
+        "lower": 0,
+        "upper": 0.1936076805344365
+      },
       "independentDeviceRuns": false,
       "exclusions": []
     },
@@ -371,15 +410,24 @@
         {
           "source": "curated",
           "numerator": 16,
-          "denominator": 16
+          "denominator": 16,
+          "independentEvaluations": 16
         },
         {
           "source": "generated",
           "numerator": 300,
-          "denominator": 300
+          "denominator": 300,
+          "independentEvaluations": 0
         }
       ],
       "independentEvaluations": 16,
+      "independentNumerator": 16,
+      "independentConfidenceInterval": {
+        "method": "wilson-95",
+        "confidenceLevel": 0.95,
+        "lower": 0.8063923194655637,
+        "upper": 1
+      },
       "independentDeviceRuns": false,
       "exclusions": []
     },
@@ -417,57 +465,57 @@
           "state": "measured",
           "operation": "flow-markdown-parse",
           "sampleCount": 10,
-          "p50Ms": 0.10815,
-          "p95Ms": 0.1640349999999999,
-          "maxMs": 0.2053
+          "p50Ms": 0.14775,
+          "p95Ms": 0.225435,
+          "maxMs": 0.2343
         },
         {
           "state": "measured",
           "operation": "flow-validate",
           "sampleCount": 10,
-          "p50Ms": 0.0011,
-          "p95Ms": 0.013434999999999994,
-          "maxMs": 0.016
+          "p50Ms": 0.0017499999999999998,
+          "p95Ms": 0.01350999999999999,
+          "maxMs": 0.0181
         },
         {
           "state": "measured",
           "operation": "report-serialize-redaction",
           "sampleCount": 10,
-          "p50Ms": 0.0928,
-          "p95Ms": 0.2103649999999999,
-          "maxMs": 0.251
+          "p50Ms": 0.12795,
+          "p95Ms": 0.24881499999999987,
+          "maxMs": 0.2971
         },
         {
           "state": "measured",
           "operation": "fingerprint",
           "sampleCount": 10,
-          "p50Ms": 0.0141,
-          "p95Ms": 0.018179999999999995,
-          "maxMs": 0.0198
+          "p50Ms": 0.02115,
+          "p95Ms": 0.027759999999999996,
+          "maxMs": 0.0292
         },
         {
           "state": "measured",
           "operation": "candidate-generation",
           "sampleCount": 10,
-          "p50Ms": 0.0293,
-          "p95Ms": 0.04154,
-          "maxMs": 0.0419
+          "p50Ms": 0.048850000000000005,
+          "p95Ms": 0.062275,
+          "maxMs": 0.0661
         },
         {
           "state": "measured",
           "operation": "candidate-ranking",
           "sampleCount": 10,
-          "p50Ms": 0.00885,
-          "p95Ms": 0.011579999999999998,
-          "maxMs": 0.0123
+          "p50Ms": 0.015649999999999997,
+          "p95Ms": 0.059234999999999934,
+          "maxMs": 0.0879
         },
         {
           "state": "measured",
           "operation": "qualification-gate",
           "sampleCount": 10,
-          "p50Ms": 0.0596,
-          "p95Ms": 0.15339499999999984,
-          "maxMs": 0.2222
+          "p50Ms": 0.0829,
+          "p95Ms": 0.2367899999999998,
+          "maxMs": 0.3294
         }
       ],
       "deviceOverhead": {
@@ -486,6 +534,7 @@
         "sampleSources": [],
         "sourceCounts": [],
         "independentEvaluations": 0,
+        "independentNumerator": 0,
         "exclusions": []
       },
       "flows": [],

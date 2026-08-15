@@ -286,6 +286,10 @@ internal static class FlowQualificationCommands
         CompareCount(comparison, "corpus.curatedRepairPositiveCases", baseline.Corpus.CuratedRepairPositiveCases, report.Corpus.CuratedRepairPositiveCases);
         CompareCount(comparison, "corpus.curatedNoRepairCases", baseline.Corpus.CuratedNoRepairCases, report.Corpus.CuratedNoRepairCases);
         CompareCount(comparison, "corpus.curatedClassificationLabeledCases", baseline.Corpus.CuratedClassificationLabeledCases, report.Corpus.CuratedClassificationLabeledCases);
+        CompareCount(comparison, "corpus.generatedNoRepairCases", baseline.Corpus.GeneratedNoRepairCases, report.Corpus.GeneratedNoRepairCases);
+        // Derived cases are disclosure, not evidence, so losing them is not a regression. The
+        // opposite is: growing them while curated originals stay flat is inflation, and the
+        // independent-evaluation comparisons above are what actually catch it.
 
         foreach (var baselineGate in baseline.Gates.Where(static gate => gate.Status == MauiPreviewQualificationStates.Pass))
         {
@@ -300,13 +304,33 @@ internal static class FlowQualificationCommands
         {
             foreach (var name in MauiPreviewQualificationAccumulator.MergedMetricNames)
             {
-                if (accumulation.Metrics.TryGetValue(name, out var merged) && merged.Denominator > 0)
-                    CompareRate(comparison, "accumulated." + name, BaselineMetric(baseline, name), merged);
+                if (!accumulation.Metrics.TryGetValue(name, out var merged) || merged.Denominator == 0)
+                    continue;
+                // False heals and abstention are counts where "higher is better" does not hold, so
+                // CompareRate's rate comparison would read backwards. They get the count treatment
+                // instead: any new escape, or any loss of evidence, is a regression.
+                if (name is "falseHeals" or "abstention")
+                {
+                    var baselineCount = name == "falseHeals" ? baseline.Metrics.FalseHeals : baseline.Metrics.Abstention;
+                    if (baselineCount.Denominator == 0)
+                        continue;
+                    if (merged.Numerator > baselineCount.Numerator)
+                        comparison.Regressions.Add($"accumulated.{name} numerator {baselineCount.Numerator} -> {merged.Numerator}");
+                    CompareCount(comparison, $"accumulated.{name} denominator", baselineCount.Denominator, merged.Denominator);
+                    CompareCount(comparison, $"accumulated.{name} independentEvaluations", baselineCount.IndependentEvaluations, merged.IndependentEvaluations);
+                    continue;
+                }
+                CompareRate(comparison, "accumulated." + name, BaselineMetric(baseline, name), merged);
             }
         }
         return comparison;
     }
 
+    /// <summary>
+    /// The per-run baseline metric an accumulated metric is compared against. False heals and
+    /// abstention return null because a rate comparison is the wrong test for them; the caller
+    /// handles those as counts.
+    /// </summary>
     private static MauiQualificationRateMetric? BaselineMetric(MauiPreviewQualificationReport baseline, string name) => name switch
     {
         "recordingValidity" => baseline.Metrics.RecordingValidity,

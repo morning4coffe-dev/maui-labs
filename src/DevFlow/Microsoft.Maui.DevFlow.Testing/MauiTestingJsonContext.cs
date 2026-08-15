@@ -172,5 +172,7 @@ namespace Microsoft.Maui.DevFlow.Testing;
 [JsonSerializable(typeof(MauiQualificationPrivacySecurityMetric))]
 [JsonSerializable(typeof(MauiQualificationReviewEvidence))]
 [JsonSerializable(typeof(MauiPreviewFeatureFlags))]
+[JsonSerializable(typeof(MauiAuthoringStudyReport))]
+[JsonSerializable(typeof(MauiAuthoringStudySession))]
 [JsonSerializable(typeof(Dictionary<string, JsonElement>))]
 public sealed partial class MauiTestingJsonContext : JsonSerializerContext;

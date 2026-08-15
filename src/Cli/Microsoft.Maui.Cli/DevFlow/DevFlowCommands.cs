@@ -1645,6 +1645,11 @@ public class DevFlowCommands
             platformOption,
             output,
             static () => _errorOccurred = true));
+        flowCommand.Add(Flows.FlowStudyCommands.Create(
+            jsonOption,
+            noJsonOption,
+            output,
+            static () => _errorOccurred = true));
         devflowCommand.Add(flowCommand);
 
         // ===== shared Inspector / Test Workbench =====

@@ -7,6 +7,19 @@ export const PROTOTYPE_STUDY_KIND = 'local-session-evidence';
 export const PROTOTYPE_STUDY_VERSION = 1;
 export const PROTOTYPE_STUDY_STORAGE_KEY = 'maui-devflow-prototype-study-v1';
 export const PROTOTYPE_STUDY_MAX_EVENTS = 256;
+
+// Authoring-time protocol identity. Sessions recorded under different protocol
+// versions, task ids, or arms are different measurements and must never be pooled.
+export const PROTOTYPE_STUDY_PROTOCOL = 'maui-devflow-authoring-time';
+export const PROTOTYPE_STUDY_PROTOCOL_VERSION = 1;
+export const PROTOTYPE_STUDY_ARMS = Object.freeze(['assisted', 'unassisted-control']);
+export const PROTOTYPE_STUDY_TASK_IDS = Object.freeze([
+  'task-01-first-run-smoke',
+  'task-02-form-entry-assertion',
+  'task-03-navigation-round-trip',
+  'task-04-list-scroll-select',
+  'task-05-repair-a-broken-selector',
+]);
 export const PROTOTYPE_STUDY_EVENT_KINDS = Object.freeze([
   'workbench-opened',
   'goal-defined',
@@ -35,6 +48,9 @@ export const PROTOTYPE_STUDY_EVENT_KINDS = Object.freeze([
 ]);
 
 const EVENT_KINDS = new Set(PROTOTYPE_STUDY_EVENT_KINDS);
+const STUDY_ARMS = new Set(PROTOTYPE_STUDY_ARMS);
+const STUDY_TASK_IDS = new Set(PROTOTYPE_STUDY_TASK_IDS);
+const PARTICIPANT_SALT_PATTERN = /^participant-[a-f0-9]{8,64}$/;
 const PROVENANCE = new Set(['human', 'agent', 'mixed']);
 const SELECTOR_QUALITY = new Set(['durable', 'fragile', 'unknown']);
 const TERMINAL_STATES = new Set([
@@ -327,14 +343,50 @@ function validStoredEvent(event) {
   return true;
 }
 
-function createSession(now, maxEventCount, randomId, recoveredFromCorruptStorage = false) {
+function normalizedAssignment(value) {
+  const source = value && typeof value === 'object' ? value : {};
+  const participantSalt = typeof source.participantSalt === 'string' &&
+    PARTICIPANT_SALT_PATTERN.test(source.participantSalt.trim().toLowerCase())
+    ? source.participantSalt.trim().toLowerCase()
+    : null;
+  const taskId = typeof source.taskId === 'string' && STUDY_TASK_IDS.has(source.taskId.trim())
+    ? source.taskId.trim()
+    : null;
+  const arm = typeof source.arm === 'string' && STUDY_ARMS.has(source.arm.trim())
+    ? source.arm.trim()
+    : null;
+  return { participantSalt, taskId, arm };
+}
+
+function assignmentFromLocation(location) {
+  try {
+    const search = typeof location?.search === 'string' ? location.search : '';
+    if (!search) return {};
+    const query = new URLSearchParams(search);
+    return {
+      participantSalt: query.get('studyParticipant'),
+      taskId: query.get('studyTask'),
+      arm: query.get('studyArm'),
+    };
+  } catch {
+    return {};
+  }
+}
+
+function createSession(now, maxEventCount, randomId, recoveredFromCorruptStorage = false, assignment = {}) {
+  const resolved = normalizedAssignment(assignment);
   return {
     schema: PROTOTYPE_STUDY_SCHEMA,
     kind: PROTOTYPE_STUDY_KIND,
     version: PROTOTYPE_STUDY_VERSION,
+    protocol: PROTOTYPE_STUDY_PROTOCOL,
+    protocolVersion: PROTOTYPE_STUDY_PROTOCOL_VERSION,
     localSessionId: opaqueLocalId(randomId(), 'local'),
     startedAt: isoTime(now()),
     redactionSalt: opaqueLocalId(randomId(), 'salt'),
+    participantSalt: resolved.participantSalt,
+    taskId: resolved.taskId,
+    arm: resolved.arm,
     maxEventCount,
     retention: 'sessionStorage-current-tab',
     droppedEventCount: 0,
@@ -348,8 +400,13 @@ function validStoredSession(value) {
     value.schema === PROTOTYPE_STUDY_SCHEMA &&
     value.kind === PROTOTYPE_STUDY_KIND &&
     value.version === PROTOTYPE_STUDY_VERSION &&
+    value.protocol === PROTOTYPE_STUDY_PROTOCOL &&
+    value.protocolVersion === PROTOTYPE_STUDY_PROTOCOL_VERSION &&
     validOpaqueLocalId(value.localSessionId, 'local') &&
     validOpaqueLocalId(value.redactionSalt, 'salt') &&
+    (value.participantSalt == null || PARTICIPANT_SALT_PATTERN.test(value.participantSalt)) &&
+    (value.taskId == null || STUDY_TASK_IDS.has(value.taskId)) &&
+    (value.arm == null || STUDY_ARMS.has(value.arm)) &&
     eventTime({ at: value.startedAt }) != null &&
     Array.isArray(value.events) &&
     value.events.length <= 512 &&
@@ -535,12 +592,17 @@ function summarizeSession(session, storageState) {
   if (firstFailed && !firstDiagnostic) missingFields.push('timeToDiagnosisProxyMs');
   if (session.droppedEventCount > 0) missingFields.push('completeEventHistory');
   if (storageState === 'unavailable') missingFields.push('sessionStoragePersistence');
+  if (!session.arm) missingFields.push('studyArm');
+  if (!session.taskId) missingFields.push('studyTaskId');
+  if (!session.participantSalt) missingFields.push('participantSalt');
 
   const limitations = [
     'Local session only; closing the browser tab or clearing session data can remove this journal.',
     'No telemetry or network egress is performed.',
     'This is prototype-study evidence, not qualification, device evidence, or platform proof.',
     'Metrics are descriptive session proxies and do not establish causality.',
+    'A single session carries no control arm. Authoring-time durations here are uninterpretable ' +
+      'until paired with unassisted-control sessions for the same task.',
   ];
   if (session.recoveredFromCorruptStorage)
     limitations.push('A corrupt local journal was discarded before this session started.');
@@ -551,6 +613,13 @@ function summarizeSession(session, storageState) {
 
   return {
     localSessionOnly: true,
+    protocol: {
+      name: PROTOTYPE_STUDY_PROTOCOL,
+      protocolVersion: PROTOTYPE_STUDY_PROTOCOL_VERSION,
+      taskId: session.taskId ?? null,
+      arm: session.arm ?? null,
+      participantLinkage: session.participantSalt ? 'salted' : 'unavailable',
+    },
     storage: {
       available: storageState !== 'unavailable',
       status: storageState,
@@ -625,6 +694,9 @@ export function createPrototypeStudyJournal(options = {}) {
     ? options.storageKey
     : PROTOTYPE_STUDY_STORAGE_KEY;
   const configuredMaxEvents = boundedMaxEvents(options.maxEventCount);
+  const requestedAssignment = normalizedAssignment(
+    options.assignment ??
+    assignmentFromLocation(options.location ?? (typeof window !== 'undefined' ? window.location : null)));
   let storageState = storage ? 'available' : 'unavailable';
   let session = null;
 
@@ -671,7 +743,7 @@ export function createPrototypeStudyJournal(options = {}) {
   }
 
   if (!session) {
-    session = createSession(now, configuredMaxEvents, randomId, storageState === 'recovered-corrupt');
+    session = createSession(now, configuredMaxEvents, randomId, storageState === 'recovered-corrupt', requestedAssignment);
     if (!persist() && storageState !== 'unavailable') storageState = 'unavailable';
   }
 
@@ -707,8 +779,28 @@ export function createPrototypeStudyJournal(options = {}) {
       return false;
     }
     storageState = 'available';
-    session = createSession(now, configuredMaxEvents, randomId);
+    session = createSession(now, configuredMaxEvents, randomId, false, requestedAssignment);
     return persist();
+  }
+
+  // Protocol assignment may only be stamped before the first recorded event. Re-stamping a
+  // session that already has timing evidence would let an operator move a slow session into the
+  // other arm after seeing the result, which is the exact bias this study must not permit.
+  function assign(assignment) {
+    const resolved = normalizedAssignment(assignment);
+    if (storageState === 'unavailable') return { assigned: false, reason: 'storage-unavailable' };
+    if (session.events.length > 0) return { assigned: false, reason: 'session-already-has-evidence' };
+    if (!resolved.arm) return { assigned: false, reason: 'unknown-arm' };
+    if (!resolved.taskId) return { assigned: false, reason: 'unknown-task' };
+    const previous = { participantSalt: session.participantSalt, taskId: session.taskId, arm: session.arm };
+    session.participantSalt = resolved.participantSalt;
+    session.taskId = resolved.taskId;
+    session.arm = resolved.arm;
+    if (!persist()) {
+      Object.assign(session, previous);
+      return { assigned: false, reason: 'storage-unavailable' };
+    }
+    return { assigned: true, reason: null };
   }
 
   function summary() {
@@ -718,13 +810,32 @@ export function createPrototypeStudyJournal(options = {}) {
   return Object.freeze({
     record,
     clear,
+    assign,
     summary,
     exportEvidence() {
+      const eligibility = [];
+      if (!session.arm) eligibility.push('arm-unassigned');
+      if (!session.taskId) eligibility.push('task-unassigned');
+      if (!session.participantSalt) eligibility.push('participant-unlinkable');
+      if (storageState !== 'available') eligibility.push('storage-degraded');
+      if (session.droppedEventCount > 0) eligibility.push('event-history-truncated');
       return {
         schema: PROTOTYPE_STUDY_SCHEMA,
         kind: PROTOTYPE_STUDY_KIND,
         version: PROTOTYPE_STUDY_VERSION,
         localSessionOnly: true,
+        protocol: {
+          name: PROTOTYPE_STUDY_PROTOCOL,
+          protocolVersion: PROTOTYPE_STUDY_PROTOCOL_VERSION,
+          taskId: session.taskId,
+          arm: session.arm,
+          participantSalt: session.participantSalt,
+          arms: [...PROTOTYPE_STUDY_ARMS],
+          eligibleForAggregation: eligibility.length === 0,
+          ineligibleReasons: eligibility,
+          statement: 'An authoring-time number from the assisted arm alone is not a result. ' +
+            'It is only interpretable against unassisted-control sessions for the same taskId.',
+        },
         session: {
           id: session.localSessionId,
           startedAt: session.startedAt,

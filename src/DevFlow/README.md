@@ -287,6 +287,18 @@ exits before agent readiness (for example, from a disconnected RDP session), the
 redacted process-exit host diagnostic and returns `infrastructure-failure`; it does not claim a
 flow failure or Windows qualification.
 
+### Measurement status
+
+Goal #4 names five metrics. Their recorded state is tracked deliberately rather than implied:
+
+| Metric | Recorded value today | Where |
+|---|---|---|
+| False repair rate | `0/316`, split `curated 0/16` + `generated 0/300` — static corpus only, no device trials | `tests/DevFlow/InspectorCorpus/README.md` |
+| Classification accuracy | Measured on the curated corpus with a published confusion matrix; gate stays `not-qualified` below 100 labelled cases | `tests/DevFlow/InspectorCorpus/baselines/README.md` |
+| Repair acceptance / precision | Denominator is the curated repair-positive count; no human-acceptance signal exists yet | `tests/DevFlow/InspectorCorpus/baselines/qualification.json` |
+| Replay stability | **No recorded number.** Needs real-device runs; `maui devflow flow qualify --accumulate` makes the ≥100 clean first attempts reachable across independent jobs | [flow-qa.md](../../docs/DevFlow/flow-qa.md) |
+| Authoring time | **No recorded number.** The protocol and export path exist; no sessions collected, and no unassisted control arm has been run | [authoring-time-protocol.md](../../docs/DevFlow/authoring-time-protocol.md) |
+
 ### On-demand diagnostics
 
 Two explicit, read-only diagnostics are available from the CLI, the MCP tools, and the Inspector's

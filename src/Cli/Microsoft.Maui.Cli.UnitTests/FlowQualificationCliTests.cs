@@ -1,3 +1,5 @@
+using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Maui.Cli.UnitTests.Fixtures;
 using Xunit;
 
@@ -39,9 +41,111 @@ public sealed class FlowQualificationCliTests : IDisposable
         Assert.Equal("not-qualified", json.GetProperty("status").GetString());
         Assert.Equal(316, json.GetProperty("metrics").GetProperty("falseHeals").GetProperty("denominator").GetInt32());
         Assert.Equal(0, json.GetProperty("metrics").GetProperty("falseHeals").GetProperty("numerator").GetInt32());
+
+        // 0/316 must be readable as its curated and generated shares, never as 316 independent trials.
+        var sourceCounts = json.GetProperty("metrics").GetProperty("falseHeals").GetProperty("sourceCounts")
+            .EnumerateArray()
+            .ToDictionary(
+                item => item.GetProperty("source").GetString()!,
+                item => item.GetProperty("denominator").GetInt32(),
+                StringComparer.Ordinal);
+        Assert.Equal(16, sourceCounts["curated"]);
+        Assert.Equal(300, sourceCounts["generated"]);
+
+        var corpusSummary = json.GetProperty("corpus");
+        Assert.Equal(58, corpusSummary.GetProperty("curatedCases").GetInt32());
+        Assert.Equal(31, corpusSummary.GetProperty("curatedRepairPositiveCases").GetInt32());
+        Assert.Equal(16, corpusSummary.GetProperty("curatedNoRepairCases").GetInt32());
+        Assert.Equal(300, corpusSummary.GetProperty("generatedNoRepairCases").GetInt32());
+        Assert.True(corpusSummary.GetProperty("provenanceComplete").GetBoolean());
+        Assert.Equal(
+            "synthetic",
+            corpusSummary.GetProperty("provenanceSourceCounts").EnumerateArray().Single().GetProperty("sourceKind").GetString());
+
+        var classification = json.GetProperty("metrics").GetProperty("classificationAccuracy");
+        Assert.Equal(45, classification.GetProperty("denominator").GetInt32());
+        Assert.Equal(42, classification.GetProperty("numerator").GetInt32());
+        Assert.Equal("measured", json.GetProperty("metrics").GetProperty("classificationMatrix").GetProperty("state").GetString());
+
         Assert.Equal(
             "missing",
             json.GetProperty("metrics").GetProperty("runtimeOverhead").GetProperty("deviceOverhead").GetProperty("state").GetString());
+    }
+
+    [Fact]
+    public async Task FlowQualify_AccumulateMergesAcrossRunsAndRefusesToCountTheSameEvidenceTwice()
+    {
+        var accumulate = Path.Combine(_root, "accumulation");
+        var corpus = Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus");
+        var cli = new CliTestHarness(mockAgentPort: 1);
+
+        for (var run = 0; run < 3; run++)
+        {
+            var result = await cli.InvokeRawAsync(
+                "devflow",
+                "flow",
+                "qualify",
+                "--platform",
+                "android",
+                "--corpus",
+                corpus,
+                "--accumulate",
+                accumulate,
+                "--json");
+            Assert.Equal(0, result.ExitCode);
+        }
+
+        var accumulated = JsonDocument.Parse(await File.ReadAllTextAsync(Path.Combine(accumulate, "accumulated.json"))).RootElement;
+        Assert.Equal("maui-preview-qualification-accumulation", accumulated.GetProperty("kind").GetString());
+
+        // Three identical static runs are one observation. Re-running the same corpus must never
+        // manufacture the independent trials the repair-precision gate is waiting for.
+        Assert.Equal(1, accumulated.GetProperty("consideredRuns").GetInt32());
+        Assert.Equal(1, accumulated.GetProperty("acceptedRuns").GetInt32());
+        Assert.Equal(
+            31,
+            accumulated.GetProperty("metrics").GetProperty("repairPrecision").GetProperty("denominator").GetInt32());
+        Assert.Equal("not-qualified", accumulated.GetProperty("status").GetString());
+        Assert.Contains(
+            accumulated.GetProperty("gates").EnumerateArray(),
+            gate => gate.GetProperty("gateId").GetString() == "accumulated-repair-precision" &&
+                gate.GetProperty("status").GetString() == "not-qualified");
+    }
+
+    [Fact]
+    public async Task FlowQualify_BaselineDiffPassesOnTheCommittedBaselineAndFailsOnARegression()
+    {
+        var repositoryRoot = FindRepositoryRoot();
+        var corpus = Path.Combine(repositoryRoot, "tests", "DevFlow", "InspectorCorpus");
+        var baseline = Path.Combine(corpus, "baselines", "qualification.json");
+        var cli = new CliTestHarness(mockAgentPort: 1);
+
+        var clean = await cli.InvokeRawAsync(
+            "devflow", "flow", "qualify",
+            "--platform", "android",
+            "--corpus", corpus,
+            "--baseline", baseline,
+            "--json");
+        Assert.Equal(0, clean.ExitCode);
+
+        // A baseline claiming better numbers than the current run must fail the diff, so a
+        // regression in repair precision or false-heal cleanliness cannot land silently.
+        var stricter = Path.Combine(_root, "stricter-baseline.json");
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(baseline))!;
+        document["metrics"]!["falseHeals"]!["denominator"] = 400;
+        document["metrics"]!["repairPrecision"]!["numerator"] = 31;
+        document["metrics"]!["repairPrecision"]!["denominator"] = 31;
+        document["metrics"]!["classificationAccuracy"]!["numerator"] = 45;
+        document["metrics"]!["classificationAccuracy"]!["denominator"] = 45;
+        await File.WriteAllTextAsync(stricter, document.ToJsonString());
+
+        var regressed = await cli.InvokeRawAsync(
+            "devflow", "flow", "qualify",
+            "--platform", "android",
+            "--corpus", corpus,
+            "--baseline", stricter,
+            "--json");
+        Assert.NotEqual(0, regressed.ExitCode);
     }
 
     [Fact]

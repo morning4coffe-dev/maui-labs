@@ -47,6 +47,33 @@ jobs:
       pack-driver: true
       os: '["windows-latest"]'
 
+  qualification-baseline:
+    name: Qualification baseline diff
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Build CLI
+        run: dotnet build src/Cli/Microsoft.Maui.Cli/Microsoft.Maui.Cli.csproj -f net10.0 -v q --nologo
+
+      # Fails when repair precision, selector stability, classification accuracy, first-attempt
+      # stability, or false-heal cleanliness drops below the committed baseline, or when a gate
+      # that passed in the baseline stops passing. Improvements never fail.
+      - name: Diff qualification against committed baseline
+        run: >
+          dotnet run --project src/Cli/Microsoft.Maui.Cli/Microsoft.Maui.Cli.csproj
+          --framework net10.0 --no-build --
+          devflow flow qualify
+          --corpus tests/DevFlow/InspectorCorpus
+          --platform android
+          --baseline tests/DevFlow/InspectorCorpus/baselines/qualification.json
+          --no-json
+
   hosts:
     name: JavaScript hosts and VSIX
     runs-on: ubuntu-latest

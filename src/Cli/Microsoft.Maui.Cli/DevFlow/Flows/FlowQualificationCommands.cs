@@ -56,6 +56,14 @@ internal static class FlowQualificationCommands
         {
             Description = "Return a nonzero exit code when the result is fail or not-qualified. Default is advisory.",
         };
+        var accumulateOption = new Option<string?>("--accumulate")
+        {
+            Description = "Directory of prior run-*.json qualification reports. Merges metric numerators and denominators across independent runs, records this run into the directory, and writes accumulated.json.",
+        };
+        var baselineOption = new Option<string?>("--baseline")
+        {
+            Description = "Path to a committed baseline qualification.json. Fails when a gated metric regresses below the baseline.",
+        };
         command.Add(corpusOption);
         command.Add(resultsOption);
         command.Add(manifestsOption);
@@ -64,6 +72,8 @@ internal static class FlowQualificationCommands
         command.Add(seedOption);
         command.Add(generatedOption);
         command.Add(failOnNonPassOption);
+        command.Add(accumulateOption);
+        command.Add(baselineOption);
         command.SetAction(async (ctx, ct) =>
         {
             var json = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
@@ -104,17 +114,215 @@ internal static class FlowQualificationCommands
                 }
             }
 
-            output.WriteResult(report, json, static value =>
+            MauiQualificationAccumulation? accumulation = null;
+            var accumulateDirectory = ctx.GetValue(accumulateOption);
+            if (!string.IsNullOrWhiteSpace(accumulateDirectory))
+            {
+                try
+                {
+                    accumulation = await AccumulateAsync(accumulateDirectory, report, ct);
+                }
+                catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+                {
+                    output.WriteError("Accumulated qualification evidence could not be read or written.", json, "AccumulateError");
+                    markError();
+                    return;
+                }
+            }
+
+            MauiQualificationBaselineComparison? baseline = null;
+            var baselinePath = ctx.GetValue(baselineOption);
+            if (!string.IsNullOrWhiteSpace(baselinePath))
+            {
+                baseline = CompareBaseline(baselinePath, report, accumulation);
+                if (!baseline.Ok)
+                    markError();
+            }
+
+            output.WriteResult(report, json, value =>
             {
                 Console.WriteLine($"Qualification: {value.Status}");
-                Console.WriteLine($"Static corpus: {value.Corpus.CuratedCases} curated, {value.Corpus.GeneratedCases} generated no-repair cases");
+                Console.WriteLine($"Static corpus: {value.Corpus.CuratedCases} curated ({value.Corpus.CuratedRepairPositiveCases} repair-positive, {value.Corpus.CuratedNoRepairCases} no-repair), {value.Corpus.GeneratedCases} generated no-repair cases");
+                Console.WriteLine($"False heals: {Describe(value.Metrics.FalseHeals)}");
+                Console.WriteLine($"Repair precision: {Describe(value.Metrics.RepairPrecision)}");
+                Console.WriteLine($"Classification accuracy: {Describe(value.Metrics.ClassificationAccuracy)}");
                 foreach (var gate in value.Gates.Where(static gate => gate.Status != MauiPreviewQualificationStates.Pass))
                     Console.WriteLine($"{gate.Status}: {gate.GateId} ({string.Join(", ", gate.ReasonCodes)})");
+                if (accumulation is not null)
+                {
+                    Console.WriteLine($"Accumulated: {accumulation.Status} over {accumulation.AcceptedRuns} accepted of {accumulation.ConsideredRuns} runs ({accumulation.RejectedRuns} rejected)");
+                    foreach (var name in MauiPreviewQualificationAccumulator.MergedMetricNames)
+                    {
+                        if (accumulation.Metrics.TryGetValue(name, out var merged) && merged.Denominator > 0)
+                            Console.WriteLine($"  {name}: {Describe(merged)}");
+                    }
+                }
+                foreach (var regression in baseline?.Regressions ?? [])
+                    Console.WriteLine($"regression: {regression}");
             });
             if (ctx.GetValue(failOnNonPassOption) && report.Status != MauiPreviewQualificationStates.Pass)
                 markError();
         });
         return command;
+    }
+
+    private static string Describe(MauiQualificationRateMetric metric)
+    {
+        var split = metric.SourceCounts.Count == 0
+            ? string.Empty
+            : " [" + string.Join(", ", metric.SourceCounts.Select(static item => $"{item.Source} {item.Numerator}/{item.Denominator}")) + "]";
+        return $"{metric.Numerator}/{metric.Denominator}{split}";
+    }
+
+    /// <summary>
+    /// Merges this run into a directory of prior runs. Merging separate runs is what "at least N
+    /// clean first attempts" actually requires: N independent trials, not N iterations inside one
+    /// warm process. Duplicate evidence is rejected rather than counted twice.
+    /// </summary>
+    private static async Task<MauiQualificationAccumulation> AccumulateAsync(
+        string directory,
+        MauiPreviewQualificationReport report,
+        CancellationToken cancellationToken)
+    {
+        var full = Path.GetFullPath(directory);
+        Directory.CreateDirectory(full);
+        var fingerprint = MauiPreviewQualificationAccumulator.ComputeEvidenceFingerprint(report);
+        var runPath = Path.Combine(full, "run-" + fingerprint.Replace("sha256:", string.Empty, StringComparison.Ordinal)[..32] + ".json");
+        await WriteAtomicAsync(runPath, report, cancellationToken).ConfigureAwait(false);
+
+        var reports = MauiPreviewQualificationAccumulator.ReadDirectory(full, out var errors);
+        var accumulation = MauiPreviewQualificationAccumulator.Accumulate(reports, DateTimeOffset.UtcNow);
+        foreach (var error in errors.Distinct(StringComparer.Ordinal))
+        {
+            accumulation.Gates.Add(new MauiQualificationGateResult
+            {
+                GateId = "accumulated-run-readable",
+                Status = MauiPreviewQualificationStates.NotQualified,
+                Message = "At least one accumulated run file could not be read.",
+                ReasonCodes = [error],
+            });
+            accumulation.Status = MauiPreviewQualificationStates.NotQualified;
+        }
+
+        var accumulatedPath = Path.Combine(full, "accumulated.json");
+        var payload = JsonSerializer.Serialize(accumulation, MauiTestingJsonContext.Default.MauiQualificationAccumulation);
+        var temporary = accumulatedPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            await File.WriteAllTextAsync(temporary, payload, cancellationToken).ConfigureAwait(false);
+            File.Move(temporary, accumulatedPath, overwrite: true);
+        }
+        finally
+        {
+            try { File.Delete(temporary); } catch { }
+        }
+        return accumulation;
+    }
+
+    /// <summary>
+    /// Compares gated metrics against a committed baseline. Only regressions fail: a run may
+    /// improve on the baseline, but a drop in repair precision, selector stability, classification
+    /// accuracy, or false-heal cleanliness is a failure even when the overall status is unchanged.
+    /// </summary>
+    private static MauiQualificationBaselineComparison CompareBaseline(
+        string baselinePath,
+        MauiPreviewQualificationReport report,
+        MauiQualificationAccumulation? accumulation)
+    {
+        var comparison = new MauiQualificationBaselineComparison();
+        if (!TryReadText(baselinePath, out var text))
+        {
+            comparison.Regressions.Add("baseline-unreadable");
+            return comparison;
+        }
+        MauiPreviewQualificationReport? baseline;
+        try
+        {
+            baseline = JsonSerializer.Deserialize(text, MauiTestingJsonContext.Default.MauiPreviewQualificationReport);
+        }
+        catch (JsonException)
+        {
+            comparison.Regressions.Add("baseline-unparsable");
+            return comparison;
+        }
+        if (baseline is null)
+        {
+            comparison.Regressions.Add("baseline-unparsable");
+            return comparison;
+        }
+
+        CompareRate(comparison, "repairPrecision", baseline.Metrics.RepairPrecision, report.Metrics.RepairPrecision);
+        CompareRate(comparison, "selectorStability", baseline.Metrics.SelectorStability, report.Metrics.SelectorStability);
+        CompareRate(comparison, "classificationAccuracy", baseline.Metrics.ClassificationAccuracy, report.Metrics.ClassificationAccuracy);
+        CompareRate(
+            comparison,
+            "flakeFirstAttemptStability",
+            baseline.Metrics.FlakeFirstAttemptStability.Stability,
+            report.Metrics.FlakeFirstAttemptStability.Stability);
+
+        // False heals are a count, not a rate: any increase is a regression, and the denominator
+        // must not shrink either or a clean sweep could be faked by evaluating fewer cases.
+        if (report.Metrics.FalseHeals.Numerator > baseline.Metrics.FalseHeals.Numerator)
+            comparison.Regressions.Add($"falseHeals numerator {baseline.Metrics.FalseHeals.Numerator} -> {report.Metrics.FalseHeals.Numerator}");
+        if (report.Metrics.FalseHeals.Denominator < baseline.Metrics.FalseHeals.Denominator)
+            comparison.Regressions.Add($"falseHeals denominator {baseline.Metrics.FalseHeals.Denominator} -> {report.Metrics.FalseHeals.Denominator}");
+
+        foreach (var baselineGate in baseline.Gates.Where(static gate => gate.Status == MauiPreviewQualificationStates.Pass))
+        {
+            var current = report.Gates.FirstOrDefault(gate => gate.GateId == baselineGate.GateId);
+            if (current is null)
+                comparison.Regressions.Add($"gate {baselineGate.GateId} missing");
+            else if (current.Status != MauiPreviewQualificationStates.Pass)
+                comparison.Regressions.Add($"gate {baselineGate.GateId} pass -> {current.Status}");
+        }
+
+        if (accumulation is not null)
+        {
+            foreach (var name in MauiPreviewQualificationAccumulator.MergedMetricNames)
+            {
+                if (accumulation.Metrics.TryGetValue(name, out var merged) && merged.Denominator > 0)
+                    CompareRate(comparison, "accumulated." + name, BaselineMetric(baseline, name), merged);
+            }
+        }
+        return comparison;
+    }
+
+    private static MauiQualificationRateMetric? BaselineMetric(MauiPreviewQualificationReport baseline, string name) => name switch
+    {
+        "recordingValidity" => baseline.Metrics.RecordingValidity,
+        "selectorStability" => baseline.Metrics.SelectorStability,
+        "repairPrecision" => baseline.Metrics.RepairPrecision,
+        "repairRecall" => baseline.Metrics.RepairRecall,
+        "falseHeals" => null,
+        "abstention" => null,
+        "classificationAccuracy" => baseline.Metrics.ClassificationAccuracy,
+        _ => null,
+    };
+
+    private static void CompareRate(
+        MauiQualificationBaselineComparison comparison,
+        string name,
+        MauiQualificationRateMetric? baseline,
+        MauiQualificationRateMetric? current)
+    {
+        if (baseline is null || current is null || baseline.Denominator == 0)
+            return;
+        var baselineRate = (double)baseline.Numerator / baseline.Denominator;
+        var currentRate = current.Denominator == 0 ? 0d : (double)current.Numerator / current.Denominator;
+        if (current.Denominator == 0)
+        {
+            comparison.Regressions.Add($"{name} evidence disappeared (baseline {baseline.Numerator}/{baseline.Denominator})");
+            return;
+        }
+        if (currentRate + 1e-9 < baselineRate)
+            comparison.Regressions.Add($"{name} {baseline.Numerator}/{baseline.Denominator} -> {current.Numerator}/{current.Denominator}");
+    }
+
+    private sealed class MauiQualificationBaselineComparison
+    {
+        public List<string> Regressions { get; } = [];
+
+        public bool Ok => Regressions.Count == 0;
     }
 
     private static MauiPreviewQualificationInput CreateBaseInput(

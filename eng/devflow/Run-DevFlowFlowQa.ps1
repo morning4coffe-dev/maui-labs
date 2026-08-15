@@ -26,7 +26,14 @@ Required:
   --results-root <path>   Exact repository-local results directory for the selected platform
 
 Options:
-  --repeat <N>            Clean repetitions (default: 3; maximum: 20)
+  --repeat <N>            Clean repetitions per invocation (default: 3; maximum: 20).
+                          The cap is deliberate: gates that need 100+ clean first attempts want
+                          100 independent runs, not 100 iterations of one warm process. Use
+                          --accumulate to merge evidence across separate runs instead.
+  --accumulate <dir>      Merge qualification metric numerators/denominators across independent
+                          runs into <dir>. Requires --qualification.
+  --baseline <path>       Fail when a gated qualification metric regresses below this committed
+                          baseline report. Requires --qualification.
   --configuration <name>  Test configuration (default: Debug)
   --flow-filter <filter>  Additional VSTest filter appended to the platform filter
   --no-build              Pass --no-build to dotnet test
@@ -890,7 +897,9 @@ function Invoke-Qualification {
         [Parameter(Mandatory)][string] $Platform,
         [Parameter(Mandatory)][string] $ManifestPath,
         [Parameter(Mandatory)][string] $ArtifactRoot,
-        [Parameter(Mandatory)][string] $DiagnosticDirectory
+        [Parameter(Mandatory)][string] $DiagnosticDirectory,
+        [string] $AccumulateDirectory,
+        [string] $BaselinePath
     )
 
     $cliProject = Join-Path $RepositoryRoot 'src/Cli/Microsoft.Maui.Cli/Microsoft.Maui.Cli.csproj'
@@ -909,6 +918,12 @@ function Invoke-Qualification {
             '--output', $outputPath,
             '--json',
             '--fail-on-non-pass'))
+    if (-not [string]::IsNullOrWhiteSpace($AccumulateDirectory)) {
+        $arguments.AddRange([string[]] @('--accumulate', $AccumulateDirectory))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($BaselinePath)) {
+        $arguments.AddRange([string[]] @('--baseline', $BaselinePath))
+    }
 
     $result = Invoke-RecordedCommand -FileName 'dotnet' -Arguments $arguments.ToArray() -DiagnosticPath (Join-Path $DiagnosticDirectory 'qualification-output.txt')
     $status = if ($result.exitCode -eq 0) {
@@ -941,6 +956,8 @@ $configuration = 'Debug'
 $flowFilter = $null
 $noBuild = $false
 $qualification = $false
+$accumulateDirectory = $null
+$baselinePath = $null
 $experimental = $false
 $physicalDevice = $false
 $deviceId = $null
@@ -976,6 +993,10 @@ for ($index = 0; $index -lt $CliArgs.Count; $index++) {
         '-no-build' { $noBuild = $true; break }
         '--qualification' { $qualification = $true; break }
         '-qualification' { $qualification = $true; break }
+        '--accumulate' { $accumulateDirectory = Get-RequiredValue $token $index $CliArgs; $index++; break }
+        '-accumulate' { $accumulateDirectory = Get-RequiredValue $token $index $CliArgs; $index++; break }
+        '--baseline' { $baselinePath = Get-RequiredValue $token $index $CliArgs; $index++; break }
+        '-baseline' { $baselinePath = Get-RequiredValue $token $index $CliArgs; $index++; break }
         '--experimental' { $experimental = $true; break }
         '-experimental' { $experimental = $true; break }
         '--physical-device' { $physicalDevice = $true; break }
@@ -1011,9 +1032,15 @@ if ([string]::IsNullOrWhiteSpace($resultsRootInput)) {
 }
 $parsedRepeat = 0
 if (-not [int]::TryParse([string] $repeat, [ref] $parsedRepeat) -or $parsedRepeat -lt 1 -or $parsedRepeat -gt 20) {
-    Exit-Usage '--repeat must be an integer from 1 through 20.'
+    Exit-Usage '--repeat must be an integer from 1 through 20. Use --accumulate to merge evidence across independent runs instead of raising this cap.'
 }
 $repeat = $parsedRepeat
+if (-not [string]::IsNullOrWhiteSpace($accumulateDirectory) -and -not $qualification) {
+    Exit-Usage '--accumulate requires --qualification.'
+}
+if (-not [string]::IsNullOrWhiteSpace($baselinePath) -and -not $qualification) {
+    Exit-Usage '--baseline requires --qualification.'
+}
 Test-OptionValue $configuration '--configuration'
 if ($configuration -notmatch '^[A-Za-z0-9._-]+$') {
     Exit-Usage '--configuration may contain only letters, digits, dot, underscore, and hyphen.'
@@ -1511,7 +1538,7 @@ try {
     & $writeArtifacts $status $classification
 
     if ($qualification -and $classification -eq 'passed') {
-        $qualificationResult = Invoke-Qualification -RepositoryRoot $repositoryRoot -Configuration $configuration -NoBuild $noBuild -Platform $platform -ManifestPath $manifestPath -ArtifactRoot $artifactRoot -DiagnosticDirectory $diagnosticDirectory
+        $qualificationResult = Invoke-Qualification -RepositoryRoot $repositoryRoot -Configuration $configuration -NoBuild $noBuild -Platform $platform -ManifestPath $manifestPath -ArtifactRoot $artifactRoot -DiagnosticDirectory $diagnosticDirectory -AccumulateDirectory $accumulateDirectory -BaselinePath $baselinePath
         $hostQa.qualification = $qualificationResult
         if ($qualificationResult.status -eq 'not-qualified') {
             $status = 'not-qualified'

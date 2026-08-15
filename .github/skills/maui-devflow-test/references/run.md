@@ -30,12 +30,13 @@ execution authority.
    revision and digest, and expiry.
 2. Direct the human to review the exact scope in Workbench. A chat response
    never replaces this grant. If capabilities report that trusted native-host
-   approval is unavailable (including standalone browser or chat), do not submit a doomed approval request and do not
-   query authoring-session status as a substitute. State that restricted-agent
-   execution is unavailable, while keeping the committed disk flow distinct.
-   The separate operator-owned `maui devflow flow run` CLI path may execute a
-   valid committed flow outside this restricted approval protocol. Describe it
-   as an explicit operator action, never as an approval bypass or an agent run.
+   approval is unavailable (including standalone browser or chat), do not
+   submit a doomed approval request and do not query authoring-session status
+   as a substitute. State that restricted-agent execution is unavailable,
+   while keeping the committed disk flow distinct. The separate operator-owned
+   `maui devflow flow run` CLI path may execute a valid committed flow outside
+   this restricted approval protocol. Describe it as an explicit operator
+   action, never as an approval bypass or an agent run.
 3. Wait with `maui_test_author await-approval`, then call `maui_test_run` with
    `start` exactly once using a broker-issued, single-use grant only when an
    available native approval client issued that exact bound grant.

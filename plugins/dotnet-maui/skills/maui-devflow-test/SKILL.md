@@ -3,14 +3,17 @@ name: maui-devflow-test
 description: >-
   Collaboratively author, review, run, diagnose, and hand off safe MAUI DevFlow
   tests through the restricted test-agent MCP profile. USE FOR: any request to
-  create, record, review, save, run, repair, or improve a UI test against a
-  connected/running MAUI app; conversational test planning; AutomationId-based
-  journeys; committed-flow execution; selector triage; repair handoff;
-  CI-evidence interpretation; and app-testability recommendations. DO NOT USE
-  FOR: editing xUnit/integration-test source unless the user explicitly asks for
-  a code-based unit or integration test; broad app automation; source editing;
-  automatic selector repair; treating chat approval as authorization; or
-  choosing ambiguous projects, targets, artifacts, agents, devices, or selectors.
+  create, review, save, run, repair, or improve a UI test against a
+  connected/running MAUI app; restating a flow described in words as a test;
+  conversational test planning; AutomationId-based journeys; committed-flow
+  execution; selector triage; repair handoff; CI-evidence interpretation; and
+  app-testability recommendations. DO NOT USE FOR: promoting an existing
+  Inspector recording into a named flow (use maui-devflow-record); operator-run
+  `maui devflow flow` CLI execution (use maui-devflow-run-cli); editing
+  xUnit/integration-test source unless the user explicitly asks for a code-based
+  unit or integration test; broad app automation; source editing; automatic
+  selector repair; treating chat approval as authorization; or choosing
+  ambiguous projects, targets, artifacts, agents, devices, or selectors.
 ---
 
 # MAUI DevFlow Collaborative Testing
@@ -76,6 +79,7 @@ when deciding whether to ask a question.
 
 | User goal | Follow |
 | --- | --- |
+| Describe a flow in words | [intake](references/intake.md) |
 | Define or change a test | [author](references/author.md) |
 | Execute a saved flow | [run](references/run.md) |
 | Explain a failure | [triage](references/triage.md) |
@@ -86,6 +90,42 @@ when deciding whether to ask a question.
 If a request spans routes, complete the least-effectful route first. For
 example, diagnose a failure before discussing a repair, and prepare an inert
 draft before asking a human to commit it.
+
+`maui-devflow-record` and `maui-devflow-run-cli`, named in the frontmatter, ship
+in the `dotnet-maui` marketplace plugin rather than the `maui devflow init`
+bundle. If one is not installed, say so and stay inside the routes above.
+
+## Conversational Intake
+
+When the user describes a flow in words instead of pointing at a recording,
+turn the words into a reviewable structure before touching any tool.
+
+1. **Restate it as numbered steps in the user's own words.** Do not rename
+   their screens, buttons, or business terms. One user intention per step.
+2. **Mark every step** `[known]` or `[unknown: selector]`,
+   `[unknown: oracle]`, or `[unknown: reset]`. `[known]` means the exact
+   AutomationId, the observable postcondition, or the reset contract is
+   already in evidence — not that it is plausible.
+3. **Ask one combined question** covering every `[unknown]` at once, following
+   [clarification-policy.md](references/clarification-policy.md). Do not send a
+   question per step and do not open a questionnaire.
+4. **When the missing fact is UI-discoverable**, propose a bounded
+   `explorationBudget` — `maxActions`, `maxDurationSeconds`, and
+   `allowedScopes` as named routes, never "the whole app" — and submit
+   `maui_test_author` with `exploration-request`. Report the proposed numbers
+   in chat before submitting.
+5. **Never draft with an unresolved `[unknown]`.** An unanswered selector,
+   oracle, or reset is a stop, not a default.
+
+**Tool gap, stated plainly:** the budget is declarative. Nothing in the current
+build enforces `maxActions` or `maxDurationSeconds`, there is no
+`maui_test_explore` tool, and `maui_test_status` reports no budget counter. The
+agent self-limits, counts its own actions, and must report actions consumed
+against the proposed budget. Say this to the user rather than implying the
+budget is enforced.
+
+See [references/intake.md](references/intake.md) for the worked example and the
+exact wording of the combined question.
 
 ## Author and Run Workflow Only
 
@@ -152,6 +192,65 @@ chooses to progress to a local reproduction or executable draft.
 - Verify the route before calling a missing element selector drift. A wrong
   route, modal, seed, locale, build, window, or checkpoint mismatch is not
   selector repairable.
+- Preserve reset, seed, and oracle requirements from the committed plan. Never
+  erase them because a scenario appears UI-only.
+
+## Artifact Format
+
+A DevFlow test is two files. `<name>.md` carries prose plus one
+` ```json maui-test ` fence — the **sole** replay source of truth, at
+`"schema": 2`. `<name>.maui-plan.json` is the reviewable plan at `"schema": 1`,
+bound by `flow.digest`; it must carry every key its validator requires or
+`flow run` fails `plan-invalid`. Assert kinds: `propEquals`, `exists`,
+`notExists`, `routeIs`.
+
+```json maui-test
+{
+  "schema": 2, "name": "promo-reduces-total", "app": "com.contoso.shop",
+  "recordedAt": "2026-08-14T09:41:12.106Z",
+  "steps": [{
+    "seq": 1, "action": "tap",
+    "label": "Apply promo code", "intent": "Submit PROMO10 from the cart",
+    "acceptanceCriterionIds": ["ac-promo-applied"],
+    "args": { "selector": { "automationId": "ApplyPromoButton" } },
+    "asserts": [{ "kind": "propEquals", "name": "Text", "expected": "45.00",
+      "selector": { "automationId": "OrderTotalLabel" }, "verify": true }]
+  }]
+}
+```
+
+```json
+{
+  "schema": 1, "planId": "plan-promo-1", "revision": 1, "goal": "A promo cuts the total 10%.",
+  "flow": { "path": "promo-reduces-total.md", "digest": "<current digest>" },
+  "acceptanceCriteria": [{ "criterionId": "ac-promo-applied", "required": true,
+    "businessOracleId": "orders-api", "description": "A valid promo reduces the total by 10%." }],
+  "scenarios": [{ "scenarioId": "scenario-1", "acceptanceCriterionIds": ["ac-promo-applied"],
+    "description": "Cart holds one 50.00 item; PROMO10 makes the total 45.00." }],
+  "independentBusinessOracles": [{ "oracleId": "orders-api", "required": true,
+    "independent": true, "evidenceKind": "http-json", "description": "GET /orders/{id} shows PROMO10." }],
+  "preconditions": [], "sideEffectPolicy": "test-tenant-resettable",
+  "reset": { "required": true, "strategy": "host-owned", "resetIdentity": "shop-cart-seed-v3" },
+  "provenance": { "actorKind": "agent", "channel": "mcp", "recordedAt": "2026-08-14T09:41:12.106Z" },
+  "explorationBudget": { "maxActions": 12, "maxDurationSeconds": 120, "allowedScopes": ["/cart", "/checkout"] }
+}
+```
+
+**Anti-patterns**, every one of them shipped in
+`samples/DevFlow.Sample/maui-tests/modal-roundtrip`: `label: null`,
+`intent: null`, `recordedAt: null`, `acceptanceCriterionIds: null`, empty
+`acceptanceCriteria`, an empty `scenarios[0].description`, `reset.strategy: ""`,
+and a zeroed `explorationBudget`. A recorder may emit them; a reviewable test
+must not. Also wrong: a policy enum in `reset.strategy`, which names a mechanism
+(`pm-clear`, `uninstall-reinstall`, `host-owned`) that must actually reset what
+`sideEffectPolicy` claims — device-local `pm-clear` cannot reset a backend
+tenant. With no oracle, say so — an empty `independentBusinessOracles` means
+**none — not independently verified**, and every result must carry that phrase.
+
+Rules: edit the prose freely, it is never replay input; never hand-edit the
+fence without `maui devflow flow validate`, which checks the fence only, not
+the sidecar; and a stale `flow.digest` invalidates every grant bound to it, so
+re-commit rather than re-pointing an existing grant.
 
 ## Safety Boundaries
 
@@ -180,9 +279,11 @@ oracle, reset policy, capability, or ambiguity as an explicit limitation.
 ## References
 
 - [Clarification policy](references/clarification-policy.md)
+- [Conversational intake](references/intake.md)
 - [Author a reviewable flow](references/author.md)
 - [Run a committed flow](references/run.md)
 - [Triage a result](references/triage.md)
 - [Selector repair boundary](references/repair.md)
+- [Replay quality rubric](references/replay-quality.md)
 - [App testability improvements](references/testability.md)
 - [CI evidence handoff](references/ci-handoff.md)

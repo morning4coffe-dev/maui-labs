@@ -41,9 +41,9 @@ finding and route to app testability; do not create a brittle executable flow.
    approval capability. When native-host approval is unavailable, stop after
    validation with the inert draft and **do not call** `approval-request`; a
    request that cannot be decided only creates a misleading failed workflow.
-   When a trusted VS Code or Copilot Canvas native-host approval client is available, call
-   `maui_test_author` with `approval-request` for one **commit** approval and
-   give the human its `reviewUrl`.
+   When a trusted VS Code or Copilot Canvas native-host approval client is
+   available, call `maui_test_author` with `approval-request` for one
+   **commit** approval and give the human its `reviewUrl`.
 7. Use `maui_test_author await-approval` with the returned request ID. If it is
    pending, continue waiting for that request rather than submitting a duplicate.
 8. Call `maui_test_author` with `commit` only with the approved broker grant

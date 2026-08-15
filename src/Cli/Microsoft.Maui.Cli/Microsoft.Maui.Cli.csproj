@@ -105,6 +105,9 @@
     <EmbeddedResource Include="..\..\..\plugins\dotnet-maui\skills\maui-devflow-test\**\*" LogicalName="devflow.skills/maui-devflow-test/%(RecursiveDir)%(Filename)%(Extension)">
       <WithCulture>false</WithCulture>
     </EmbeddedResource>
+    <EmbeddedResource Include="..\..\..\plugins\dotnet-maui\skills\maui-devflow-artifact\**\*" LogicalName="devflow.skills/maui-devflow-artifact/%(RecursiveDir)%(Filename)%(Extension)">
+      <WithCulture>false</WithCulture>
+    </EmbeddedResource>
   </ItemGroup>
 
   <ItemGroup>

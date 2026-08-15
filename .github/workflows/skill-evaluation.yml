@@ -19,6 +19,11 @@ on:
   pull_request:
     paths:
       - 'plugins/**/skills/**'
+      # `.github/skills/**` keeps the required check from getting stuck on a
+      # mirror-only PR. The discovery step below only evaluates
+      # `plugins/<p>/skills` and `tests/<p>`, so such a PR resolves to
+      # needs_eval=false and posts the success status without evaluating.
+      - '.github/skills/**'
       - 'tests/**'
 
   issue_comment:

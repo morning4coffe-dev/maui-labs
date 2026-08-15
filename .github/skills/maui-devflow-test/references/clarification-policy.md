@@ -25,6 +25,31 @@ chooses to continue to local reproduction or an executable draft.
 | The flow is destructive or non-replayable | Whether to prepare a one-shot review request | Run, retry, or compensate automatically |
 | A platform or action capability is absent | Whether to stop, use a supported target, or hand off | Claim a substitute platform result |
 | An imported artifact is offered for repair | Whether a fresh local reproduction is available | Treat CI or attestation as execution authority |
+| A flow is described in words and names a screen you have not seen | Which route it is, or approval for a bounded look at named routes | Assume a route name from the screen title |
+| Intent is stated without an acceptance criterion | The single observable postcondition that proves the intent | Convert "it should work" into an `exists` assert |
+| A required fact is UI-discoverable but unknown | Whether to submit a bounded `exploration-request`, and the `maxActions`, `maxDurationSeconds`, and named `allowedScopes` | Explore first and report the budget afterwards |
+| The user states a durable design preference | Whether to record it for the rest of the session | Silently generalize a one-off choice into a rule |
+| Several flows already cover the same user journey | Which flow is canonical and what happens to the others | Add a near-duplicate flow, or delete or overwrite an existing one |
+
+## Preference Capture
+
+A preference is a durable, non-safety choice the user states once and expects
+to hold — a naming convention, a default platform for drafts, a preferred
+oracle source, a house style for step labels.
+
+- **Echo it once**, verbatim, on the turn it is stated:
+  `Recorded preference: flow-naming = kebab-case verb-first`.
+- **Reuse it silently** afterwards. Do not re-ask, and do not re-announce it on
+  every turn.
+- **Re-confirm only when applying it would change a safety boundary** — a
+  target binding, an approval scope, a reset or side-effect policy, a
+  destructive action, or an independent-oracle claim. Then ask again for that
+  specific case and say why the recorded preference is not sufficient.
+- **Never infer a preference from a single accepted suggestion.** The user
+  agreeing to one selector is not a rule about selectors.
+- A preference lives in the conversation only. It is not persisted, it does not
+  travel to another session, and it never becomes part of a committed plan
+  unless the user asks for that explicitly.
 
 ## Do Not Ask
 

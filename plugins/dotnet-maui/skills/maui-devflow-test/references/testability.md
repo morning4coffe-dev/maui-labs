@@ -17,6 +17,8 @@ asks to turn the recommendation into a local reproduction or executable draft.
 - A documented reset/seed provider for repeatable, stateful test tenants.
 - An independent business oracle for outcomes that must be verified beyond UI.
 - Explicit route and hard postcondition coverage for meaningful transitions.
+- A typed `notExists` assertion when dismissal or removal is the intended UI
+  postcondition; do not substitute existence of an underlying page element.
 
 ## Do Not Recommend as a Fix
 

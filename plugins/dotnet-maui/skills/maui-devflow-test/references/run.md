@@ -8,6 +8,10 @@ execution authority.
 
 1. Confirm the named committed flow, current revision/digest, and selected
    exact `agentId` plus `agentInstanceId`.
+   A checked-in Markdown flow plus matching plan sidecar is a committed disk
+   artifact, but `maui_test_run` is intentionally authoring-session-bound and
+   cannot route that disk artifact without a session. Never use an unrelated
+   active draft to claim that the checked-in flow itself is uncommitted.
 2. Read `maui_test_capabilities`; stop rather than routing to an unsupported
    platform or action.
 3. Check declared route, build, app instance, seed/backend, locale, display,
@@ -51,3 +55,5 @@ continuation from an uncertain or failed run.
 Report completed, failed, cancelled, unknown-completion, or completed but not
 independently verified. Do not upgrade simulator, CI, source-only, or
 attested-artifact evidence to a physical-device or qualification claim.
+Preserve the committed plan's reset, seed, and oracle requirements exactly;
+never infer that they are unnecessary merely because the actions look UI-only.

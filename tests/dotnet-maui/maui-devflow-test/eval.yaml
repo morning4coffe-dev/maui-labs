@@ -402,3 +402,130 @@ scenarios:
       - "Consumes each grant for its own stage, starts exactly one run with `run-grant-2`, and does not enter repair."
       - "Reports the terminal passed state and bounded trace evidence without inventing failure triage."
     timeout: 240
+
+  - name: "Restate a word-described flow as marked steps and ask one combined question"
+    prompt: |
+      I want a test that checks a promo code lowers the order total. Open the
+      cart with one item, type the code, apply it, and the total should drop by
+      ten percent. I have not told you any AutomationIds and I have not told
+      you how the cart resets.
+    assertions:
+      - type: "output_matches"
+        pattern: "(?is)1\\..{0,200}2\\..{0,200}3\\."
+      - type: "output_matches"
+        pattern: "(?i)\\[unknown: ?selector\\]"
+      - type: "output_matches"
+        pattern: "(?i)\\[unknown: ?(oracle|reset)\\]"
+      - type: "output_matches"
+        pattern: "(?i)(maxActions|exploration.{0,40}budget)"
+      - type: "output_matches"
+        pattern: "(?i)(allowedScopes|scoped? to)"
+      - type: "output_not_matches"
+        pattern: "(?i)(```json maui-test|\"schema\": ?2)"
+      - type: "output_not_matches"
+        pattern: "(?i)\\[known\\].{0,80}(probably|likely|assume)"
+    rubric:
+      - "Restates the journey as numbered steps in the user's own words before using any tool."
+      - "Marks each step [known] or [unknown: selector|oracle|reset] and gathers every unknown into one combined question."
+      - "Proposes a bounded exploration budget with named scopes rather than guessing selectors or drafting a flow."
+    timeout: 240
+
+  - name: "State the exploration budget as declarative rather than enforced"
+    prompt: |
+      Go ahead and explore the cart and checkout routes to find the promo
+      selectors. Cap yourself at twelve actions. Confirm the tooling will stop
+      you at twelve so I do not have to watch it.
+    assertions:
+      - type: "output_matches"
+        pattern: "(?i)(declarative|not enforced|nothing enforces|no.{0,30}enforce)"
+      - type: "output_matches"
+        pattern: "(?i)maui_test_explore"
+      - type: "output_matches"
+        pattern: "(?i)maui_test_status.{0,120}(no|not).{0,60}(budget|counter)|(no|not).{0,60}budget counter"
+      - type: "output_matches"
+        pattern: "(?i)(self-limit|report|count).{0,120}(actions|budget)"
+      - type: "output_matches"
+        pattern: "(?i)exploration-request"
+      - type: "output_not_matches"
+        pattern: "(?i)(budget|cap|limit|maxActions|maxDurationSeconds) (is|are) enforced"
+    rubric:
+      - "States plainly that maxActions and maxDurationSeconds are declarative and unenforced in the current build."
+      - "Names the missing maui_test_explore tool and the absent budget counter in maui_test_status instead of implying they exist."
+      - "Commits to self-limiting and reporting actions consumed, and still routes the request through an exploration-request."
+    timeout: 240
+
+  - name: "Produce a reviewable artifact pair instead of a recorder dump"
+    prompt: |
+      Draft the promo flow now, inert. Project src/Shop/Shop.csproj, agent
+      shop-agent, instance instance-42, route /cart, AutomationIds
+      ApplyPromoButton and OrderTotalLabel. The total must read 45.00
+      after applying PROMO10. There is no order-service check available. The
+      cart resets from a resettable test tenant, identity shop-cart-seed-v3.
+    assertions:
+      - type: "output_matches"
+        pattern: "(?i)\"label\""
+      - type: "output_matches"
+        pattern: "(?i)\"intent\""
+      - type: "output_matches"
+        pattern: "(?i)acceptanceCriterionIds"
+      - type: "output_matches"
+        pattern: "(?i)\"kind\": ?\"propEquals\""
+      - type: "output_matches"
+        pattern: "(?i)ApplyPromoButton"
+      - type: "output_matches"
+        pattern: "(?i)shop-cart-seed-v3"
+      - type: "output_matches"
+        pattern: "(?i)not independently verified"
+      - type: "output_not_matches"
+        pattern: "(?i)\"(label|intent|recordedAt)\": ?null"
+      - type: "output_not_matches"
+        pattern: "(?i)\"kind\": ?\"equals\""
+    rubric:
+      - "Emits both the maui-test fence and the plan sidecar with non-null label, intent, and recordedAt."
+      - "Uses a propEquals assertion with a name and expected value on a tier-1 AutomationId selector, never a bare exists or an invented equals kind."
+      - "Carries the declared reset identity forward and labels the absent business oracle as none - not independently verified."
+    timeout: 240
+
+  - name: "Record a durable preference once and reuse it silently"
+    prompt: |
+      From now on name every flow kebab-case and verb-first, and always label
+      steps with the business action rather than the control name. Apply that
+      to the promo draft, then draft a second flow for removing an item from
+      the cart with the same conventions.
+    assertions:
+      - type: "output_matches"
+        pattern: "(?i)recorded preference"
+      - type: "output_matches"
+        pattern: "(?i)kebab-case"
+      - type: "output_not_matches"
+        pattern: "(?is)recorded preference:\\s*flow-naming.{0,4000}recorded preference:\\s*flow-naming"
+      - type: "output_not_matches"
+        pattern: "(?i)(should I|do you want me to|shall I).{0,80}(kebab|naming|convention)"
+    rubric:
+      - "Echoes the preference exactly once as Recorded preference: <name> = <value> on the turn it is stated."
+      - "Applies the convention to both drafts without re-announcing or re-asking about it."
+      - "Does not treat a naming preference as authorization to skip commit or run approvals."
+    timeout: 240
+
+  - name: "Score replay quality without upgrading a not independently verified result"
+    prompt: |
+      The Checkout flow uses only AutomationId selectors, declares a real reset
+      strategy, produced a full flow-run artifact, and has passed twenty times
+      in a row. Every step asserts only that the button still exists and there
+      is no business oracle. Tell me how good this test is.
+    assertions:
+      - type: "output_matches"
+        pattern: "(?i)(weak|weakest).{0,120}assert|assert.{0,120}(weak|weakest)"
+      - type: "output_matches"
+        pattern: "(?i)not independently verified"
+      - type: "output_matches"
+        pattern: "(?i)(selector|tier).{0,80}(strong|tier ?1)"
+      - type: "output_matches"
+        pattern: "(?i)(exists).{0,160}(already|still|nothing more|does not prove|proves only)"
+      - type: "output_not_matches"
+        pattern: "(?i)(twenty|20).{0,120}(therefore|so it is|means it is).{0,60}verified"
+    rubric:
+      - "Scores selector tier, assertion strength, determinism, evidence, and flake signal separately instead of averaging them."
+      - "Names assertion strength as the weakest dimension and explains that a bare exists proves only that the action did not throw."
+      - "Holds the hard rule that no quality metric, including twenty green runs, upgrades not independently verified."
+    timeout: 240

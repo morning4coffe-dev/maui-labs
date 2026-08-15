@@ -93,8 +93,6 @@ public static class MauiPreviewQualificationAccumulator
 
         var reference = ordered[0];
         accumulation.Platform = reference.Platform;
-        accumulation.PolicyVersion = reference.Thresholds.PolicyVersion;
-        accumulation.CorpusFingerprint = reference.Fingerprints.CorpusFingerprint;
         // Thresholds are anchored to the compiled policy defaults, never adopted from a run file.
         // A hand-edited run could otherwise set minimumRepairEvaluations to 1 and the accumulated
         // gates would obligingly agree.
@@ -123,6 +121,10 @@ public static class MauiPreviewQualificationAccumulator
 
         accumulation.AcceptedRuns = accepted.Count;
         accumulation.RejectedRuns = accumulation.ConsideredRuns - accepted.Count;
+        // Provenance names evidence that actually contributed. Taking it from ordered[0] would let
+        // the published policy version and corpus fingerprint come from a run that was rejected.
+        accumulation.PolicyVersion = accepted.Count > 0 ? accepted[0].Thresholds.PolicyVersion : null;
+        accumulation.CorpusFingerprint = accepted.Count > 0 ? accepted[0].Fingerprints.CorpusFingerprint : null;
         accumulation.DistinctEvidenceRuns = accumulation.Runs
             .Where(static run => run.Accepted)
             .Select(static run => run.RunFingerprint)
@@ -230,7 +232,7 @@ public static class MauiPreviewQualificationAccumulator
             .Append(metric.IndependentEvaluations).Append('|')
             .Append(metric.IndependentDeviceRuns);
         foreach (var count in (metric.SourceCounts ?? []).OrderBy(static count => count.Source, StringComparer.Ordinal))
-            builder.Append('|').Append(count.Source).Append(':').Append(count.Numerator).Append('/').Append(count.Denominator);
+            builder.Append('|').Append(count.Source).Append(':').Append(count.Numerator).Append('/').Append(count.Denominator).Append('/').Append(count.IndependentEvaluations);
         builder.Append('\n');
     }
 
@@ -263,8 +265,62 @@ public static class MauiPreviewQualificationAccumulator
         {
             reasons.Add("accumulate-unmodelled-evidence");
         }
+        foreach (var name in MergedMetricNames)
+        {
+            var metric = Select(candidate.Metrics, name);
+            // Totals are trusted verbatim by the merge, so a hand-edited run file could otherwise
+            // declare any independence it liked. Require the parts to add up to the whole.
+            if (!IsCoherent(metric))
+            {
+                reasons.Add("accumulate-incoherent-metric");
+                break;
+            }
+        }
+        // Static evidence is a property of the corpus, and the corpus fingerprint already had to
+        // match. A run whose static counts nevertheless differ is describing a different corpus
+        // than it claims to, so it cannot be merged with the reference.
+        if (!StaticEvidenceMatches(reference, candidate))
+            reasons.Add("accumulate-static-evidence-mismatch");
         return reasons;
     }
+
+    private static bool IsCoherent(MauiQualificationRateMetric metric)
+    {
+        if (metric.Numerator < 0 || metric.Denominator < 0 || metric.IndependentEvaluations < 0)
+            return false;
+        if (metric.Numerator > metric.Denominator || metric.IndependentEvaluations > metric.Denominator)
+            return false;
+        var counts = metric.SourceCounts ?? [];
+        if (counts.Count == 0)
+            return metric.Denominator == 0;
+        if (counts.Any(static count => count.Numerator < 0 || count.Denominator < 0 ||
+            count.IndependentEvaluations < 0 || count.Numerator > count.Denominator ||
+            count.IndependentEvaluations > count.Denominator))
+        {
+            return false;
+        }
+        return counts.Sum(static count => (long)count.Denominator) == metric.Denominator &&
+            counts.Sum(static count => (long)count.Numerator) == metric.Numerator &&
+            counts.Sum(static count => (long)count.IndependentEvaluations) == metric.IndependentEvaluations;
+    }
+
+    private static bool StaticEvidenceMatches(
+        MauiPreviewQualificationReport reference,
+        MauiPreviewQualificationReport candidate)
+    {
+        foreach (var name in MergedMetricNames)
+        {
+            if (!StaticCounts(Select(reference.Metrics, name)).SequenceEqual(StaticCounts(Select(candidate.Metrics, name)), StringComparer.Ordinal))
+                return false;
+        }
+        return true;
+    }
+
+    private static IEnumerable<string> StaticCounts(MauiQualificationRateMetric metric) =>
+        (metric.SourceCounts ?? [])
+            .Where(static count => MauiQualificationSampleSources.IsStatic(count.Source))
+            .OrderBy(static count => count.Source, StringComparer.Ordinal)
+            .Select(static count => $"{count.Source}:{count.Numerator}/{count.Denominator}/{count.IndependentEvaluations}");
 
     private static bool ThresholdsMatch(MauiQualificationGateThresholds left, MauiQualificationGateThresholds right) =>
         left.ConfidenceLevel.Equals(right.ConfidenceLevel) &&
@@ -289,47 +345,86 @@ public static class MauiPreviewQualificationAccumulator
         _ => new MauiQualificationRateMetric(),
     };
 
+    /// <summary>
+    /// Merges one rate metric across runs. Every accepted run shares a corpus fingerprint, so its
+    /// static (curated / curated-derived / generated) evidence is byte-identical to every other
+    /// run's: it is counted exactly once. Only device-backed evidence is genuinely per-run and is
+    /// therefore the only thing summed. Without this, running the same static corpus 100 times
+    /// would report 100 independent evaluations of one corpus and walk every count gate to pass.
+    /// </summary>
     private static MauiQualificationRateMetric MergeRate(IEnumerable<MauiQualificationRateMetric> metrics)
     {
         var list = metrics.Where(static metric => metric is not null).ToList();
-        // Summed in long and clamped: a checked int overflow here throws out of the accumulator's
-        // catch filter and takes the whole command down instead of failing the merge closed.
-        var numerator = (int)Math.Clamp(list.Sum(static metric => (long)Math.Max(0, metric.Numerator)), 0, int.MaxValue);
-        var denominator = (int)Math.Clamp(list.Sum(static metric => (long)Math.Max(0, metric.Denominator)), 0, int.MaxValue);
-        var independent = (int)Math.Clamp(list.Sum(static metric => (long)Math.Max(0, metric.IndependentEvaluations)), 0, int.MaxValue);
+        var contributing = list.Where(static metric => metric.Denominator > 0).ToList();
+        var merged = new List<MauiQualificationRateSourceCount>();
+        foreach (var group in contributing
+            .SelectMany(static metric => metric.SourceCounts ?? [])
+            .GroupBy(static count => count.Source, StringComparer.Ordinal)
+            .OrderBy(static group => group.Key, StringComparer.Ordinal))
+        {
+            if (MauiQualificationSampleSources.IsStatic(group.Key))
+            {
+                // Identical by construction (the corpus fingerprint is an accumulation
+                // precondition, and Incompatibilities rejects any run that disagrees). Taking the
+                // minimum rather than the first keeps this fail-closed if that ever stops holding.
+                merged.Add(new MauiQualificationRateSourceCount
+                {
+                    Source = group.Key,
+                    Numerator = group.Min(static count => Math.Max(0, count.Numerator)),
+                    Denominator = group.Min(static count => Math.Max(0, count.Denominator)),
+                    IndependentEvaluations = group.Min(static count => Math.Max(0, count.IndependentEvaluations)),
+                });
+                continue;
+            }
+
+            // Summed in long and clamped: a checked int overflow here throws out of the
+            // accumulator's catch filter and takes the whole command down instead of failing the
+            // merge closed.
+            merged.Add(new MauiQualificationRateSourceCount
+            {
+                Source = group.Key,
+                Numerator = (int)Math.Clamp(group.Sum(static count => (long)Math.Max(0, count.Numerator)), 0, int.MaxValue),
+                Denominator = (int)Math.Clamp(group.Sum(static count => (long)Math.Max(0, count.Denominator)), 0, int.MaxValue),
+                IndependentEvaluations = (int)Math.Clamp(group.Sum(static count => (long)Math.Max(0, count.IndependentEvaluations)), 0, int.MaxValue),
+            });
+        }
+
+        var numerator = (int)Math.Clamp(merged.Sum(static count => (long)count.Numerator), 0, int.MaxValue);
+        var denominator = (int)Math.Clamp(merged.Sum(static count => (long)count.Denominator), 0, int.MaxValue);
+        var independent = (int)Math.Clamp(merged.Sum(static count => (long)count.IndependentEvaluations), 0, int.MaxValue);
         // A numerator larger than its denominator is incoherent evidence, not a rate above 1.
         numerator = Math.Min(numerator, denominator);
         independent = Math.Min(independent, denominator);
+        var independentNumerator = Math.Min(
+            (int)Math.Clamp(
+                merged.Where(static count => MauiQualificationSampleSources.IsIndependent(count.Source))
+                    .Sum(static count => (long)Math.Min(count.Numerator, count.IndependentEvaluations)),
+                0,
+                int.MaxValue),
+            independent);
         var confidence = list
             .Select(static metric => metric.ConfidenceInterval?.ConfidenceLevel)
             .FirstOrDefault(static level => level is > 0 and < 1) ?? 0.95;
-        var contributing = list.Where(static metric => metric.Denominator > 0).ToList();
         return new MauiQualificationRateMetric
         {
             State = denominator == 0 ? "missing" : "measured",
             Numerator = numerator,
             Denominator = denominator,
             IndependentEvaluations = independent,
+            IndependentNumerator = independentNumerator,
             Value = denominator == 0 ? null : (double)numerator / denominator,
             ConfidenceInterval = denominator == 0
                 ? null
                 : MauiQualificationStatistics.WilsonInterval(numerator, denominator, confidence),
+            IndependentConfidenceInterval = independent == 0
+                ? null
+                : MauiQualificationStatistics.WilsonInterval(independentNumerator, independent, confidence),
             SampleSources = list
                 .SelectMany(static metric => metric.SampleSources ?? [])
                 .Distinct(StringComparer.Ordinal)
                 .OrderBy(static source => source, StringComparer.Ordinal)
                 .ToList(),
-            SourceCounts = list
-                .SelectMany(static metric => metric.SourceCounts ?? [])
-                .GroupBy(static count => count.Source, StringComparer.Ordinal)
-                .OrderBy(static group => group.Key, StringComparer.Ordinal)
-                .Select(static group => new MauiQualificationRateSourceCount
-                {
-                    Source = group.Key,
-                    Numerator = (int)Math.Clamp(group.Sum(static count => (long)Math.Max(0, count.Numerator)), 0, int.MaxValue),
-                    Denominator = (int)Math.Clamp(group.Sum(static count => (long)Math.Max(0, count.Denominator)), 0, int.MaxValue),
-                })
-                .ToList(),
+            SourceCounts = merged,
             // Independence is conjunctive: one pooled or non-device contributor makes the
             // merged total non-independent, exactly as it does within a single run.
             IndependentDeviceRuns = denominator == 0
@@ -417,7 +512,9 @@ public static class MauiPreviewQualificationAccumulator
         bool useLowerBound = true)
     {
         var metric = accumulation.Metrics.GetValueOrDefault(metricName) ?? new MauiQualificationRateMetric();
-        var observed = useLowerBound ? metric.ConfidenceInterval?.Lower : metric.Value;
+        // Reads the interval over the independent subset. The pooled interval narrows every time a
+        // derived clone or a generated mutant is added, which is not new information.
+        var observed = useLowerBound ? metric.IndependentConfidenceInterval?.Lower : metric.Value;
         // Counts independent evaluations, not raw denominator: restating one seed a hundred times
         // is one trial, and the per-run gates hold the same line.
         var status = metric.IndependentEvaluations < minimumDenominator

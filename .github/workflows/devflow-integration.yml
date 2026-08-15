@@ -440,6 +440,27 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+      - name: Summarize Android flow runs
+        if: always()
+        shell: pwsh
+        run: >
+          ./eng/devflow/Write-DevFlowFlowRunSummary.ps1
+          -ResultsRoot "${env:DEVFLOW_FLOW_PILOT_ARTIFACT_ROOT}"
+          -Lane android-flow-pilot
+
+      # A lane that publishes no flow-run.json is not a green lane, so this upload fails loudly
+      # instead of warning. The evidence paths are explicit and never include raw device logs.
+      - name: Upload Android flow evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: devflow-flow-evidence-android-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ./artifacts/devflow/${{ github.run_id }}-${{ github.run_attempt }}/android/**/flow-run.json
+            ./artifacts/devflow/${{ github.run_id }}-${{ github.run_attempt }}/android/**/*.mauitrace
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload Android flow-pilot artifacts
         if: always()
         uses: actions/upload-artifact@v7
@@ -667,6 +688,25 @@ jobs:
           --output "${DEVFLOW_FLOW_QA_ARTIFACT_ROOT}/qualification.json"
           --json
 
+      - name: Summarize iOS flow runs
+        if: always()
+        shell: pwsh
+        run: >
+          ./eng/devflow/Write-DevFlowFlowRunSummary.ps1
+          -ResultsRoot "${env:DEVFLOW_FLOW_QA_ARTIFACT_ROOT}"
+          -Lane ios-flow-qa
+
+      - name: Upload iOS flow evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: devflow-flow-evidence-ios-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ./artifacts/devflow/${{ github.run_id }}-${{ github.run_attempt }}/ios/**/flow-run.json
+            ./artifacts/devflow/${{ github.run_id }}-${{ github.run_attempt }}/ios/**/*.mauitrace
+          if-no-files-found: error
+          retention-days: 30
+
       - name: Upload iOS flow QA artifacts
         if: always()
         uses: actions/upload-artifact@v7
@@ -731,6 +771,25 @@ jobs:
           --artifact-manifest "${DEVFLOW_FLOW_QA_ARTIFACT_ROOT}/manifest.json"
           --output "${DEVFLOW_FLOW_QA_ARTIFACT_ROOT}/qualification.json"
           --json
+
+      - name: Summarize Mac Catalyst flow runs
+        if: always()
+        shell: pwsh
+        run: >
+          ./eng/devflow/Write-DevFlowFlowRunSummary.ps1
+          -ResultsRoot "${env:DEVFLOW_FLOW_QA_ARTIFACT_ROOT}"
+          -Lane maccatalyst-flow-qa
+
+      - name: Upload Mac Catalyst flow evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: devflow-flow-evidence-maccatalyst-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ./artifacts/devflow/${{ github.run_id }}-${{ github.run_attempt }}/maccatalyst/**/flow-run.json
+            ./artifacts/devflow/${{ github.run_id }}-${{ github.run_attempt }}/maccatalyst/**/*.mauitrace
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload Mac Catalyst flow QA artifacts
         if: always()
@@ -801,6 +860,25 @@ jobs:
           --artifact-manifest "${DEVFLOW_FLOW_QA_ARTIFACT_ROOT}/manifest.json"
           --output "${DEVFLOW_FLOW_QA_ARTIFACT_ROOT}/qualification.json"
           --json
+
+      - name: Summarize experimental AppKit flow runs
+        if: always()
+        shell: pwsh
+        run: >
+          ./eng/devflow/Write-DevFlowFlowRunSummary.ps1
+          -ResultsRoot "${env:DEVFLOW_FLOW_QA_ARTIFACT_ROOT}"
+          -Lane macos-appkit-flow-qa
+
+      - name: Upload experimental AppKit flow evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: devflow-flow-evidence-macos-appkit-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ./artifacts/devflow/${{ github.run_id }}-${{ github.run_attempt }}/macos/**/flow-run.json
+            ./artifacts/devflow/${{ github.run_id }}-${{ github.run_attempt }}/macos/**/*.mauitrace
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload experimental AppKit flow QA artifacts
         if: always()
@@ -907,13 +985,14 @@ jobs:
           retention-days: 30
 
   # Advisory second-platform contract. It is a distinct MAUI WinUI lane, never WPF evidence.
+  # The lane is no longer advisory-only: it fails the run when the Tier-1 flow QA fails or when it
+  # publishes no flow evidence. Branch protection must add it to the required checks separately.
   windows-flow-qa:
     needs: plan
     if: needs.plan.outputs.run-windows-flow-qa == 'true'
     permissions:
       contents: read
     runs-on: windows-latest
-    continue-on-error: true
     timeout-minutes: 120
     env:
       DEVFLOW_TEST_PLATFORM: windows
@@ -940,6 +1019,25 @@ jobs:
             --configuration Debug `
             --results-root .\artifacts\TestResults\devflow-flow\windows `
             --qualification
+
+      - name: Summarize Windows flow runs
+        if: always()
+        shell: pwsh
+        run: >
+          .\eng\devflow\Write-DevFlowFlowRunSummary.ps1
+          -ResultsRoot "${env:DEVFLOW_FLOW_QA_ARTIFACT_ROOT}"
+          -Lane windows-flow-qa
+
+      - name: Upload Windows flow evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: devflow-flow-evidence-windows-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            .\artifacts\devflow\${{ github.run_id }}-${{ github.run_attempt }}\windows\**\flow-run.json
+            .\artifacts\devflow\${{ github.run_id }}-${{ github.run_attempt }}\windows\**\*.mauitrace
+          if-no-files-found: error
+          retention-days: 30
 
       - name: Upload Windows flow QA artifacts
         if: always()

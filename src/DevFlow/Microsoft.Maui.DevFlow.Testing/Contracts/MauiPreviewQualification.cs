@@ -290,6 +290,14 @@ public sealed class MauiQualificationCorpusSummary
     /// </summary>
     [JsonPropertyName("undeclaredProjectionCollisions")] public int UndeclaredProjectionCollisions { get; set; }
 
+    /// <summary>
+    /// Curated cases that do not declare a seed yet share a fixture *shape* — the set of key
+    /// paths, values ignored — with another case of the same kind. Catches the clone that evades
+    /// <see cref="UndeclaredProjectionCollisions"/> by perturbing values until its diagnostics
+    /// differ. Also a disclosure, not a rejection.
+    /// </summary>
+    [JsonPropertyName("undeclaredShapeCollisions")] public int UndeclaredShapeCollisions { get; set; }
+
     [JsonPropertyName("curatedNoRepairCases")] public int CuratedNoRepairCases { get; set; }
     [JsonPropertyName("generatedNoRepairCases")] public int GeneratedNoRepairCases { get; set; }
     [JsonPropertyName("curatedClassificationLabeledCases")] public int CuratedClassificationLabeledCases { get; set; }
@@ -629,6 +637,10 @@ public sealed class MauiQualificationFlowAttemptSummary
     [JsonPropertyName("passedFirstAttempts")] public int PassedFirstAttempts { get; set; }
     [JsonPropertyName("stability")] public double? Stability { get; set; }
     [JsonPropertyName("realDeviceEvidence")] public bool RealDeviceEvidence { get; set; }
+    /// <summary>Number of accepted runs that contributed to <see cref="CleanFirstAttempts"/>. Only set when accumulating.</summary>
+    [JsonPropertyName("contributingRuns")] public int ContributingRuns { get; set; }
+    /// <summary>Distinct declared real-device fingerprints behind those runs. Self-reported; the merge cannot verify it.</summary>
+    [JsonPropertyName("contributingDevices")] public int ContributingDevices { get; set; }
 }
 
 /// <summary>Counts review outcomes without retaining reviewer text or grant content.</summary>

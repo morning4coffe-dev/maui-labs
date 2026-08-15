@@ -814,22 +814,36 @@ public static class MauiPreviewQualificationGateEvaluator
         var reasons = new List<string>();
         if (metric.Flows.Count == 0)
             reasons.Add("tier1-flow-declaration-missing");
+        // Each flow is judged on its own evidence and the worst verdict wins. Pooling the reasons
+        // would let one flow that has not run yet downgrade another flow's measured stability
+        // failure to not-qualified, which reports exit 0 on a real regression.
+        var status = metric.Flows.Count == 0
+            ? MauiPreviewQualificationStates.NotQualified
+            : MauiPreviewQualificationStates.Pass;
         foreach (var flow in metric.Flows)
         {
+            var flowStatus = MauiPreviewQualificationStates.Pass;
             if (!flow.RealDeviceEvidence)
                 reasons.Add("android-real-device-evidence-missing");
             if (flow.CleanFirstAttempts < thresholds.MinimumCleanFirstAttemptsPerTier1Flow)
+            {
                 reasons.Add("android-clean-first-attempt-count-insufficient");
-            if (flow.Stability < thresholds.MinimumFirstAttemptStability)
-                reasons.Add("android-first-attempt-stability-below-threshold");
+                flowStatus = MauiPreviewQualificationStates.NotQualified;
+            }
+            else
+            {
+                if (!flow.RealDeviceEvidence)
+                    flowStatus = MauiPreviewQualificationStates.Fail;
+                if (flow.Stability < thresholds.MinimumFirstAttemptStability)
+                {
+                    reasons.Add("android-first-attempt-stability-below-threshold");
+                    flowStatus = MauiPreviewQualificationStates.Fail;
+                }
+            }
+
+            status = WorseGateStatus(status, flowStatus);
         }
 
-        var status = reasons.Count == 0
-            ? MauiPreviewQualificationStates.Pass
-            : reasons.Any(static code => code == "android-first-attempt-stability-below-threshold") &&
-              metric.Flows.All(flow => flow.CleanFirstAttempts >= thresholds.MinimumCleanFirstAttemptsPerTier1Flow)
-                ? MauiPreviewQualificationStates.Fail
-                : MauiPreviewQualificationStates.NotQualified;
         report.Gates.Add(new MauiQualificationGateResult
         {
             GateId = "android-tier1-first-attempts",
@@ -841,8 +855,19 @@ public static class MauiPreviewQualificationGateEvaluator
         });
     }
 
-    private static MauiQualificationGateThresholds NormalizeThresholds(MauiQualificationGateThresholds source)
+    /// <summary>Fail is worse than not-qualified, which is worse than pass.</summary>
+    private static string WorseGateStatus(string left, string right)
     {
+        static int Rank(string status) => status switch
+        {
+            MauiPreviewQualificationStates.Fail => 2,
+            MauiPreviewQualificationStates.NotQualified => 1,
+            _ => 0,
+        };
+        return Rank(right) > Rank(left) ? right : left;
+    }
+
+    private static MauiQualificationGateThresholds NormalizeThresholds(MauiQualificationGateThresholds source)    {
         return new MauiQualificationGateThresholds
         {
             PolicyVersion = MauiQualificationSanitizer.FingerprintOrUnknown(source.PolicyVersion),
@@ -1043,6 +1068,7 @@ public static class MauiPreviewQualificationGateEvaluator
         CuratedRepairPositiveCases = Math.Max(0, source?.CuratedRepairPositiveCases ?? 0),
         CuratedDerivedCases = Math.Max(0, source?.CuratedDerivedCases ?? 0),
         UndeclaredProjectionCollisions = Math.Max(0, source?.UndeclaredProjectionCollisions ?? 0),
+        UndeclaredShapeCollisions = Math.Max(0, source?.UndeclaredShapeCollisions ?? 0),
         CuratedNoRepairCases = Math.Max(0, source?.CuratedNoRepairCases ?? 0),
         GeneratedNoRepairCases = Math.Max(0, source?.GeneratedNoRepairCases ?? 0),
         CuratedClassificationLabeledCases = Math.Max(0, source?.CuratedClassificationLabeledCases ?? 0),

@@ -97,7 +97,35 @@ public static class MauiPreviewQualificationAccumulator
             return accumulation;
         }
 
-        var reference = ordered[0];
+        // The reference run defines what "the same evidence" means, so choosing the wrong one is a
+        // denial-of-evidence footgun: with the oldest run as reference, a single stale file from a
+        // superseded corpus would reject every current run as a fingerprint mismatch and the merge
+        // would report almost no evidence — a silent undercount dressed up as a clean result.
+        // Pick the largest coherent cohort instead, newest run first within it. This is not a
+        // defence against forged input (a flood of forged runs would win the vote), but forging is
+        // already outside what a self-reported file can be checked for; an accidental stale file
+        // is not, and it is the failure that actually happens in CI.
+        //
+        // A run that rejects *itself* — relaxed thresholds, unmodelled evidence, counts that do
+        // not add up — can never be accepted, so it must never be the run everything else is
+        // measured against. Fall back to the whole set only when nothing is self-valid, so that
+        // the rejection reasons still get reported rather than the merge silently emptying.
+        var eligible = ordered
+            .Where(static report => Incompatibilities(report, report).Count == 0)
+            .ToList();
+        var reference = (eligible.Count > 0 ? eligible : ordered)
+            .GroupBy(static report => string.Join(
+                '|',
+                report.ContractVersion,
+                report.Platform,
+                report.Thresholds.PolicyVersion,
+                report.Fingerprints.CorpusFingerprint), StringComparer.Ordinal)
+            .OrderByDescending(static group => group.Count())
+            .ThenByDescending(static group => group.Max(static report => report.GeneratedAt))
+            .ThenBy(static group => group.Key, StringComparer.Ordinal)
+            .First()
+            .OrderByDescending(static report => report.GeneratedAt)
+            .First();
         accumulation.Platform = reference.Platform;
         // Thresholds are anchored to the compiled policy defaults, never adopted from a run file.
         // A hand-edited run could otherwise set minimumRepairEvaluations to 1 and the accumulated
@@ -294,7 +322,55 @@ public static class MauiPreviewQualificationAccumulator
         // already rejects unknown sources; the merge path must agree with it.
         if (!SampleSourcesAreKnown(candidate))
             reasons.Add("accumulate-unknown-sample-source");
+        // Clean first attempts are the only evidence the merge sums across runs, so a run's flow
+        // list is trusted arithmetic. Repeating one flow entry five times inside a single file
+        // would otherwise multiply one device run by five.
+        if (!FlowEvidenceIsCoherent(candidate))
+            reasons.Add("accumulate-incoherent-flow-evidence");
+        // A flow may only claim real-device evidence if the run says which device produced it.
+        // Unattributed device claims are not refused outright — they are recorded — but they must
+        // not be indistinguishable from attributed ones.
+        if (!DeviceEvidenceIsAttributed(candidate))
+            reasons.Add("accumulate-unattributed-device-evidence");
         return reasons;
+    }
+
+    private static bool FlowEvidenceIsCoherent(MauiPreviewQualificationReport report)
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var flow in report.Metrics.FlakeFirstAttemptStability.Flows)
+        {
+            if (string.IsNullOrWhiteSpace(flow.FlowId))
+                return false;
+            if (!seen.Add(flow.FlowId))
+                return false;
+            if (flow.CleanFirstAttempts < 0 || flow.PassedFirstAttempts < 0)
+                return false;
+            if (flow.PassedFirstAttempts > flow.CleanFirstAttempts)
+                return false;
+        }
+
+        return true;
+    }
+
+    private static bool DeviceEvidenceIsAttributed(MauiPreviewQualificationReport report) =>        !report.Metrics.FlakeFirstAttemptStability.Flows.Any(static flow => flow.RealDeviceEvidence) ||
+        DeclaredDevices(report).Count > 0;
+
+    private static HashSet<string> DeclaredDevices(MauiPreviewQualificationReport report) =>        report.Profiles
+            .Where(static profile => profile.RealDevice == true && !string.IsNullOrWhiteSpace(profile.DeviceFingerprint))
+            .Select(static profile => profile.DeviceFingerprint!)
+            .ToHashSet(StringComparer.Ordinal);
+
+    /// <summary>Fail is worse than not-qualified, which is worse than pass.</summary>
+    private static string WorseOf(string left, string right)
+    {
+        static int Rank(string status) => status switch
+        {
+            MauiPreviewQualificationStates.Fail => 2,
+            MauiPreviewQualificationStates.NotQualified => 1,
+            _ => 0,
+        };
+        return Rank(right) > Rank(left) ? right : left;
     }
 
     private static bool SampleSourcesAreKnown(MauiPreviewQualificationReport report) =>
@@ -458,19 +534,25 @@ public static class MauiPreviewQualificationAccumulator
     /// to come from independent jobs. Unlike the static corpus share, these are genuinely fresh
     /// device observations and summing them is correct — duplicate runs are already refused by the
     /// evidence fingerprint, which hashes the per-flow attempt counts.
+    ///
+    /// Independence itself is self-reported and cannot be verified from a JSON file. What the
+    /// merge can do is publish the shape of the claim: how many runs and how many distinct
+    /// declared devices a flow's total came from, so a reviewer can see 100 attempts arriving as
+    /// 5 runs on 5 devices rather than as 5 restatements of one.
     /// </summary>
     private static List<MauiQualificationFlowAttemptSummary> MergeFirstAttemptFlows(
         IReadOnlyList<MauiPreviewQualificationReport> accepted)
     {
         var merged = new List<MauiQualificationFlowAttemptSummary>();
         foreach (var group in accepted
-            .SelectMany(static report => report.Metrics.FlakeFirstAttemptStability.Flows)
-            .Where(static flow => !string.IsNullOrWhiteSpace(flow.FlowId))
-            .GroupBy(static flow => flow.FlowId!, StringComparer.Ordinal)
+            .SelectMany(static report => report.Metrics.FlakeFirstAttemptStability.Flows
+                .Where(static flow => !string.IsNullOrWhiteSpace(flow.FlowId))
+                .Select(flow => (Flow: flow, Devices: DeclaredDevices(report))))
+            .GroupBy(static entry => entry.Flow.FlowId!, StringComparer.Ordinal)
             .OrderBy(static group => group.Key, StringComparer.Ordinal))
         {
-            var clean = (int)Math.Clamp(group.Sum(static flow => (long)Math.Max(0, flow.CleanFirstAttempts)), 0, int.MaxValue);
-            var passed = (int)Math.Clamp(group.Sum(static flow => (long)Math.Max(0, flow.PassedFirstAttempts)), 0, int.MaxValue);
+            var clean = (int)Math.Clamp(group.Sum(static entry => (long)Math.Max(0, entry.Flow.CleanFirstAttempts)), 0, int.MaxValue);
+            var passed = (int)Math.Clamp(group.Sum(static entry => (long)Math.Max(0, entry.Flow.PassedFirstAttempts)), 0, int.MaxValue);
             merged.Add(new MauiQualificationFlowAttemptSummary
             {
                 FlowId = group.Key,
@@ -479,7 +561,12 @@ public static class MauiPreviewQualificationAccumulator
                 Stability = clean == 0 ? null : (double)Math.Min(passed, clean) / clean,
                 // One run without real-device evidence taints the merged flow. A flow is only
                 // device-backed if every contribution to it was.
-                RealDeviceEvidence = group.All(static flow => flow.RealDeviceEvidence),
+                RealDeviceEvidence = group.All(static entry => entry.Flow.RealDeviceEvidence),
+                ContributingRuns = group.Count(),
+                ContributingDevices = group
+                    .SelectMany(static entry => entry.Devices)
+                    .Distinct(StringComparer.Ordinal)
+                    .Count(),
             });
         }
         return merged;
@@ -538,25 +625,40 @@ public static class MauiPreviewQualificationAccumulator
 
         var flows = accumulation.FirstAttemptFlows;
         var firstAttemptReasons = new List<string>();
+        var androidScope = string.Equals(accumulation.Platform, "android", StringComparison.Ordinal);
+        if (!androidScope)
+            firstAttemptReasons.Add("android-platform-scope-missing");
         if (flows.Count == 0)
             firstAttemptReasons.Add("tier1-flow-declaration-missing");
+        // Each flow is judged on its own evidence and the worst verdict wins. Pooling the reasons
+        // would let one unexercised flow downgrade another flow's measured failure to
+        // not-qualified, and accumulation is exactly where partial flow coverage is normal.
+        var firstAttemptStatus = androidScope && flows.Count > 0
+            ? MauiPreviewQualificationStates.Pass
+            : MauiPreviewQualificationStates.NotQualified;
         foreach (var flow in flows)
         {
+            var flowStatus = MauiPreviewQualificationStates.Pass;
             if (!flow.RealDeviceEvidence)
                 firstAttemptReasons.Add("android-real-device-evidence-missing");
             if (flow.CleanFirstAttempts < thresholds.MinimumCleanFirstAttemptsPerTier1Flow)
+            {
                 firstAttemptReasons.Add("android-clean-first-attempt-count-insufficient");
-            if (flow.Stability < thresholds.MinimumFirstAttemptStability)
-                firstAttemptReasons.Add("android-first-attempt-stability-below-threshold");
+                flowStatus = MauiPreviewQualificationStates.NotQualified;
+            }
+            else
+            {
+                if (!flow.RealDeviceEvidence)
+                    flowStatus = MauiPreviewQualificationStates.Fail;
+                if (flow.Stability < thresholds.MinimumFirstAttemptStability)
+                {
+                    firstAttemptReasons.Add("android-first-attempt-stability-below-threshold");
+                    flowStatus = MauiPreviewQualificationStates.Fail;
+                }
+            }
+
+            firstAttemptStatus = WorseOf(firstAttemptStatus, flowStatus);
         }
-        // Mirrors AddAndroidFirstAttemptGate: a shortfall in evidence is not-qualified, but a
-        // sufficient sample that misses the threshold is a real failure.
-        var firstAttemptStatus = firstAttemptReasons.Count == 0
-            ? MauiPreviewQualificationStates.Pass
-            : firstAttemptReasons.Contains("android-first-attempt-stability-below-threshold") &&
-              flows.All(flow => flow.CleanFirstAttempts >= thresholds.MinimumCleanFirstAttemptsPerTier1Flow)
-                ? MauiPreviewQualificationStates.Fail
-                : MauiPreviewQualificationStates.NotQualified;
         accumulation.Gates.Add(new MauiQualificationGateResult
         {
             GateId = "accumulated-tier1-first-attempts",

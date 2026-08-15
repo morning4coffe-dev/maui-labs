@@ -2208,6 +2208,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.ProvenanceSource
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.SecurityCorpus[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationSecurityCorpusSummary{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.StaticOnly[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.UndeclaredProjectionCollisions[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.UndeclaredShapeCollisions[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.Version[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationDurationMetric.MaxMs[]:System.Nullable`1[System.Double]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationDurationMetric.MissingReason[]:System.String{get:public;set:public}
@@ -2274,6 +2275,8 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationFirstAttemptMetric.Infrastruct
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationFirstAttemptMetric.Stability[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationFirstAttemptMetric.State[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationFlowAttemptSummary.CleanFirstAttempts[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationFlowAttemptSummary.ContributingDevices[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationFlowAttemptSummary.ContributingRuns[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationFlowAttemptSummary.FlowId[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationFlowAttemptSummary.PassedFirstAttempts[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationFlowAttemptSummary.RealDeviceEvidence[]:System.Boolean{get:public;set:public}

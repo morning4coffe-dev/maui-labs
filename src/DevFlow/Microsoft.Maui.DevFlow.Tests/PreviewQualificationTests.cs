@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Maui.DevFlow.Driver;
 using Microsoft.Maui.DevFlow.Testing;
 using YamlDotNet.RepresentationModel;
@@ -78,6 +79,9 @@ public sealed class PreviewQualificationTests
             .Single(static item => item.Source == MauiQualificationSampleSources.Generated);
         Assert.Equal(16, curatedFalseHeals.Denominator);
         Assert.Equal(300, generatedFalseHeals.Denominator);
+        // Only the 16 curated seeds are independent. The 300 mutants are derived from them and
+        // must never satisfy the gate's minimum on their own.
+        Assert.Equal(16, report.Metrics.FalseHeals.IndependentEvaluations);
         Assert.DoesNotContain(
             report.Metrics.FalseHeals.SourceCounts,
             static item => item.Source == MauiQualificationSampleSources.DeviceBacked);
@@ -87,6 +91,14 @@ public sealed class PreviewQualificationTests
         Assert.True(report.Corpus.ProvenanceComplete);
 
         Assert.Equal(31, report.Metrics.RepairPrecision.Denominator);
+        // 30 of the 31 repair-positives are adapted from one seed. The reported 31/31 therefore
+        // rests on a single independent trial, and the gate says so.
+        Assert.Equal(1, report.Metrics.RepairPrecision.IndependentEvaluations);
+        Assert.Equal(
+            30,
+            report.Metrics.RepairPrecision.SourceCounts
+                .Single(static item => item.Source == MauiQualificationSampleSources.CuratedDerived)
+                .Denominator);
         Assert.Equal(31, report.Metrics.RepairRecall.Denominator);
         Assert.Equal(31, report.Metrics.RepairRecall.Numerator);
 
@@ -100,6 +112,17 @@ public sealed class PreviewQualificationTests
         Assert.Equal("measured", report.Metrics.ClassificationMatrix.State);
         Assert.Equal(45, report.Metrics.ClassificationMatrix.SampleCount);
         Assert.Equal(42, report.Metrics.ClassificationMatrix.Correct);
+        // The headline 42/45 is mostly the classifier copying a class the fixture already stamped.
+        // Only 8 cases forced genuine inference, and the gate minimum counts only those.
+        Assert.Equal(8, report.Metrics.ClassificationMatrix.InferredSampleCount);
+        Assert.Equal(8, report.Metrics.ClassificationMatrix.InferredCorrect);
+        Assert.Equal(37, report.Metrics.ClassificationMatrix.StampHonouredSampleCount);
+        Assert.Equal(34, report.Metrics.ClassificationMatrix.StampHonouredCorrect);
+        Assert.Equal(8, classification.IndependentEvaluations);
+        Assert.Equal(
+            report.Metrics.ClassificationMatrix.SampleCount,
+            report.Metrics.ClassificationMatrix.InferredSampleCount +
+                report.Metrics.ClassificationMatrix.StampHonouredSampleCount);
         Assert.Equal(
             report.Metrics.ClassificationMatrix.SampleCount,
             report.Metrics.ClassificationMatrix.Cells.Sum(static cell => cell.Count));
@@ -163,6 +186,9 @@ public sealed class PreviewQualificationTests
         var repair = report.Metrics.RepairPrecision;
         Assert.Equal(100, repair.Denominator);
         Assert.Equal(100, repair.Numerator);
+        // The gate counts independent evaluations, so a denominator inflated with restated cases
+        // could not carry it.
+        Assert.Equal(100, repair.IndependentEvaluations);
         Assert.NotNull(repair.ConfidenceInterval);
         Assert.True(repair.ConfidenceInterval!.Lower >= 0.95);
 
@@ -187,7 +213,10 @@ public sealed class PreviewQualificationTests
 
         Assert.Equal(MauiPreviewQualificationStates.Fail, Gate(report, "zero-false-heals").Status);
         Assert.Equal(1, report.Metrics.FalseHeals.Numerator);
-        Assert.Equal(300, report.Metrics.FalseHeals.Denominator);
+        Assert.Equal(600, report.Metrics.FalseHeals.Denominator);
+        // Generated mutants are reported but never satisfy the minimum; only the 300 device-backed
+        // trials do.
+        Assert.Equal(300, report.Metrics.FalseHeals.IndependentEvaluations);
         Assert.Equal(
             300,
             report.Metrics.FalseHeals.SourceCounts
@@ -202,6 +231,11 @@ public sealed class PreviewQualificationTests
         Assert.Equal(MauiPreviewQualificationStates.Pass, Gate(qualified, "classification-accuracy").Status);
         Assert.Equal(100, qualified.Metrics.ClassificationAccuracy.Denominator);
         Assert.Equal(100, qualified.Metrics.ClassificationAccuracy.Numerator);
+        // Only genuinely inferred cases count toward the minimum. A corpus that stamps its own
+        // failure class would answer by copying and could never carry this gate.
+        Assert.Equal(100, qualified.Metrics.ClassificationAccuracy.IndependentEvaluations);
+        Assert.Equal(100, qualified.Metrics.ClassificationMatrix.InferredSampleCount);
+        Assert.Equal(0, qualified.Metrics.ClassificationMatrix.StampHonouredSampleCount);
         Assert.Equal(1, qualified.Metrics.ClassificationMatrix.LabelCount);
 
         var unlabelled = QualifiedInput();
@@ -727,6 +761,7 @@ public sealed class PreviewQualificationTests
                 RepairCorrect = true,
                 ExpectedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
                 ObservedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
+                FailureClassInferred = true,
             });
         }
         var second = MauiPreviewQualificationGateEvaluator.Evaluate(secondInput, DateTimeOffset.UnixEpoch.AddDays(2));
@@ -735,7 +770,9 @@ public sealed class PreviewQualificationTests
         Assert.Equal(0, merged.RejectedRuns);
         Assert.Equal(140, merged.Metrics["repairPrecision"].Denominator);
         Assert.Equal(140, merged.Metrics["repairPrecision"].Numerator);
-        Assert.Equal(600, merged.Metrics["falseHeals"].Denominator);
+        Assert.Equal(140, merged.Metrics["repairPrecision"].IndependentEvaluations);
+        Assert.Equal(1200, merged.Metrics["falseHeals"].Denominator);
+        Assert.Equal(600, merged.Metrics["falseHeals"].IndependentEvaluations);
         Assert.Equal(MauiPreviewQualificationStates.Pass, Gate(merged, "accumulated-repair-precision").Status);
         Assert.Equal(MauiPreviewQualificationStates.Pass, Gate(merged, "accumulated-zero-false-heals").Status);
 
@@ -787,6 +824,133 @@ public sealed class PreviewQualificationTests
             merged.Metrics["recordingValidity"].SourceCounts
                 .Single(static item => item.Source == MauiQualificationSampleSources.Generated)
                 .Denominator);
+    }
+
+    [Fact]
+    public void GateEvaluator_RestatedCasesInflateNoGateMinimum()
+    {
+        // The failure mode this whole change exists to prevent: 200 copies of one case must not
+        // read as 200 trials just because the denominator says so.
+        var input = QualifiedInput();
+        input.Samples.RemoveAll(static sample => sample.RepairProposed == true);
+        for (var index = 0; index < 200; index++)
+        {
+            input.Samples.Add(new MauiQualificationExecutionSample
+            {
+                SampleId = $"restated-{index}",
+                Source = MauiQualificationSampleSources.CuratedDerived,
+                Platform = "android",
+                RepairProposed = true,
+                RepairExpected = true,
+                RepairCorrect = true,
+            });
+        }
+
+        var report = MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(200, report.Metrics.RepairPrecision.Denominator);
+        Assert.Equal(0, report.Metrics.RepairPrecision.IndependentEvaluations);
+        Assert.Equal(
+            MauiPreviewQualificationStates.NotQualified,
+            Gate(report, "repair-precision").Status);
+        Assert.Contains("repair-evaluation-count-insufficient", Gate(report, "repair-precision").ReasonCodes);
+    }
+
+    [Fact]
+    public void GateEvaluator_StampHonouredClassificationsNeverCarryTheAccuracyGate()
+    {
+        // A corpus that stamps its own failure class answers by copying. Those cases are reported
+        // but must not be able to satisfy the classification minimum on their own.
+        var input = QualifiedInput();
+        foreach (var sample in input.Samples.Where(static sample => sample.ExpectedFailureClass is not null))
+            sample.FailureClassInferred = false;
+
+        var report = MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(100, report.Metrics.ClassificationAccuracy.Denominator);
+        Assert.Equal(100, report.Metrics.ClassificationAccuracy.Numerator);
+        Assert.Equal(0, report.Metrics.ClassificationAccuracy.IndependentEvaluations);
+        Assert.Equal(100, report.Metrics.ClassificationMatrix.StampHonouredSampleCount);
+        Assert.Equal(
+            MauiPreviewQualificationStates.NotQualified,
+            Gate(report, "classification-accuracy").Status);
+    }
+
+    [Fact]
+    public void Accumulator_RefusesRunsWithRelaxedThresholdsOrUnmodelledEvidence()
+    {
+        var first = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput(), DateTimeOffset.UnixEpoch);
+
+        // A hand-edited run file cannot lower the bar for the whole accumulation.
+        var relaxed = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput(), DateTimeOffset.UnixEpoch.AddDays(1));
+        relaxed.Thresholds.MinimumRepairEvaluations = 1;
+        var withRelaxed = MauiPreviewQualificationAccumulator.Accumulate([first, relaxed], DateTimeOffset.UnixEpoch);
+        Assert.Equal(1, withRelaxed.AcceptedRuns);
+        Assert.Contains(
+            withRelaxed.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-threshold-not-policy-default"));
+        Assert.Equal(100, withRelaxed.Thresholds.MinimumRepairEvaluations);
+
+        // Unknown properties survive a JSON round-trip but are not fingerprinted, so a report
+        // carrying them cannot be deduplicated correctly and is refused instead.
+        var unmodelled = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput(), DateTimeOffset.UnixEpoch.AddDays(2));
+        unmodelled.Corpus.ExtensionData = new Dictionary<string, JsonElement>
+        {
+            ["surprise"] = JsonDocument.Parse("1").RootElement.Clone(),
+        };
+        var withUnmodelled = MauiPreviewQualificationAccumulator.Accumulate([first, unmodelled], DateTimeOffset.UnixEpoch);
+        Assert.Contains(
+            withUnmodelled.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-unmodelled-evidence"));
+    }
+
+    [Fact]
+    public void Accumulator_ProfileOrderIsNotFreshEvidence()
+    {
+        var first = QualifiedInput();
+        first.Profiles.Add(new MauiQualificationPlatformProfile { Platform = "android", Scope = "a" });
+        first.Profiles.Add(new MauiQualificationPlatformProfile { Platform = "android", Scope = "b" });
+        var reordered = QualifiedInput();
+        reordered.Profiles.Add(new MauiQualificationPlatformProfile { Platform = "android", Scope = "b" });
+        reordered.Profiles.Add(new MauiQualificationPlatformProfile { Platform = "android", Scope = "a" });
+
+        Assert.Equal(
+            MauiPreviewQualificationAccumulator.ComputeEvidenceFingerprint(
+                MauiPreviewQualificationGateEvaluator.Evaluate(first, DateTimeOffset.UnixEpoch)),
+            MauiPreviewQualificationAccumulator.ComputeEvidenceFingerprint(
+                MauiPreviewQualificationGateEvaluator.Evaluate(reordered, DateTimeOffset.UnixEpoch.AddDays(1))));
+    }
+
+    [Fact]
+    public void CorpusRunner_RejectsUnknownCaseKeysAndUnattributedDerivedCases()
+    {
+        var corpusRoot = Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus");
+        var casePath = Directory.GetFiles(Path.Combine(corpusRoot, "cases"), "repair-positive-*.json")
+            .OrderBy(static path => path, StringComparer.Ordinal)
+            .First();
+        var original = File.ReadAllText(casePath);
+        try
+        {
+            // The schema declares additionalProperties:false at the case root. A typo must fail
+            // the corpus, not quietly drop the case out of a denominator.
+            var withUnknownKey = JsonNode.Parse(original)!.AsObject();
+            withUnknownKey["expectedFailureclass"] = "locator-not-found";
+            File.WriteAllText(casePath, withUnknownKey.ToJsonString());
+            Assert.Contains("corpus-case-unknown-property", RunCorpus().Summary.Errors);
+
+            // A derived case must name its seed, or the curated-versus-derived split it feeds is
+            // unverifiable.
+            var withoutDerivedFrom = JsonNode.Parse(original)!.AsObject();
+            withoutDerivedFrom["provenance"]!.AsObject().Remove("derivedFrom");
+            File.WriteAllText(casePath, withoutDerivedFrom.ToJsonString());
+            Assert.Contains("corpus-case-provenance-invalid", RunCorpus().Summary.Errors);
+        }
+        finally
+        {
+            File.WriteAllText(casePath, original);
+        }
+
+        Assert.Empty(RunCorpus().Summary.Errors);
     }
 
     private static MauiQualificationGateResult Gate(MauiQualificationAccumulation accumulation, string gateId) =>
@@ -877,6 +1041,27 @@ public sealed class PreviewQualificationTests
                 // evidence: the accuracy gate must be earned, not skipped for lack of labels.
                 ExpectedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
                 ObservedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
+                // The classifier derived this class from replay facts. A sample whose evidence
+                // already stamped the class is correct by construction and never counts toward
+                // this gate's minimum.
+                FailureClassInferred = true,
+            });
+        }
+        // A qualified preview needs an independent no-repair denominator, not machine-generated
+        // mutants of a handful of seeds. The generated mutants stay in the report as context;
+        // only these device-backed trials can satisfy the gate minimum.
+        for (var index = 0; index < 300; index++)
+        {
+            input.Samples.Add(new MauiQualificationExecutionSample
+            {
+                SampleId = $"device-no-repair-{index}",
+                Source = MauiQualificationSampleSources.DeviceBacked,
+                Platform = "android",
+                DeviceEvidenceKind = "physical-device",
+                RealDevice = true,
+                NoRepairExpected = true,
+                FalseHeal = false,
+                Abstained = true,
             });
         }
         for (var index = 0; index < 300; index++)

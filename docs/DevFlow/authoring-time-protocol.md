@@ -98,7 +98,10 @@ report success; the report is still written so the operator can see what was dro
 
 `participantSalt` is a value of the form `participant-<8-64 hex>`, generated **offline by the
 operator** and handed to the participant with their task card. It is not derived from any
-attribute of the person or machine.
+attribute of the person or machine. A session whose salt is not that exact shape is rejected with
+`study-session-participant-salt-invalid`; surrounding whitespace is trimmed first, because salts
+are compared ordinally and a trailing newline picked up from a text-file round-trip would otherwise
+split one person into two participants and silently empty the cross-arm blocker.
 
 Its only purpose is to let two sessions be known to come from the same participant so that
 counterbalancing works and so that one fast participant contributing ten sessions cannot look

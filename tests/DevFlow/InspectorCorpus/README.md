@@ -76,6 +76,7 @@ corpus summary:
 | `generatedNoRepairCases` | 300 |
 | `curatedClassificationLabeledCases` | 45 |
 | `undeclaredProjectionCollisions` | 0 |
+| `undeclaredShapeCollisions` | 5 |
 
 Read `curatedCases` **with** `curatedDerivedCases`: 58 files are 28 original cases plus 30
 restatements of one of them.
@@ -105,19 +106,32 @@ Rather than leave that to be discovered, the artifact records it:
   reports `repair-evaluation-count-insufficient` at an independent count of 1, exactly as it did
   before the 30 cases were added.
 - `maui devflow flow qualify --accumulate` counts static evidence **once** no matter how many runs
-  report it, because every accumulated run must share a corpus fingerprint — which covers the case
-  file contents, not just the manifest — and therefore re-reads the same files. Only
-  `device-backed` counts are summed across runs.
+  report it, because every accumulated run must share a corpus fingerprint — which covers the
+  contents of every evaluated `.json` file under this directory, not just the manifest — and
+  therefore re-reads the same files. Only `device-backed` counts are summed across runs.
 
 **The split is still self-declared.** Nothing forces a case that copies a seed to say so. A clone
 that simply omits `provenance.derivedFrom` and claims `hand-authored` would be counted as a 31st
-independent trial. `corpus.undeclaredProjectionCollisions` is the check on that: it counts cases
-that do *not* declare a seed yet evaluate to byte-identical evidence (same kind, disposition,
-repair eligibility, pass/fail, expected and observed class, classification basis, diagnostic ids,
-candidate kinds, and ineligibility codes) as another case. It is currently `0`, it must not grow —
-the baseline diff fails if it does —
-and it is a **disclosure, not a rejection**, because genuinely distinct cases can legitimately
-coincide.
+independent trial. Two counters disclose that, and neither is a gate:
+
+- `corpus.undeclaredProjectionCollisions` (currently `0`) counts undeclared cases whose
+  **evaluation outputs** project identically onto another case's — same kind, disposition, repair
+  eligibility, pass/fail, expected and observed class, classification basis, diagnostic ids,
+  candidate kinds, and ineligibility codes.
+- `corpus.undeclaredShapeCollisions` (currently `5`) counts undeclared cases whose **fixture
+  shape** — the set of JSON key paths, all values discarded — contains another same-kind case's
+  shape. This is the one that survives evasion: a clone can perturb `checkpointMismatches` until
+  its diagnostics differ, or bolt on an extra key, and still be counted here.
+
+Read these honestly. The first counter catches naive duplication — a copied file with the
+provenance line deleted — which is exactly the mistake that produced the 30 derived cases in the
+first place. It does **not** catch a determined clone: perturb an evidence-neutral fixture value
+until the ineligibility codes differ and the projection no longer matches. The second counter is
+harder to dodge but is not proof of anything either: `5` today is five genuinely distinct curated
+cases that happen to ask a strictly wider version of another case's question. Both are floors in
+the baseline diff — they must not grow — and both are **disclosures, not rejections**. Neither
+establishes that a case is original; they make an undeclared restatement something a reviewer has
+to argue for rather than something that passes unremarked.
 
 Closing the repair-precision gate honestly needs ~100 *materially different* repair scenarios —
 different failure shapes, different candidate sets, different checkpoint outcomes — or real

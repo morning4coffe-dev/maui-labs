@@ -65,7 +65,14 @@ The comparison fails (nonzero exit) when:
 - `corpus.curatedOriginalCases` (curated minus derived) falls below the baseline — `curatedDerivedCases`
   itself is deliberately *not* frozen, because losing disclosure is not a regression but growing
   clones while originals stay flat is;
-- `corpus.undeclaredProjectionCollisions` rises above the baseline;
+- `corpus.undeclaredProjectionCollisions` or `corpus.undeclaredShapeCollisions` rises above the
+  baseline;
+- `corpus.securityCorpus.caseCount`, `corpus.securityCorpus.passedCount`, or
+  `metrics.privacySecurityEscapes.testCount` falls below the baseline — the privacy-security gate
+  reports `pass` on three cases as happily as on eighteen, so without these floors deleting fifteen
+  of them changes no gate status and no rate;
+- `abstention`'s **numerator** falls below the baseline — it counts *correct* abstentions, so
+  unlike `falseHeals` it must not shrink;
 - a metric that had evidence in the baseline has none in the current run;
 - a gate that was `pass` in the baseline is no longer `pass`, or has disappeared;
 - with `--accumulate`, any accumulated metric regresses against its per-run baseline counterpart —
@@ -88,8 +95,11 @@ metric the diff gates on (`repairPrecision`, `repairRecall`, `falseHeals`, `abst
 Be clear about what that test does and does not do: it catches a **hand-edited or stale** baseline.
 It does **not** catch a corpus weakened and re-baselined in the same commit — regenerating the file
 makes both artifacts consistent again. What catches that is the set of monotone floors above:
-`corpus.*`, `independentEvaluations`, and the gate-status comparison, none of which the corpus can
-lower without a visible regression line.
+`corpus.*`, `independentEvaluations`, and the gate-status comparison. Those floors are only as wide
+as the fields listed, and a field with no floor is unprotected: the privacy/security corpus was
+exactly that gap until its counts were floored, and any *future* evidence surface added to the
+report will be too until someone adds it to the list. Reviewing what a change removes is still a
+human job.
 
 ## Regenerating
 
@@ -126,14 +136,32 @@ the contract does not model (`accumulate-unmodelled-evidence`); when a rate metr
 do not add up to its totals (`accumulate-incoherent-metric`); or when its static evidence disagrees
 with the reference under a matching corpus fingerprint (`accumulate-static-evidence-mismatch`).
 
+The reference run is the newest member of the **largest self-valid cohort** — runs grouped by
+contract version, platform, policy version, and corpus fingerprint, excluding any run that would
+reject itself. Picking the oldest file instead meant one leftover run from a superseded corpus
+rejected every current run as a fingerprint mismatch, and the merge reported a near-empty result
+with exit 0. Cohort voting is not a defence against forged input — enough forged runs would win the
+vote — but a stale file is an accident that happens, and forgery is already outside what any
+self-reported file can be checked for.
+
 **Static evidence is counted once, not summed.** Every accumulated run must share a corpus
-fingerprint — which now covers the case file *contents*, not just the manifest — so its curated,
+fingerprint — which covers the *contents* of every evaluated `.json` file under the corpus root,
+not just the manifest, and excludes only `baselines/` (generated from the fingerprint, so hashing
+it would never converge) and markdown — so its curated,
 curated-derived, and generated counts are re-reads of the same files. Only `device-backed` counts
 are summed across runs; an unrecognised source name is refused outright
 (`accumulate-unknown-sample-source`) rather than quietly treated as one or the other. Running the
 same static corpus 100 times — under 100 different `--mutation-seed` values, which do produce 100
 distinct evidence fingerprints — still yields `independentEvaluations` of 1 for `repairPrecision`.
 Accumulation is for real device runs; it cannot manufacture trials out of re-reading files.
+
+**The source-name check is a spell-checker, not an authenticity check.** It rejects `null`, `""`,
+`"   "`, `"Device-Backed"`, `"device-backed "` and any label the contract does not define. It does
+**not** reject a fabricated `sourceCounts` entry that spells `device-backed` correctly — a
+hand-written run file claiming 400 device-backed no-repair evaluations is merged verbatim. Nothing
+in a self-reported JSON file can prove that a number came from a device. What the merge can do is
+refuse the shapes that are obviously not evidence, and publish enough structure that a reviewer can
+see what is being claimed. Trust the run files exactly as much as you trust the job that wrote them.
 
 **Clean first attempts do accumulate**, because they are the one thing here that is a fresh device
 observation per run. `accumulation.firstAttemptFlows` sums `cleanFirstAttempts` and
@@ -142,6 +170,16 @@ gates them at the same per-flow threshold as the single-run gate. A flow counts 
 only if *every* contributing run said so. This is what makes 5 jobs × `--repeat 20` reach the ≥100
 threshold without raising the cap. No run has produced any first-attempt evidence yet, so the
 committed baseline reports none.
+
+Because that sum is the only place new evidence enters, it carries the tightest checks:
+
+- a run repeating one `flowId` in its flow list, or claiming more passes than clean attempts, is
+  refused (`accumulate-incoherent-flow-evidence`) — otherwise pasting one 20/20 entry five times
+  inside a single file reaches the 100-attempt threshold from 20 real attempts;
+- a flow claiming `realDeviceEvidence` in a run that names no real device is refused
+  (`accumulate-unattributed-device-evidence`);
+- each merged flow publishes `contributingRuns` and `contributingDevices`, so 100 attempts arriving
+  as 5 runs on 5 devices is legible as such — and 100 arriving as 5 runs on 1 device is too.
 
 **Runs must be distinguishable to count.** `accumulate-duplicate-run` rejects any run whose
 evidence fingerprint — contract version, platform, status, identity fingerprints, corpus summary,
@@ -152,3 +190,15 @@ is that CI shards must record what actually distinguishes them: a per-shard
 indistinguishable evidence, and the second is dropped rather than added. That is the fail-closed
 direction — it undercounts rather than inflates — but it means an accumulate job that forgets to
 stamp device identity will silently plateau at one run's worth of attempts.
+
+Say the uncomfortable part plainly: `deviceFingerprint` is a string the harness writes, and five
+copies of one run file with that string edited will merge to 100 attempts. Stamping it is only
+sound when the *harness* derives it from the device it actually drove. If a human types it, the sum
+is not evidence, and `contributingDevices` will not know the difference. This is a reason to
+generate run files from CI, never by hand — not a property the merge can enforce.
+
+**Per-flow verdicts are not pooled.** Both `android-tier1-first-attempts` and its accumulated twin
+judge each flow on its own evidence and take the worst verdict. A flow with a sufficient sample
+that misses the stability threshold is a `fail` even when a sibling flow has not run yet; pooling
+the reason codes used to downgrade that to `not-qualified`, which reports exit 0 on a measured
+regression.

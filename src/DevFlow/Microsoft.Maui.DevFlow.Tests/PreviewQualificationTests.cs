@@ -746,16 +746,17 @@ public sealed class PreviewQualificationTests
             static run => run.ReasonCodes.Contains("accumulate-duplicate-run"));
 
         // Distinct evidence merges additively, which is what "100 clean first attempts" needs:
-        // independent runs across jobs and days, not one long in-process loop.
+        // independent runs across jobs and days, not one long in-process loop. Only device-backed
+        // evidence is genuinely per-run; the curated share is the same corpus re-read.
         var secondInput = QualifiedInput();
-        secondInput.Samples.RemoveAll(static sample => sample.RepairProposed == true);
         for (var index = 0; index < 40; index++)
         {
             secondInput.Samples.Add(new MauiQualificationExecutionSample
             {
                 SampleId = $"repair-second-{index}",
-                Source = MauiQualificationSampleSources.Curated,
+                Source = MauiQualificationSampleSources.DeviceBacked,
                 Platform = "android",
+                RealDevice = true,
                 RepairProposed = true,
                 RepairExpected = true,
                 RepairCorrect = true,
@@ -768,13 +769,27 @@ public sealed class PreviewQualificationTests
         var merged = MauiPreviewQualificationAccumulator.Accumulate([first, second], DateTimeOffset.UnixEpoch);
         Assert.Equal(2, merged.AcceptedRuns);
         Assert.Equal(0, merged.RejectedRuns);
+        // 100 curated counted once (both runs read the same corpus) plus 40 device-backed trials.
         Assert.Equal(140, merged.Metrics["repairPrecision"].Denominator);
         Assert.Equal(140, merged.Metrics["repairPrecision"].Numerator);
         Assert.Equal(140, merged.Metrics["repairPrecision"].IndependentEvaluations);
-        Assert.Equal(1200, merged.Metrics["falseHeals"].Denominator);
+        Assert.Equal(900, merged.Metrics["falseHeals"].Denominator);
         Assert.Equal(600, merged.Metrics["falseHeals"].IndependentEvaluations);
         Assert.Equal(MauiPreviewQualificationStates.Pass, Gate(merged, "accumulated-repair-precision").Status);
         Assert.Equal(MauiPreviewQualificationStates.Pass, Gate(merged, "accumulated-zero-false-heals").Status);
+
+        // Two runs claiming the same corpus but reporting different static counts did not read the
+        // same corpus. Merging them would sum evidence that is supposed to be identical.
+        var shrunkStatic = QualifiedInput();
+        shrunkStatic.Samples.RemoveAll(static sample =>
+            sample.Source == MauiQualificationSampleSources.Curated && sample.RepairProposed == true);
+        var staticMismatch = MauiPreviewQualificationAccumulator.Accumulate(
+            [first, MauiPreviewQualificationGateEvaluator.Evaluate(shrunkStatic, DateTimeOffset.UnixEpoch.AddDays(4))],
+            DateTimeOffset.UnixEpoch);
+        Assert.Equal(1, staticMismatch.AcceptedRuns);
+        Assert.Contains(
+            staticMismatch.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-static-evidence-mismatch"));
 
         // Fail closed on anything that would silently pool incomparable evidence.
         var otherPlatform = QualifiedInput();
@@ -813,17 +828,40 @@ public sealed class PreviewQualificationTests
         var staticRun = MauiPreviewQualificationGateEvaluator.Evaluate(staticInput, DateTimeOffset.UnixEpoch.AddDays(1));
         Assert.False(staticRun.Metrics.RecordingValidity.IndependentDeviceRuns);
 
-        // Pooling device evidence with generated evidence must not launder the generated share
-        // into independent device runs.
-        var merged = MauiPreviewQualificationAccumulator.Accumulate([deviceRun, staticRun], DateTimeOffset.UnixEpoch);
+        // Dropping the device evidence and adding generated cases changes the static share, so the
+        // pair is refused outright rather than pooled.
+        var refused = MauiPreviewQualificationAccumulator.Accumulate([deviceRun, staticRun], DateTimeOffset.UnixEpoch);
+        Assert.Equal(1, refused.AcceptedRuns);
+        Assert.Contains(
+            refused.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-static-evidence-mismatch"));
+
+        // The pooling case that must not launder: identical static evidence in both runs, but one
+        // run's recording evidence is not from a real device. The merged metric must not claim
+        // independent device runs on the strength of the other run.
+        var pooledInput = QualifiedInput();
+        pooledInput.Samples.Add(new MauiQualificationExecutionSample
+        {
+            SampleId = "emulator-recording",
+            Source = MauiQualificationSampleSources.DeviceBacked,
+            Platform = "android",
+            RealDevice = false,
+            RecordingValid = true,
+        });
+        var pooledRun = MauiPreviewQualificationGateEvaluator.Evaluate(pooledInput, DateTimeOffset.UnixEpoch.AddDays(1));
+        Assert.False(pooledRun.Metrics.RecordingValidity.IndependentDeviceRuns);
+
+        var merged = MauiPreviewQualificationAccumulator.Accumulate([deviceRun, pooledRun], DateTimeOffset.UnixEpoch);
         Assert.Equal(2, merged.AcceptedRuns);
-        Assert.Equal(200, merged.Metrics["recordingValidity"].Denominator);
         Assert.False(merged.Metrics["recordingValidity"].IndependentDeviceRuns);
+        // Static evidence is counted once no matter how many runs re-read it.
         Assert.Equal(
-            100,
+            deviceRun.Metrics.RecordingValidity.SourceCounts
+                .Where(static item => MauiQualificationSampleSources.IsStatic(item.Source))
+                .Sum(static item => item.Denominator),
             merged.Metrics["recordingValidity"].SourceCounts
-                .Single(static item => item.Source == MauiQualificationSampleSources.Generated)
-                .Denominator);
+                .Where(static item => MauiQualificationSampleSources.IsStatic(item.Source))
+                .Sum(static item => item.Denominator));
     }
 
     [Fact]
@@ -924,42 +962,249 @@ public sealed class PreviewQualificationTests
     [Fact]
     public void CorpusRunner_RejectsUnknownCaseKeysAndUnattributedDerivedCases()
     {
-        var corpusRoot = Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus");
-        var casePath = Directory.GetFiles(Path.Combine(corpusRoot, "cases"), "repair-positive-*.json")
-            .OrderBy(static path => path, StringComparer.Ordinal)
-            .First();
-        var original = File.ReadAllText(casePath);
+        // Copied rather than mutated in place: SelectorHealthTests reads the same files from a
+        // parallel xUnit collection, and a hang-kill mid-test would leave the repository dirty.
+        var scratch = Path.Combine(
+            Path.GetDirectoryName(typeof(PreviewQualificationTests).Assembly.Location)!,
+            "corpus-mutation-tests",
+            Guid.NewGuid().ToString("N"));
+        CopyDirectory(Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus"), scratch);
         try
         {
+            var casePath = Directory.GetFiles(Path.Combine(scratch, "cases"), "repair-positive-*.json")
+                .OrderBy(static path => path, StringComparer.Ordinal)
+                .First();
+            var original = File.ReadAllText(casePath);
+            Assert.Empty(RunCorpus(scratch).Summary.Errors);
+
             // The schema declares additionalProperties:false at the case root. A typo must fail
             // the corpus, not quietly drop the case out of a denominator.
             var withUnknownKey = JsonNode.Parse(original)!.AsObject();
             withUnknownKey["expectedFailureclass"] = "locator-not-found";
             File.WriteAllText(casePath, withUnknownKey.ToJsonString());
-            Assert.Contains("corpus-case-unknown-property", RunCorpus().Summary.Errors);
+            Assert.Contains("corpus-case-unknown-property", RunCorpus(scratch).Summary.Errors);
 
             // A derived case must name its seed, or the curated-versus-derived split it feeds is
             // unverifiable.
             var withoutDerivedFrom = JsonNode.Parse(original)!.AsObject();
             withoutDerivedFrom["provenance"]!.AsObject().Remove("derivedFrom");
             File.WriteAllText(casePath, withoutDerivedFrom.ToJsonString());
-            Assert.Contains("corpus-case-provenance-invalid", RunCorpus().Summary.Errors);
+            Assert.Contains("corpus-case-provenance-invalid", RunCorpus(scratch).Summary.Errors);
         }
         finally
         {
-            File.WriteAllText(casePath, original);
+            try { Directory.Delete(scratch, recursive: true); }
+            catch (IOException) { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void CorpusRunner_NeverCountsAClassTheFixtureAlreadyNamedAsInference()
+    {
+        var scratch = Path.Combine(
+            Path.GetDirectoryName(typeof(PreviewQualificationTests).Assembly.Location)!,
+            "corpus-inference-tests",
+            Guid.NewGuid().ToString("N"));
+        var source = Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus");
+        CopyDirectory(source, scratch);
+        try
+        {
+            var baselineMatrix = Report(RunCorpus(scratch), DateTimeOffset.UnixEpoch).Metrics.ClassificationMatrix;
+
+            // MauiFlowFailureClassifier.Classify short-circuits on terminalOutcome and on an
+            // otherFailures flag before it ever looks at the stamped failure class. A case that
+            // omits "failure" but names its class through either of those routes is still answered
+            // by copying, and must not be counted as a genuinely inferred evaluation.
+            var seed = JsonNode.Parse(
+                File.ReadAllText(Path.Combine(scratch, "cases", "baseline-unique-automation-id.json")))!.AsObject();
+            foreach (var (id, fixtureKey, fixtureValue) in new[]
+            {
+                ("classification-shortcut-transport", "otherFailures", (JsonNode)new JsonArray("transport")),
+                ("classification-shortcut-cancelled", "terminalOutcome", JsonValue.Create("cancelled")!),
+            })
+            {
+                var injected = JsonNode.Parse(seed.ToJsonString())!.AsObject();
+                injected["id"] = id;
+                injected["expectedFailureClass"] = fixtureKey == "otherFailures" ? "transport" : "cancelled";
+                injected["fixture"]!.AsObject()[fixtureKey] = fixtureValue;
+                File.WriteAllText(Path.Combine(scratch, "cases", id + ".json"), injected.ToJsonString());
+            }
+            var manifestPath = Path.Combine(scratch, "corpus-manifest.json");
+            var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+            foreach (var id in new[] { "classification-shortcut-transport", "classification-shortcut-cancelled" })
+            {
+                manifest["cases"]!.AsArray().Add(new JsonObject
+                {
+                    ["id"] = id,
+                    ["file"] = "cases/" + id + ".json",
+                    ["kind"] = "baseline",
+                    ["disposition"] = "diagnostic-only",
+                });
+            }
+            File.WriteAllText(manifestPath, manifest.ToJsonString());
+
+            var run = RunCorpus(scratch);
+            Assert.Empty(run.Summary.Errors);
+            var matrix = Report(run, DateTimeOffset.UnixEpoch).Metrics.ClassificationMatrix;
+            Assert.Equal(baselineMatrix.SampleCount + 2, matrix.SampleCount);
+            // Both new cases land in the stamp-honoured bucket, not the inferred one.
+            Assert.Equal(baselineMatrix.InferredSampleCount, matrix.InferredSampleCount);
+            Assert.Equal(baselineMatrix.StampHonouredSampleCount + 2, matrix.StampHonouredSampleCount);
+        }
+        finally
+        {
+            try { Directory.Delete(scratch, recursive: true); }
+            catch (IOException) { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void Baseline_MatchesAFreshlyGeneratedReport()
+    {
+        // The baseline diff is monotone: it flags current < baseline and is silent otherwise, so a
+        // commit that weakens the corpus *and* re-baselines is green. This is what stops that.
+        var baselinePath = Path.Combine(
+            FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus", "baselines", "qualification.json");
+        var committed = JsonNode.Parse(File.ReadAllText(baselinePath))!.AsObject();
+        var corpus = RunCorpus();
+        var freshReport = MauiPreviewQualificationGateEvaluator.Evaluate(
+            new MauiPreviewQualificationInput
+            {
+                Platform = committed["platform"]!.GetValue<string>(),
+                Corpus = corpus.Summary,
+                Samples = corpus.Samples,
+                PrivacySecurity = corpus.PrivacySecurity,
+            },
+            DateTimeOffset.UnixEpoch);
+        var fresh = JsonNode.Parse(JsonSerializer.Serialize(
+            freshReport, MauiTestingJsonContext.Default.MauiPreviewQualificationReport))!.AsObject();
+
+        Assert.Equal(Canonical(committed["corpus"]!), Canonical(fresh["corpus"]!));
+
+        // Every metric the CI diff gates on, recomputed from the corpus on disk. runtimeOverhead is
+        // machine dependent and the rest carry no static evidence.
+        foreach (var name in new[]
+        {
+            "repairPrecision", "repairRecall", "falseHeals", "abstention",
+            "classificationAccuracy", "classificationMatrix", "selectorStability",
+            "recordingValidity", "privacySecurityEscapes",
+        })
+        {
+            Assert.Equal(Canonical(committed["metrics"]![name]!), Canonical(fresh["metrics"]![name]!));
         }
 
-        Assert.Empty(RunCorpus().Summary.Errors);
+        Assert.Equal(committed["status"]!.GetValue<string>(), freshReport.Status);
     }
+
+    private static string Canonical(JsonNode node) =>
+        JsonSerializer.Serialize(JsonSerializer.Deserialize<JsonElement>(node.ToJsonString()));
+
+    private static void CopyDirectory(string source, string destination)
+    {
+        Directory.CreateDirectory(destination);
+        foreach (var file in Directory.GetFiles(source))
+            File.Copy(file, Path.Combine(destination, Path.GetFileName(file)));
+        foreach (var directory in Directory.GetDirectories(source))
+            CopyDirectory(directory, Path.Combine(destination, Path.GetFileName(directory)));
+    }
+
+    [Fact]
+    public void Accumulator_ReReadingTheSameCorpusNeverGrowsIndependentEvidence()
+    {
+        // --mutation-seed changes the evidence fingerprint, so 30 seeded runs are 30 *distinct*,
+        // accepted runs by the dedupe rule. They are still one corpus read thirty times, and the
+        // independent counts the gates read must not move.
+        var runs = Enumerable.Range(0, 30)
+            .Select(seed => MauiPreviewQualificationCorpusRunner.Run(new MauiPreviewQualificationCorpusRunRequest
+            {
+                CorpusRoot = Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus"),
+                Platform = "android",
+                MutationSeed = 20260802 + seed,
+                GeneratedNoRepairEvaluations = 300,
+            }))
+            .Select((result, index) => Report(result, DateTimeOffset.UnixEpoch.AddDays(index)))
+            .ToList();
+        Assert.Equal(
+            30,
+            runs.Select(MauiPreviewQualificationAccumulator.ComputeEvidenceFingerprint)
+                .Distinct(StringComparer.Ordinal)
+                .Count());
+
+        var single = MauiPreviewQualificationAccumulator.Accumulate([runs[0]], DateTimeOffset.UnixEpoch);
+        var many = MauiPreviewQualificationAccumulator.Accumulate(runs, DateTimeOffset.UnixEpoch);
+        Assert.Equal(30, many.AcceptedRuns);
+        foreach (var name in MauiPreviewQualificationAccumulator.MergedMetricNames)
+        {
+            Assert.Equal(single.Metrics[name].Denominator, many.Metrics[name].Denominator);
+            Assert.Equal(single.Metrics[name].IndependentEvaluations, many.Metrics[name].IndependentEvaluations);
+        }
+        Assert.Equal(1, many.Metrics["repairPrecision"].IndependentEvaluations);
+        Assert.Equal(16, many.Metrics["falseHeals"].IndependentEvaluations);
+        Assert.Equal(8, many.Metrics["classificationAccuracy"].IndependentEvaluations);
+        Assert.NotEqual(MauiPreviewQualificationStates.Pass, Gate(many, "accumulated-repair-precision").Status);
+        Assert.NotEqual(MauiPreviewQualificationStates.Pass, Gate(many, "accumulated-zero-false-heals").Status);
+        Assert.NotEqual(MauiPreviewQualificationStates.Pass, Gate(many, "accumulated-classification-accuracy").Status);
+    }
+
+    [Fact]
+    public void Accumulator_RefusesRunsWhoseSourceCountsDoNotAddUp()
+    {
+        var honest = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput(), DateTimeOffset.UnixEpoch);
+        var edited = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput(), DateTimeOffset.UnixEpoch.AddDays(1));
+        // Exactly what a hand-edited run file looks like: totals raised, per-source counts left
+        // alone. Nothing else in the pipeline recomputes these, so the merge has to refuse them.
+        edited.Metrics.RepairPrecision.Denominator += 50;
+        edited.Metrics.RepairPrecision.Numerator += 50;
+        edited.Metrics.RepairPrecision.IndependentEvaluations += 50;
+
+        var accumulation = MauiPreviewQualificationAccumulator.Accumulate([honest, edited], DateTimeOffset.UnixEpoch);
+        Assert.Equal(1, accumulation.AcceptedRuns);
+        Assert.Contains(
+            accumulation.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-incoherent-metric"));
+        Assert.Equal(100, accumulation.Metrics["repairPrecision"].IndependentEvaluations);
+    }
+
+    [Fact]
+    public void GateEvaluator_LowerBoundGatesReadTheIndependentIntervalNotThePooledOne()
+    {
+        var report = Report(RunCorpus(), DateTimeOffset.UnixEpoch);
+        var precision = report.Metrics.RepairPrecision;
+
+        // 31/31 pooled versus 1/1 independent. The pooled Wilson lower bound is far above the
+        // truth the sample supports, which is exactly how clones would buy a passing gate.
+        Assert.Equal(31, precision.Denominator);
+        Assert.Equal(1, precision.IndependentEvaluations);
+        Assert.NotNull(precision.ConfidenceInterval);
+        Assert.NotNull(precision.IndependentConfidenceInterval);
+        Assert.True(precision.IndependentConfidenceInterval!.Lower < precision.ConfidenceInterval!.Lower);
+        Assert.True(precision.IndependentConfidenceInterval.Lower < 0.25);
+        Assert.True(precision.ConfidenceInterval.Lower > 0.85);
+
+        var classification = report.Metrics.ClassificationAccuracy;
+        Assert.True(classification.IndependentConfidenceInterval!.Lower < classification.ConfidenceInterval!.Lower);
+    }
+
+    private static MauiPreviewQualificationReport Report(
+        MauiPreviewQualificationCorpusRunResult corpus,
+        DateTimeOffset generatedAt) =>
+        MauiPreviewQualificationGateEvaluator.Evaluate(
+            new MauiPreviewQualificationInput
+            {
+                Platform = "android",
+                Corpus = corpus.Summary,
+                Samples = corpus.Samples,
+                PrivacySecurity = corpus.PrivacySecurity,
+            },
+            generatedAt);
 
     private static MauiQualificationGateResult Gate(MauiQualificationAccumulation accumulation, string gateId) =>
         accumulation.Gates.Single(gate => gate.GateId == gateId);
 
-    private static MauiPreviewQualificationCorpusRunResult RunCorpus() =>
+    private static MauiPreviewQualificationCorpusRunResult RunCorpus(string? corpusRoot = null) =>
         MauiPreviewQualificationCorpusRunner.Run(new MauiPreviewQualificationCorpusRunRequest
         {
-            CorpusRoot = Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus"),
+            CorpusRoot = corpusRoot ?? Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus"),
             Platform = "android",
             MutationSeed = 20260802,
             GeneratedNoRepairEvaluations = 300,

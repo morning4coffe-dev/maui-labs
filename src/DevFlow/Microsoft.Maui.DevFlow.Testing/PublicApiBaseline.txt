@@ -377,6 +377,10 @@ F:Microsoft.Maui.DevFlow.Testing.MauiCSharpSourceProposalStates.Stale:System.Str
 F:Microsoft.Maui.DevFlow.Testing.MauiCSharpSourceProposalStates.VerificationFailed:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiCSharpSourceProposalStates.Verified:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlow.CurrentSchema:System.Int32
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowClassificationBases.FactFlag:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowClassificationBases.Inferred:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowClassificationBases.Outcome:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowClassificationBases.Stamped:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClasses.ActionRejected:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClasses.AgentDisconnected:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClasses.AssertionFailed:System.String
@@ -771,6 +775,7 @@ M:Microsoft.Maui.DevFlow.Testing.MauiQualificationPrivacyScanner.Scan(projection
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransitionPolicy.Evaluate(transition:Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransition):Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransitionResult
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationSampleSources.IsIndependent(value:System.String):System.Boolean
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationSampleSources.IsKnown(value:System.String):System.Boolean
+M:Microsoft.Maui.DevFlow.Testing.MauiQualificationSampleSources.IsStatic(value:System.String):System.Boolean
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationSanitizer.Fingerprint(value:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationSanitizer.FingerprintOrUnknown(value:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationSanitizer.SafeKind(value:System.String):System.String
@@ -1007,6 +1012,8 @@ P:Microsoft.Maui.DevFlow.Testing.MauiAuthoringStudyArmSummary.MedianTimeToFirstR
 P:Microsoft.Maui.DevFlow.Testing.MauiAuthoringStudyArmSummary.MedianTimeToGoalMs[]:System.Nullable`1[System.Double]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiAuthoringStudyArmSummary.Participants[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiAuthoringStudyArmSummary.Sessions[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiAuthoringStudyArmSummary.TimeToFirstResultSampleCount[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiAuthoringStudyArmSummary.TimeToGoalSampleCount[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiAuthoringStudyReport.AssistedSessions[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiAuthoringStudyReport.ComparableTasks[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiAuthoringStudyReport.ControlSessions[]:System.Int32{get:public;set:public}
@@ -1379,6 +1386,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.Phase[]:System.String{get:publi
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.RepairEligible[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.Retryable[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.StepId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification.Basis[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification.Category[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification.Code[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification.FailureClass[]:System.String{get:public;set:public}
@@ -2182,6 +2190,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceCount.SourceKi
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.CaseSchemaValid[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.CuratedCases[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.CuratedClassificationLabeledCases[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.CuratedDerivedCases[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.CuratedNoRepairCases[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.CuratedRepairPositiveCases[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.DeviceBackedCases[]:System.Int32{get:public;set:public}
@@ -2349,14 +2358,17 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransitionResult.Reaso
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.ConfidenceInterval[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationConfidenceInterval{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.Denominator[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.Exclusions[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationExclusion]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.IndependentConfidenceInterval[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationConfidenceInterval{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.IndependentDeviceRuns[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.IndependentEvaluations[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.IndependentNumerator[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.Numerator[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.SampleSources[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.SourceCounts[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationRateSourceCount]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.State[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.Value[]:System.Nullable`1[System.Double]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateSourceCount.Denominator[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateSourceCount.IndependentEvaluations[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateSourceCount.Numerator[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateSourceCount.Source[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationReason.Code[]:System.String{get:public;set:public}
@@ -3698,6 +3710,7 @@ T:class static Microsoft.Maui.DevFlow.Testing.MauiCSharpSourceIneligibilityCodes
 T:class static Microsoft.Maui.DevFlow.Testing.MauiCSharpSourceProposalStates
 T:class static Microsoft.Maui.DevFlow.Testing.MauiElementFingerprintBuilder
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerifier
+T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowClassificationBases
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClasses
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowIncidentFingerprint

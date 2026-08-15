@@ -95,6 +95,11 @@ public static class MauiPreviewQualificationCorpusRunner
             return Complete(summary, cases, samples, errors, null);
         }
         summary.ManifestFingerprint = Hash(manifestBytes);
+        // The manifest alone does not pin what the cases say. Two runs whose case *contents* differ
+        // would otherwise share a fingerprint, and the accumulator relies on that fingerprint to
+        // conclude that the static evidence in both runs is the same evidence.
+        summary.ManifestFingerprint = Hash(Encoding.UTF8.GetBytes(
+            summary.ManifestFingerprint + "|" + HashCaseDirectory(root)));
 
         if (!TryReadObject(schemaPath, out var schema, out _, out var schemaError))
             errors.Add(schemaError ?? "corpus-schema-invalid");
@@ -221,6 +226,16 @@ public static class MauiPreviewQualificationCorpusRunner
         summary.GeneratedNoRepairCases = samples.Count(static item =>
             item.Source == MauiQualificationSampleSources.Generated && item.NoRepairExpected == true);
         summary.CuratedClassificationLabeledCases = cases.Count(static item => item.ExpectedFailureClass is not null);
+        // The curated-versus-derived split is self-declared. A case that copies a seed and simply
+        // does not say so is counted as independent evidence, which is exactly the inflation this
+        // corpus exists to disclose. Two cases whose *evaluated projection* is identical produce
+        // the same evidence whatever their provenance says, so count the ones that collide without
+        // declaring a seed. This is a disclosure, not a rejection: legitimately similar cases exist.
+        summary.UndeclaredProjectionCollisions = cases
+            .Where(static item => item.SchemaValid &&
+                !string.Equals(item.ProvenanceMethod, "adapted-from-case", StringComparison.Ordinal))
+            .GroupBy(EvaluationProjection, StringComparer.Ordinal)
+            .Sum(static group => Math.Max(0, group.Count() - 1));
         summary.ProvenanceComplete = cases.Count > 0 && cases.All(static item =>
             !string.IsNullOrEmpty(item.ProvenanceMethod) && !string.IsNullOrEmpty(item.ProvenanceSourceKind));
         summary.ProvenanceSourceCounts = provenanceCounts
@@ -1000,6 +1015,50 @@ public static class MauiPreviewQualificationCorpusRunner
 
     private static bool IsKnownDisposition(string value) =>
         value is "diagnostic-only" or "no-repair" or "repair-eligible";
+
+    /// <summary>
+    /// Everything about a case that changes what the evaluation observes. Ids, routes and selector
+    /// text are deliberately excluded: renaming them produces a different file but not a different
+    /// piece of evidence.
+    /// </summary>
+    private static string EvaluationProjection(MauiQualificationCorpusCaseResult item) =>
+        string.Join('|',
+            item.Kind,
+            item.Disposition,
+            item.RepairEligible,
+            item.Passed,
+            item.ExpectedFailureClass,
+            item.ObservedFailureClass,
+            item.FailureClassInferred,
+            string.Join(',', item.DiagnosticIds.OrderBy(static id => id, StringComparer.Ordinal)),
+            string.Join(',', item.CandidateKinds.OrderBy(static kind => kind, StringComparer.Ordinal)),
+            string.Join(',', item.IneligibilityCodes.OrderBy(static code => code, StringComparer.Ordinal)));
+
+    private static string HashCaseDirectory(string root)
+    {
+        var directory = Path.Combine(root, "cases");
+        if (!Directory.Exists(directory))
+            return "no-cases";
+        var builder = new StringBuilder();
+        foreach (var file in Directory.GetFiles(directory, "*.json").OrderBy(static path => path, StringComparer.Ordinal))
+        {
+            builder.Append(Path.GetFileName(file)).Append('=');
+            try
+            {
+                builder.Append(Hash(File.ReadAllBytes(file)));
+            }
+            catch (IOException)
+            {
+                builder.Append("unreadable");
+            }
+            catch (UnauthorizedAccessException)
+            {
+                builder.Append("unreadable");
+            }
+            builder.Append(';');
+        }
+        return Hash(Encoding.UTF8.GetBytes(builder.ToString()));
+    }
 
     private static string Hash(ReadOnlySpan<byte> bytes) =>
         "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();

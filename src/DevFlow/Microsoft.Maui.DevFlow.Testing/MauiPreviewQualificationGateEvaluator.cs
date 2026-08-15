@@ -1042,6 +1042,7 @@ public static class MauiPreviewQualificationGateEvaluator
         DeviceBackedCases = Math.Max(0, source?.DeviceBackedCases ?? 0),
         CuratedRepairPositiveCases = Math.Max(0, source?.CuratedRepairPositiveCases ?? 0),
         CuratedDerivedCases = Math.Max(0, source?.CuratedDerivedCases ?? 0),
+        UndeclaredProjectionCollisions = Math.Max(0, source?.UndeclaredProjectionCollisions ?? 0),
         CuratedNoRepairCases = Math.Max(0, source?.CuratedNoRepairCases ?? 0),
         GeneratedNoRepairCases = Math.Max(0, source?.GeneratedNoRepairCases ?? 0),
         CuratedClassificationLabeledCases = Math.Max(0, source?.CuratedClassificationLabeledCases ?? 0),

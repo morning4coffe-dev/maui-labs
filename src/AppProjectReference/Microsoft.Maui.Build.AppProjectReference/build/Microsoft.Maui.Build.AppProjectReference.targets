@@ -195,14 +195,21 @@
       the property does not participate in restore, and restore property sets are deliberately
       kept minimal here. A caller that wants the default behaviour back can set
       MauiAppRefAndroidEmbedAssembliesIntoApk=false, or pass its own EmbedAssembliesIntoApk value
-      through Properties/AdditionalProperties, which is respected as-is.
+      through Properties/AdditionalProperties, which is respected as-is. MSBuild property names
+      are case-insensitive, so the "did the caller already set it" test lowercases both sides and
+      anchors on the delimited name - an unanchored, case-sensitive Contains would both miss
+      'embedassembliesintoapk=false' and false-positive on an unrelated property whose name or
+      value happens to contain the text.
+
+      A global property (dotnet build -p:EmbedAssembliesIntoApk=false on the host project) is not
+      an opt-out: AdditionalProperties on the MSBuild task wins over inherited globals.
 
       This is keyed off the reference's declared TargetFramework, so a reference that leaves the
       framework to the app project keeps whatever that project's configuration selects.
     -->
     <ItemGroup Condition="'$(MauiAppRefAndroidEmbedAssembliesIntoApk)' != 'false'">
       <_ResolvedMauiAppProjectReference Update="@(_ResolvedMauiAppProjectReference)"
-                                    Condition="$([System.String]::Copy('%(_ResolvedMauiAppProjectReference.TargetFramework)').Contains('-android')) and !$([System.String]::Copy('%(_ResolvedMauiAppProjectReference.AdditionalProperties)').Contains('EmbedAssembliesIntoApk'))">
+                                    Condition="$([System.String]::Copy('%(_ResolvedMauiAppProjectReference.TargetFramework)').Contains('-android')) and !$([System.String]::Copy(';%(_ResolvedMauiAppProjectReference.AdditionalProperties)').ToLowerInvariant().Contains(';embedassembliesintoapk='))">
         <AdditionalProperties>%(_ResolvedMauiAppProjectReference.AdditionalProperties);EmbedAssembliesIntoApk=true</AdditionalProperties>
       </_ResolvedMauiAppProjectReference>
     </ItemGroup>

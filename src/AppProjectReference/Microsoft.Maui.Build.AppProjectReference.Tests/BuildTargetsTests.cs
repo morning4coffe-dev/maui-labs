@@ -501,6 +501,45 @@ public sealed class BuildTargetsTests
         Assert.DoesNotContain("EmbedAssembliesIntoApk=true", properties, StringComparison.Ordinal);
     }
 
+    // MSBuild property names are case-insensitive, so the caller opt-out has to be too. A
+    // case-sensitive test would append EmbedAssembliesIntoApk=true after the caller's value and,
+    // because the last assignment wins, silently invert the opt-out.
+    [Fact]
+    public async Task AndroidReference_KeepsCallerSuppliedEmbedAssembliesValue_RegardlessOfCasing()
+    {
+        using var workspace = TestWorkspace.Create();
+
+        var properties = await ResolveAppProjectReferencePropertiesAsync(
+            workspace,
+            """
+            <MauiAppProjectReference Include="..\App\App.csproj"
+                                     TargetFramework="net10.0-android"
+                                     ReferenceName="AndroidApp"
+                                     Properties="embedassembliesintoapk=false" />
+            """);
+
+        Assert.Contains("embedassembliesintoapk=false", properties, StringComparison.Ordinal);
+        Assert.DoesNotContain("EmbedAssembliesIntoApk=true", properties, StringComparison.Ordinal);
+    }
+
+    // A property that merely contains the name must not suppress the default.
+    [Fact]
+    public async Task AndroidReference_SimilarlyNamedCallerProperty_DoesNotSuppressTheDefault()
+    {
+        using var workspace = TestWorkspace.Create();
+
+        var properties = await ResolveAppProjectReferencePropertiesAsync(
+            workspace,
+            """
+            <MauiAppProjectReference Include="..\App\App.csproj"
+                                     TargetFramework="net10.0-android"
+                                     ReferenceName="AndroidApp"
+                                     Properties="MyEmbedAssembliesIntoApkOverride=true" />
+            """);
+
+        Assert.Contains("EmbedAssembliesIntoApk=true", properties, StringComparison.Ordinal);
+    }
+
     [Fact]
     public async Task AndroidReference_HonorsGlobalOptOut()
     {

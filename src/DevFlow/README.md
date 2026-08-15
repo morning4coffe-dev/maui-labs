@@ -289,15 +289,17 @@ flow failure or Windows qualification.
 
 ### Measurement status
 
-Goal #4 names five metrics. Their recorded state is tracked deliberately rather than implied:
+Goal #4 names five metrics. Their recorded state is tracked deliberately rather than implied. Read
+the **independent** count in each row: a denominator can be grown by restating evidence, an
+independent count cannot.
 
 | Metric | Recorded value today | Where |
 |---|---|---|
-| False repair rate | `0/316`, split `curated 0/16` + `generated 0/300` — static corpus only, no device trials | `tests/DevFlow/InspectorCorpus/README.md` |
-| Classification accuracy | Measured on the curated corpus with a published confusion matrix; gate stays `not-qualified` below 100 labelled cases | `tests/DevFlow/InspectorCorpus/baselines/README.md` |
-| Repair acceptance / precision | Denominator is the curated repair-positive count; no human-acceptance signal exists yet | `tests/DevFlow/InspectorCorpus/baselines/qualification.json` |
+| False repair rate | `0/316` pooled, but **16 independent** — `curated 0/16` + `generated 0/300`. Static corpus only, no device trials. Gate needs 300 independent. | `tests/DevFlow/InspectorCorpus/README.md` |
+| Classification accuracy | `42/45` pooled, but **8 independent** — 37 of the 45 handed the classifier its own answer. Confusion matrix published with an inferred/stamp-honoured split. Gate needs 100 *genuinely inferred* evaluations, so 100 stamped labels would still be `not-qualified`. | `tests/DevFlow/InspectorCorpus/baselines/README.md` |
+| Repair acceptance / precision | `31/31` pooled, but **1 independent** — 30 of the 31 repair-positive cases are `adapted-from-case` restatements of one seed. No human-acceptance signal exists at all. | `tests/DevFlow/InspectorCorpus/baselines/qualification.json` |
 | Replay stability | **No recorded number.** Needs real-device runs; `maui devflow flow qualify --accumulate` makes the ≥100 clean first attempts reachable across independent jobs | [flow-qa.md](../../docs/DevFlow/flow-qa.md) |
-| Authoring time | **No recorded number.** The protocol and export path exist; no sessions collected, and no unassisted control arm has been run | [authoring-time-protocol.md](../../docs/DevFlow/authoring-time-protocol.md) |
+| Authoring time | **No recorded number.** The protocol, export path, and aggregation CLI exist; zero sessions have been collected, **no unassisted-control capture path exists**, and no control sessions have been run | [authoring-time-protocol.md](../../docs/DevFlow/authoring-time-protocol.md) |
 
 ### On-demand diagnostics
 

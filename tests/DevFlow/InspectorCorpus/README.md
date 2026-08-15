@@ -81,8 +81,9 @@ observations.
 ### `curated-derived`: the repair-positive denominator is one seed restated
 
 **30 of the 31 repair-positive cases are `adapted-from-case` copies of
-`repair-positive-unique-locator-drift.json`.** They differ only in `id`, `route`, `oldSelector`, and
-`candidate` — none of which `EvaluateRepairFixture` reads. Every one of them satisfies the same six
+`repair-positive-unique-locator-drift.json`.** They differ only in the *values* of `id`, `route`,
+`oldSelector`, and `candidate` — values `EvaluateRepairFixture` never reads. (It reads whether
+`candidate` is *present*, not what it contains.) Every one of them satisfies the same six
 conjuncts for the same reason, so `repairPrecision` reading `31/31` rests on **one** independent
 trial, not thirty-one. Growing the file count did not grow the evidence.
 
@@ -90,10 +91,17 @@ Rather than leave that to be discovered, the artifact records it:
 
 - Cases whose `provenance.method` is `adapted-from-case` are emitted with sample source
   **`curated-derived`**, and such a case must name its seed in `provenance.derivedFrom`.
-- `metrics.*.independentEvaluations` counts only `curated` and `device-backed` samples.
-- **Every count gate compares `independentEvaluations`, not `denominator`.** `repair-precision`
-  therefore reports `repair-evaluation-count-insufficient` at an independent count of 1, exactly as
-  it did before the 30 cases were added.
+  `corpus.curatedDerivedCases` reports how many there are.
+- `metrics.*.independentEvaluations` counts only `curated` and `device-backed` samples, and
+  `metrics.*.independentConfidenceInterval` is the Wilson interval over *that* subset.
+- **Every count gate compares `independentEvaluations`, not `denominator`, and every lower-bound
+  gate reads `independentConfidenceInterval`, not the pooled one.** The pooled interval narrows
+  toward certainty as clones are added, which is why it is disclosure only. `repair-precision`
+  reports `repair-evaluation-count-insufficient` at an independent count of 1, exactly as it did
+  before the 30 cases were added.
+- `maui devflow flow qualify --accumulate` counts static evidence **once** no matter how many runs
+  report it, because every accumulated run must share a corpus fingerprint and therefore re-reads
+  the same files. Only `device-backed` counts are summed across runs.
 
 Closing the repair-precision gate honestly needs ~100 *materially different* repair scenarios —
 different failure shapes, different candidate sets, different checkpoint outcomes — or real
@@ -121,8 +129,14 @@ Rules:
 
 Where a fixture carries a `failure` field, that value is passed through as
 `MauiFlowFailureFacts.FailureClass`, and the classifier **honours a known stamp before it falls back
-to inference**. For those cases the metric measures stamp-to-report mapping fidelity, not inference
-from raw evidence.
+to inference**. The same is true of `terminalOutcome` and of an `otherFailures` entry that names a
+class: each short-circuits `Classify` before any inference runs. For those cases the metric measures
+stamp-to-report mapping fidelity, not inference from raw evidence.
+
+The split is not re-derived by the corpus runner from the fixture shape — `Classify` reports which
+input decided the answer (`MauiFlowFailureClassification.Basis`), and only `inferred` counts. That
+matters because there are three separate ways to hand the classifier its own answer, and a
+fixture-shape heuristic missed two of them.
 
 The report splits the two rather than pooling them:
 

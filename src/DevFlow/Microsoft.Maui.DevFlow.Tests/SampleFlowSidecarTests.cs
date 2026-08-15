@@ -7,9 +7,11 @@ namespace Microsoft.Maui.DevFlow.Tests;
 
 /// <summary>
 /// The sample flows are executed from their committed <c>.maui-plan.json</c> sidecars, so every
-/// flow needs one and every sidecar has to stay bound to the exact Markdown bytes beside it.
+/// flow needs one and every sidecar has to stay bound to the replay block that defines the flow.
 /// This guard fails when a flow is edited without refreshing its sidecar, which is precisely the
-/// drift the committed-bundle contract exists to reject.
+/// drift the committed-bundle contract exists to reject. The binding is the flow digest, which is
+/// computed over the parsed flow, so prose outside the fenced <c>json maui-test</c> block is not
+/// covered by it.
 /// </summary>
 public sealed class SampleFlowSidecarTests
 {
@@ -31,11 +33,12 @@ public sealed class SampleFlowSidecarTests
         Assert.True(parsed.Ok, $"{relativeFlowPath} could not be parsed: {parsed.Error}");
 
         var digest = MauiFlowRunReportSerializer.ComputeFlowDigest(parsed.Flow!);
+
+        // Regeneration authors or rebinds the sidecar and then falls through to the same
+        // assertions, so a rebind can never launder a sidecar that is invalid or that widens the
+        // mutation policy.
         if (string.Equals(Environment.GetEnvironmentVariable(UpdateEnvironmentVariable), "1", StringComparison.Ordinal))
-        {
             UpdateSidecar(flowPath, sidecarPath, parsed.Flow!, digest);
-            return;
-        }
 
         Assert.True(
             File.Exists(sidecarPath),

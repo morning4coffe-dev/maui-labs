@@ -137,6 +137,34 @@ public sealed class DevFlowFlowRunSummaryScriptTests : IDisposable
     }
 
     [Fact]
+    public async Task ParsableReportWithoutOutcomeStatus_CountsAsNotPassed()
+    {
+        var root = CreateResultsRoot("no-status");
+        WriteReport(root, "truncated-attempt-1", """{ "schema": 1, "runId": "run-4" }""");
+
+        var result = await RunAsync(root, "android-flow-pilot");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(1, result.Json.GetProperty("reports").GetInt32());
+        Assert.Equal(0, result.Json.GetProperty("passed").GetInt32());
+        Assert.Equal(1, result.Json.GetProperty("notPassed").GetInt32());
+    }
+
+    [Fact]
+    public async Task ScalarJsonReport_CountsAsUnreadable()
+    {
+        var root = CreateResultsRoot("scalar");
+        WriteReport(root, "scalar-attempt-1", "\"just a string\"");
+
+        var result = await RunAsync(root, "android-flow-pilot");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Equal(1, result.Json.GetProperty("unreadable").GetInt32());
+        Assert.Equal(0, result.Json.GetProperty("passed").GetInt32());
+        Assert.Contains("unreadable", result.Summary, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void EveryFlowLaneRendersASummaryAndUploadsEvidence()
     {
         var workflow = File.ReadAllText(Path.Combine(_repositoryRoot, WorkflowPath.Replace('/', Path.DirectorySeparatorChar)));
@@ -154,6 +182,12 @@ public sealed class DevFlowFlowRunSummaryScriptTests : IDisposable
         Assert.Contains("**/*.mauitrace", workflow, StringComparison.Ordinal);
         Assert.Contains("**\\flow-run.json", workflow, StringComparison.Ordinal);
         Assert.Contains("**\\*.mauitrace", workflow, StringComparison.Ordinal);
+
+        // A lane that ran and produced no evidence has to fail loudly, but a lane that never got
+        // as far as running must not report an artifact error instead of its real failure.
+        Assert.Equal(
+            FlowLanes.Length,
+            CountOccurrences(workflow, "if: ${{ always() && steps.flow-run.conclusion != 'skipped' }}"));
     }
 
     [Fact]

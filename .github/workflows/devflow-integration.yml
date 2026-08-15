@@ -362,6 +362,7 @@ jobs:
           script: echo "Generated AVD snapshot."
 
       - name: Run Android Tier-1 flow pilot
+        id: flow-run
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
         with:
           avd-name: ${{ env.DEVFLOW_TEST_ANDROID_AVD }}
@@ -451,7 +452,7 @@ jobs:
       # A lane that publishes no flow-run.json is not a green lane, so this upload fails loudly
       # instead of warning. The evidence paths are explicit and never include raw device logs.
       - name: Upload Android flow evidence
-        if: always()
+        if: ${{ always() && steps.flow-run.conclusion != 'skipped' }}
         uses: actions/upload-artifact@v7
         with:
           name: devflow-flow-evidence-android-${{ github.run_id }}-${{ github.run_attempt }}
@@ -665,6 +666,7 @@ jobs:
           echo "id=$SIMULATOR_ID" >> "$GITHUB_OUTPUT"
 
       - name: Run advisory iOS XCTest flow QA
+        id: flow-run
         continue-on-error: true
         run: |
           bash ./eng/devflow/Run-DevFlowFlowQa.sh \
@@ -697,7 +699,7 @@ jobs:
           -Lane ios-flow-qa
 
       - name: Upload iOS flow evidence
-        if: always()
+        if: ${{ always() && steps.flow-run.conclusion != 'skipped' }}
         uses: actions/upload-artifact@v7
         with:
           name: devflow-flow-evidence-ios-${{ github.run_id }}-${{ github.run_attempt }}
@@ -750,6 +752,7 @@ jobs:
         run: dotnet workload install maui ios macos maccatalyst tvos android wasm-tools --version ${{ env.DOTNET_WORKLOAD_VERSION }}
 
       - name: Run advisory Mac Catalyst XCTest flow QA
+        id: flow-run
         continue-on-error: true
         run: |
           bash ./eng/devflow/Run-DevFlowFlowQa.sh \
@@ -781,7 +784,7 @@ jobs:
           -Lane maccatalyst-flow-qa
 
       - name: Upload Mac Catalyst flow evidence
-        if: always()
+        if: ${{ always() && steps.flow-run.conclusion != 'skipped' }}
         uses: actions/upload-artifact@v7
         with:
           name: devflow-flow-evidence-maccatalyst-${{ github.run_id }}-${{ github.run_attempt }}
@@ -836,6 +839,7 @@ jobs:
         run: dotnet workload install maui macos maccatalyst ios tvos android wasm-tools --version ${{ env.DOTNET_WORKLOAD_VERSION }}
 
       - name: Run advisory experimental AppKit flow QA
+        id: flow-run
         continue-on-error: true
         run: |
           bash ./eng/devflow/Run-DevFlowFlowQa.sh \
@@ -870,7 +874,7 @@ jobs:
           -Lane macos-appkit-flow-qa
 
       - name: Upload experimental AppKit flow evidence
-        if: always()
+        if: ${{ always() && steps.flow-run.conclusion != 'skipped' }}
         uses: actions/upload-artifact@v7
         with:
           name: devflow-flow-evidence-macos-appkit-${{ github.run_id }}-${{ github.run_attempt }}
@@ -984,7 +988,7 @@ jobs:
           path: .\artifacts\TestResults\devflow-integration\windows\
           retention-days: 30
 
-  # Advisory second-platform contract. It is a distinct MAUI WinUI lane, never WPF evidence.
+  # Second-platform contract: a distinct MAUI WinUI lane, never WPF evidence.
   # The lane is no longer advisory-only: it fails the run when the Tier-1 flow QA fails or when it
   # publishes no flow evidence. Branch protection must add it to the required checks separately.
   windows-flow-qa:
@@ -1011,6 +1015,7 @@ jobs:
         run: dotnet workload install maui ios macos maccatalyst tvos android wasm-tools --version ${{ env.DOTNET_WORKLOAD_VERSION }}
 
       - name: Run Windows Tier-1 flow QA
+        id: flow-run
         shell: pwsh
         run: |
           .\eng\devflow\Run-DevFlowFlowQa.ps1 `
@@ -1029,7 +1034,7 @@ jobs:
           -Lane windows-flow-qa
 
       - name: Upload Windows flow evidence
-        if: always()
+        if: ${{ always() && steps.flow-run.conclusion != 'skipped' }}
         uses: actions/upload-artifact@v7
         with:
           name: devflow-flow-evidence-windows-${{ github.run_id }}-${{ github.run_attempt }}

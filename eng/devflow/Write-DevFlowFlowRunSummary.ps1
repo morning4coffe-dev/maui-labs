@@ -131,7 +131,16 @@ try {
             $report = $null
         }
 
-        if ($null -eq $report -or $report -isnot [psobject]) {
+        # ConvertFrom-Json happily returns a bare string, number, or array for a JSON scalar or
+        # array document, and every one of those still answers -is [psobject] in PowerShell, so the
+        # base object has to be checked explicitly. Only a JSON object with at least one property
+        # can be a flow run report.
+        $isReportObject = $false
+        if ($null -ne $report -and $report.PSObject.BaseObject -is [System.Management.Automation.PSCustomObject]) {
+            $isReportObject = @($report.PSObject.Properties).Count -gt 0
+        }
+
+        if (-not $isReportObject) {
             $unreadableCount++
             $rows += , @($location, '-', 'unreadable', '-', '-', '-', '-', '-', '-')
             continue
@@ -146,8 +155,10 @@ try {
         $verified = Get-ReportProperty $outcome 'verified'
         if ($verified -is [bool] -and $verified) { $verifiedCount++ }
 
+        # A report that parses but carries no outcome status is suspicious, not neutral: count it
+        # with the failures so a truncated or garbled report can never read as "nothing to see".
         if ($outcomeStatus -eq 'passed') { $passedCount++ }
-        elseif ($outcomeStatus -ne '-') { $failedCount++ }
+        else { $failedCount++ }
 
         $stepCount = 0
         if ($null -ne $steps -and $steps -is [System.Collections.IEnumerable] -and $steps -isnot [string]) {

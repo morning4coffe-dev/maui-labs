@@ -690,6 +690,108 @@ public sealed class PreviewQualificationTests
         return parsed.Ok ? transition.ReasonCode : "parse-failed";
     }
 
+    [Fact]
+    public void Accumulator_MergesIndependentRunsButRefusesDuplicateOrIncompatibleEvidence()
+    {
+        var first = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput(), DateTimeOffset.UnixEpoch);
+
+        // The same evidence submitted twice is one observation. Wall-clock time is excluded from
+        // the run fingerprint precisely so a repeated run cannot inflate a denominator.
+        var duplicate = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput(), DateTimeOffset.UnixEpoch.AddDays(1));
+        Assert.Equal(
+            MauiPreviewQualificationAccumulator.ComputeEvidenceFingerprint(first),
+            MauiPreviewQualificationAccumulator.ComputeEvidenceFingerprint(duplicate));
+
+        var deduplicated = MauiPreviewQualificationAccumulator.Accumulate([first, duplicate], DateTimeOffset.UnixEpoch);
+        Assert.Equal(2, deduplicated.ConsideredRuns);
+        Assert.Equal(1, deduplicated.AcceptedRuns);
+        Assert.Equal(1, deduplicated.RejectedRuns);
+        Assert.Equal(100, deduplicated.Metrics["repairPrecision"].Denominator);
+        Assert.Contains(
+            deduplicated.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-duplicate-run"));
+
+        // Distinct evidence merges additively, which is what "100 clean first attempts" needs:
+        // independent runs across jobs and days, not one long in-process loop.
+        var secondInput = QualifiedInput();
+        secondInput.Samples.RemoveAll(static sample => sample.RepairProposed == true);
+        for (var index = 0; index < 40; index++)
+        {
+            secondInput.Samples.Add(new MauiQualificationExecutionSample
+            {
+                SampleId = $"repair-second-{index}",
+                Source = MauiQualificationSampleSources.Curated,
+                Platform = "android",
+                RepairProposed = true,
+                RepairExpected = true,
+                RepairCorrect = true,
+                ExpectedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
+                ObservedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
+            });
+        }
+        var second = MauiPreviewQualificationGateEvaluator.Evaluate(secondInput, DateTimeOffset.UnixEpoch.AddDays(2));
+        var merged = MauiPreviewQualificationAccumulator.Accumulate([first, second], DateTimeOffset.UnixEpoch);
+        Assert.Equal(2, merged.AcceptedRuns);
+        Assert.Equal(0, merged.RejectedRuns);
+        Assert.Equal(140, merged.Metrics["repairPrecision"].Denominator);
+        Assert.Equal(140, merged.Metrics["repairPrecision"].Numerator);
+        Assert.Equal(600, merged.Metrics["falseHeals"].Denominator);
+        Assert.Equal(MauiPreviewQualificationStates.Pass, Gate(merged, "accumulated-repair-precision").Status);
+        Assert.Equal(MauiPreviewQualificationStates.Pass, Gate(merged, "accumulated-zero-false-heals").Status);
+
+        // Fail closed on anything that would silently pool incomparable evidence.
+        var otherPlatform = QualifiedInput();
+        otherPlatform.Platform = "ios";
+        foreach (var sample in otherPlatform.Samples)
+            sample.Platform = "ios";
+        var crossPlatform = MauiPreviewQualificationAccumulator.Accumulate(
+            [first, MauiPreviewQualificationGateEvaluator.Evaluate(otherPlatform, DateTimeOffset.UnixEpoch.AddDays(3))],
+            DateTimeOffset.UnixEpoch);
+        Assert.Equal(1, crossPlatform.AcceptedRuns);
+        Assert.Contains(
+            crossPlatform.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-platform-mismatch"));
+        Assert.Equal(MauiPreviewQualificationStates.NotQualified, crossPlatform.Status);
+    }
+
+    [Fact]
+    public void Accumulator_NeverTreatsPooledEvidenceAsIndependentDeviceRuns()
+    {
+        var deviceInput = QualifiedInput();
+        var deviceRun = MauiPreviewQualificationGateEvaluator.Evaluate(deviceInput, DateTimeOffset.UnixEpoch);
+        Assert.True(deviceRun.Metrics.RecordingValidity.IndependentDeviceRuns);
+
+        var staticInput = QualifiedInput();
+        staticInput.Samples.RemoveAll(static sample => sample.Source == MauiQualificationSampleSources.DeviceBacked);
+        for (var index = 0; index < 100; index++)
+        {
+            staticInput.Samples.Add(new MauiQualificationExecutionSample
+            {
+                SampleId = $"generated-recording-{index}",
+                Source = MauiQualificationSampleSources.Generated,
+                Platform = "android",
+                RecordingValid = true,
+            });
+        }
+        var staticRun = MauiPreviewQualificationGateEvaluator.Evaluate(staticInput, DateTimeOffset.UnixEpoch.AddDays(1));
+        Assert.False(staticRun.Metrics.RecordingValidity.IndependentDeviceRuns);
+
+        // Pooling device evidence with generated evidence must not launder the generated share
+        // into independent device runs.
+        var merged = MauiPreviewQualificationAccumulator.Accumulate([deviceRun, staticRun], DateTimeOffset.UnixEpoch);
+        Assert.Equal(2, merged.AcceptedRuns);
+        Assert.Equal(200, merged.Metrics["recordingValidity"].Denominator);
+        Assert.False(merged.Metrics["recordingValidity"].IndependentDeviceRuns);
+        Assert.Equal(
+            100,
+            merged.Metrics["recordingValidity"].SourceCounts
+                .Single(static item => item.Source == MauiQualificationSampleSources.Generated)
+                .Denominator);
+    }
+
+    private static MauiQualificationGateResult Gate(MauiQualificationAccumulation accumulation, string gateId) =>
+        accumulation.Gates.Single(gate => gate.GateId == gateId);
+
     private static MauiPreviewQualificationCorpusRunResult RunCorpus() =>
         MauiPreviewQualificationCorpusRunner.Run(new MauiPreviewQualificationCorpusRunRequest
         {

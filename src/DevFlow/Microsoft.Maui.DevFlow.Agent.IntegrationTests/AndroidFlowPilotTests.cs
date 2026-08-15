@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Maui.Cli.DevFlow.Evidence;
+using Microsoft.Maui.Cli.DevFlow.Execution;
 using Microsoft.Maui.DevFlow.Agent.IntegrationTests.Fixtures;
 using Microsoft.Maui.DevFlow.Testing;
 using Xunit.Abstractions;
@@ -28,6 +29,15 @@ public sealed class AndroidFlowPilotTests
         => Assert.Equal(expected, ResolveCleanRepetitions(configured));
 
     [Fact]
+    public async Task TierOneFlows_LoadCommittedPlanBundles()
+    {
+        var flows = await LoadTierOneFlowsAsync(AppFixtureBase.FindRepoRoot());
+
+        Assert.All(flows, flow => Assert.NotNull(flow.Plan));
+        Assert.All(flows, flow => Assert.Equal(MauiFlowSideEffectPolicies.None, flow.Plan!.SideEffectPolicy));
+    }
+
+    [Fact]
     public async Task TierOneFlows_RunConfiguredCleanAttempts_AndPublishFirstAttemptManifest()
     {
         if (!IsEnabled())
@@ -50,7 +60,7 @@ public sealed class AndroidFlowPilotTests
 
         try
         {
-            flows = LoadTierOneFlows(repositoryRoot);
+            flows = await LoadTierOneFlowsAsync(repositoryRoot);
             fixture = new AndroidEmulatorFixture();
             await fixture.InitializeAsync();
             host = fixture.CreateFlowTestHost();
@@ -73,7 +83,8 @@ public sealed class AndroidFlowPilotTests
 
                     var result = await host.RunAsync(
                         flow.Flow,
-                        CreatePlan(flow.Flow.Name),
+                        flow.Plan ?? throw new InvalidOperationException(
+                            $"{Path.GetFileName(flow.SourcePath)} has no committed plan sidecar."),
                         new AndroidFlowRunRequest
                         {
                             RunId = runId,
@@ -174,24 +185,28 @@ public sealed class AndroidFlowPilotTests
             ? value
             : DefaultCleanRepetitions;
 
-    static List<FlowPilotFlowSource> LoadTierOneFlows(string repositoryRoot)
+    internal static async Task<List<FlowPilotFlowSource>> LoadTierOneFlowsAsync(
+        string repositoryRoot,
+        CancellationToken cancellationToken = default)
     {
         var directory = Path.Combine(repositoryRoot, "samples", "DevFlow.Sample", "maui-tests");
+        var loader = new CommittedFlowBundleLoader();
         var sources = new List<FlowPilotFlowSource>();
         foreach (var path in Directory.GetFiles(directory, "*.md")
                      .Where(static path => !string.Equals(Path.GetFileName(path), "README.md", StringComparison.OrdinalIgnoreCase))
                      .OrderBy(static path => path, StringComparer.Ordinal))
         {
-            var parsed = FlowMarkdown.Parse(File.ReadAllText(path), path);
-            if (!parsed.Ok)
-                throw new InvalidOperationException($"{Path.GetFileName(path)} could not be parsed: {parsed.Error}");
+            var bundle = await loader.LoadAsync(path, planPath: null, cancellationToken);
 
-            var validation = FlowValidator.Validate(parsed.Flow!);
-            if (!validation.Ok)
+            // The pilot replays committed flows unattended, so only no-side-effect plans are admissible.
+            if (!string.Equals(bundle.Plan.SideEffectPolicy, MauiFlowSideEffectPolicies.None, StringComparison.Ordinal))
+            {
                 throw new InvalidOperationException(
-                    $"{Path.GetFileName(path)} is invalid: {string.Join("; ", validation.Errors)}");
+                    $"{Path.GetFileName(path)} declares sideEffectPolicy '{bundle.Plan.SideEffectPolicy}'; " +
+                    "the Android flow pilot only replays plans with 'none'.");
+            }
 
-            sources.Add(new FlowPilotFlowSource(path, parsed.Flow!));
+            sources.Add(new FlowPilotFlowSource(path, bundle.Flow, bundle.Plan));
         }
 
         if (sources.Count is < 6 or > 12)
@@ -199,24 +214,6 @@ public sealed class AndroidFlowPilotTests
 
         return sources;
     }
-
-    static MauiTestPlan CreatePlan(string? flowName)
-        => new()
-        {
-            PlanId = $"android-flow-pilot-{flowName ?? "flow"}",
-            SideEffectPolicy = MauiFlowSideEffectPolicies.None,
-            Checkpoint = new MauiFlowCheckpointRequirements { Route = "//native" },
-            IndependentBusinessOracles =
-            [
-                new MauiIndependentBusinessOracleDeclaration
-                {
-                    OracleId = "sample-integration-state",
-                    Required = true,
-                    Independent = true,
-                    EvidenceKind = "sample-test-state",
-                },
-            ],
-        };
 }
 
 public sealed class FlowPilotArtifactManifestTests
@@ -648,7 +645,7 @@ public sealed class FlowPilotArtifactManifestTests
     }
 }
 
-internal sealed record FlowPilotFlowSource(string SourcePath, MauiFlow Flow);
+internal sealed record FlowPilotFlowSource(string SourcePath, MauiFlow Flow, MauiTestPlan? Plan = null);
 
 internal sealed class AndroidFlowPilotConfiguration
 {

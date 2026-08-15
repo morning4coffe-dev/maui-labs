@@ -3,6 +3,27 @@
   "id": "baseline-assertion-gap",
   "kind": "baseline",
   "disposition": "diagnostic-only",
-  "fixture": { "action": "tap", "selector": { "automationId": "save" }, "assertions": [] },
-  "expect": { "diagnosticIds": ["DFSH009"], "candidateKinds": ["automation-id"] }
+  "provenance": {
+    "labeledBy": "devflow-maintainers",
+    "labeledOn": "2026-08-15",
+    "method": "hand-authored",
+    "sourceKind": "synthetic",
+    "reviewStatus": "unreviewed",
+    "notes": "Authoring advisory; models no runtime failure."
+  },
+  "fixture": {
+    "action": "tap",
+    "selector": {
+      "automationId": "save"
+    },
+    "assertions": []
+  },
+  "expect": {
+    "diagnosticIds": [
+      "DFSH009"
+    ],
+    "candidateKinds": [
+      "automation-id"
+    ]
+  }
 }

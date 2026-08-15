@@ -188,6 +188,9 @@ public static class MauiFlowFailureClassifier
     private static bool IsKnownClass(string? value)
         => value is not null && KnownClasses.Contains(value);
 
+    /// <summary>Returns whether the supplied value is one of the closed stable failure classes.</summary>
+    public static bool IsKnownFailureClass(string? value) => IsKnownClass(value);
+
     private static string NormalizeClass(string value)
         => value.Trim().ToLowerInvariant();
 

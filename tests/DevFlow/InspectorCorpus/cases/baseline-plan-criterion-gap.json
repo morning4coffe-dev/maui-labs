@@ -3,6 +3,23 @@
   "id": "baseline-plan-criterion-gap",
   "kind": "baseline",
   "disposition": "diagnostic-only",
-  "fixture": { "acceptanceCriterion": "order-saved", "linkedStep": "1", "hardAssertion": false },
-  "expect": { "diagnosticIds": ["DFSH010"], "candidateKinds": [] }
+  "provenance": {
+    "labeledBy": "devflow-maintainers",
+    "labeledOn": "2026-08-15",
+    "method": "hand-authored",
+    "sourceKind": "synthetic",
+    "reviewStatus": "unreviewed",
+    "notes": "Plan advisory; models no runtime failure."
+  },
+  "fixture": {
+    "acceptanceCriterion": "order-saved",
+    "linkedStep": "1",
+    "hardAssertion": false
+  },
+  "expect": {
+    "diagnosticIds": [
+      "DFSH010"
+    ],
+    "candidateKinds": []
+  }
 }

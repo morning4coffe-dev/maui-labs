@@ -3,13 +3,25 @@
   "id": "xaml-advisory-missing-automation-id",
   "kind": "no-repair",
   "disposition": "diagnostic-only",
+  "provenance": {
+    "labeledBy": "devflow-maintainers",
+    "labeledOn": "2026-08-15",
+    "method": "hand-authored",
+    "sourceKind": "synthetic",
+    "reviewStatus": "unreviewed",
+    "notes": "Source advisory; models no runtime failure."
+  },
   "fixture": {
     "xaml": "<ContentPage><Button Text=\"Save\" /></ContentPage>",
     "scope": "static-direct"
   },
   "expect": {
-    "diagnosticIds": ["DFXAML001"],
+    "diagnosticIds": [
+      "DFXAML001"
+    ],
     "repairEligible": false,
-    "ineligibilityCodes": ["source-proposal-required"]
+    "ineligibilityCodes": [
+      "source-proposal-required"
+    ]
   }
 }

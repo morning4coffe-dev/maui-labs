@@ -33,6 +33,10 @@ public sealed class MauiQualificationCorpusCaseResult
     public bool SchemaValid { get; init; }
     public bool Passed { get; init; }
     public bool RepairEligible { get; init; }
+    public string? ExpectedFailureClass { get; init; }
+    public string? ObservedFailureClass { get; init; }
+    public string? ProvenanceMethod { get; init; }
+    public string? ProvenanceSourceKind { get; init; }
     public List<string> DiagnosticIds { get; init; } = [];
     public List<string> CandidateKinds { get; init; } = [];
     public List<string> IneligibilityCodes { get; init; } = [];
@@ -96,6 +100,7 @@ public static class MauiPreviewQualificationCorpusRunner
         }
 
         var ids = new HashSet<string>(StringComparer.Ordinal);
+        var provenanceCounts = new Dictionary<string, int>(StringComparer.Ordinal);
         foreach (var entry in entries.EnumerateArray())
         {
             if (!TryReadEntry(root, entry, ids, out var fixture, out var metadata, out var entryError))
@@ -115,11 +120,17 @@ public static class MauiPreviewQualificationCorpusRunner
                 SchemaValid = true,
                 Passed = passed,
                 RepairEligible = evaluation.RepairEligible,
+                ExpectedFailureClass = metadata.ExpectedFailureClass,
+                ObservedFailureClass = metadata.ExpectedFailureClass is null ? null : evaluation.ObservedFailureClass,
+                ProvenanceMethod = metadata.ProvenanceMethod,
+                ProvenanceSourceKind = metadata.ProvenanceSourceKind,
                 DiagnosticIds = evaluation.DiagnosticIds,
                 CandidateKinds = evaluation.CandidateKinds,
                 IneligibilityCodes = evaluation.IneligibilityCodes,
             };
             cases.Add(caseResult);
+            provenanceCounts[metadata.ProvenanceSourceKind] =
+                provenanceCounts.GetValueOrDefault(metadata.ProvenanceSourceKind) + 1;
             if (!passed)
                 errors.Add("corpus-case-expectation-mismatch");
             if (passed && string.Equals(metadata.Disposition, "no-repair", StringComparison.Ordinal))
@@ -137,6 +148,10 @@ public static class MauiPreviewQualificationCorpusRunner
                 RepairCorrect = evaluation.RepairEligible ? passed : null,
                 FalseHeal = string.Equals(metadata.Disposition, "no-repair", StringComparison.Ordinal) && evaluation.RepairEligible,
                 Abstained = string.Equals(metadata.Disposition, "no-repair", StringComparison.Ordinal) && !evaluation.RepairEligible,
+                // Ground truth is hand-assigned per case; unlabeled advisory cases stay out of the
+                // classification denominator instead of being scored against a fabricated label.
+                ExpectedFailureClass = metadata.ExpectedFailureClass,
+                ObservedFailureClass = metadata.ExpectedFailureClass is null ? null : evaluation.ObservedFailureClass,
             });
         }
 
@@ -181,6 +196,23 @@ public static class MauiPreviewQualificationCorpusRunner
         summary.CuratedCases = cases.Count;
         summary.GeneratedCases = samples.Count(static item => item.Source == MauiQualificationSampleSources.Generated);
         summary.DeviceBackedCases = 0;
+        summary.CuratedRepairPositiveCases = cases.Count(static item =>
+            string.Equals(item.Disposition, "repair-eligible", StringComparison.Ordinal));
+        summary.CuratedNoRepairCases = cases.Count(static item =>
+            string.Equals(item.Disposition, "no-repair", StringComparison.Ordinal));
+        summary.GeneratedNoRepairCases = samples.Count(static item =>
+            item.Source == MauiQualificationSampleSources.Generated && item.NoRepairExpected == true);
+        summary.CuratedClassificationLabeledCases = cases.Count(static item => item.ExpectedFailureClass is not null);
+        summary.ProvenanceComplete = cases.Count > 0 && cases.All(static item =>
+            !string.IsNullOrEmpty(item.ProvenanceMethod) && !string.IsNullOrEmpty(item.ProvenanceSourceKind));
+        summary.ProvenanceSourceCounts = provenanceCounts
+            .OrderBy(static pair => pair.Key, StringComparer.Ordinal)
+            .Select(static pair => new MauiQualificationCorpusProvenanceCount
+            {
+                SourceKind = pair.Key,
+                Count = pair.Value,
+            })
+            .ToList();
         summary.ManifestValid = errors.All(static error => !error.StartsWith("corpus-", StringComparison.Ordinal) &&
             !error.StartsWith("no-repair-", StringComparison.Ordinal));
         summary.CaseSchemaValid = cases.Count > 0 && cases.All(static item => item.SchemaValid);
@@ -245,8 +277,20 @@ public static class MauiPreviewQualificationCorpusRunner
         {
             errors.Add("corpus-schema-expect-required");
         }
+        if (required.ValueKind != JsonValueKind.Array ||
+            !required.EnumerateArray().Any(static item => string.Equals(item.GetString(), "provenance", StringComparison.Ordinal)))
+        {
+            errors.Add("corpus-schema-provenance-required");
+        }
         if (!schema.TryGetProperty("properties", out var properties) || properties.ValueKind != JsonValueKind.Object)
+        {
             errors.Add("corpus-schema-properties-missing");
+            return;
+        }
+        if (!properties.TryGetProperty("provenance", out _))
+            errors.Add("corpus-schema-provenance-property-missing");
+        if (!properties.TryGetProperty("expectedFailureClass", out _))
+            errors.Add("corpus-schema-expected-failure-class-property-missing");
     }
 
     private static bool TryReadEntry(
@@ -304,10 +348,65 @@ public static class MauiPreviewQualificationCorpusRunner
             error = "corpus-case-schema-invalid";
             return false;
         }
+        if (!TryReadProvenance(fixture, out var provenanceMethod, out var provenanceSourceKind))
+        {
+            error = "corpus-case-provenance-invalid";
+            return false;
+        }
+        string? expectedFailureClass = null;
+        if (fixture.TryGetProperty("expectedFailureClass", out var expectedClass))
+        {
+            if (expectedClass.ValueKind != JsonValueKind.String ||
+                !MauiFlowFailureClassifier.IsKnownFailureClass(expectedClass.GetString()))
+            {
+                error = "corpus-case-expected-failure-class-invalid";
+                return false;
+            }
+            expectedFailureClass = expectedClass.GetString();
+        }
 
-        metadata = new CorpusEntry(id, kind, disposition);
+        metadata = new CorpusEntry(id, kind, disposition, expectedFailureClass, provenanceMethod, provenanceSourceKind);
         return true;
     }
+
+    /// <summary>
+    /// Reads the required per-case provenance record. The corpus fails closed when a case does not
+    /// record who labeled it, when, how, and from what kind of source.
+    /// </summary>
+    private static bool TryReadProvenance(JsonElement document, out string method, out string sourceKind)
+    {
+        method = string.Empty;
+        sourceKind = string.Empty;
+        if (!document.TryGetProperty("provenance", out var provenance) || provenance.ValueKind != JsonValueKind.Object)
+            return false;
+        if (!TryGetString(provenance, "labeledBy", out var labeledBy) || labeledBy.Length > 128)
+            return false;
+        if (!TryGetString(provenance, "labeledOn", out var labeledOn) || !IsIsoDate(labeledOn))
+            return false;
+        if (!TryGetString(provenance, "method", out var candidateMethod) ||
+            !MauiQualificationCorpusProvenanceMethods.IsKnown(candidateMethod))
+        {
+            return false;
+        }
+        if (!TryGetString(provenance, "sourceKind", out var candidateSource) ||
+            MauiQualificationCorpusProvenanceSourceKinds.Normalize(candidateSource) ==
+                MauiQualificationCorpusProvenanceSourceKinds.Unknown)
+        {
+            return false;
+        }
+        if (!TryGetString(provenance, "reviewStatus", out var reviewStatus) ||
+            reviewStatus is not ("unreviewed" or "peer-reviewed"))
+        {
+            return false;
+        }
+        method = candidateMethod;
+        sourceKind = candidateSource;
+        return true;
+    }
+
+    private static bool IsIsoDate(string value) =>
+        value.Length == 10 && value[4] == '-' && value[7] == '-' &&
+        value.Where(static (_, index) => index is not (4 or 7)).All(static character => character is >= '0' and <= '9');
 
     private static CorpusEvaluation EvaluateFixture(JsonElement document, string id)
     {
@@ -419,7 +518,116 @@ public static class MauiPreviewQualificationCorpusRunner
             diagnostics.OrderBy(static value => value, StringComparer.Ordinal).ToList(),
             candidates.Distinct(StringComparer.Ordinal).ToList(),
             ineligibility.OrderBy(static value => value, StringComparer.Ordinal).ToList(),
-            repairEligible);
+            repairEligible,
+            MauiFlowFailureClassifier.Classify(BuildFailureFacts(fixture)).FailureClass);
+    }
+
+    /// <summary>
+    /// Projects a corpus fixture onto the same replay facts a live run supplies, so the shipping
+    /// <see cref="MauiFlowFailureClassifier"/> produces the observed class. No expected label is read
+    /// here: the corpus ground truth never feeds the classifier under measurement.
+    /// </summary>
+    private static MauiFlowFailureFacts BuildFailureFacts(JsonElement fixture)
+    {
+        var facts = new MauiFlowFailureFacts();
+        if (TryGetString(fixture, "terminalOutcome", out var terminalOutcome))
+            facts.TerminalOutcome = terminalOutcome;
+        if (TryGetString(fixture, "failure", out var recordedClass))
+            facts.FailureClass = recordedClass;
+        if (fixture.TryGetProperty("otherFailures", out var otherFailures) && otherFailures.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var value in otherFailures.EnumerateArray().Select(static item => item.GetString()))
+            {
+                switch (value)
+                {
+                    case MauiFlowFailureClasses.UnknownCompletion:
+                        facts.CompletionCertain = false;
+                        break;
+                    case MauiFlowFailureClasses.AgentDisconnected:
+                        facts.AgentDisconnected = true;
+                        break;
+                    case MauiFlowFailureClasses.Transport:
+                        facts.TransportFailure = true;
+                        break;
+                    case MauiFlowFailureClasses.ActionRejected:
+                        facts.ActionRejected = true;
+                        break;
+                    case MauiFlowFailureClasses.ResetFailed:
+                        facts.ResetFailed = true;
+                        break;
+                    case MauiFlowFailureClasses.CapabilityMissing:
+                        facts.CapabilityMissing = true;
+                        break;
+                    case MauiFlowFailureClasses.FlowInvalid:
+                        facts.FlowInvalid = true;
+                        break;
+                    case MauiFlowFailureClasses.SchemaUnsupported:
+                        facts.SchemaUnsupported = true;
+                        break;
+                }
+            }
+        }
+        facts.LegacyFailureKind = InferLegacyFailureKind(fixture);
+        if (TryGetString(fixture, "checkpoint", out var checkpoint))
+        {
+            facts.CheckpointVerified = true;
+            facts.CheckpointMatches = string.Equals(checkpoint, "all-match", StringComparison.Ordinal);
+            facts.RouteMatches = facts.CheckpointMatches;
+        }
+        if (fixture.TryGetProperty("checkpointMismatches", out var mismatches) && mismatches.ValueKind == JsonValueKind.Array)
+        {
+            facts.CheckpointVerified = true;
+            facts.CheckpointMatches = mismatches.GetArrayLength() == 0;
+            if (mismatches.EnumerateArray().Any(static item =>
+                string.Equals(item.GetString(), "route-login", StringComparison.Ordinal)))
+            {
+                facts.RouteMatches = false;
+            }
+        }
+        if (fixture.TryGetProperty("recordedRoute", out var recordedRoute) &&
+            fixture.TryGetProperty("observedRoute", out var observedRoute))
+        {
+            facts.CheckpointVerified = true;
+            facts.RouteMatches = string.Equals(recordedRoute.GetString(), observedRoute.GetString(), StringComparison.Ordinal);
+        }
+        if (TryGetString(fixture, "phase", out var phase))
+            facts.BeforeDispatch = string.Equals(phase, "pre-dispatch", StringComparison.Ordinal);
+        return facts;
+    }
+
+    /// <summary>Derives the legacy replay failure kind from observable fixture structure only.</summary>
+    private static string? InferLegacyFailureKind(JsonElement fixture)
+    {
+        if (fixture.TryGetProperty("assertion", out var assertion) && assertion.ValueKind == JsonValueKind.Object &&
+            assertion.TryGetProperty("expected", out var expected) && assertion.TryGetProperty("actual", out var actual) &&
+            !string.Equals(expected.GetString(), actual.GetString(), StringComparison.Ordinal))
+        {
+            return FlowFailureKinds.Assertion;
+        }
+        if (fixture.TryGetProperty("candidates", out var scored) && scored.ValueKind == JsonValueKind.Array &&
+            scored.GetArrayLength() > 1)
+        {
+            return FlowFailureKinds.Ambiguous;
+        }
+        if (fixture.TryGetProperty("elements", out var elements) && elements.ValueKind == JsonValueKind.Array)
+        {
+            var ids = elements.EnumerateArray()
+                .Where(static element => element.ValueKind == JsonValueKind.Object)
+                .Select(static element => element.TryGetProperty("automationId", out var value) ? value.GetString() : null)
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .ToList();
+            if (ids.Count != ids.Distinct(StringComparer.Ordinal).Count())
+                return FlowFailureKinds.Ambiguous;
+        }
+        if (fixture.TryGetProperty("candidate", out _) ||
+            fixture.TryGetProperty("oldSelector", out _) ||
+            fixture.TryGetProperty("recordedAutomationId", out _) ||
+            fixture.TryGetProperty("recorded", out _) ||
+            fixture.TryGetProperty("selector", out _))
+        {
+            return FlowFailureKinds.NotFound;
+        }
+        return null;
     }
 
     private static JsonDocument GenerateNoRepairFixture(
@@ -754,13 +962,20 @@ public static class MauiPreviewQualificationCorpusRunner
     private static string Hash(ReadOnlySpan<byte> bytes) =>
         "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
-    private readonly record struct CorpusEntry(string Id, string Kind, string Disposition);
+    private readonly record struct CorpusEntry(
+        string Id,
+        string Kind,
+        string Disposition,
+        string? ExpectedFailureClass,
+        string ProvenanceMethod,
+        string ProvenanceSourceKind);
 
     private readonly record struct CorpusEvaluation(
         List<string> DiagnosticIds,
         List<string> CandidateKinds,
         List<string> IneligibilityCodes,
-        bool RepairEligible);
+        bool RepairEligible,
+        string ObservedFailureClass);
 
     private struct DeterministicRandom
     {

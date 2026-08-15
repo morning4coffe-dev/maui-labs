@@ -3,6 +3,26 @@
   "id": "mutation-renamed-automation-id",
   "kind": "mutation",
   "disposition": "diagnostic-only",
-  "fixture": { "recordedAutomationId": "save-order", "liveAutomationId": "confirm-order", "route": "/checkout" },
-  "expect": { "diagnosticIds": ["DFSH006"], "candidateKinds": ["automation-id"] }
+  "expectedFailureClass": "locator-not-found",
+  "provenance": {
+    "labeledBy": "devflow-maintainers",
+    "labeledOn": "2026-08-15",
+    "method": "hand-authored",
+    "sourceKind": "synthetic",
+    "reviewStatus": "unreviewed",
+    "notes": "Recorded AutomationId was renamed in the app."
+  },
+  "fixture": {
+    "recordedAutomationId": "save-order",
+    "liveAutomationId": "confirm-order",
+    "route": "/checkout"
+  },
+  "expect": {
+    "diagnosticIds": [
+      "DFSH006"
+    ],
+    "candidateKinds": [
+      "automation-id"
+    ]
+  }
 }

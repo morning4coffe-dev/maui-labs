@@ -3,6 +3,30 @@
   "id": "mutation-platform-divergence",
   "kind": "mutation",
   "disposition": "diagnostic-only",
-  "fixture": { "requiredPlatforms": ["android", "windows"], "androidCandidateKinds": ["automation-id"], "windowsCandidateKinds": ["native-automation-id"] },
-  "expect": { "diagnosticIds": ["DFSH008"], "candidateKinds": [] }
+  "provenance": {
+    "labeledBy": "devflow-maintainers",
+    "labeledOn": "2026-08-15",
+    "method": "hand-authored",
+    "sourceKind": "synthetic",
+    "reviewStatus": "unreviewed",
+    "notes": "Authoring advisory about per-platform candidate kinds; models no runtime failure."
+  },
+  "fixture": {
+    "requiredPlatforms": [
+      "android",
+      "windows"
+    ],
+    "androidCandidateKinds": [
+      "automation-id"
+    ],
+    "windowsCandidateKinds": [
+      "native-automation-id"
+    ]
+  },
+  "expect": {
+    "diagnosticIds": [
+      "DFSH008"
+    ],
+    "candidateKinds": []
+  }
 }

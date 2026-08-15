@@ -15,9 +15,25 @@ public sealed class PreviewQualificationTests
         Assert.True(result.Summary.ManifestValid);
         Assert.True(result.Summary.CaseSchemaValid);
         Assert.Empty(result.Summary.Errors);
-        Assert.Equal(28, result.Summary.CuratedCases);
+        Assert.Equal(58, result.Summary.CuratedCases);
         Assert.Equal(300, result.Summary.GeneratedCases);
         Assert.Equal(0, result.Summary.DeviceBackedCases);
+        Assert.Equal(31, result.Summary.CuratedRepairPositiveCases);
+        Assert.Equal(16, result.Summary.CuratedNoRepairCases);
+        Assert.Equal(300, result.Summary.GeneratedNoRepairCases);
+        Assert.True(result.Summary.ProvenanceComplete);
+        Assert.Equal(
+            result.Summary.CuratedCases,
+            result.Summary.ProvenanceSourceCounts.Sum(static item => item.Count));
+        Assert.All(
+            result.Summary.ProvenanceSourceCounts,
+            static item => Assert.NotEqual(
+                MauiQualificationCorpusProvenanceSourceKinds.Unknown,
+                item.SourceKind));
+        Assert.DoesNotContain(
+            result.Summary.ProvenanceSourceCounts,
+            static item => MauiQualificationCorpusProvenanceSourceKinds.IsObserved(item.SourceKind));
+        Assert.InRange(result.Summary.CuratedClassificationLabeledCases, 1, result.Summary.CuratedCases);
         Assert.True(result.Cases.All(static item => item.Passed));
         Assert.All(
             result.Samples.Where(static sample => sample.Source == MauiQualificationSampleSources.Generated),
@@ -53,9 +69,53 @@ public sealed class PreviewQualificationTests
         Assert.Equal(316, report.Metrics.FalseHeals.Denominator);
         Assert.Equal(0, report.Metrics.FalseHeals.Numerator);
         Assert.False(report.Metrics.FalseHeals.IndependentDeviceRuns);
-        Assert.Equal(1, report.Metrics.RepairPrecision.Denominator);
-        Assert.Equal(1, report.Metrics.RepairRecall.Denominator);
-        Assert.Equal(1, report.Metrics.RepairRecall.Numerator);
+
+        // The pooled 0/316 must never read as 316 independent trials: 16 curated seeds and
+        // 300 machine-generated mutants of those seeds are reported separately.
+        var curatedFalseHeals = report.Metrics.FalseHeals.SourceCounts
+            .Single(static item => item.Source == MauiQualificationSampleSources.Curated);
+        var generatedFalseHeals = report.Metrics.FalseHeals.SourceCounts
+            .Single(static item => item.Source == MauiQualificationSampleSources.Generated);
+        Assert.Equal(16, curatedFalseHeals.Denominator);
+        Assert.Equal(300, generatedFalseHeals.Denominator);
+        Assert.DoesNotContain(
+            report.Metrics.FalseHeals.SourceCounts,
+            static item => item.Source == MauiQualificationSampleSources.DeviceBacked);
+        Assert.Equal(16, report.Corpus.CuratedNoRepairCases);
+        Assert.Equal(300, report.Corpus.GeneratedNoRepairCases);
+        Assert.Equal(31, report.Corpus.CuratedRepairPositiveCases);
+        Assert.True(report.Corpus.ProvenanceComplete);
+
+        Assert.Equal(31, report.Metrics.RepairPrecision.Denominator);
+        Assert.Equal(31, report.Metrics.RepairRecall.Denominator);
+        Assert.Equal(31, report.Metrics.RepairRecall.Numerator);
+
+        // Classification accuracy is now a recorded number rather than an unmeasured claim,
+        // but it is still under the minimum evaluation count so the gate stays not-qualified.
+        var classification = report.Metrics.ClassificationAccuracy;
+        Assert.Equal(45, classification.Denominator);
+        Assert.Equal(45, report.Corpus.CuratedClassificationLabeledCases);
+        Assert.Equal(42, classification.Numerator);
+        Assert.False(classification.IndependentDeviceRuns);
+        Assert.Equal("measured", report.Metrics.ClassificationMatrix.State);
+        Assert.Equal(45, report.Metrics.ClassificationMatrix.SampleCount);
+        Assert.Equal(42, report.Metrics.ClassificationMatrix.Correct);
+        Assert.Equal(
+            report.Metrics.ClassificationMatrix.SampleCount,
+            report.Metrics.ClassificationMatrix.Cells.Sum(static cell => cell.Count));
+        Assert.Contains(
+            report.Metrics.ClassificationMatrix.Cells,
+            static cell => cell.Expected != cell.Observed && cell.Count > 0);
+        Assert.Contains(
+            report.Gates,
+            gate => gate.GateId == "classification-accuracy" &&
+                gate.Status == MauiPreviewQualificationStates.NotQualified &&
+                gate.ReasonCodes.Contains("classification-evaluation-count-insufficient"));
+        Assert.Contains(
+            report.Gates,
+            gate => gate.GateId == "repair-precision" &&
+                gate.Status == MauiPreviewQualificationStates.NotQualified &&
+                gate.ReasonCodes.Contains("repair-evaluation-count-insufficient"));
         Assert.Contains(
             report.Gates,
             gate => gate.GateId == "android-tier1-first-attempts" &&
@@ -128,6 +188,75 @@ public sealed class PreviewQualificationTests
         Assert.Equal(MauiPreviewQualificationStates.Fail, Gate(report, "zero-false-heals").Status);
         Assert.Equal(1, report.Metrics.FalseHeals.Numerator);
         Assert.Equal(300, report.Metrics.FalseHeals.Denominator);
+        Assert.Equal(
+            300,
+            report.Metrics.FalseHeals.SourceCounts
+                .Single(static item => item.Source == MauiQualificationSampleSources.Generated)
+                .Denominator);
+    }
+
+    [Fact]
+    public void GateEvaluator_ClassificationAccuracyRequiresLabelledEvidenceAndConservativeLowerBound()
+    {
+        var qualified = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput());
+        Assert.Equal(MauiPreviewQualificationStates.Pass, Gate(qualified, "classification-accuracy").Status);
+        Assert.Equal(100, qualified.Metrics.ClassificationAccuracy.Denominator);
+        Assert.Equal(100, qualified.Metrics.ClassificationAccuracy.Numerator);
+        Assert.Equal(1, qualified.Metrics.ClassificationMatrix.LabelCount);
+
+        var unlabelled = QualifiedInput();
+        foreach (var sample in unlabelled.Samples)
+        {
+            sample.ExpectedFailureClass = null;
+            sample.ObservedFailureClass = null;
+        }
+        var missing = MauiPreviewQualificationGateEvaluator.Evaluate(unlabelled);
+        Assert.Equal(MauiPreviewQualificationStates.NotQualified, Gate(missing, "classification-accuracy").Status);
+        Assert.Contains(
+            "classification-evaluation-count-insufficient",
+            Gate(missing, "classification-accuracy").ReasonCodes);
+        Assert.Equal(0, missing.Metrics.ClassificationAccuracy.Denominator);
+        Assert.Equal("missing", missing.Metrics.ClassificationMatrix.State);
+        Assert.NotEqual(MauiPreviewQualificationStates.Pass, missing.Status);
+
+        var misclassified = QualifiedInput();
+        foreach (var sample in misclassified.Samples.Where(static item => item.ExpectedFailureClass is not null).Take(20))
+            sample.ObservedFailureClass = MauiFlowFailureClasses.RouteStateDrift;
+        var failed = MauiPreviewQualificationGateEvaluator.Evaluate(misclassified);
+        Assert.Equal(MauiPreviewQualificationStates.Fail, Gate(failed, "classification-accuracy").Status);
+        Assert.Contains(
+            "classification-accuracy-lower-bound-below-threshold",
+            Gate(failed, "classification-accuracy").ReasonCodes);
+        Assert.Equal(80, failed.Metrics.ClassificationAccuracy.Numerator);
+        Assert.Equal(2, failed.Metrics.ClassificationMatrix.LabelCount);
+        var drift = failed.Metrics.ClassificationMatrix.PerClass
+            .Single(static item => item.FailureClass == MauiFlowFailureClasses.RouteStateDrift);
+        Assert.Equal(0, drift.Support);
+        Assert.Equal(20, drift.Predicted);
+        Assert.Equal(0d, drift.Precision);
+        Assert.Null(drift.Recall);
+    }
+
+    [Fact]
+    public void GateEvaluator_ClassificationLabelsOutsideTheClosedSetAreNormalizedAwayFromFreeText()
+    {
+        var input = QualifiedInput();
+        foreach (var sample in input.Samples.Where(static item => item.ExpectedFailureClass is not null).Take(5))
+        {
+            sample.ExpectedFailureClass = "user-profile-page-locator";
+            sample.ObservedFailureClass = "user-profile-page-locator";
+        }
+
+        var report = MauiPreviewQualificationGateEvaluator.Evaluate(input);
+
+        // Unknown labels must never reach the report verbatim; they collapse to "unknown"
+        // and are excluded from the accuracy denominator so they cannot inflate the rate.
+        Assert.Equal(95, report.Metrics.ClassificationAccuracy.Denominator);
+        Assert.DoesNotContain(
+            report.Metrics.ClassificationMatrix.Cells,
+            static cell => cell.Expected.Contains("profile", StringComparison.OrdinalIgnoreCase) ||
+                cell.Observed.Contains("profile", StringComparison.OrdinalIgnoreCase));
+        Assert.True(MauiPreviewQualificationReportValidator.Validate(report).IsValid);
     }
 
     [Fact]
@@ -584,6 +713,19 @@ public sealed class PreviewQualificationTests
                 CaseSchemaValid = true,
                 CuratedCases = 100,
                 GeneratedCases = 300,
+                CuratedRepairPositiveCases = 100,
+                CuratedNoRepairCases = 100,
+                GeneratedNoRepairCases = 300,
+                CuratedClassificationLabeledCases = 100,
+                ProvenanceComplete = true,
+                ProvenanceSourceCounts =
+                [
+                    new MauiQualificationCorpusProvenanceCount
+                    {
+                        SourceKind = MauiQualificationCorpusProvenanceSourceKinds.ObservedLocalRun,
+                        Count = 100,
+                    },
+                ],
                 SecurityCorpus = new MauiQualificationSecurityCorpusSummary
                 {
                     Valid = true,
@@ -629,6 +771,10 @@ public sealed class PreviewQualificationTests
                 RepairProposed = true,
                 RepairExpected = true,
                 RepairCorrect = true,
+                // A fully qualified run carries classification ground truth alongside repair
+                // evidence: the accuracy gate must be earned, not skipped for lack of labels.
+                ExpectedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
+                ObservedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
             });
         }
         for (var index = 0; index < 300; index++)

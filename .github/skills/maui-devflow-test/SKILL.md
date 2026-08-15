@@ -91,6 +91,10 @@ If a request spans routes, complete the least-effectful route first. For
 example, diagnose a failure before discussing a repair, and prepare an inert
 draft before asking a human to commit it.
 
+`maui-devflow-record` and `maui-devflow-run-cli`, named in the frontmatter, ship
+in the `dotnet-maui` marketplace plugin rather than the `maui devflow init`
+bundle. If one is not installed, say so and stay inside the routes above.
+
 ## Conversational Intake
 
 When the user describes a flow in words instead of pointing at a recording,
@@ -195,10 +199,10 @@ chooses to progress to a local reproduction or executable draft.
 
 A DevFlow test is two files. `<name>.md` carries prose plus one
 ` ```json maui-test ` fence — the **sole** replay source of truth, at
-`"schema": 2`. `<name>.maui-plan.json` is the reviewable plan at
-`"schema": 1`, bound by `flow.digest`, and must carry every key its
-validator requires or `flow run` fails with `plan-invalid`. Verifiable
-assert kinds are `propEquals`, `exists`, `notExists`, and `routeIs`.
+`"schema": 2`. `<name>.maui-plan.json` is the reviewable plan at `"schema": 1`,
+bound by `flow.digest`; it must carry every key its validator requires or
+`flow run` fails `plan-invalid`. Assert kinds: `propEquals`, `exists`,
+`notExists`, `routeIs`.
 
 ```json maui-test
 {
@@ -226,7 +230,7 @@ assert kinds are `propEquals`, `exists`, `notExists`, and `routeIs`.
   "independentBusinessOracles": [{ "oracleId": "orders-api", "required": true,
     "independent": true, "evidenceKind": "http-json", "description": "GET /orders/{id} shows PROMO10." }],
   "preconditions": [], "sideEffectPolicy": "test-tenant-resettable",
-  "reset": { "required": true, "strategy": "pm-clear", "resetIdentity": "shop-cart-seed-v3" },
+  "reset": { "required": true, "strategy": "host-owned", "resetIdentity": "shop-cart-seed-v3" },
   "provenance": { "actorKind": "agent", "channel": "mcp", "recordedAt": "2026-08-14T09:41:12.106Z" },
   "explorationBudget": { "maxActions": 12, "maxDurationSeconds": 120, "allowedScopes": ["/cart", "/checkout"] }
 }
@@ -237,10 +241,11 @@ assert kinds are `propEquals`, `exists`, `notExists`, and `routeIs`.
 `intent: null`, `recordedAt: null`, `acceptanceCriterionIds: null`, empty
 `acceptanceCriteria`, an empty `scenarios[0].description`, `reset.strategy: ""`,
 and a zeroed `explorationBudget`. A recorder may emit them; a reviewable test
-must not. Also wrong: a policy enum in `reset.strategy`, which names a
-mechanism (`pm-clear`, `uninstall-reinstall`, `host-owned`). With no oracle,
-say so — an empty `independentBusinessOracles` means **none — not
-independently verified**, and every reported result must carry that phrase.
+must not. Also wrong: a policy enum in `reset.strategy`, which names a mechanism
+(`pm-clear`, `uninstall-reinstall`, `host-owned`) that must actually reset what
+`sideEffectPolicy` claims — device-local `pm-clear` cannot reset a backend
+tenant. With no oracle, say so — an empty `independentBusinessOracles` means
+**none — not independently verified**, and every result must carry that phrase.
 
 Rules: edit the prose freely, it is never replay input; never hand-edit the
 fence without `maui devflow flow validate`, which checks the fence only, not

@@ -37,6 +37,11 @@ selector repair.
 | Executing a committed flow from an operator shell | `maui-devflow-run-cli` |
 | Reviewing a chat transcript rather than an artifact | `maui-devflow-session-review` |
 
+`maui-devflow-ci-triage`, `maui-devflow-ci`, and `maui-devflow-run-cli` ship in
+the `dotnet-maui` marketplace plugin, not in the `maui devflow init` bundle. If
+one is not installed, say so and continue here within the boundaries below
+rather than silently widening scope.
+
 ## Inputs
 
 - An **explicit local path** supplied by the human or by a trusted workflow

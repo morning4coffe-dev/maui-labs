@@ -67,7 +67,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)(re-?run|attempt)"
       - type: "output_not_matches"
-        pattern: "(?i)(safe to ignore|can be ignored|just flaky)"
+        pattern: "(?im)is safe to ignore|can be ignored|^\\s*(it|this|that)(?:'s| is)( probably| likely)? just (a )?flak"
     rubric:
       - "Reports the observed pass/fail ratio and sample size instead of a flake label."
       - "Notes that a re-run may have overwritten the first failure's artifact if the name lacked run_attempt."

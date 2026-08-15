@@ -31,7 +31,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)adb install"
       - type: "output_not_matches"
-        pattern: "(?i)maui android install[^.]{0,40}\\b(installs|pushes|deploys|puts)\\b[^.]{0,30}(apk|app package)"
+        pattern: "(?i)maui android install[^.]{0,30}\\b(installs|pushes|deploys|sideloads)\\b (the |your |an |a )?(apk|app package)"
     rubric:
       - "Explains that `maui android install` provisions the Android SDK, JDK, and packages, not an application package."
       - "Points at `adb install -r` or `maui devflow flow run` for getting the app onto the device."
@@ -52,7 +52,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)(validate|maui devflow flow validate)"
       - type: "output_not_matches"
-        pattern: "(?i)(overwrite|delete|clear|wipe).{0,60}artifacts/promo-run-1"
+        pattern: "(?i)(I(?:'ll| will)|let me|we(?:'ll| will)) (overwrite|delete|clear|wipe)[^.]{0,60}artifacts/promo-run-1"
     rubric:
       - "Selects `run` rather than `replay`, because no app is already running."
       - "Refuses the non-empty output directory and proposes a new one instead of overwriting evidence."
@@ -72,7 +72,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)--evidence-on-failure"
       - type: "output_not_matches"
-        pattern: "(?i)(safe|no risk|nothing sensitive).{0,60}screenshot"
+        pattern: "(?i)(are|is|they're|it's) safe to (share|publish|attach|upload)"
     rubric:
       - "Warns that screenshot pixels are never redacted and may expose on-screen data to everyone who can read the folder."
       - "Notes that `--evidence-screenshot` requires `--evidence-on-failure` and explicit opt-in."

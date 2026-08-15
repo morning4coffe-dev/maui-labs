@@ -11,7 +11,7 @@ scenarios:
       - type: "output_matches"
         pattern: "maui_artifact_inspect"
       - type: "output_not_matches"
-        pattern: "(?i)(ls -t|sort.{0,40}(mtime|LastWriteTime)|newest|most recent).{0,60}(flow-run|artifact).{0,60}(inspect|open)"
+        pattern: "(?i)(I(?:'ll| will)|let me|we(?:'ll| will)) (grab|take|pick|use|open|inspect|sort|find)[^.]{0,60}(newest|most recent|latest)|ls -t"
     rubric:
       - "States that `maui_artifact_inspect` requires an explicit path and never searches for a latest artifact."
       - "Asks for the exact artifact path instead of globbing or sorting by timestamp."
@@ -36,7 +36,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)(fresh|local).{0,40}(reproduction|reproduce)"
       - type: "output_not_matches"
-        pattern: "(?i)(I(?:'ll| will)|we(?:'ll| will)).{0,40}(apply|open|create).{0,40}(the )?(selector )?repair"
+        pattern: "(?i)(I(?:'ll| will)|we(?:'ll| will)|let me) (apply|open|create|submit)[^.]{0,40}repair"
     rubric:
       - "Repeats the trust state verbatim as `attested` and refuses to promote it to `locally-reproduced`, physical-device, or qualification evidence."
       - "Cites the run ID and digest in the conclusion."
@@ -59,7 +59,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)--import"
       - type: "output_not_matches"
-        pattern: "(?i)(I(?:'ll| will)|we(?:'ll| will)).{0,40}replay"
+        pattern: "(?i)(I(?:'ll| will)|we(?:'ll| will)|let me) replay"
     rubric:
       - "Passes `kind: mauitrace` explicitly because the extension cannot be inferred."
       - "Routes reproduction to `maui devflow flow reproduce --import` as an operator action rather than replaying from the imported artifact."

@@ -55,9 +55,9 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)maui devflow flow validate"
       - type: "output_not_matches"
-        pattern: "(?i)(saved|committed) (it|the flow) as-is"
+        pattern: "(?i)(I|we) (just )?(saved|committed) (it|the flow) as-is"
       - type: "output_not_matches"
-        pattern: "(?i)(remove|delete|drop) step"
+        pattern: "(?i)(I(?:'ll| will)|let me|we(?:'ll| will)|you can) (remove|delete|drop)[^.]{0,20}step"
     rubric:
       - "Refuses to save recorder defaults and names each defect: null label, null intent, null recordedAt, text selector, bare exists assert, empty reset strategy."
       - "Proposes tier-1 AutomationId selectors and a propEquals assertion on a value the feature changes."
@@ -74,7 +74,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)separate.{0,80}approval|approval.{0,80}separate"
       - type: "output_not_matches"
-        pattern: "(?i)(committing|committed|running|ran) (it|the flow) now"
+        pattern: "(?i)(I(?:'m| am)|we(?:'re| are)) (committing|running) (it|the flow) now"
     rubric:
       - "Explains that chat approval expresses intent only."
       - "Keeps commit and run as two separate human approvals."

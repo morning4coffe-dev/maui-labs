@@ -2,8 +2,10 @@ using System.Security;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Maui.Cli.Commands;
 using Microsoft.Maui.Cli.Utils;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Execution;
 
@@ -23,6 +25,19 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
     private const int MaximumArtifactRecords = 256;
     private const int MaximumBuildOutputCharacters = 1_048_576;
     private const int MaximumBuildDiagnosticCharacters = 2_048;
+    private const int MaximumBuildLogSectionCharacters = 256 * 1024;
+    private const int MaximumBuildLogSectionInputCharacters = 2 * MaximumBuildLogSectionCharacters;
+    private const int MaximumBuildLogLineCharacters = 4_096;
+    private const int MaximumBuildLogLines = 5_000;
+    internal const string BuildLogFileName = "app-build.log";
+    private static readonly Regex MsBuildDiagnosticPattern = new(
+        @"(?i)\b(?<severity>error|warning)\s+[A-Z]+[0-9]+\b",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        TimeSpan.FromSeconds(1));
+    private static readonly Regex MsBuildDiagnosticCodePattern = new(
+        @"\b[A-Z]{2,}[0-9]{3,}\s*:",
+        RegexOptions.CultureInvariant | RegexOptions.Compiled,
+        TimeSpan.FromSeconds(1));
     private static readonly string[] MsBuildEnvironmentVariablesToRemove =
     [
         "MSBuildSDKsPath",
@@ -117,6 +132,8 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
         var hostProjectPath = Path.Combine(resolutionRoot, "ResolveAppArtifact.proj");
         var metadataPath = Path.Combine(resolutionRoot, "resolved-artifacts.txt");
         var outputRoot = Path.Combine(resolutionRoot, "build");
+        var hostIntermediateOutputPath = Path.Combine(resolutionRoot, "host-obj")
+            + Path.DirectorySeparatorChar;
 
         try
         {
@@ -174,7 +191,8 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
                     outputRoot,
                     expectedArtifactPath,
                     windowsTarget?.TargetPlatformMinVersion,
-                    metadataPath)
+                    metadataPath,
+                    hostIntermediateOutputPath)
                     .AsMemory(),
                     cancellationToken).ConfigureAwait(false);
                 await writer.FlushAsync(cancellationToken).ConfigureAwait(false);
@@ -193,6 +211,7 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
                     "-nologo",
                     "-verbosity:minimal",
                     "-maxcpucount:1",
+                    "-nodeReuse:false",
                     "-target:ResolveDevFlowAppArtifact",
                 ],
                 workingDirectory: Path.GetDirectoryName(projectPath),
@@ -202,15 +221,31 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
             if (result.StandardOutput.Length > MaximumBuildOutputCharacters ||
                 result.StandardError.Length > MaximumBuildOutputCharacters)
             {
-                throw FlowExecutionException.Infrastructure(
+                var oversizeLog = await TryPersistBuildLogAsync(
+                    request.WorkDirectory,
+                    result).ConfigureAwait(false);
+                throw new FlowExecutionException(
+                    FlowExecutionExitCategories.InfrastructureFailure,
                     "app-build-diagnostics-too-large",
-                    "MSBuild diagnostics exceeded the bounded response size.");
+                    AppendBuildLogPointer(
+                        "MSBuild diagnostics exceeded the bounded response size.",
+                        oversizeLog))
+                {
+                    DiagnosticsArtifact = oversizeLog,
+                };
             }
             if (!result.Success)
             {
-                throw FlowExecutionException.Infrastructure(
+                var buildLog = await TryPersistBuildLogAsync(
+                    request.WorkDirectory,
+                    result).ConfigureAwait(false);
+                throw new FlowExecutionException(
+                    FlowExecutionExitCategories.InfrastructureFailure,
                     "app-build-failed",
-                    FormatBuildFailure(result));
+                    FormatBuildFailure(result, buildLog))
+                {
+                    DiagnosticsArtifact = buildLog,
+                };
             }
             if (!File.Exists(metadataPath))
             {
@@ -408,7 +443,8 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
         string outputRoot,
         string? expectedArtifactPath,
         string? targetPlatformMinVersion,
-        string metadataPath)
+        string metadataPath,
+        string hostIntermediateOutputPath)
     {
         static string Escape(string value) => SecurityElement.Escape(value) ?? "";
 
@@ -440,6 +476,19 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
 
         return $"""
             <Project>
+              <PropertyGroup>
+                <!--
+                  Defensive only: this host imports no SDK, so it restores nothing and produces no
+                  intermediate output of its own. Isolation of the app graph's restore state is
+                  enforced by RestoreProperties and RestoreGlobalPropertiesToRemove in
+                  Microsoft.Maui.Build.AppProjectReference.targets, not here. These paths keep any
+                  future SDK-style host from writing into the repository's shared intermediate
+                  output.
+                -->
+                <BaseIntermediateOutputPath>{Escape(hostIntermediateOutputPath)}</BaseIntermediateOutputPath>
+                <MSBuildProjectExtensionsPath>{Escape(hostIntermediateOutputPath)}</MSBuildProjectExtensionsPath>
+                <BaseOutputPath>{Escape(hostIntermediateOutputPath)}</BaseOutputPath>
+              </PropertyGroup>
               <Import Project="{Escape(propsPath)}" />
               <Import Project="{Escape(targetsPath)}" />
               <ItemGroup>
@@ -751,25 +800,269 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
         }
     }
 
-    private static string FormatBuildFailure(ProcessResult result)
+    private static string FormatBuildFailure(
+        ProcessResult result,
+        FlowExecutionDiagnosticsArtifact? buildLog = null)
     {
+        var header = AppendBuildLogPointer(
+            $"MSBuild could not resolve the app artifact (exit code {result.ExitCode}).",
+            buildLog);
         var combined = string.Join(
-                "\n",
-                new[] { result.StandardError, result.StandardOutput }
-                    .Where(static value => !string.IsNullOrWhiteSpace(value)))
-            .Trim();
+            "\n",
+            new[] { result.StandardError, result.StandardOutput }
+                .Where(static value => !string.IsNullOrWhiteSpace(value))
+                .Select(static value => TakeLastLines(value, MaximumBuildLogLines)));
         if (combined.Length == 0)
-            return $"MSBuild could not resolve the app artifact (exit code {result.ExitCode}).";
+            return header;
 
-        var safe = new string(combined
-            .Select(static character =>
-                character is '\r' or '\n' or '\t' || !char.IsControl(character)
+        var safe = RemoveControlCharacters(combined);
+        // MSBuild prints its errors last and the reported message is later bounded from the head,
+        // so select the diagnostic lines first and only fall back to the tail of the output.
+        string? selected;
+        try
+        {
+            selected = SelectMsBuildDiagnostics(safe);
+        }
+        catch (RegexMatchTimeoutException)
+        {
+            selected = null;
+        }
+        selected ??= safe.Length > MaximumBuildDiagnosticCharacters
+            ? safe[^MaximumBuildDiagnosticCharacters..]
+            : safe;
+        return $"{header} Diagnostics: {selected}";
+    }
+
+    /// <summary>
+    /// Keeps only the last <paramref name="maximumLines"/> lines so unbounded process output is
+    /// never materialized again while formatting a failure.
+    /// </summary>
+    private static string TakeLastLines(string value, int maximumLines)
+    {
+        var index = value.Length;
+        for (var remaining = maximumLines; remaining > 0 && index > 0; remaining--)
+        {
+            var next = value.LastIndexOf('\n', index - 1);
+            if (next < 0)
+                return value.Trim();
+            index = next;
+        }
+        return value[index..].Trim();
+    }
+
+    private static string AppendBuildLogPointer(
+        string message,
+        FlowExecutionDiagnosticsArtifact? buildLog)
+        => buildLog is null ? message : $"{message} Full build output: {buildLog.FileName}.";
+
+    /// <summary>
+    /// Returns the MSBuild diagnostic lines (errors first, then warnings) found in build output, or
+    /// <see langword="null"/> when the output contains none.
+    /// </summary>
+    internal static string? SelectMsBuildDiagnostics(string output)
+    {
+        if (string.IsNullOrWhiteSpace(output))
+            return null;
+
+        var errors = new List<string>();
+        var localized = new List<string>();
+        var warnings = new List<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var rawLine in output.Split('\n'))
+        {
+            var line = rawLine.Trim();
+            if (line.Length == 0)
+                continue;
+            if (line.Length > MaximumBuildDiagnosticCharacters)
+                line = line[..MaximumBuildDiagnosticCharacters];
+            var match = MsBuildDiagnosticPattern.Match(line);
+            List<string> bucket;
+            if (match.Success)
+            {
+                bucket = string.Equals(
+                    match.Groups["severity"].Value,
+                    "error",
+                    StringComparison.OrdinalIgnoreCase)
+                    ? errors
+                    : warnings;
+            }
+            else if (MsBuildDiagnosticCodePattern.IsMatch(line))
+            {
+                // Localized MSBuild output does not use the English severity words, so fall back to
+                // the language-independent diagnostic code. The severity is unknown, so rank these
+                // between errors and warnings instead of guessing.
+                bucket = localized;
+            }
+            else
+            {
+                continue;
+            }
+            if (!seen.Add(line))
+                continue;
+            bucket.Add(line);
+        }
+        if (errors.Count == 0 && localized.Count == 0 && warnings.Count == 0)
+            return null;
+
+        var builder = new StringBuilder();
+        foreach (var line in errors.Concat(localized).Concat(warnings))
+        {
+            var separator = builder.Length == 0 ? "" : " ";
+            if (builder.Length + separator.Length + line.Length > MaximumBuildDiagnosticCharacters)
+                continue;
+            builder.Append(separator).Append(line);
+        }
+        return builder.ToString();
+    }
+
+    /// <summary>
+    /// Writes a bounded, redacted copy of the build output next to the run's other artifacts so the
+    /// actionable MSBuild diagnostics survive the bounded report message.
+    /// </summary>
+    private static async Task<FlowExecutionDiagnosticsArtifact?> TryPersistBuildLogAsync(
+        string workDirectory,
+        ProcessResult result)
+    {
+        var staged = "";
+        try
+        {
+            ExecutionPathSafety.ValidateOutputDirectory(workDirectory);
+            var logPath = Path.Combine(Path.GetFullPath(workDirectory), BuildLogFileName);
+            if (ExecutionPathSafety.EntryExists(logPath))
+                return null;
+
+            var content = FormatBuildLog(result);
+            var bytes = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false).GetBytes(content);
+            staged = logPath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            // Stage first so a partial write can never leave a truncated log whose digest does not
+            // match what the report published.
+            await using (var stream = new FileStream(
+                staged,
+                new FileStreamOptions
+                {
+                    Mode = FileMode.CreateNew,
+                    Access = FileAccess.Write,
+                    Share = FileShare.None,
+                    Options = FileOptions.Asynchronous | FileOptions.SequentialScan,
+                }))
+            {
+                // The run is already failing, and cancellation must not cost the operator the only
+                // actionable copy of the build output.
+                await stream.WriteAsync(bytes, CancellationToken.None).ConfigureAwait(false);
+                await stream.FlushAsync(CancellationToken.None).ConfigureAwait(false);
+            }
+            File.Move(staged, logPath);
+            return new FlowExecutionDiagnosticsArtifact
+            {
+                FileName = BuildLogFileName,
+                Digest = "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant(),
+                SizeBytes = bytes.LongLength,
+            };
+        }
+        catch (Exception ex) when (ex is IOException
+            or UnauthorizedAccessException
+            or NotSupportedException
+            or ArgumentException
+            or SecurityException
+            or OperationCanceledException
+            or RegexMatchTimeoutException
+            or FlowExecutionException)
+        {
+            // Diagnostics are best effort: never mask the build failure that is being reported.
+            TryDeleteFile(staged);
+            return null;
+        }
+    }
+
+    private static void TryDeleteFile(string path)
+    {
+        if (string.IsNullOrEmpty(path))
+            return;
+        try
+        {
+            File.Delete(path);
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+        }
+    }
+
+    internal static string FormatBuildLog(ProcessResult result)
+    {
+        var builder = new StringBuilder();
+        builder.Append("# DevFlow app build output (redacted)\n");
+        builder.Append("# exit-code: ").Append(result.ExitCode).Append('\n');
+        AppendBuildLogSection(builder, "stderr", result.StandardError);
+        AppendBuildLogSection(builder, "stdout", result.StandardOutput);
+        return builder.ToString();
+    }
+
+    private static void AppendBuildLogSection(StringBuilder builder, string name, string content)
+    {
+        builder.Append("\n# --- ").Append(name).Append(" ---\n");
+        if (string.IsNullOrWhiteSpace(content))
+        {
+            builder.Append("<empty>\n");
+            return;
+        }
+
+        // The oversize failure path reaches here precisely because the output exceeded the bounded
+        // response size, so the input is trimmed to the tail before anything materializes a copy.
+        var trimmedInput = content.Length > MaximumBuildLogSectionInputCharacters;
+        if (trimmedInput)
+            content = content[^MaximumBuildLogSectionInputCharacters..];
+        var allLines = content.Split('\n');
+        var skipped = Math.Max(0, allLines.Length - MaximumBuildLogLines);
+        // MSBuild reports its errors at the very end, so both bounds keep the tail: the retained
+        // window is filled backwards and the head of it is dropped when the budget runs out.
+        var retained = new List<string>();
+        var budget = MaximumBuildLogSectionCharacters;
+        var truncated = trimmedInput || skipped > 0;
+        for (var index = allLines.Length - 1; index >= skipped; index--)
+        {
+            // Clamp before normalizing: both the control-character pass and the redactor scale with
+            // line length and neither is safe on an unbounded single line.
+            var raw = allLines[index].TrimEnd();
+            if (raw.Length > MaximumBuildLogLineCharacters)
+            {
+                raw = raw[..MaximumBuildLogLineCharacters];
+                truncated = true;
+            }
+            var line = RemoveControlCharacters(raw);
+            // Redaction is per line: a whole-string pass collapses every line into one marker as
+            // soon as any single line looks sensitive.
+            var safe = MauiFlowReportRedactor.SafeMessage(line, MaximumBuildLogLineCharacters) ?? "";
+            if (budget - safe.Length - 1 < 0)
+            {
+                truncated = true;
+                break;
+            }
+            budget -= safe.Length + 1;
+            retained.Add(safe);
+        }
+        if (truncated)
+            builder.Append("[earlier output omitted]\n");
+        for (var index = retained.Count - 1; index >= 0; index--)
+            builder.Append(retained[index]).Append('\n');
+    }
+
+    private static string RemoveControlCharacters(string value)
+    {
+        if (!value.Any(static character =>
+                char.IsControl(character) && character is not ('\r' or '\n' or '\t')))
+        {
+            return value;
+        }
+        return string.Create(value.Length, value, static (destination, source) =>
+        {
+            for (var index = 0; index < source.Length; index++)
+            {
+                var character = source[index];
+                destination[index] = character is '\r' or '\n' or '\t' || !char.IsControl(character)
                     ? character
-                    : ' ')
-            .ToArray());
-        if (safe.Length > MaximumBuildDiagnosticCharacters)
-            safe = safe[^MaximumBuildDiagnosticCharacters..];
-        return $"MSBuild could not resolve the app artifact (exit code {result.ExitCode}). Diagnostics: {safe}";
+                    : ' ';
+            }
+        });
     }
 
     private static void AppendHashString(IncrementalHash hash, string value)
@@ -942,12 +1235,32 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
         if (result.StandardOutput.Length > MaximumBuildOutputCharacters ||
             result.StandardError.Length > MaximumBuildOutputCharacters)
         {
-            throw FlowExecutionException.Infrastructure(
+            var oversizeLog = await TryPersistBuildLogAsync(
+                request.WorkDirectory,
+                result).ConfigureAwait(false);
+            throw new FlowExecutionException(
+                FlowExecutionExitCategories.InfrastructureFailure,
                 "app-build-diagnostics-too-large",
-                "MSBuild diagnostics exceeded the bounded response size.");
+                AppendBuildLogPointer(
+                    "MSBuild diagnostics exceeded the bounded response size.",
+                    oversizeLog))
+            {
+                DiagnosticsArtifact = oversizeLog,
+            };
         }
         if (!result.Success)
-            throw FlowExecutionException.Infrastructure("app-build-failed", FormatBuildFailure(result));
+        {
+            var buildLog = await TryPersistBuildLogAsync(
+                request.WorkDirectory,
+                result).ConfigureAwait(false);
+            throw new FlowExecutionException(
+                FlowExecutionExitCategories.InfrastructureFailure,
+                "app-build-failed",
+                FormatBuildFailure(result, buildLog))
+            {
+                DiagnosticsArtifact = buildLog,
+            };
+        }
         if (!File.Exists(target.TargetPath))
         {
             throw FlowExecutionException.Infrastructure(

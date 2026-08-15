@@ -100,6 +100,7 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         var message = "The flow execution did not start.";
         var currentStage = "initialization";
         var infrastructurePhase = "execution";
+        FlowExecutionDiagnosticsArtifact? diagnosticsArtifact = null;
 
         try
         {
@@ -340,6 +341,7 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             exitCategory = ex.ExitCategory;
             detailCode = ex.Code;
             message = BoundMessage(ex.Message);
+            diagnosticsArtifact = ex.DiagnosticsArtifact;
             infrastructurePhase = currentStage;
             AddFailedStageIfMissing(lifecycle, currentStage, detailCode);
         }
@@ -348,6 +350,7 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             exitCategory = ex.ExitCategory;
             detailCode = ex.Code;
             message = BoundMessage(ex.Message);
+            diagnosticsArtifact = ex.DiagnosticsArtifact;
             infrastructurePhase = currentStage;
             AddFailedStageIfMissing(lifecycle, currentStage, detailCode);
         }
@@ -473,6 +476,14 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         }
         report.ExtensionData ??= new Dictionary<string, JsonElement>(StringComparer.Ordinal);
         report.ExtensionData["exitCategory"] = JsonSerializer.SerializeToElement(exitCategory);
+        // The report and the manifest have to agree, so drop the pointer once if the file is gone.
+        if (diagnosticsArtifact is not null &&
+            !File.Exists(Path.Combine(outputDirectory, diagnosticsArtifact.FileName)))
+        {
+            diagnosticsArtifact = null;
+        }
+        if (diagnosticsArtifact is not null)
+            AddDiagnosticsArtifact(report, diagnosticsArtifact, _clock.GetUtcNow());
         NormalizeArtifactPaths(report);
 
         var reportFile = _reportWriter.Create(report);
@@ -489,7 +500,8 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             reportFile,
             junitFile,
             evidence?.CapturedPath,
-            appSourceIdentity);
+            appSourceIdentity,
+            diagnosticsArtifact);
         var manifestFile = _manifestWriter.Create(manifest);
         await _outputWriter.WriteAsync(
             outputDirectory,
@@ -758,7 +770,8 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         ExecutionOutputFile reportFile,
         ExecutionOutputFile junitFile,
         string? evidencePath,
-        AppSourceIdentity appSourceIdentity)
+        AppSourceIdentity appSourceIdentity,
+        FlowExecutionDiagnosticsArtifact? diagnosticsArtifact = null)
     {
         var manifest = new MauiTestExecutionManifest
         {
@@ -823,6 +836,20 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
                 Digest = ComputeFileDigest(evidencePath),
                 SizeBytes = info.Length,
                 RelativePath = Path.GetFileName(evidencePath),
+                Redacted = true,
+            });
+        }
+        if (diagnosticsArtifact is not null)
+        {
+            manifest.Artifacts.Add(new MauiTestExecutionArtifact
+            {
+                ArtifactId = "app-build-log",
+                Role = "failure-diagnostics",
+                Kind = diagnosticsArtifact.Kind,
+                MediaType = diagnosticsArtifact.MediaType,
+                Digest = diagnosticsArtifact.Digest,
+                SizeBytes = diagnosticsArtifact.SizeBytes,
+                RelativePath = diagnosticsArtifact.FileName,
                 Redacted = true,
             });
         }
@@ -1036,6 +1063,31 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         }
         using var document = JsonDocument.Parse(stream.ToArray());
         return document.RootElement.Clone();
+    }
+
+    private static void AddDiagnosticsArtifact(
+        MauiFlowRunReport report,
+        FlowExecutionDiagnosticsArtifact diagnostics,
+        DateTimeOffset at)
+    {
+        // The report message is bounded, so the operator-facing pointer to the full build log has to
+        // travel as an artifact reference instead.
+        report.Artifacts.Add(CreateReference(diagnostics, at));
+        report.Failure?.Artifacts.Add(CreateReference(diagnostics, at));
+
+        static MauiFlowArtifactReference CreateReference(
+            FlowExecutionDiagnosticsArtifact diagnostics,
+            DateTimeOffset at)
+            => new()
+            {
+                ArtifactId = "app-build-log",
+                Kind = diagnostics.Kind,
+                Path = diagnostics.FileName,
+                Digest = diagnostics.Digest,
+                MediaType = diagnostics.MediaType,
+                Redacted = true,
+                CreatedAt = at,
+            };
     }
 
     private static void NormalizeArtifactPaths(MauiFlowRunReport report)

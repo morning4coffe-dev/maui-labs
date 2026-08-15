@@ -81,6 +81,12 @@ internal class FlowExecutionException : Exception
     public string ExitCategory { get; }
     public string Code { get; }
 
+    /// <summary>
+    /// Optional operator-facing diagnostics file written into the run output directory before the
+    /// failure was raised, so the actionable detail survives the bounded report message.
+    /// </summary>
+    public FlowExecutionDiagnosticsArtifact? DiagnosticsArtifact { get; init; }
+
     public static FlowExecutionException Invalid(string code, string message)
         => new(FlowExecutionExitCategories.InvalidConfiguration, code, message);
 
@@ -100,9 +106,25 @@ internal sealed class FlowExecutionPlatformLaunchException : FlowExecutionExcept
         FlowExecutionException failure,
         FlowExecutionPlatformSession session)
         : base(failure.ExitCategory, failure.Code, failure.Message, failure)
-        => Session = session;
+    {
+        Session = session;
+        DiagnosticsArtifact = failure.DiagnosticsArtifact;
+    }
 
     public FlowExecutionPlatformSession Session { get; }
+}
+
+/// <summary>
+/// A bounded, redacted diagnostics file that a failing stage persisted into the run output
+/// directory. Only the relative file name is reported so no absolute host path leaks.
+/// </summary>
+internal sealed record FlowExecutionDiagnosticsArtifact
+{
+    public required string FileName { get; init; }
+    public required string Digest { get; init; }
+    public required long SizeBytes { get; init; }
+    public string Kind { get; init; } = "build-log";
+    public string MediaType { get; init; } = "text/plain";
 }
 
 internal sealed record CommittedFlowBundle

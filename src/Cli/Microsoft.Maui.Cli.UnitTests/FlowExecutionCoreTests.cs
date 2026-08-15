@@ -356,6 +356,299 @@ public sealed class FlowExecutionCoreTests
     }
 
     [Fact]
+    public async Task ArtifactResolver_DoesNotRestoreTransitiveProjectReferencesUnderTheAppTargetFramework()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var sharedIntermediateRoot = Path.Combine(workspace.Root, "shared-obj");
+        // Mirrors the repository layout that made this a shared-state bug: every project in the
+        // graph writes its restore assets into one shared intermediate root.
+        await File.WriteAllTextAsync(
+            Path.Combine(workspace.Root, "Directory.Build.props"),
+            """
+            <Project>
+              <PropertyGroup>
+                <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)shared-obj\$(MSBuildProjectName)\</BaseIntermediateOutputPath>
+                <MSBuildProjectExtensionsPath>$(BaseIntermediateOutputPath)</MSBuildProjectExtensionsPath>
+              </PropertyGroup>
+            </Project>
+            """);
+        await File.WriteAllTextAsync(Path.Combine(workspace.Root, "Directory.Build.targets"), "<Project />");
+        await File.WriteAllTextAsync(
+            Path.Combine(workspace.Root, "Directory.Packages.props"),
+            """
+            <Project>
+              <PropertyGroup>
+                <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+              </PropertyGroup>
+            </Project>
+            """);
+        var libraryDirectory = Path.Combine(workspace.Root, "SharedLibrary");
+        Directory.CreateDirectory(libraryDirectory);
+        await File.WriteAllTextAsync(
+            Path.Combine(libraryDirectory, "SharedLibrary.csproj"),
+            """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>netstandard2.0</TargetFramework>
+              </PropertyGroup>
+            </Project>
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(libraryDirectory, "Library.cs"),
+            "public static class SharedLibraryMarker { public static int Value => 1; }");
+        var appDirectory = Path.Combine(workspace.Root, "HostApp");
+        Directory.CreateDirectory(appDirectory);
+        var project = Path.Combine(appDirectory, "HostApp.csproj");
+        await File.WriteAllTextAsync(
+            project,
+            """
+            <Project Sdk="Microsoft.NET.Sdk">
+              <PropertyGroup>
+                <TargetFramework>net10.0</TargetFramework>
+              </PropertyGroup>
+              <ItemGroup>
+                <ProjectReference Include="..\SharedLibrary\SharedLibrary.csproj" />
+              </ItemGroup>
+            </Project>
+            """);
+        await File.WriteAllTextAsync(
+            Path.Combine(appDirectory, "Program.cs"),
+            "public static class HostAppMarker { public static int Value => SharedLibraryMarker.Value; }");
+        var resolver = new MsBuildAppArtifactResolver(new ExecutionProcessRunner());
+
+        await resolver.ResolveAsync(new AppArtifactResolutionRequest
+        {
+            ProjectPath = project,
+            AgentSessionId = "flowsession",
+            TargetFramework = "net10.0",
+            Configuration = "Debug",
+            WorkDirectory = workspace.Output,
+        });
+
+        var libraryAssets = Path.Combine(sharedIntermediateRoot, "SharedLibrary", "project.assets.json");
+        Assert.True(File.Exists(libraryAssets), libraryAssets);
+        var targets = JsonNode.Parse(await File.ReadAllTextAsync(libraryAssets))!
+            .AsObject()["targets"]!
+            .AsObject()
+            .Select(static entry => entry.Key)
+            .ToArray();
+        // Resolving an app artifact must not clobber shared restore state: the netstandard2.0
+        // project keeps its own target instead of being rewritten with the app's framework.
+        Assert.Contains(targets, static target => target.StartsWith("netstandard2.0", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(targets, static target => target.Contains("net10.0", StringComparison.OrdinalIgnoreCase));
+        Assert.DoesNotContain(targets, static target => target.Contains("v10.0", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public async Task ArtifactResolver_HostProject_DeclaresInvocationOwnedIntermediatePaths()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var project = Path.Combine(workspace.Root, "App.csproj");
+        await File.WriteAllTextAsync(project, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0-android</TargetFramework></PropertyGroup></Project>");
+        var capturedHostProjectPath = "";
+        var runner = new CallbackProcessRunner(async call =>
+        {
+            var hostProjectPath = call.Arguments[1];
+            capturedHostProjectPath = hostProjectPath;
+            var host = XDocument.Load(hostProjectPath);
+            var ownedRoot = Path.GetDirectoryName(hostProjectPath)!;
+            foreach (var name in new[]
+                     {
+                         "BaseIntermediateOutputPath",
+                         "MSBuildProjectExtensionsPath",
+                         "BaseOutputPath",
+                     })
+            {
+                var value = host.Descendants(name).Single().Value;
+                Assert.True(
+                    ExecutionPathSafety.IsWithinRoot(ownedRoot, value),
+                    $"{name}={value}");
+            }
+
+            var outputRoot = host.Descendants("OutputRoot").Single().Value;
+            var metadataPath = host.Descendants("WriteLinesToFile").Single().Attribute("File")!.Value;
+            var artifactPath = Path.Combine(outputRoot, "package", "App.apk");
+            Directory.CreateDirectory(Path.GetDirectoryName(artifactPath)!);
+            await File.WriteAllBytesAsync(artifactPath, [1, 2, 3, 4]);
+            await File.WriteAllTextAsync(
+                metadataPath,
+                ArtifactMetadata(artifactPath, project, runtimeIdentifier: ""));
+            return Success();
+        });
+        var resolver = new MsBuildAppArtifactResolver(runner);
+
+        var artifact = await resolver.ResolveAsync(new AppArtifactResolutionRequest
+        {
+            ProjectPath = project,
+            AgentSessionId = "flowsession",
+            TargetFramework = "net10.0-android",
+            Configuration = "Debug",
+            WorkDirectory = workspace.Output,
+            Platform = "android",
+            TargetFrameworkPlatformIdentifiers = ["android"],
+            CandidateArtifactTypes = ["apk"],
+        });
+
+        Assert.Equal("apk", artifact.ArtifactType);
+        // The owned build root is the run's own output directory, so nothing the host project
+        // writes can reach the repository that owns the app project.
+        Assert.True(
+            ExecutionPathSafety.IsWithinRoot(workspace.Output, capturedHostProjectPath),
+            capturedHostProjectPath);
+    }
+
+    [Fact]
+    public async Task ArtifactResolver_BuildFailure_SurfacesMsBuildErrorsAndPersistsRedactedLog()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var project = Path.Combine(workspace.Root, "App.csproj");
+        await File.WriteAllTextAsync(project, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0-android</TargetFramework></PropertyGroup></Project>");
+        var restoreNoise = string.Join(
+            "\n",
+            Enumerable
+                .Range(0, 400)
+                .Select(index => $"  Restored C:\\repo\\src\\Project{index}\\Project{index}.csproj (in 1.2 sec)."));
+        var errorLine =
+            "C:\\sdk\\targets\\Microsoft.PackageDependencyResolution.targets(266,5): error NETSDK1005: " +
+            "Assets file 'C:\\repo\\artifacts\\obj\\Agent.Core\\project.assets.json' doesn't have a target for 'net10.0'. " +
+            "[C:\\repo\\src\\Agent.Core\\Agent.Core.csproj]";
+        var resolver = new MsBuildAppArtifactResolver(
+            new QueueProcessRunner(new ProcessResult
+            {
+                ExitCode = 1,
+                StandardOutput = restoreNoise + "\n" + errorLine + "\n" + errorLine + "\n" + restoreNoise,
+            }));
+
+        var failure = await Assert.ThrowsAsync<FlowExecutionException>(() =>
+            resolver.ResolveAsync(new AppArtifactResolutionRequest
+            {
+                ProjectPath = project,
+                AgentSessionId = "flowsession",
+                TargetFramework = "net10.0-android",
+                Configuration = "Debug",
+                WorkDirectory = workspace.Output,
+                Platform = "android",
+                TargetFrameworkPlatformIdentifiers = ["android"],
+                CandidateArtifactTypes = ["apk"],
+            }));
+
+        Assert.Equal("app-build-failed", failure.Code);
+        // The coordinator bounds the reported message to its first 512 characters, so the actionable
+        // MSBuild diagnostic has to appear there instead of being buried in restore noise.
+        var reported = failure.Message[..Math.Min(512, failure.Message.Length)];
+        Assert.Contains("NETSDK1005", reported, StringComparison.Ordinal);
+        Assert.Contains("app-build.log", reported, StringComparison.Ordinal);
+        Assert.DoesNotContain("Restored", reported, StringComparison.Ordinal);
+
+        var logPath = Path.Combine(workspace.Output, "app-build.log");
+        Assert.True(File.Exists(logPath), logPath);
+        var log = await File.ReadAllTextAsync(logPath);
+        Assert.Contains("NETSDK1005", log, StringComparison.Ordinal);
+        Assert.Contains("Restored", log, StringComparison.Ordinal);
+        Assert.DoesNotContain("C:\\repo", log, StringComparison.Ordinal);
+        Assert.NotNull(failure.DiagnosticsArtifact);
+        Assert.Equal("app-build.log", failure.DiagnosticsArtifact!.FileName);
+        Assert.StartsWith("sha256:", failure.DiagnosticsArtifact.Digest, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ArtifactResolver_BuildDiagnosticSelection_PrefersErrorsAndDeduplicates()
+    {
+        var output = string.Join(
+            "\n",
+            "  Restored one.csproj (in 1.2 sec).",
+            "app.csproj : warning NU1507: There are 6 package sources defined.",
+            "app.csproj : error NETSDK1005: Assets file does not have a target.",
+            "app.csproj : error NETSDK1005: Assets file does not have a target.",
+            "  Restored two.csproj (in 0.4 sec).");
+
+        var selected = MsBuildAppArtifactResolver.SelectMsBuildDiagnostics(output);
+
+        Assert.NotNull(selected);
+        Assert.StartsWith("app.csproj : error NETSDK1005", selected, StringComparison.Ordinal);
+        Assert.Equal(
+            1,
+            selected!.Split("NETSDK1005", StringSplitOptions.None).Length - 1);
+        Assert.Contains("NU1507", selected, StringComparison.Ordinal);
+        Assert.DoesNotContain("Restored", selected, StringComparison.Ordinal);
+        Assert.Null(MsBuildAppArtifactResolver.SelectMsBuildDiagnostics("  Restored one.csproj (in 1.2 sec)."));
+    }
+
+    [Fact]
+    public void ArtifactResolver_BuildLog_BoundsUnboundedProcessOutput()
+    {
+        // The oversize failure path persists a log precisely because the output blew the bounded
+        // response size, so formatting it must never materialize the whole stream.
+        var tail = "app.csproj : error NETSDK1005: Assets file does not have a target.";
+        var result = new ProcessResult
+        {
+            ExitCode = 1,
+            StandardOutput = new string('x', 8 * 1024 * 1024) + "\n" + tail,
+            StandardError = new string('y', 4 * 1024 * 1024),
+        };
+
+        var log = MsBuildAppArtifactResolver.FormatBuildLog(result);
+
+        Assert.True(log.Length < 1024 * 1024, log.Length.ToString());
+        Assert.Contains(tail, log, StringComparison.Ordinal);
+        Assert.Contains("[earlier output omitted]", log, StringComparison.Ordinal);
+        // A single unbounded line is clamped rather than copied whole.
+        Assert.DoesNotContain(new string('x', 8_192), log, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Coordinator_AppBuildFailure_WithoutPersistedLog_OmitsArtifactFromReportAndManifest()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var adapter = new FakePlatformAdapter();
+        var coordinator = CreateCoordinator(
+            new BuildLogFailingArtifactResolver(persistLog: false),
+            adapter);
+
+        var result = await coordinator.RunAsync(Request(bundle, workspace.Output));
+
+        Assert.Equal("app-build-failed", result.Report?.Failure?.Code);
+        // The report and the manifest have to agree: neither may point at a log that is not there.
+        Assert.DoesNotContain(
+            result.Report!.Artifacts,
+            static item => item.ArtifactId == "app-build-log");
+        Assert.DoesNotContain(
+            result.Report.Failure!.Artifacts,
+            static item => item.ArtifactId == "app-build-log");
+        Assert.DoesNotContain(
+            result.Manifest!.Artifacts,
+            static item => item.ArtifactId == "app-build-log");
+    }
+
+    [Fact]
+    public async Task Coordinator_AppBuildFailure_PublishesBuildLogArtifact()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var adapter = new FakePlatformAdapter();
+        var coordinator = CreateCoordinator(new BuildLogFailingArtifactResolver(), adapter);
+
+        var result = await coordinator.RunAsync(Request(bundle, workspace.Output));
+
+        Assert.Equal(FlowExecutionExitCategories.InfrastructureFailure, result.ExitCategory);
+        Assert.Equal("app-build-failed", result.Report?.Failure?.Code);
+        var reported = Assert.Single(
+            result.Report!.Artifacts,
+            static item => item.ArtifactId == "app-build-log");
+        Assert.Equal("app-build.log", reported.Path);
+        Assert.Contains(
+            result.Report.Failure!.Artifacts,
+            static item => item.ArtifactId == "app-build-log");
+        Assert.Contains(
+            result.Manifest!.Artifacts,
+            static item => item.ArtifactId == "app-build-log" &&
+                item.RelativePath == "app-build.log" &&
+                item.Role == "failure-diagnostics");
+        Assert.True(File.Exists(Path.Combine(workspace.Output, "app-build.log")));
+    }
+
+    [Fact]
     public void ArtifactPath_ReparsePointInsideOwnedRoot_IsRejected()
     {
         using var workspace = new ExecutionTestWorkspace();
@@ -1734,6 +2027,31 @@ public sealed class FlowExecutionCoreTests
             AppArtifactResolutionRequest request,
             CancellationToken cancellationToken = default)
             => Task.FromException<ResolvedAppArtifact>(failure);
+    }
+
+    private sealed class BuildLogFailingArtifactResolver(bool persistLog = true) : IAppArtifactResolver
+    {
+        public async Task<ResolvedAppArtifact> ResolveAsync(
+            AppArtifactResolutionRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            var logPath = Path.Combine(request.WorkDirectory, "app-build.log");
+            var content = "# DevFlow app build output (redacted)\nerror NETSDK1005: assets file mismatch.\n";
+            if (persistLog)
+                await File.WriteAllTextAsync(logPath, content, cancellationToken);
+            throw new FlowExecutionException(
+                FlowExecutionExitCategories.InfrastructureFailure,
+                "app-build-failed",
+                "MSBuild could not resolve the app artifact (exit code 1). Full build output: app-build.log.")
+            {
+                DiagnosticsArtifact = new FlowExecutionDiagnosticsArtifact
+                {
+                    FileName = "app-build.log",
+                    Digest = "sha256:" + new string('a', 64),
+                    SizeBytes = content.Length,
+                },
+            };
+        }
     }
 
     private sealed class FakeStateEvidenceProvider : IFlowStateEvidenceProvider

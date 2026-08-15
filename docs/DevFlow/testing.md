@@ -123,7 +123,9 @@ maui devflow flow run maui-tests/checkout.md --project src/MyApp/MyApp.csproj --
 ```
 
 The output directory contains `execution-manifest.json`, `flow-run.json`, and
-`report.junit.xml`. The default cleanup terminates only the exact package/process launched by this
+`report.junit.xml`. When the app build fails, it also contains `app-build.log`: a bounded, redacted
+copy of the MSBuild output, referenced from both the report and the manifest as `app-build-log`.
+The default cleanup terminates only the exact package/process launched by this
 invocation. `--cleanup uninstall` removes an Android or iOS Simulator package only when this
 invocation installed it; desktop adapters terminate their owned process but never install or remove
 a package. AAB, physical iOS/IPA, MSIX, AppInstaller, packaged Windows, cloud farms, and automatic

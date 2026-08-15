@@ -1,5 +1,8 @@
 using Xunit;
 
+// The gate source is shared into this project (see the linked FlowQaLaneGate.cs compile item in
+// Microsoft.Maui.DevFlow.Tests.csproj) because Arcade never executes the integration-test project
+// that owns it. The namespace matches the shared source so the internal gate stays reachable.
 namespace Microsoft.Maui.DevFlow.Agent.IntegrationTests;
 
 /// <summary>
@@ -111,5 +114,46 @@ public class FlowQaLaneGateTests
         };
 
         Assert.Equal(variables.Length, variables.Distinct(StringComparer.Ordinal).Count());
+    }
+
+    // The four attributes are the only part of the gate the suites actually consume. A mis-wire
+    // (say WindowsFlowQaFactAttribute asking the AppKit lane) compiles cleanly and then silently
+    // skips or silently runs the wrong lane, so pin each attribute to its own lane.
+    static string? SkipFor(FlowQaLaneReadiness readiness) => readiness.IsEnabled ? null : readiness.Reason;
+
+    [Fact]
+    public void AndroidFlowPilotFact_SkipsExactlyWhenTheAndroidLaneIsDisabled()
+        => Assert.Equal(SkipFor(FlowQaLaneGate.AndroidFlowPilot()), new AndroidFlowPilotFactAttribute().Skip);
+
+    [Fact]
+    public void WindowsFlowQaFact_SkipsExactlyWhenTheWindowsLaneIsDisabled()
+        => Assert.Equal(SkipFor(FlowQaLaneGate.WindowsFlowQa()), new WindowsFlowQaFactAttribute().Skip);
+
+    [Fact]
+    public void AppKitFlowQaFact_SkipsExactlyWhenTheAppKitLaneIsDisabled()
+        => Assert.Equal(SkipFor(FlowQaLaneGate.AppKitFlowQa()), new AppKitFlowQaFactAttribute().Skip);
+
+    [Fact]
+    public void AppleFlowQaFact_SkipsExactlyWhenTheAppleLaneIsDisabled()
+        => Assert.Equal(SkipFor(FlowQaLaneGate.AppleFlowQa()), new AppleFlowQaFactAttribute().Skip);
+
+    // Every lane reason is distinct on every host, which is what makes the four assertions above
+    // able to tell the lanes apart rather than all matching the same message.
+    [Fact]
+    public void EveryDisabledLaneReportsItsOwnReason()
+    {
+        var reasons = new[]
+        {
+            FlowQaLaneGate.AndroidFlowPilot(_ => null).Reason,
+            FlowQaLaneGate.WindowsFlowQa(_ => null, isWindowsHost: false).Reason,
+            FlowQaLaneGate.AppKitFlowQa(_ => null, isMacOSHost: false).Reason,
+            FlowQaLaneGate.AppleFlowQa(_ => null, isMacOSHost: false).Reason,
+            FlowQaLaneGate.WindowsFlowQa(_ => null, isWindowsHost: true).Reason,
+            FlowQaLaneGate.AppKitFlowQa(_ => null, isMacOSHost: true).Reason,
+            FlowQaLaneGate.AppleFlowQa(_ => null, isMacOSHost: true).Reason,
+        };
+
+        Assert.All(reasons, reason => Assert.NotEqual("", reason));
+        Assert.Equal(reasons.Length, reasons.Distinct(StringComparer.Ordinal).Count());
     }
 }

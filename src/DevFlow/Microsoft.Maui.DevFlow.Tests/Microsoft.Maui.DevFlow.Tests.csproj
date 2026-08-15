@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
@@ -23,6 +23,18 @@
     <ProjectReference Include="..\Microsoft.Maui.DevFlow.TestAgent.Core\Microsoft.Maui.DevFlow.TestAgent.Core.csproj" />
     <ProjectReference Include="..\Microsoft.Maui.DevFlow.TestAgent.Host\Microsoft.Maui.DevFlow.TestAgent.Host.csproj" />
     <ProjectReference Include="..\Microsoft.Maui.DevFlow.Testing\Microsoft.Maui.DevFlow.Testing.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Microsoft.Maui.DevFlow.Agent.IntegrationTests is classified by Arcade as an integration
+      test project, and cibuild never passes -integrationTest, so nothing in it executes in CI.
+      The lane gate decides whether the environment-gated QA suites run at all, so its
+      verification has to live in a suite that does run. The gate itself stays in the project
+      that consumes it; only the source is shared.
+    -->
+    <Compile Include="..\Microsoft.Maui.DevFlow.Agent.IntegrationTests\FlowQaLaneGate.cs"
+             Link="FlowQaLaneGate.cs" />
   </ItemGroup>
 
   <ItemGroup>

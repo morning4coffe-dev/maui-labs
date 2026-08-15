@@ -158,12 +158,9 @@ public sealed class AppleFlowQaContractTests
         Assert.False(MauiSourceProposalTrustPolicy.CanCreateProposal(artifact).Allowed);
     }
 
-    [Fact]
+    [AppleFlowQaFact]
     public void RuntimeArtifactManifest_CoversRequiredAppleContractOutcomes_WhenEnabled()
     {
-        if (!AppleQaEnvironment.IsRuntimeEnabled)
-            return;
-
         var path = AppleQaEnvironment.RequiredManifestPath();
         Assert.True(File.Exists(path), $"Apple QA manifest was not produced: {path}");
         using var document = JsonDocument.Parse(File.ReadAllText(path));
@@ -282,9 +279,7 @@ public sealed class AppleFlowQaContractTests
 
 internal static class AppleQaEnvironment
 {
-    internal static bool IsRuntimeEnabled =>
-        OperatingSystem.IsMacOS() &&
-        string.Equals(Environment.GetEnvironmentVariable("DEVFLOW_RUN_APPLE_FLOW_QA"), "1", StringComparison.Ordinal);
+    internal static bool IsRuntimeEnabled => FlowQaLaneGate.AppleFlowQa().IsEnabled;
 
     internal static string RequiredManifestPath()
         => Environment.GetEnvironmentVariable("DEVFLOW_APPLE_QA_MANIFEST")

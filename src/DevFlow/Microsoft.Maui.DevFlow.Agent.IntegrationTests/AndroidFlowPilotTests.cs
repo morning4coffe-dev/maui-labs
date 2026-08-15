@@ -27,17 +27,9 @@ public sealed class AndroidFlowPilotTests
     public void CleanRepetitions_UsesBoundedConfiguredValue(string? configured, int expected)
         => Assert.Equal(expected, ResolveCleanRepetitions(configured));
 
-    [Fact]
+    [AndroidFlowPilotFact]
     public async Task TierOneFlows_RunConfiguredCleanAttempts_AndPublishFirstAttemptManifest()
     {
-        if (!IsEnabled())
-        {
-            _output.WriteLine(
-                "Android flow pilot not requested. Set DEVFLOW_RUN_ANDROID_FLOW_PILOT=1 to run the " +
-                "configured-repeat, emulator-pilot Tier-1 run.");
-            return;
-        }
-
         var repositoryRoot = AppFixtureBase.FindRepoRoot();
         var configuration = AndroidFlowPilotConfiguration.FromEnvironment(repositoryRoot);
         var manifest = FlowPilotArtifactManifest.Create(configuration.ManifestOptions);
@@ -162,12 +154,6 @@ public sealed class AndroidFlowPilotTests
 
         Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
     }
-
-    static bool IsEnabled()
-        => string.Equals(
-            Environment.GetEnvironmentVariable("DEVFLOW_RUN_ANDROID_FLOW_PILOT"),
-            "1",
-            StringComparison.Ordinal);
 
     internal static int ResolveCleanRepetitions(string? configured)
         => int.TryParse(configured, out var value) && value is >= 1 and <= 20

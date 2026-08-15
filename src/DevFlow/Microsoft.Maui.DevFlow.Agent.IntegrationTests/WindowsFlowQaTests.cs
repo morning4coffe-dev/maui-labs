@@ -24,16 +24,9 @@ public sealed class WindowsFlowQaTests
     public WindowsFlowQaTests(ITestOutputHelper output)
         => _output = output;
 
-    [Fact]
+    [WindowsFlowQaFact]
     public async Task TierOneFlows_RunThreeCleanWindowsAttempts_AndPreserveFirstAttemptArtifacts()
     {
-        if (!IsEnabled())
-        {
-            _output.WriteLine(
-                "Windows flow QA not requested. Set DEVFLOW_RUN_WINDOWS_FLOW_QA=1 on a Windows MAUI host.");
-            return;
-        }
-
         var repositoryRoot = AppFixtureBase.FindRepoRoot();
         var configuration = WindowsFlowQaConfiguration.FromEnvironment(repositoryRoot);
         var manifest = FlowPilotArtifactManifest.Create(configuration.ManifestOptions);
@@ -136,12 +129,9 @@ public sealed class WindowsFlowQaTests
         Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
     }
 
-    [Fact]
+    [WindowsFlowQaFact]
     public async Task PlatformContracts_ValidateIdentityNavigationDialogsAndWebView_WhenEnabled()
     {
-        if (!IsEnabled())
-            return;
-
         var artifactRoot = ResolveWindowsArtifactRoot();
         var failures = new List<string>();
         var capabilityGaps = new List<string>();
@@ -267,13 +257,6 @@ public sealed class WindowsFlowQaTests
 
         Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
     }
-
-    static bool IsEnabled()
-        => OperatingSystem.IsWindows() &&
-           string.Equals(
-               Environment.GetEnvironmentVariable("DEVFLOW_RUN_WINDOWS_FLOW_QA"),
-               "1",
-               StringComparison.Ordinal);
 
     internal static int ResolveCleanRepetitions(string? configured)
         => int.TryParse(configured, out var value) && value is >= 1 and <= 20

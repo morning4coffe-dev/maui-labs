@@ -537,14 +537,7 @@ public class InspectorPropertyEndpointTests
 
     private static StringContent Json(string body) => new(body, Encoding.UTF8, "application/json");
 
-    private static int FreePort()
-    {
-        var l = new TcpListener(IPAddress.Loopback, 0);
-        l.Start();
-        var port = ((IPEndPoint)l.LocalEndpoint).Port;
-        l.Stop();
-        return port;
-    }
+    private static int FreePort() => TestPorts.Reserve();
 
     /// <summary>Minimal loopback agent answering GET/PUT /api/v1/ui/elements/{id}/properties/{name}.</summary>
     private sealed class FakeAgent : IAsyncDisposable

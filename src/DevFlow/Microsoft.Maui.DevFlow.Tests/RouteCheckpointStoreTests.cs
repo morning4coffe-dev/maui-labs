@@ -107,12 +107,61 @@ public sealed class RouteCheckpointStoreTests : IDisposable
     [Fact]
     public void Save_CapsEntries()
     {
-        var store = new RouteCheckpointStore(_root);
+        var store = new RouteCheckpointStore(_root, FrozenClock());
         for (var index = 0; index <= RouteCheckpointStore.MaxEntries; index++)
             store.Save("agent-" + index, null, "/route-" + index, null, null, null);
 
         Assert.False(store.Get("agent-0").HasCheckpoint);
         Assert.True(store.Get("agent-" + RouteCheckpointStore.MaxEntries).HasCheckpoint);
+    }
+
+    // Save_CapsEntries only triggers one trim. A second trim reads the persisted order, so if the
+    // trim wrote its survivors newest-first the positional tie-break would then evict the
+    // second-newest entry instead of the oldest.
+    [Fact]
+    public void Save_RepeatedTrims_KeepEvictingTheOldestEntry()
+    {
+        var store = new RouteCheckpointStore(_root, FrozenClock());
+        var total = RouteCheckpointStore.MaxEntries * 2;
+        for (var index = 0; index < total; index++)
+            store.Save("agent-" + index, null, "/route-" + index, null, null, null);
+
+        for (var index = 0; index < total - RouteCheckpointStore.MaxEntries; index++)
+            Assert.False(store.Get("agent-" + index).HasCheckpoint);
+
+        for (var index = total - RouteCheckpointStore.MaxEntries; index < total; index++)
+            Assert.True(store.Get("agent-" + index).HasCheckpoint);
+    }
+
+    // The session-less lookup is the coordinator's fallback (RouteCheckpointCoordinator uses it
+    // when the current session has no checkpoint of its own), and one agent legitimately keeps
+    // checkpoints for several sessions. Two saves inside one clock tick share a SavedUtc, so the
+    // fallback has to resolve the tie to the newer session rather than to whichever was stored first.
+    [Fact]
+    public void Get_WithoutSession_PrefersTheMostRecentlySavedSession()
+    {
+        var store = new RouteCheckpointStore(_root, FrozenClock());
+        store.Save("agent", "older-session", "/older", null, null, null);
+        store.Save("agent", "newer-session", "/newer", null, null, null);
+
+        var fallback = store.Get("agent");
+
+        Assert.True(fallback.HasCheckpoint);
+        Assert.Equal("newer-session", fallback.Checkpoint?.SessionId);
+        Assert.Equal("/newer", fallback.Checkpoint?.Route);
+        Assert.True(store.Get("agent", "older-session").HasCheckpoint);
+    }
+
+    // These three tests exist for the case where several saves land on the same SavedUtc, which is
+    // what actually happens on Windows: TimeProvider.System has ~15.6 ms granularity, so a burst of
+    // saves ties and the store has to break the tie by insertion order. A frozen clock makes that
+    // tie certain instead of leaving it to the host clock's resolution, which is finer on Linux and
+    // would let these pass even with the tie-break reverted.
+    private static TimeProvider FrozenClock() => new FrozenTimeProvider(new DateTimeOffset(2026, 1, 1, 0, 0, 0, TimeSpan.Zero));
+
+    private sealed class FrozenTimeProvider(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
     }
 
     [Theory]

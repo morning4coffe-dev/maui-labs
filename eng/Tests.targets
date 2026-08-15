@@ -1,0 +1,217 @@
+<Project>
+
+  <!--
+    Repo-owned test hooks.
+
+    The Arcade SDK imports this file into every project from its own Tests.targets
+    (Microsoft.DotNet.Arcade.Sdk/tools/Tests.targets), so every property and target here is
+    guarded on Arcade's project classification.
+
+    Why this lives in MSBuild rather than a `dotnet test` command line: CI runs
+    eng/common/cibuild.cmd|sh with a solution filter, which never invokes `dotnet test`
+    itself. Arcade's RunTests target builds the `dotnet test` command line and appends the
+    VSTest "settings" switch from $(VSTestRunSettingsFile), which is the only supported seam
+    for a .runsettings file on that path. A .runsettings file can turn coverage collection on
+    but cannot fail a build, so the threshold is enforced by ValidateCoverageThreshold below.
+
+    That seam only exists on Arcade's VSTest runner. Arcade defaults to the xunit console
+    runner, which loads no data collectors at all, so Directory.Build.props switches to the
+    VSTest runner whenever CollectCoverage is true. Without that switch coverlet.collector
+    never runs and this gate would fail every build with "no coverage.cobertura.xml was
+    produced" instead of measuring anything.
+
+    Usage:
+      build.cmd -test -projects <slnf> /p:CollectCoverage=true /p:Threshold=30
+
+    ThresholdType and ThresholdStat are fixed here rather than passed from CI: MSBuild splits a
+    /p: value on commas, so "line,branch" cannot survive a command line without %2C escaping,
+    which in turn is mangled by cmd batch percent expansion in GitHub Actions.
+  -->
+
+  <PropertyGroup Condition="'$(IsTestProject)' == 'true'">
+    <CollectCoverage Condition="'$(CollectCoverage)' == ''">false</CollectCoverage>
+
+    <!-- coverlet property names and semantics: Threshold is a percentage, 0 disables the gate. -->
+    <ThresholdType Condition="'$(ThresholdType)' == ''">line,branch</ThresholdType>
+    <ThresholdStat Condition="'$(ThresholdStat)' == ''">total</ThresholdStat>
+
+    <!--
+      $(Threshold) comes from CI as a repo-wide floor and arrives as a global property, so it
+      cannot be defaulted in place: a project may not assign a global property, and an empty value
+      would blow up Math.Max below with MSB4186 during evaluation. Launder it into a private
+      property first. $(CoverageThreshold) is the project's own bar; the effective gate is the
+      higher of the two so a repo-wide value can never lower a project below what it already
+      achieves.
+    -->
+    <_ThresholdFloor>$(Threshold)</_ThresholdFloor>
+    <_ThresholdFloor Condition="'$(_ThresholdFloor)' == ''">0</_ThresholdFloor>
+    <CoverageThreshold Condition="'$(CoverageThreshold)' == ''">0</CoverageThreshold>
+    <_ThresholdFloorIsNumeric>$([System.Text.RegularExpressions.Regex]::IsMatch('$(_ThresholdFloor)', '^\d+(\.\d+)?$'))</_ThresholdFloorIsNumeric>
+    <_CoverageThresholdIsNumeric>$([System.Text.RegularExpressions.Regex]::IsMatch('$(CoverageThreshold)', '^\d+(\.\d+)?$'))</_CoverageThresholdIsNumeric>
+    <EffectiveCoverageThreshold Condition="'$(_ThresholdFloorIsNumeric)' == 'true' and '$(_CoverageThresholdIsNumeric)' == 'true'">$([System.Math]::Max($(_ThresholdFloor), $(CoverageThreshold)))</EffectiveCoverageThreshold>
+
+    <!--
+      Opt-in per project. Several suites in this repo are environment gated and skip everything on
+      an unattended runner (Microsoft.Maui.DevFlow.Inspector.Tests skips all 88 of its tests, and
+      Agent.IntegrationTests/Appium.SmokeTests need a device), so a coverage number from them is
+      not a signal. Projects that always run set EnforceCoverageThreshold in their csproj.
+    -->
+    <EnforceCoverageThreshold Condition="'$(EnforceCoverageThreshold)' == ''">false</EnforceCoverageThreshold>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsTestProject)' == 'true' and '$(CollectCoverage)' == 'true'">
+    <VSTestRunSettingsFile Condition="'$(VSTestRunSettingsFile)' == ''">$(RepositoryEngineeringDir)test.runsettings</VSTestRunSettingsFile>
+
+    <!--
+      Arcade runs `dotnet test <assembly>`, which never executes coverlet.collector.targets, so
+      the collector is not on the default adapter search path and VSTest silently collects
+      nothing (it warns, then exits 0). Point at the package build folder explicitly.
+      Pkgcoverlet_collector comes from GeneratePathProperty in Directory.Build.targets.
+      NormalizePath rather than plain concatenation because MSBuild does not fix separators in
+      concatenated properties, and a backslash here would silently miss the directory on macOS
+      and Linux. NormalizePath rather than NormalizeDirectory because a trailing separator would
+      escape the closing quote on Windows.
+    -->
+    <_CoverletAdapterDir Condition="'$(Pkgcoverlet_collector)' != ''">$([MSBuild]::NormalizePath('$(Pkgcoverlet_collector)', 'build'))</_CoverletAdapterDir>
+    <TestRunnerAdditionalArguments Condition="'$(_CoverletAdapterDir)' != ''">$(TestRunnerAdditionalArguments) "--TestAdapterPath:$(_CoverletAdapterDir)"</TestRunnerAdditionalArguments>
+
+    <!--
+      Arcade derives the VSTest results directory from ArtifactsTestResultsDir and shares it
+      across every test project. coverlet writes coverage.cobertura.xml into a GUID subfolder,
+      so give each project its own results root; otherwise the reports cannot be attributed
+      back to the project that produced them.
+    -->
+    <ArtifactsTestResultsDir>$([MSBuild]::NormalizeDirectory('$(ArtifactsTestResultsDir)', '$(MSBuildProjectName)'))</ArtifactsTestResultsDir>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(IsTestProject)' == 'true'">
+    <_CoverageGateEnabled>false</_CoverageGateEnabled>
+    <_CoverageGateEnabled Condition="'$(CollectCoverage)' == 'true' and
+                                     '$(EnforceCoverageThreshold)' == 'true' and
+                                     '$(SkipTests)' != 'true' and
+                                     '$(EffectiveCoverageThreshold)' != '' and
+                                     '$(EffectiveCoverageThreshold)' != '0'">true</_CoverageGateEnabled>
+  </PropertyGroup>
+
+  <!--
+    Validated for every coverage run, not just the ones that enforce a threshold: a mistyped CI
+    parameter would otherwise leave EffectiveCoverageThreshold empty, which silently disables the
+    gate instead of failing.
+  -->
+  <Target Name="ValidateCoverageThresholdValue"
+          BeforeTargets="RunTests"
+          Condition="'$(IsTestProject)' == 'true' and '$(CollectCoverage)' == 'true' and '@(TestToRun)' != ''">
+    <Error Condition="'$(_ThresholdFloorIsNumeric)' != 'true'"
+           Text="Threshold='$(Threshold)' is not a number. Pass a percentage such as /p:Threshold=30, or 0 to disable the repo-wide floor."
+           File="Coverage" />
+    <Error Condition="'$(_CoverageThresholdIsNumeric)' != 'true'"
+           Text="CoverageThreshold='$(CoverageThreshold)' in $(MSBuildProjectName) is not a number."
+           File="Coverage" />
+  </Target>
+
+  <!--
+    Stale reports from a previous local run would make the gate read the wrong numbers, and
+    MSBuild cannot tell the new GUID folder from the old one. The @(TestToRun) guard matters:
+    MSBuild runs BeforeTargets/AfterTargets hooks even when the hooked target's own Condition is
+    false, so without it a run narrowed by TestTargetFrameworks or TestArchitectures would delete
+    a previous run's report and then fail the gate for producing nothing.
+
+    Delete is deliberately not ContinueOnError. A report that cannot be removed is read by the
+    gate below as if it were this run's output, so failing here is the safe outcome. It is also
+    the only outcome CI can express: eng/common/tools.ps1 adds /warnaserror to every CI build, so
+    a downgraded warning would be promoted straight back to an error anyway.
+  -->
+  <Target Name="RemoveStaleCoverageReports"
+          BeforeTargets="RunTests"
+          Condition="'$(IsTestProject)' == 'true' and '$(CollectCoverage)' == 'true' and '@(TestToRun)' != ''">
+    <ItemGroup>
+      <_StaleCoverageReport Include="$(ArtifactsTestResultsDir)**/coverage.cobertura.xml" />
+    </ItemGroup>
+    <Delete Files="@(_StaleCoverageReport)" />
+  </Target>
+
+  <Target Name="ValidateCoverageThreshold"
+          AfterTargets="RunTests"
+          Condition="'$(_CoverageGateEnabled)' == 'true' and '@(TestToRun)' != ''">
+
+    <Error Condition="'$(ThresholdStat)' != 'total'"
+           Text="ThresholdStat='$(ThresholdStat)' is not supported. A cobertura report only carries the aggregate rates, so this gate implements ThresholdStat=total."
+           File="Coverage" />
+
+    <ItemGroup>
+      <!--
+        coverlet writes its report to <ResultsDirectory>/<guid>/coverage.cobertura.xml, exactly
+        one level deep. The trx logger also copies attachments to
+        <ResultsDirectory>/<run>/In/<machine>/coverage.cobertura.xml, so a ** glob matches the
+        same run twice; the single * keeps only the collector's own output.
+      -->
+      <_CoverageReport Include="$(ArtifactsTestResultsDir)*/coverage.cobertura.xml" />
+    </ItemGroup>
+
+    <PropertyGroup>
+      <_CoverageReportCount>@(_CoverageReport->Count())</_CoverageReportCount>
+    </PropertyGroup>
+
+    <Error Condition="'$(_CoverageReportCount)' == '0'"
+           Text="CollectCoverage=true but no coverage.cobertura.xml was produced under '$(ArtifactsTestResultsDir)'. Check that $(MSBuildProjectName) references coverlet.collector, that the adapter directory '$(_CoverletAdapterDir)' exists, and that '$(VSTestRunSettingsFile)' enables the 'XPlat Code Coverage' collector."
+           File="Coverage" />
+
+    <Error Condition="'$(_CoverageReportCount)' != '1'"
+           Text="Expected exactly one coverage.cobertura.xml under '$(ArtifactsTestResultsDir)' but found $(_CoverageReportCount). Arcade batches RunTests over target framework and architecture and each batch writes its own report, so a test project with more than one of either is not supported by this gate yet; scope ArtifactsTestResultsDir per batch to add support."
+           File="Coverage" />
+
+    <XmlPeek XmlInputPath="@(_CoverageReport)" Query="/coverage/@line-rate">
+      <Output TaskParameter="Result" PropertyName="_CoverageLineRate" />
+    </XmlPeek>
+
+    <XmlPeek XmlInputPath="@(_CoverageReport)" Query="/coverage/@branch-rate">
+      <Output TaskParameter="Result" PropertyName="_CoverageBranchRate" />
+    </XmlPeek>
+
+    <XmlPeek XmlInputPath="@(_CoverageReport)" Query="/coverage/@lines-valid">
+      <Output TaskParameter="Result" PropertyName="_CoverageLinesValid" />
+    </XmlPeek>
+
+    <!--
+      XmlPeek returns empty and does not warn when a query matches nothing, and the arithmetic
+      below would then fail with MSB4086 pointing at MSBuild rather than at the report.
+    -->
+    <Error Condition="'$(_CoverageLineRate)' == '' or '$(_CoverageBranchRate)' == '' or '$(_CoverageLinesValid)' == ''"
+           Text="'@(_CoverageReport)' is missing one of the cobertura root attributes line-rate, branch-rate or lines-valid. The coverlet report format has probably changed."
+           File="Coverage" />
+
+    <PropertyGroup>
+      <_CoverageLinePercent>$([MSBuild]::Multiply($(_CoverageLineRate), 100))</_CoverageLinePercent>
+      <_CoverageBranchPercent>$([MSBuild]::Multiply($(_CoverageBranchRate), 100))</_CoverageBranchPercent>
+      <_CoverageLineText>$([System.Math]::Round($(_CoverageLinePercent), 2))</_CoverageLineText>
+      <_CoverageBranchText>$([System.Math]::Round($(_CoverageBranchPercent), 2))</_CoverageBranchText>
+    </PropertyGroup>
+
+    <Message Importance="high"
+             Text="Coverage ($(MSBuildProjectName)): line $(_CoverageLineText)%, branch $(_CoverageBranchText)% over $(_CoverageLinesValid) lines (threshold $(EffectiveCoverageThreshold)% on $(ThresholdType), stat $(ThresholdStat))" />
+
+    <!--
+      The percentages are a portfolio average over every assembly the runsettings Include filter
+      matches, not a per-assembly guarantee: each suite loads both the DevFlow assemblies and the
+      CLI, so a big untested assembly can be hidden by a well covered one. MinimumLinesValid
+      guards the denominator so a filter, rename, or reference change that silently stops
+      measuring a whole assembly fails loudly instead of raising the percentage.
+    -->
+    <Error Condition="'$(CoverageMinimumLinesValid)' != '' and '$(_CoverageLinesValid)' &lt; '$(CoverageMinimumLinesValid)'"
+           Text="Coverage measured only $(_CoverageLinesValid) lines for $(MSBuildProjectName), below the expected floor of $(CoverageMinimumLinesValid). An assembly has probably dropped out of the Include filter in '$(VSTestRunSettingsFile)', which would inflate the coverage percentage."
+           File="Coverage" />
+
+    <Error Condition="$(ThresholdType.Contains('line')) and '$(_CoverageLinePercent)' &lt; '$(EffectiveCoverageThreshold)'"
+           Text="Total line coverage $(_CoverageLineText)% is below the required $(EffectiveCoverageThreshold)% for $(MSBuildProjectName). Report: @(_CoverageReport)"
+           File="Coverage" />
+
+    <Error Condition="$(ThresholdType.Contains('branch')) and '$(_CoverageBranchPercent)' &lt; '$(EffectiveCoverageThreshold)'"
+           Text="Total branch coverage $(_CoverageBranchText)% is below the required $(EffectiveCoverageThreshold)% for $(MSBuildProjectName). Report: @(_CoverageReport)"
+           File="Coverage" />
+
+    <Error Condition="$(ThresholdType.Contains('method'))"
+           Text="ThresholdType 'method' is not supported: a cobertura report has no aggregate method rate. Use 'line', 'branch', or 'line,branch'."
+           File="Coverage" />
+  </Target>
+
+</Project>

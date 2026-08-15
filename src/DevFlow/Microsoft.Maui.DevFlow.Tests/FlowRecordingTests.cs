@@ -1208,14 +1208,7 @@ public class FlowRecordingTests : System.IDisposable
     private static int StepCount(string id)
         => FlowRecordingStore.Instance.TryGet(id, out var r) ? r.StepCount : -1;
 
-    private static int GetFreePort()
-    {
-        using var listener = new System.Net.Sockets.TcpListener(
-            System.Net.IPAddress.Loopback,
-            0);
-        listener.Start();
-        return ((System.Net.IPEndPoint)listener.LocalEndpoint).Port;
-    }
+    private static int GetFreePort() => TestPorts.Reserve();
 
     private static async Task WaitForBrokerAsync(int port)
     {

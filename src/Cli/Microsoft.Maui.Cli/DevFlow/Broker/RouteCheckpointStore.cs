@@ -235,8 +235,11 @@ public sealed class RouteCheckpointStore
 
     private static RouteCheckpoint? Find(CheckpointDocument document, string agentId, string? sessionId)
         => document.Checkpoints
-            .Where(c => SameKey(c, agentId, sessionId))
-            .OrderByDescending(static c => c.SavedUtc)
+            .Select(static (checkpoint, index) => (checkpoint, index))
+            .Where(entry => SameKey(entry.checkpoint, agentId, sessionId))
+            .OrderByDescending(static entry => entry.checkpoint.SavedUtc)
+            .ThenByDescending(static entry => entry.index)
+            .Select(static entry => entry.checkpoint)
             .FirstOrDefault();
 
     private static bool SameKey(RouteCheckpoint checkpoint, string agentId, string? sessionId)
@@ -248,9 +251,19 @@ public sealed class RouteCheckpointStore
     {
         if (document.Checkpoints.Count <= MaxEntries)
             return;
+        // SavedUtc ties are the normal case, not the exception: DateTimeOffset.UtcNow only advances
+        // about every 15ms on Windows, so a burst of saves shares one timestamp. LINQ sorts are
+        // stable, so ordering on SavedUtc alone keeps the earliest members of a tie group and
+        // evicts the newest checkpoint. Save always appends, so insertion order breaks the tie.
+        // The survivors are written back in insertion order so that index keeps meaning insertion
+        // order on the next trim; selecting newest-first and persisting that would invert it.
         document.Checkpoints = document.Checkpoints
-            .OrderByDescending(static c => c.SavedUtc)
+            .Select(static (checkpoint, index) => (checkpoint, index))
+            .OrderByDescending(static entry => entry.checkpoint.SavedUtc)
+            .ThenByDescending(static entry => entry.index)
             .Take(MaxEntries)
+            .OrderBy(static entry => entry.index)
+            .Select(static entry => entry.checkpoint)
             .ToList();
     }
 

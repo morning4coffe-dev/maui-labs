@@ -46,6 +46,8 @@ jobs:
       pack: true
       pack-driver: true
       os: '["windows-latest"]'
+      collect-coverage: true
+      coverage-threshold: '30'
 
   hosts:
     name: JavaScript hosts and VSIX

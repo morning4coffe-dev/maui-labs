@@ -1010,19 +1010,7 @@ public sealed class DevFlowFailurePublisherScriptTests : IDisposable
             context.Response.Close();
         }
 
-        private static int GetAvailablePort()
-        {
-            var listener = new TcpListener(IPAddress.Loopback, 0);
-            listener.Start();
-            try
-            {
-                return ((IPEndPoint)listener.LocalEndpoint).Port;
-            }
-            finally
-            {
-                listener.Stop();
-            }
-        }
+        private static int GetAvailablePort() => TestPorts.Reserve();
 
         private sealed record MockRun(
             long RunId,

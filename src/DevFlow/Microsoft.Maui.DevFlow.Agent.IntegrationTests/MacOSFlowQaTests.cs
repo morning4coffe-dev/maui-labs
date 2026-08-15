@@ -292,12 +292,9 @@ public sealed class MacOSFlowQaTests
         Assert.NotNull(workflow);
     }
 
-    [Fact]
+    [AppKitFlowQaFact]
     public async Task Runtime_AppKitFixtureExecutesTierOneAndWritesExperimentalArtifacts_WhenEnabled()
     {
-        if (!IsRuntimeEnabled())
-            return;
-
         var repositoryRoot = AppFixtureBase.FindRepoRoot();
         var artifactRoot = ResolveArtifactRoot(repositoryRoot);
         var manifest = FlowPilotArtifactManifest.Create(new FlowPilotManifestOptions
@@ -393,12 +390,9 @@ public sealed class MacOSFlowQaTests
         Assert.True(failures.Count == 0, string.Join(Environment.NewLine, failures));
     }
 
-    [Fact]
+    [AppKitFlowQaFact]
     public void RuntimeManifest_RequiresExperimentalAppKitLabels_WhenEnabled()
     {
-        if (!IsRuntimeEnabled())
-            return;
-
         var path = Environment.GetEnvironmentVariable("DEVFLOW_APPKIT_QA_MANIFEST")
             ?? throw new InvalidOperationException(
                 "DEVFLOW_APPKIT_QA_MANIFEST is required when experimental AppKit QA is enabled.");
@@ -568,10 +562,6 @@ public sealed class MacOSFlowQaTests
                 File.Delete(temporary);
         }
     }
-
-    static bool IsRuntimeEnabled()
-        => OperatingSystem.IsMacOS() &&
-           string.Equals(Environment.GetEnvironmentVariable("DEVFLOW_RUN_APPKIT_FLOW_QA"), "1", StringComparison.Ordinal);
 
     static int ResolveCleanRepetitions(string? configured)
         => int.TryParse(configured, out var value) && value is >= 1 and <= 20

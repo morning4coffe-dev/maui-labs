@@ -1833,10 +1833,5 @@ public sealed class InspectorWorkbenchBrokerRouteTests
         return Encoding.UTF8.GetString(buffer, 0, result.Count);
     }
 
-    private static int FreePort()
-    {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
-    }
+    private static int FreePort() => TestPorts.Reserve();
 }

@@ -526,12 +526,7 @@ public sealed class BrokerRepairValidationIntegrationTests
         return Encoding.UTF8.GetString(buffer, 0, result.Count);
     }
 
-    private static int FreePort()
-    {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
-    }
+    private static int FreePort() => TestPorts.Reserve();
 
     /// <summary>
     /// A lifecycle owner that records what it applied. It stands in for the platform owner without

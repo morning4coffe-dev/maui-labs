@@ -95,6 +95,16 @@ public class SetPropertyBindableTests
         using var socket = new ClientWebSocket();
         using var setupTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
         await socket.ConnectAsync(new Uri($"ws://localhost:{harness.Port}/ws/v1/ui/events"), setupTimeout.Token);
+
+        // ConnectAsync only proves the handshake completed. The agent registers the subscription
+        // inside its WebSocket handler, which can still be scheduled, and PublishUiEvent only fans
+        // out to already-registered subscriptions. The handler queues a lifecycle frame as its
+        // first act after registering, so receiving any frame is the deterministic signal that a
+        // mutation published from now on will reach this socket.
+        using (await ReceiveMessageAsync(socket, setupTimeout.Token))
+        {
+        }
+
         var subscription = Encoding.UTF8.GetBytes("{\"type\":\"subscribe\",\"data\":{\"events\":[\"treeChange\"]}}");
         await socket.SendAsync(subscription, WebSocketMessageType.Text, true, setupTimeout.Token);
 
@@ -418,12 +428,7 @@ public class SetPropertyBindableTests
             return null;
         }
 
-        private static int GetFreePort()
-        {
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
-            listener.Start();
-            return ((IPEndPoint)listener.LocalEndpoint).Port;
-        }
+        private static int GetFreePort() => TestPorts.Reserve();
     }
 
     private static async Task<MemoryStream> ReceiveMessageAsync(ClientWebSocket socket, CancellationToken cancellationToken)

@@ -44,3 +44,9 @@ jobs:
       run-tests: true
       pack: true
       install-workloads: false
+      collect-coverage: true
+      coverage-threshold: '30'
+      # No os override, so this runs the default macOS + Windows matrix. _build.yml collects and
+      # gates coverage on coverage-os (windows-latest) only; the macOS leg still runs the tests,
+      # because the thresholds are calibrated against one OS and src/Cli is full of
+      # OperatingSystem.IsWindows/IsMacOS branches.

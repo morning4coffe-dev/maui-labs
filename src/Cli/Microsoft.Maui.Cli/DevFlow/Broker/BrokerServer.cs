@@ -847,16 +847,51 @@ public partial class BrokerServer : IDisposable
     {
         _idleTimer?.Dispose();
 
-        // Close all agent WebSockets
-        foreach (var agent in _agents.Values)
+        // Tear down agent WebSockets without the graceful close handshake.
+        //
+        // HttpListener's server-side WebSocket takes its SessionHandle lock before its
+        // internal _thisLock, but the close path re-enters that pair while it is still
+        // holding _thisLock. That inverts the order against the receive pump, which holds
+        // SessionHandle and then waits for _thisLock in StartOnCloseReceived while handling
+        // an inbound close frame. When a peer closes at the same moment the broker shuts
+        // down, the two sides deadlock. CloseAsync blocks in Monitor.Enter before its first
+        // await, so the CloseAsync(...).Wait(2s) that used to be here could never time out:
+        // it hung whichever thread cancelled the broker, which on the RunAsync cancellation
+        // path is the caller of Cancel() itself.
+        //
+        // Abort() takes the same locks in the documented order, so it cannot invert them;
+        // dropping the handshake is what removes the deadlock. Each socket is torn down on its
+        // own dedicated thread so a single wedged socket cannot starve the others, and off the
+        // thread pool so a saturated pool cannot delay teardown past the timeout.
+        var sockets = _agents.Values.Select(a => a.WebSocket).ToArray();
+        if (sockets.Length > 0)
         {
-            try
+            var teardowns = new List<Thread>(sockets.Length);
+            foreach (var socket in sockets)
             {
-                agent.WebSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Broker shutting down", CancellationToken.None)
-                    .Wait(TimeSpan.FromSeconds(2));
+                var thread = new Thread(() =>
+                {
+                    try { socket.Abort(); } catch { }
+                    try { socket.Dispose(); } catch { }
+                })
+                { IsBackground = true, Name = "devflow-broker-socket-teardown" };
+
+                thread.Start();
+                teardowns.Add(thread);
             }
-            catch { }
-            agent.WebSocket.Dispose();
+
+            // Stopwatch rather than DateTime.UtcNow: the wall clock is not monotonic, and an NTP
+            // step during shutdown would either collapse the budget to zero or extend it.
+            var budget = TimeSpan.FromSeconds(2);
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
+            foreach (var thread in teardowns)
+            {
+                var remaining = budget - elapsed.Elapsed;
+                if (remaining <= TimeSpan.Zero)
+                    break;
+
+                try { thread.Join(remaining); } catch { }
+            }
         }
         _agents.Clear();
         _mutationLeases.Clear();

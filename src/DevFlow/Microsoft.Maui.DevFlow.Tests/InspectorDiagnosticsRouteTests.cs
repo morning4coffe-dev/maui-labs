@@ -348,14 +348,7 @@ public class InspectorDiagnosticsRouteTests
 
     private static StringContent Json(string json) => new(json, Encoding.UTF8, "application/json");
 
-    private static int FreePort()
-    {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
+    private static int FreePort() => TestPorts.Reserve();
 
     /// <summary>Loopback agent answering the layout and profiler reads the diagnostics tabs make.</summary>
     private sealed class FakeDiagnosticsAgent : IAsyncDisposable

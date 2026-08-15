@@ -456,14 +456,7 @@ public class InspectorFlowReplayTests
         return http.SendAsync(request);
     }
 
-    private static int FreePort()
-    {
-        var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        var port = ((IPEndPoint)listener.LocalEndpoint).Port;
-        listener.Stop();
-        return port;
-    }
+    private static int FreePort() => TestPorts.Reserve();
 
     private sealed class RunningInspector : IAsyncDisposable
     {

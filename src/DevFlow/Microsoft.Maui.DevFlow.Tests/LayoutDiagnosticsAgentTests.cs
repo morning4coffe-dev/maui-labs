@@ -444,12 +444,7 @@ public class LayoutDiagnosticsAgentTests
             _service.Dispose();
         }
 
-        private static int GetFreePort()
-        {
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
-            listener.Start();
-            return ((IPEndPoint)listener.LocalEndpoint).Port;
-        }
+        private static int GetFreePort() => TestPorts.Reserve();
     }
 
     /// <summary>Exposes the walker instance so a test can assert the per-scan map is released.</summary>

@@ -274,12 +274,7 @@ public sealed class XamlSourceInspectorRouteTests
         return Encoding.UTF8.GetString(buffer, 0, result.Count);
     }
 
-    private static int FreePort()
-    {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
-    }
+    private static int FreePort() => TestPorts.Reserve();
 
     private static (int Line, int Column) LineColumn(string source, string marker)
     {

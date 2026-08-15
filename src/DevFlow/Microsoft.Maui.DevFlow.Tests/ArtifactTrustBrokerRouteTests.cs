@@ -152,10 +152,5 @@ public class ArtifactTrustBrokerRouteTests
         throw new InvalidOperationException("Broker did not start.");
     }
 
-    private static int FreePort()
-    {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
-    }
+    private static int FreePort() => TestPorts.Reserve();
 }

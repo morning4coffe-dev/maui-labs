@@ -190,12 +190,7 @@ public class DiagnosticProblemsTests
             _service.Dispose();
         }
 
-        private static int GetFreePort()
-        {
-            using var listener = new TcpListener(IPAddress.Loopback, 0);
-            listener.Start();
-            return ((IPEndPoint)listener.LocalEndpoint).Port;
-        }
+        private static int GetFreePort() => TestPorts.Reserve();
     }
 
     private sealed class TestApplication : Application, IVisualTreeElement

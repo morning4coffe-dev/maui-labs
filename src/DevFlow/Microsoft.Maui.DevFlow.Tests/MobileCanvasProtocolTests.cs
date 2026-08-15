@@ -36,14 +36,7 @@ public class MobileCanvasProtocolTests : IAsyncLifetime
         return Task.CompletedTask;
     }
 
-    private static int GetFreePort()
-    {
-        using var socket = new System.Net.Sockets.TcpListener(IPAddress.Loopback, 0);
-        socket.Start();
-        var port = ((IPEndPoint)socket.LocalEndpoint).Port;
-        socket.Stop();
-        return port;
-    }
+    private static int GetFreePort() => TestPorts.Reserve();
 
     private async Task ServeAsync()
     {

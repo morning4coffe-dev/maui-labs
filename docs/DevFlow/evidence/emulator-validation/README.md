@@ -1,15 +1,24 @@
 # Emulator validation evidence
 
-First artifacts produced by `maui devflow flow run` against a real Android
-emulator rather than a test fake.
+Artifacts produced by `maui devflow flow run` against a real Android emulator
+rather than a test fake. Each subdirectory is one run, kept in chronological
+order so the failing record is not overwritten by the later passing one.
 
-**This run did not pass.** It is committed as an honest record of what the
-harness actually emits on real hardware, not as proof the flow succeeded.
+Common to both runs:
 
 | | |
 |---|---|
 | Command | `maui devflow flow run samples/DevFlow.Sample/maui-tests/modal-roundtrip.md --project samples/DevFlow.Sample/DevFlow.Sample.csproj --platform android --device emulator-5554 --output <out> --json` |
-| Device | Android emulator, AVD `devflow-tests-api35` (API 35, x86_64) |
+| Device | Android emulator, AVD `devflow-tests-api35` (API 35, x86_64, `google_apis`) |
+| Flow | `samples/DevFlow.Sample/maui-tests/modal-roundtrip.md` (two taps: open modal, close modal) |
+
+## `2026-08-14-app-build-failed`
+
+**This run did not pass.** It is kept as an honest record of what the harness
+emitted before the artifact pipeline worked on a real device.
+
+| | |
+|---|---|
 | Source revision | `72e7d2b1770d35620b7701408eb43310dbcedcc3` |
 | Run id | `run-20260814191908180-cc9b7bd9` |
 | Outcome | `infrastructure-error` / `app-build-failed`, process exit code 1 |
@@ -17,29 +26,63 @@ harness actually emits on real hardware, not as proof the flow succeeded.
 
 Stages 1-4 (`validate-request`, `source-identity`, `load-workflow`,
 `validate-target`) passed. The run never reached install, launch, agent
-binding, or replay, so nothing here demonstrates those stages.
+binding, or replay, so nothing in that directory demonstrates those stages.
 
-## Why it failed
+The build failed because `resolve-artifact` forced `TargetFramework=net10.0-android`
+down into the app's transitive `ProjectReference` graph, rewriting the shared
+`project.assets.json` of the `net10.0`-only DevFlow projects and then failing
+with `NETSDK1005`. The operator-visible message did not say that: the
+diagnostic was truncated to a window containing only NuGet `Restored ...` lines
+and no raw build log was written.
 
-`resolve-artifact` builds the app through a generated MSBuild host project that
-forces `TargetFramework=net10.0-android` down into the app's transitive
-`ProjectReference` graph. The `net10.0`-only DevFlow projects
-(`Microsoft.Maui.DevFlow.Agent.Core`, `Microsoft.Maui.DevFlow.Logging`) are
-restored under that framework and their `project.assets.json` is rewritten in
-the shared Arcade `artifacts/obj/<Project>/` directory with only a
-`net10.0-android` target. The subsequent build asks for `net10.0` and fails
-with `NETSDK1005`.
+## `2026-08-15-replay-passed`
 
-The same clobbered assets files also break a plain `dotnet build` of the app
-afterwards, until `dotnet restore` is run again.
+**This run passed.** All sixteen lifecycle stages completed and both flow steps
+replayed against the app running on the emulator.
 
-The operator-visible message does not say any of this: the diagnostic is
-truncated to a window that contains only NuGet `Restored ...` lines, and no raw
-build log is written to the output directory.
+| | |
+|---|---|
+| Source revision | `7643531e05626323ffe0989d7425e93a887bd6bf` plus the working-tree fixes described below |
+| Run id | `run-20260815182033097-c0728f6c` |
+| Outcome | `passed` / `Flow replay passed.` |
+| Exit category | `unverified` |
+| Stages | 16/16 passed, including `resolve-artifact` (262.8 s), `platform-launch` (21.8 s), `agent-forward`, `validate-agent`, `execute-flow` (3.5 s), `cleanup`, `artifact-cleanup` |
+| Steps | `tap ShowModalButton` passed (1525 ms), `tap CloseModalButton` passed (1591 ms) |
 
-## What these files are good for
+`exitCategory: unverified` is not a failure. The replay executed and passed; the
+report declines to call it *verified* because the flow declares no independent
+business oracle and one declared scenario has no complete hard-assertion
+coverage (`independent-oracle-absent`, `required-scenario-uncovered`). The CLI
+still exits with `ok: false` for that reason, which is deliberate.
 
-`execution-manifest.json` and `flow-run.json` show that the reporting contract
-holds on a real device: stage-by-stage lifecycle, run/flow/incident
-fingerprints, artifact digests, and redaction. Neither file contains an
-absolute path, user name, or token.
+Three defects had to be fixed before this run could get past `resolve-artifact`
+and `platform-launch`:
+
+1. A Debug Android build emits `<package>.apk` and `<package>-Signed.apk` side
+   by side, and artifact resolution failed closed with `artifact-ambiguous`.
+   The artifact contract now carries `SigningState` derived from the Android
+   SDK's own package properties, and resolution prefers the signed package.
+2. `AdbRunner.ListReversePortsAsync` matches `adb reverse --list` column 1
+   against the device serial, but that column holds the ADB transport id
+   (`host-17`), so it always reported zero rules and the reverse mapping was
+   treated as failed. A local subclass parses the raw output instead.
+3. A Debug Android build defaults to fast deployment
+   (`EmbedAssembliesIntoApk` unset), which produces a package with no managed
+   assemblies. Installing it with `adb install` aborted at startup with
+   `No assemblies found in '/data/user/0/<app>/files/.__override__/x86_64'`.
+   The artifact contract now asks for a self-contained package.
+
+### Redaction applied to `flow-run.json`
+
+`execution-manifest.json` is byte-for-byte what the run produced.
+
+`flow-run.json` is **not**: the repository root prefix
+`C:\Users\<user>\...\maui-labs\` was replaced with `<repo>\` in seven
+`sourceAnchor` values before committing. Those anchors are emitted as
+`<absolute XAML path>:<line>`, so a passing report embeds the build machine's
+absolute paths and user name. That is a real gap - the report is not
+leak-free on its own - and it is why the manifest's recorded digest for
+`flow-run.json`
+(`sha256:7b5249ee6c2d5a9b6795e7d25602967017cf9acbb8d16c12938cf66f4ef0378a`,
+43340 bytes) does not match the committed file. Nothing else was changed. The
+report contains no host name, IP address, port, device serial, or credential.

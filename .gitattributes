@@ -1,1 +1,6 @@
 .github/workflows/*.lock.yml linguist-generated=true merge=ours
+
+# The qualification corpus and its committed baseline are hashed byte-for-byte into
+# corpus.manifestFingerprint, which --accumulate uses to decide that two runs read the same static
+# evidence. A CRLF checkout would otherwise produce a different fingerprint on every clone.
+tests/DevFlow/InspectorCorpus/** text eol=lf

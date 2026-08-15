@@ -68,6 +68,7 @@ public static class MauiPreviewQualificationCorpusRunner
         var cases = new List<MauiQualificationCorpusCaseResult>();
         var samples = new List<MauiQualificationExecutionSample>();
         var noRepairFixtures = new List<(string Id, JsonElement Fixture)>();
+        var fixtureShapes = new List<(string Kind, string ProvenanceMethod, SortedSet<string> Shape)>();
         var summary = new MauiQualificationCorpusSummary
         {
             Version = "selector-health-corpus-v1",
@@ -94,12 +95,13 @@ public static class MauiPreviewQualificationCorpusRunner
             errors.Add(manifestError ?? "corpus-manifest-invalid");
             return Complete(summary, cases, samples, errors, null);
         }
-        summary.ManifestFingerprint = Hash(manifestBytes);
         // The manifest alone does not pin what the cases say. Two runs whose case *contents* differ
         // would otherwise share a fingerprint, and the accumulator relies on that fingerprint to
-        // conclude that the static evidence in both runs is the same evidence.
+        // conclude that the static evidence in both runs is the same evidence. Everything under the
+        // root is hashed — cases, schemas, and the privacy/security corpus — because all of it
+        // feeds a published number.
         summary.ManifestFingerprint = Hash(Encoding.UTF8.GetBytes(
-            summary.ManifestFingerprint + "|" + HashCaseDirectory(root)));
+            Hash(manifestBytes) + "|" + HashCorpusTree(root)));
 
         if (!TryReadObject(schemaPath, out var schema, out _, out var schemaError))
             errors.Add(schemaError ?? "corpus-schema-invalid");
@@ -149,6 +151,7 @@ public static class MauiPreviewQualificationCorpusRunner
                 IneligibilityCodes = evaluation.IneligibilityCodes,
             };
             cases.Add(caseResult);
+            fixtureShapes.Add((metadata.Kind, metadata.ProvenanceMethod, FixtureShape(fixture)));
             provenanceCounts[metadata.ProvenanceSourceKind] =
                 provenanceCounts.GetValueOrDefault(metadata.ProvenanceSourceKind) + 1;
             if (!passed)
@@ -236,6 +239,16 @@ public static class MauiPreviewQualificationCorpusRunner
                 !string.Equals(item.ProvenanceMethod, "adapted-from-case", StringComparison.Ordinal))
             .GroupBy(EvaluationProjection, StringComparer.Ordinal)
             .Sum(static group => Math.Max(0, group.Count() - 1));
+        // The projection above compares evaluation *outputs*, so a clone that perturbs an
+        // evidence-neutral fixture value until its diagnostics differ escapes it. This second
+        // counter compares fixture *shape* — the set of key paths, values ignored — and counts a
+        // case whose shape contains another same-kind case's shape, so neither changing a value
+        // nor bolting on an extra key escapes it. Neither counter proves a case is original;
+        // together they make an undeclared restatement of an existing seed something a reviewer
+        // has to argue for rather than something that passes unremarked. A nonzero value is not by
+        // itself wrong — genuinely distinct cases can ask a strictly wider version of the same
+        // question — which is why this is a floor to hold, not a gate to pass.
+        summary.UndeclaredShapeCollisions = CountShapeContainments(fixtureShapes);
         summary.ProvenanceComplete = cases.Count > 0 && cases.All(static item =>
             !string.IsNullOrEmpty(item.ProvenanceMethod) && !string.IsNullOrEmpty(item.ProvenanceSourceKind));
         summary.ProvenanceSourceCounts = provenanceCounts
@@ -1017,9 +1030,11 @@ public static class MauiPreviewQualificationCorpusRunner
         value is "diagnostic-only" or "no-repair" or "repair-eligible";
 
     /// <summary>
-    /// Everything about a case that changes what the evaluation observes. Ids, routes and selector
-    /// text are deliberately excluded: renaming them produces a different file but not a different
-    /// piece of evidence.
+    /// Everything about a case that changes what the evaluation observes. Case ids are excluded
+    /// even though <c>EvaluateFixture</c> does sniff one substring out of them, because renaming a
+    /// file is not new evidence; that id sniff is a quirk of the evaluator, not a property of the
+    /// case. This projection compares evaluation outputs only — see <c>FixtureShape</c> for the
+    /// complementary input-side check.
     /// </summary>
     private static string EvaluationProjection(MauiQualificationCorpusCaseResult item) =>
         string.Join('|',
@@ -1034,18 +1049,90 @@ public static class MauiPreviewQualificationCorpusRunner
             string.Join(',', item.CandidateKinds.OrderBy(static kind => kind, StringComparer.Ordinal)),
             string.Join(',', item.IneligibilityCodes.OrderBy(static code => code, StringComparer.Ordinal)));
 
-    private static string HashCaseDirectory(string root)
+    /// <summary>
+    /// The set of key paths in a fixture, with all values discarded. Two cases with the same shape
+    /// ask the evaluator the same question with different numbers in it; a case whose shape
+    /// contains another's asks that same question plus something extra.
+    /// </summary>
+    private static SortedSet<string> FixtureShape(JsonElement fixture)
     {
-        var directory = Path.Combine(root, "cases");
-        if (!Directory.Exists(directory))
-            return "no-cases";
-        var builder = new StringBuilder();
-        foreach (var file in Directory.GetFiles(directory, "*.json").OrderBy(static path => path, StringComparer.Ordinal))
+        var paths = new SortedSet<string>(StringComparer.Ordinal);
+        Walk(fixture, string.Empty);
+        return paths;
+
+        void Walk(JsonElement element, string prefix)
         {
-            builder.Append(Path.GetFileName(file)).Append('=');
+            switch (element.ValueKind)
+            {
+                case JsonValueKind.Object:
+                    foreach (var property in element.EnumerateObject())
+                        Walk(property.Value, prefix.Length == 0 ? property.Name : prefix + "." + property.Name);
+                    break;
+                case JsonValueKind.Array:
+                    // Element order and count are values, not shape; a clone cannot escape by
+                    // shortening a list.
+                    paths.Add(prefix + "[]");
+                    foreach (var item in element.EnumerateArray())
+                        Walk(item, prefix + "[]");
+                    break;
+                default:
+                    paths.Add(prefix);
+                    break;
+            }
+        }
+    }
+
+    private static int CountShapeContainments(
+        List<(string Kind, string ProvenanceMethod, SortedSet<string> Shape)> shapes)
+    {
+        var count = 0;
+        foreach (var kind in shapes
+            .Where(static item => !string.Equals(item.ProvenanceMethod, "adapted-from-case", StringComparison.Ordinal))
+            .GroupBy(static item => item.Kind, StringComparer.Ordinal))
+        {
+            var ordered = kind.Select(static item => item.Shape).OrderBy(static shape => shape.Count).ToList();
+            for (var index = 1; index < ordered.Count; index++)
+            {
+                if (ordered.Take(index).Any(earlier => earlier.IsSubsetOf(ordered[index])))
+                    count++;
+            }
+        }
+        return count;
+    }
+
+    /// <summary>
+    /// Hashes every evaluated file under the corpus root, not just the manifest or the case
+    /// directory: the privacy/security corpus and the schemas also feed published numbers, and a
+    /// fingerprint that ignores them lets those numbers change while the accumulator still calls
+    /// two runs the same static evidence.
+    /// <para>
+    /// Two exclusions, both deliberate. <c>baselines/</c> holds the report generated *from* this
+    /// fingerprint, so hashing it would make the fingerprint a fixed point that no regeneration
+    /// ever reaches. Documentation (<c>*.md</c>) is excluded because it is not evaluated — every
+    /// case is enumerated by the manifest and every fixture is JSON — and hashing prose would fail
+    /// the baseline diff on a typo fix, teaching exactly the reflexive "just regenerate it" habit
+    /// these gates exist to prevent. Anything that is read to produce a number is a
+    /// <c>.json</c> file and is hashed.
+    /// </para>
+    /// Line endings are normalised so a CRLF checkout of an unchanged corpus hashes the same as an
+    /// LF one.
+    /// </summary>
+    private static string HashCorpusTree(string root)
+    {
+        if (!Directory.Exists(root))
+            return "no-corpus";
+        var builder = new StringBuilder();
+        foreach (var file in Directory.GetFiles(root, "*.json", SearchOption.AllDirectories)
+            .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/'))
+            .Where(static path => !path.StartsWith("baselines/", StringComparison.Ordinal))
+            .OrderBy(static path => path, StringComparer.Ordinal))
+        {
+            builder.Append(file).Append('=');
             try
             {
-                builder.Append(Hash(File.ReadAllBytes(file)));
+                var bytes = File.ReadAllBytes(Path.Combine(root, file));
+                builder.Append(Hash(Encoding.UTF8.GetBytes(
+                    Encoding.UTF8.GetString(bytes).Replace("\r\n", "\n", StringComparison.Ordinal))));
             }
             catch (IOException)
             {

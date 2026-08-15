@@ -11,11 +11,13 @@ namespace Microsoft.Maui.Cli.Providers.Android;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <c>adb forward --list</c> prints the device serial in its first column
-/// (<c>emulator-5554 tcp:5000 tcp:5000</c>), but <c>adb reverse --list</c> prints the ADB
-/// transport id instead (<c>host-17 tcp:5000 tcp:5000</c>). The upstream
-/// <see cref="AdbRunner.ListReversePortsAsync"/> matches that first column against the requested
-/// serial, so it silently returns an empty list even when reverse mappings exist.
+/// The upstream <see cref="AdbRunner.ListReversePortsAsync"/> keeps only the lines that begin with
+/// the literal <c>(reverse)</c> prefix that older adb builds emitted. Modern adb prints the ADB
+/// transport id instead (<c>host-17 tcp:5000 tcp:5000</c>), so every line is discarded and the
+/// list always comes back empty. Verified against Xamarin.Android.Tools.AndroidSdk
+/// 1.0.189-preview.58: <c>ParseReverseListOutput</c> takes no serial at all, and feeding it
+/// <c>host-17 tcp:5000 tcp:5000</c> returns zero rules while <c>(reverse) tcp:5000 tcp:5000</c>
+/// returns one.
 /// </para>
 /// <para>
 /// An empty reverse list is indistinguishable from "no mapping present", which made every
@@ -44,6 +46,8 @@ internal sealed class MauiAdbRunner : AdbRunner
 		string serial,
 		CancellationToken cancellationToken = default)
 	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(serial);
+
 		var result = await ProcessRunner.RunAsync(
 			_adbPath,
 			["-s", serial, "reverse", "--list"],
@@ -66,6 +70,16 @@ internal sealed class MauiAdbRunner : AdbRunner
 	/// read from the end of the line so an extra leading column never drops a mapping. Lines whose
 	/// last two columns are not port specs are ignored rather than guessed at.
 	/// </summary>
+	/// <remarks>
+	/// The device-side spec is deliberately stored in <see cref="AdbPortRule.Local"/>, which is the
+	/// opposite of the role names upstream uses for the same struct (upstream follows adb's own
+	/// <c>reverse REMOTE LOCAL</c> argument order, where REMOTE is the device side). DevFlow's
+	/// conflict guard, <c>AndroidDevFlowPortForwarder.FindForeignLocalMapping</c>, keys on
+	/// <c>Local.Port</c> and must see the device-side port, because that is the port the broker
+	/// would rebind. Do not feed these rules back into <see cref="AdbRunner.ReversePortAsync"/> or
+	/// <see cref="AdbRunner.RemoveReversePortAsync"/> without swapping the roles back: those take
+	/// the device-side spec as <c>remote</c>.
+	/// </remarks>
 	internal static IReadOnlyList<AdbPortRule> ParseReverseList(string? output)
 	{
 		if (string.IsNullOrWhiteSpace(output))
@@ -78,15 +92,12 @@ internal sealed class MauiAdbRunner : AdbRunner
 			if (columns.Length < 3)
 				continue;
 
-			// AdbPortRule mirrors `adb reverse <local-on-device> <remote-on-host>`, so the
-			// second-to-last column is Local and the last column is Remote - the same column
-			// order AdbRunner.ListForwardPortsAsync uses for `adb forward --list`.
-			var local = AdbPortSpec.TryParse(columns[^2]);
-			var remote = AdbPortSpec.TryParse(columns[^1]);
-			if (local is null || remote is null)
+			var deviceSide = AdbPortSpec.TryParse(columns[^2]);
+			var hostSide = AdbPortSpec.TryParse(columns[^1]);
+			if (deviceSide is null || hostSide is null)
 				continue;
 
-			rules.Add(new AdbPortRule(Remote: remote, Local: local));
+			rules.Add(new AdbPortRule(Remote: hostSide, Local: deviceSide));
 		}
 
 		return rules;

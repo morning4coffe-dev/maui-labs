@@ -6,10 +6,11 @@ namespace Microsoft.Maui.Cli.UnitTests;
 
 /// <summary>
 /// Regression coverage for the <c>adb reverse --list</c> reader. The upstream
-/// <see cref="AdbRunner.ListReversePortsAsync"/> matches the first output column against the device
-/// serial, but <c>adb reverse --list</c> prints the ADB transport id there, so it always returned an
-/// empty list. An empty list is indistinguishable from "no mapping", which made the DevFlow broker
-/// reverse check fail closed on every Android flow run.
+/// <see cref="AdbRunner.ListReversePortsAsync"/> keeps only lines that start with the literal
+/// <c>(reverse)</c> prefix older adb builds emitted; modern adb prints the ADB transport id there
+/// (<c>host-17</c>), so upstream always returned an empty list. An empty list is indistinguishable
+/// from "no mapping", which made the DevFlow broker reverse check fail closed on every Android
+/// flow run.
 /// </summary>
 public class MauiAdbRunnerTests
 {
@@ -26,12 +27,14 @@ public class MauiAdbRunnerTests
 	}
 
 	/// <summary>
-	/// Column order has to match <c>adb reverse &lt;local-on-device&gt; &lt;remote-on-host&gt;</c>, because
-	/// the forwarder refuses to replace a local port that is already mapped to a different remote.
-	/// Getting the order backwards would silently invert that conflict guard.
+	/// <c>adb reverse --list</c> prints <c>&lt;transport&gt; &lt;device-side&gt; &lt;host-side&gt;</c>, and the
+	/// device side is stored in <see cref="AdbPortRule.Local"/> on purpose: DevFlow's conflict guard
+	/// keys on <c>Local.Port</c> and must see the port the broker would rebind on the device. This is
+	/// the opposite of upstream's role naming, so the asymmetric case is pinned here rather than left
+	/// to the symmetric mappings DevFlow itself creates.
 	/// </summary>
 	[Fact]
-	public void ParseReverseList_MapsTheSecondColumnToLocalAndTheThirdToRemote()
+	public void ParseReverseList_StoresTheDeviceSideSpecInLocal()
 	{
 		var rules = MauiAdbRunner.ParseReverseList("host-3 tcp:41113 tcp:42224");
 

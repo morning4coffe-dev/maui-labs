@@ -62,10 +62,14 @@ and `platform-launch`:
    by side, and artifact resolution failed closed with `artifact-ambiguous`.
    The artifact contract now carries `SigningState` derived from the Android
    SDK's own package properties, and resolution prefers the signed package.
-2. `AdbRunner.ListReversePortsAsync` matches `adb reverse --list` column 1
-   against the device serial, but that column holds the ADB transport id
-   (`host-17`), so it always reported zero rules and the reverse mapping was
+2. `AdbRunner.ListReversePortsAsync` keeps only the lines that begin with the
+   literal `(reverse)` prefix older adb builds emitted; modern adb prints the
+   ADB transport id there (`host-17 tcp:5000 tcp:5000`), so every line was
+   discarded, the list always came back empty, and the reverse mapping was
    treated as failed. A local subclass parses the raw output instead.
+   (Confirmed against Xamarin.Android.Tools.AndroidSdk 1.0.189-preview.58:
+   `ParseReverseListOutput` takes no serial argument, returns zero rules for
+   `host-17 tcp:5000 tcp:5000`, and one rule for `(reverse) tcp:5000 tcp:5000`.)
 3. A Debug Android build defaults to fast deployment
    (`EmbedAssembliesIntoApk` unset), which produces a package with no managed
    assemblies. Installing it with `adb install` aborted at startup with
@@ -86,3 +90,8 @@ leak-free on its own - and it is why the manifest's recorded digest for
 (`sha256:7b5249ee6c2d5a9b6795e7d25602967017cf9acbb8d16c12938cf66f4ef0378a`,
 43340 bytes) does not match the committed file. Nothing else was changed. The
 report contains no host name, IP address, port, device serial, or credential.
+
+The committed `flow-run.json` hashes to
+`sha256:9ea66dca83edd7ee695f57824234292a3e009f7860a2b52f8331f113f68cf882`
+(42843 bytes), so this directory stays self-verifying for a reader who only has
+these bytes.

@@ -117,9 +117,10 @@ public static class MauiAuthoringStudyProtocol
             return null;
         }
         // The exporter is the only thing that saw the raw event stream. When it says a session is
-        // not fit to aggregate, that judgement is authoritative here too.
-        if (summary.TryGetProperty("eligibleForAggregation", out var eligible) &&
-            eligible.ValueKind == JsonValueKind.False)
+        // not fit to aggregate, that judgement is authoritative here too. It writes the verdict in
+        // the protocol block; summary is checked as well so a hand-assembled export cannot evade
+        // the check by moving the flag.
+        if (IsMarkedIneligible(protocol) || IsMarkedIneligible(summary))
         {
             rejection = "study-session-marked-ineligible";
             return null;
@@ -151,6 +152,11 @@ public static class MauiAuthoringStudyProtocol
             SavedTest = !Strings(summary, "missingFields").Contains("savedTestMetrics"),
         };
     }
+
+    private static bool IsMarkedIneligible(JsonElement element) =>
+        element.ValueKind == JsonValueKind.Object &&
+        element.TryGetProperty("eligibleForAggregation", out var eligible) &&
+        eligible.ValueKind == JsonValueKind.False;
 
     private static bool IsUsableDuration(double? value) =>
         value is null || (double.IsFinite(value.Value) && value.Value >= 0);
@@ -212,6 +218,12 @@ public static class MauiAuthoringStudyProtocol
         // change can shorten.
         if (assisted.MedianTimeToFirstResultMs is null) blockers.Add("assisted-time-to-first-result-missing");
         if (control.MedianTimeToFirstResultMs is null) blockers.Add("control-time-to-first-result-missing");
+        // A five-session arm whose median rests on one observation is not five observations. The
+        // primary endpoint has to clear the session minimum on its own, not on the arm's behalf.
+        if (assisted.TimeToFirstResultSampleCount < MinimumSessionsPerArm)
+            blockers.Add("assisted-time-to-first-result-sample-insufficient");
+        if (control.TimeToFirstResultSampleCount < MinimumSessionsPerArm)
+            blockers.Add("control-time-to-first-result-sample-insufficient");
 
         var result = new MauiAuthoringStudyTaskResult
         {
@@ -243,6 +255,8 @@ public static class MauiAuthoringStudyProtocol
             MedianTimeToGoalMs = Median(materialized.Select(static session => session.TimeToGoalMs)),
             MedianTimeToFirstResultMs = Median(materialized.Select(static session => session.TimeToFirstResultMs)),
             MedianRecordingDurationMs = Median(materialized.Select(static session => session.RecordingDurationMs)),
+            TimeToFirstResultSampleCount = materialized.Count(static session => session.TimeToFirstResultMs.HasValue),
+            TimeToGoalSampleCount = materialized.Count(static session => session.TimeToGoalMs.HasValue),
         };
     }
 
@@ -300,6 +314,17 @@ public sealed class MauiAuthoringStudyArmSummary
     [JsonPropertyName("medianTimeToGoalMs")] public double? MedianTimeToGoalMs { get; set; }
     [JsonPropertyName("medianTimeToFirstResultMs")] public double? MedianTimeToFirstResultMs { get; set; }
     [JsonPropertyName("medianRecordingDurationMs")] public double? MedianRecordingDurationMs { get; set; }
+
+    /// <summary>
+    /// How many sessions actually carried the primary endpoint. This is not always
+    /// <see cref="Sessions"/>: a session missing <c>timeToFirstResultMs</c> still counts toward the
+    /// arm's session and participant minimums but contributes nothing to the median, so without
+    /// this a five-session arm could publish a median resting on one observation.
+    /// </summary>
+    [JsonPropertyName("timeToFirstResultSampleCount")] public int TimeToFirstResultSampleCount { get; set; }
+
+    /// <summary>How many sessions carried <c>timeToGoalMs</c>.</summary>
+    [JsonPropertyName("timeToGoalSampleCount")] public int TimeToGoalSampleCount { get; set; }
 }
 
 /// <summary>Result for one fixed task across both arms.</summary>

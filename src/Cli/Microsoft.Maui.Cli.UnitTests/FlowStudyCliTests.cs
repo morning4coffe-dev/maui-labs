@@ -78,7 +78,10 @@ public sealed class FlowStudyCliTests : IDisposable
         var result = await cli.InvokeRawAsync(
             "devflow", "flow", "study", "--session-dir", sessions, "--study-out", studyOut, "--json");
 
-        Assert.Equal(0, result.ExitCode);
+        // A rejected export is a nonzero exit: an aggregation job that silently drops sessions and
+        // still reports success is how a study number stops meaning anything. The report is still
+        // written so the operator can see exactly what was dropped.
+        Assert.Equal(1, result.ExitCode);
         Assert.True(File.Exists(studyOut));
         var root = result.ParseJsonOutput();
         Assert.Equal(10, root.GetProperty("acceptedSessions").GetInt32());

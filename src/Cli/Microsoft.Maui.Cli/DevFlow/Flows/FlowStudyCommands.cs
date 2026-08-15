@@ -165,6 +165,11 @@ internal static class FlowStudyCommands
                 markError();
                 return 1;
             }
+            // A run that silently discarded exports is not a clean run. The report still stands on
+            // what survived, so this is an error signal rather than a nonzero exit, but a caller
+            // reading only the exit code must not conclude every session was counted.
+            if (rejected.Count > 0)
+                markError();
             return 0;
         });
         return command;

@@ -67,19 +67,32 @@ produce a wrong-but-green test. Its acceptance criteria therefore forbid weakeni
 
 The clock is the participant's own session journal, not a stopwatch held by the operator.
 
-- **Start:** the `goal-defined` event in the assisted arm; in the control arm, the operator
-  records the same event through the control-arm journal shim at the moment the participant is
-  shown the task card.
+- **Start:** the `goal-defined` event in the assisted arm. **In the control arm there is currently
+  no capture path at all.** `inspector-study.js` — the Test Workbench instrumentation — is the only
+  session producer in this repository, and it is the assisted tool. An operator running the control
+  arm today would have to hand-author the export JSON. No control-arm journal shim exists, and no
+  control session has ever been recorded.
 - **`timeToGoalMs`:** start → the participant states the goal. This is a *reading* interval and
   is expected to be similar across arms; a large difference indicates a task-card problem, not a
   tooling effect.
-- **`timeToFirstResultMs`:** start → first terminal run result. This is the primary comparison.
+- **`timeToFirstResultMs`:** start → first terminal run result. This is the primary comparison,
+  and `timeToFirstResultSampleCount` reports how many sessions actually carried it — an arm whose
+  primary-endpoint sample is below the session minimum is blocked, not published.
 - **Completion:** a session counts as completed only if a test was saved (`savedTestMetrics`
-  present). Abandoned sessions are reported as a completion-rate difference, never dropped
-  silently — dropping them would let a tool look fast by being unusable.
+  present). `completedTasks` is reported per arm. **Abandoned sessions still contribute their
+  durations to the medians**, which biases the medians in the favourable direction ("faster because
+  they gave up"); no completion-rate *difference* is computed today. Read `completedTasks`
+  alongside every median.
+
+> **The arm is a self-declared `?studyArm=` query parameter.** Nothing validates that a session
+> labelled `unassisted-control` was produced without the tool — the same Workbench instrumentation
+> emits both. Until a separate control-arm capture path exists, an arm label is an assertion by the
+> operator, not evidence.
 
 Sessions whose journal reports `completeEventHistory` in `missingFields` (the event cap
-discarded entries) are **rejected**, not truncated-and-used.
+discarded entries) are **rejected**, not truncated-and-used. Any rejection makes
+`maui devflow flow study` exit nonzero, so an aggregation job cannot drop sessions and still
+report success; the report is still written so the operator can see what was dropped and why.
 
 ## Participant salt
 

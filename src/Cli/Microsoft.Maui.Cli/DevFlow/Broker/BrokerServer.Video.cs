@@ -182,10 +182,18 @@ public partial class BrokerServer
             // before it returns a Task -- see the lock-ordering analysis on
             // BrokerServer.Shutdown(). Neither this token nor a timeout on the returned task
             // can bound that, and a later Abort() cannot rescue it either because Abort waits
-            // on the same lock the wedged thread already holds. The only reliable fix is to
-            // skip the handshake for HttpListener sockets, which changes what the streaming
-            // peer observes, so it is deliberately left for a change that can be validated
-            // against a real device rather than folded into a test-hardening pass.
+            // on the same lock the wedged thread already holds. Because the wedge is
+            // synchronous it strands the caller too: the `await` at the downstream call site
+            // never returns, so the upstream socket is never closed and the HttpListener
+            // request never completes.
+            //
+            // Two ways out, neither taken here. Removing the handshake for HttpListener
+            // sockets fixes it at the source but changes what the streaming peer observes, so
+            // it needs validation against a real device. Wrapping this call in Task.Run and
+            // racing it with a delay bounds the caller without changing the wire at all, at
+            // the cost of leaking a pool thread per wedged socket. Both are out of scope for a
+            // test-hardening pass; this path is documented rather than changed because it is
+            // only reachable from live video streaming, which no test in this repo exercises.
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
             await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "stream ended", timeout.Token);
         }

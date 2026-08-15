@@ -122,10 +122,15 @@ internal static class FlowStudyCommands
                 }
             }
 
+            // `ok` must mean the same thing as exit 0, or a JSON consumer and a shell consumer of
+            // the same invocation disagree about whether the run succeeded.
+            var insufficient = ctx.GetValue(failOnInsufficientOption) && report.Status != "comparable";
+            var ok = rejected.Count == 0 && !insufficient;
+
             if (json)
             {
                 output.WriteResult(new StudyCommandResult(
-                    rejected.Count == 0,
+                    ok,
                     report,
                     files.Count,
                     deduped.Count,
@@ -160,7 +165,7 @@ internal static class FlowStudyCommands
                 if (writtenTo is not null) Console.WriteLine($"  report written to     : {writtenTo}");
             }
 
-            if (ctx.GetValue(failOnInsufficientOption) && report.Status != "comparable")
+            if (insufficient)
             {
                 markError();
                 return 1;

@@ -20,9 +20,15 @@ public static class MauiAuthoringStudyProtocol
     public const string AssistedArm = "assisted";
     public const string ControlArm = "unassisted-control";
 
-    /// <summary>The salt shape documented in docs/DevFlow/authoring-time-protocol.md.</summary>
+    /// <summary>
+    /// The salt shape documented in docs/DevFlow/authoring-time-protocol.md. Anchored with
+    /// <c>\A</c>/<c>\z</c> rather than <c>^</c>/<c>$</c>: in .NET <c>$</c> also matches before a
+    /// trailing newline, so a salt round-tripped through a text file would validate yet compare
+    /// ordinally unequal to the same salt without it — counting one person as two participants and
+    /// silently defeating the cross-arm blocker.
+    /// </summary>
     private static readonly System.Text.RegularExpressions.Regex ParticipantSaltPattern =
-        new("^participant-[0-9a-f]{8,64}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+        new(@"\Aparticipant-[0-9a-f]{8,64}\z", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
 
     /// <summary>Minimum sessions per arm, per task, before a comparison is reported.</summary>
     public const int MinimumSessionsPerArm = 5;
@@ -283,7 +289,9 @@ public static class MauiAuthoringStudyProtocol
 
     private static string? Text(JsonElement element, string name)
         => element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
-            ? value.GetString()
+            // Trimmed before any comparison: participant salts are compared ordinally, so
+            // whitespace picked up from a file round-trip would split one person into two.
+            ? value.GetString()?.Trim()
             : null;
 
     private static double? Number(JsonElement element, string name)

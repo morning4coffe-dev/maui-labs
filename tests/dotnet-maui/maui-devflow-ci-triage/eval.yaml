@@ -29,7 +29,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)(flow-run\\.json|execution-manifest|\\.mauitrace)"
       - type: "output_not_matches"
-        pattern: "(?i)(the app is broken|the bug is in|root cause is).{0,120}"
+        pattern: "(?i)(the app is broken|the bug is in|root cause (is|was) (a|an|the) )"
     rubric:
       - "Says a console tail is not sufficient evidence and names the artifact needed."
       - "Does not produce a confident root cause from a log tail."

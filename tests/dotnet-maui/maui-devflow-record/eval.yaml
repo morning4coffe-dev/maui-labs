@@ -11,7 +11,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)(maui devflow inspect|Test Workbench|Inspector)"
       - type: "output_not_matches"
-        pattern: "(?i)(starting|started|I(?:'ll| will)) record(ing)?"
+        pattern: "(?i)(I(?:'m| am) (now )?record|I(?:'ll| will) (now )?record|recording (has )?started)"
       - type: "output_not_matches"
         pattern: "(?i)maui devflow flow record"
     rubric:

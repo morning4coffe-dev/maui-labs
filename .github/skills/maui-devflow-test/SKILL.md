@@ -194,11 +194,11 @@ chooses to progress to a local reproduction or executable draft.
 ## Artifact Format
 
 A DevFlow test is two files. `<name>.md` carries prose plus one
-` ```json maui-test ` fence — that fence is the **sole** replay source of
-truth. `<name>.maui-plan.json` carries the reviewable plan and is bound to the
-flow by `flow.digest`. Aim for the pair below rather than a bare recorder dump;
-keys not shown keep their recorded values, and the verifiable assert kinds are
-`propEquals`, `exists`, `notExists`, and `routeIs`.
+` ```json maui-test ` fence — the **sole** replay source of truth, at
+`"schema": 2`. `<name>.maui-plan.json` is the reviewable plan at
+`"schema": 1`, bound by `flow.digest`, and must carry every key its
+validator requires or `flow run` fails with `plan-invalid`. Verifiable
+assert kinds are `propEquals`, `exists`, `notExists`, and `routeIs`.
 
 ```json maui-test
 {
@@ -217,14 +217,17 @@ keys not shown keep their recorded values, and the verifiable assert kinds are
 
 ```json
 {
+  "schema": 1, "planId": "plan-promo-1", "revision": 1, "goal": "A promo cuts the total 10%.",
   "flow": { "path": "promo-reduces-total.md", "digest": "<current digest>" },
   "acceptanceCriteria": [{ "criterionId": "ac-promo-applied", "required": true,
-    "businessOracleId": "orders-api", "description": "A promo cuts the total 10%." }],
+    "businessOracleId": "orders-api", "description": "A valid promo reduces the total by 10%." }],
   "scenarios": [{ "scenarioId": "scenario-1", "acceptanceCriterionIds": ["ac-promo-applied"],
     "description": "Cart holds one 50.00 item; PROMO10 makes the total 45.00." }],
   "independentBusinessOracles": [{ "oracleId": "orders-api", "required": true,
     "independent": true, "evidenceKind": "http-json", "description": "GET /orders/{id} shows PROMO10." }],
-  "reset": { "required": true, "strategy": "test-tenant-resettable", "resetIdentity": "shop-cart-seed-v3" },
+  "preconditions": [], "sideEffectPolicy": "test-tenant-resettable",
+  "reset": { "required": true, "strategy": "pm-clear", "resetIdentity": "shop-cart-seed-v3" },
+  "provenance": { "actorKind": "agent", "channel": "mcp", "recordedAt": "2026-08-14T09:41:12.106Z" },
   "explorationBudget": { "maxActions": 12, "maxDurationSeconds": 120, "allowedScopes": ["/cart", "/checkout"] }
 }
 ```
@@ -234,14 +237,15 @@ keys not shown keep their recorded values, and the verifiable assert kinds are
 `intent: null`, `recordedAt: null`, `acceptanceCriterionIds: null`, empty
 `acceptanceCriteria`, an empty `scenarios[0].description`, `reset.strategy: ""`,
 and a zeroed `explorationBudget`. A recorder may emit them; a reviewable test
-must not keep them. With no oracle, write that out — an empty
-`independentBusinessOracles` means **none — not independently verified**, and
-the reported result must carry that phrase.
+must not. Also wrong: a policy enum in `reset.strategy`, which names a
+mechanism (`pm-clear`, `uninstall-reinstall`, `host-owned`). With no oracle,
+say so — an empty `independentBusinessOracles` means **none — not
+independently verified**, and every reported result must carry that phrase.
 
 Rules: edit the prose freely, it is never replay input; never hand-edit the
-fence without running `maui devflow flow validate` on the file afterwards; and
-a stale `flow.digest` invalidates every grant bound to it, so re-commit and ask
-for a new approval instead of re-pointing an existing grant.
+fence without `maui devflow flow validate`, which checks the fence only, not
+the sidecar; and a stale `flow.digest` invalidates every grant bound to it, so
+re-commit rather than re-pointing an existing grant.
 
 ## Safety Boundaries
 

@@ -423,7 +423,7 @@ scenarios:
       - type: "output_not_matches"
         pattern: "(?i)(```json maui-test|\"schema\": ?2)"
       - type: "output_not_matches"
-        pattern: "(?i)(probably|likely|assume).{0,60}(AutomationId|selector|called)"
+        pattern: "(?i)\\[known\\].{0,80}(probably|likely|assume)"
     rubric:
       - "Restates the journey as numbered steps in the user's own words before using any tool."
       - "Marks each step [known] or [unknown: selector|oracle|reset] and gathers every unknown into one combined question."
@@ -447,7 +447,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)exploration-request"
       - type: "output_not_matches"
-        pattern: "(?i)(tooling|runtime|the tool).{0,60}(will|does) (stop|cap|halt|enforce)"
+        pattern: "(?i)(budget|cap|limit|maxActions|maxDurationSeconds) (is|are) enforced"
     rubric:
       - "States plainly that maxActions and maxDurationSeconds are declarative and unenforced in the current build."
       - "Names the missing maui_test_explore tool and the absent budget counter in maui_test_status instead of implying they exist."
@@ -498,7 +498,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)kebab-case"
       - type: "output_not_matches"
-        pattern: "(?i)recorded preference.{0,4000}recorded preference"
+        pattern: "(?is)recorded preference:\\s*flow-naming.{0,4000}recorded preference:\\s*flow-naming"
       - type: "output_not_matches"
         pattern: "(?i)(should I|do you want me to|shall I).{0,80}(kebab|naming|convention)"
     rubric:

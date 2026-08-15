@@ -20,6 +20,24 @@ DevFlow CI jobs build and execute code from the pull request under test. That
 makes them untrusted by construction. This skill covers how to run them anyway
 without handing a PR author a write token.
 
+## When to Use
+
+- A workflow that runs `maui devflow flow` is being authored or reviewed.
+- Job `permissions:`, label gating, or a `workflow_run` publisher split needs
+  deciding.
+- Flow-run and `.mauitrace` evidence needs an artifact naming and retention
+  policy.
+
+## When Not to Use
+
+| Situation | Use instead |
+| --- | --- |
+| Diagnosing an already-red run | `maui-devflow-ci-triage` |
+| Running flows locally | `maui-devflow-run-cli` |
+| Authoring or repairing flows | `maui-devflow-test` |
+| Promoting a recording | `maui-devflow-record` |
+| Repository CI unrelated to DevFlow | none of these skills |
+
 ## The Core Rule
 
 **A job that executes PR-author-controlled code holds no write scope.** In this
@@ -65,10 +83,13 @@ after a twelve-minute build.
 - name: Run flow
   run: |
     maui devflow flow run maui-tests/promo-reduces-total.md \
-      --project src/Shop/Shop.csproj -f net10.0-android \
+      --project src/Shop/Shop.csproj --platform android -f net10.0-android \
       --output "${{ runner.temp }}/flow-run-1" \
       --cleanup uninstall --evidence-on-failure
 ```
+
+Pass `--platform` explicitly. `flow run` defaults to `android` when it is
+omitted, and the TFM does not select the platform for you.
 
 Do not add `--evidence-screenshot` to a shared CI job without an explicit
 decision: screenshot pixels are never redacted and the artifact may be
@@ -79,7 +100,7 @@ downloadable by anyone who can read the run.
 Include both the run ID and the attempt, as the integration workflow does:
 
 ```yaml
-- uses: actions/upload-artifact@v4
+- uses: actions/upload-artifact@v7
   if: always()
   with:
     name: devflow-flow-android-${{ github.run_id }}-${{ github.run_attempt }}
@@ -93,10 +114,15 @@ failure, which is the evidence a triage agent wants most.
 ### 5. Qualify the corpus
 
 ```bash
-maui devflow flow qualify --artifact-manifest <manifest> \
+maui devflow flow qualify --platform android \
+  --corpus tests/DevFlow/InspectorCorpus \
+  --artifact-manifest "${ARTIFACT_ROOT}/manifest.json" \
   -o qualification.json --fail-on-non-pass
 ```
 
+Pass `--corpus` and `--platform`: the corpus default is a maui-labs-relative
+path and the platform default is `maccatalyst`, so an unqualified invocation in
+a consumer repository silently qualifies an empty corpus on the wrong platform.
 `qualify` never replays and never applies a change, so it is safe in a
 low-privilege job. Use it to gate merges on evidence quality rather than on a
 single green run.

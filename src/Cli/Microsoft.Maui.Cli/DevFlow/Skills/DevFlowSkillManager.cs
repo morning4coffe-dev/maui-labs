@@ -45,6 +45,9 @@ internal static class DevFlowSkillManager
         ["agents"] = Path.Combine(".agents", "skills")
     };
 
+    internal static IReadOnlyList<string> OptionalSkillIds { get; } =
+        s_skills.Where(skill => !skill.Recommended).Select(skill => skill.Id).ToArray();
+
     internal static string? StateRootOverrideForTests { get; set; }
     internal static string? UserRootOverrideForTests { get; set; }
     internal static DateTimeOffset? UtcNowOverrideForTests { get; set; }

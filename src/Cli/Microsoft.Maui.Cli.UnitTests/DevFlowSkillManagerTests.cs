@@ -12,7 +12,16 @@ namespace Microsoft.Maui.Cli.UnitTests;
 public sealed class DevFlowSkillManagerTests
 {
     // Skills that ship in the CLI bundle but are not installed by `maui devflow init`.
+    // Kept in sync with s_skills by OptionalSkillIds_MatchesNonRecommendedBundledSkills.
     static readonly string[] OptionalSkillIds = ["maui-devflow-test", "maui-devflow-artifact"];
+
+    [Fact]
+    public void OptionalSkillIds_MatchesNonRecommendedBundledSkills()
+    {
+        Assert.Equal(
+            OptionalSkillIds.OrderBy(id => id, StringComparer.Ordinal),
+            DevFlowSkillManager.OptionalSkillIds.OrderBy(id => id, StringComparer.Ordinal));
+    }
 
     [Fact]
     public async Task InstallRecommended_ProjectScope_WritesBundledSkillsAndUserLevelState()

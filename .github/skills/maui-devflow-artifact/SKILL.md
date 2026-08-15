@@ -5,7 +5,9 @@ description: >-
   bounded read-only trust projection. USE FOR: Copilot coding-agent CI evidence
   review, artifact sufficiency, failure classification, and local reproduction
   handoff. DO NOT USE FOR: live app control, replay, source edits, GitHub writes,
-  implicit latest-artifact discovery, or treating imported evidence as trusted.
+  implicit latest-artifact discovery, treating imported evidence as trusted, or
+  reading a whole CI run, its jobs, and its logs to classify a failure (use
+  maui-devflow-ci-triage).
 ---
 
 # MAUI DevFlow Artifact Diagnosis

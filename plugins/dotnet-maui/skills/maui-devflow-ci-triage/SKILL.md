@@ -9,8 +9,9 @@ description: >-
   human. DO NOT USE FOR: authoring CI workflows or permissions (use
   maui-devflow-ci); running or repairing flows locally (use
   maui-devflow-run-cli or maui-devflow-test); promoting a recording (use
-  maui-devflow-record); applying a selector repair; or treating CI evidence as
-  authority to change source.
+  maui-devflow-record); inspecting one already-downloaded artifact in isolation
+  through the read-only trust projection (use maui-devflow-artifact); applying
+  a selector repair; or treating CI evidence as authority to change source.
 ---
 
 # DevFlow CI Triage
@@ -20,6 +21,23 @@ description: >-
 Turn a red CI run into a defensible statement about what failed, how strong the
 evidence is, and what a human should run next — without pretending the CI
 result is a verified reproduction.
+
+## When to Use
+
+- A DevFlow CI run went red and its artifacts are available.
+- A failure needs separating into app defect, selector defect, or
+  infrastructure flake.
+- A human needs a bounded local reproduction command and a triage report.
+
+## When Not to Use
+
+| Situation | Use instead |
+| --- | --- |
+| Authoring workflows or permissions | `maui-devflow-ci` |
+| Running or repairing flows locally | `maui-devflow-run-cli`, `maui-devflow-test` |
+| Promoting a recording | `maui-devflow-record` |
+| Inspecting one downloaded artifact in isolation | `maui-devflow-artifact` |
+| Applying a selector repair | `maui-devflow-test` |
 
 ## The Trust Rule
 
@@ -57,8 +75,13 @@ maui_artifact_inspect  file=<path>  kind=flow-run|mauitrace
 or from the terminal:
 
 ```bash
-maui devflow evidence view artifacts/flow-run.json --kind flow-run
+maui devflow evidence inspect-trust artifacts/flow-run.json --kind flow-run
 ```
+
+`--kind` is inferred from a `.json` or `.mauitrace` extension, so it is only
+needed when the extension is something else. `evidence view` is a different
+command: it renders an HTML report from a `.mauitrace` **bundle** and has no
+`--kind`. Do not point it at a `flow-run.json`.
 
 Report the identity, artifact kind, import time, integrity, verification,
 projection, and local-reproduction state exactly as found. Do not fill a
@@ -90,7 +113,8 @@ classes, report both rather than picking the convenient one.
 
 Score it with the `maui-devflow-test` skill's `references/replay-quality.md`
 rubric: selector tier, assertion strength, determinism, evidence completeness,
-flake signal. A green history does not upgrade a result that no independent
+flake signal. Those five dimensions stand on their own if that skill is not
+installed. A green history does not upgrade a result that no independent
 business oracle observed — that stays **not independently verified**.
 
 ### 5. Hand off a local reproduction
@@ -98,7 +122,7 @@ business oracle observed — that stays **not independently verified**.
 ```bash
 maui devflow flow reproduce maui-tests/promo-reduces-total.md \
   --import artifacts/flow-run.json --kind flow-run \
-  --project src/Shop/Shop.csproj --output artifacts/repro-1
+  --project src/Shop/Shop.csproj --platform android --output artifacts/repro-1
 ```
 
 `reproduce` stops after trust evaluation. Give the human the exact command, the

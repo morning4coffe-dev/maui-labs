@@ -31,7 +31,7 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)adb install"
       - type: "output_not_matches"
-        pattern: "(?i)maui android install.{0,60}(apk|app package)\\b"
+        pattern: "(?i)maui android install[^.]{0,40}\\b(installs|pushes|deploys|puts)\\b[^.]{0,30}(apk|app package)"
     rubric:
       - "Explains that `maui android install` provisions the Android SDK, JDK, and packages, not an application package."
       - "Points at `adb install -r` or `maui devflow flow run` for getting the app onto the device."

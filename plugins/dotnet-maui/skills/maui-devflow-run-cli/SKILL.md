@@ -8,9 +8,10 @@ description: >-
   the exit status of a local run. DO NOT USE FOR: authoring or repairing a flow
   (use maui-devflow-test); promoting a recording (use maui-devflow-record);
   writing CI workflows (use maui-devflow-ci); diagnosing a red CI run from
-  downloaded artifacts (use maui-devflow-ci-triage); or MCP-driven runs inside
-  the restricted test-agent profile, which go through `maui_test_run`, not the
-  CLI.
+  downloaded artifacts (use maui-devflow-ci-triage); interactive build, deploy,
+  launch, and connection recovery outside a flow run (use maui-devflow-debug);
+  or MCP-driven runs inside the restricted test-agent profile, which go through
+  `maui_test_run`, not the CLI.
 ---
 
 # MAUI DevFlow CLI Execution
@@ -19,6 +20,24 @@ description: >-
 
 Pick the right `maui devflow flow` verb for what the operator actually wants,
 and run it with the narrowest options that still produce usable evidence.
+
+## When to Use
+
+- An operator wants to run, replay, reproduce, or qualify a committed flow from
+  a terminal.
+- A run needs an exact target, output directory, or evidence flag decided.
+- The exit status or output of a local `maui devflow flow` run needs reading.
+
+## When Not to Use
+
+| Situation | Use instead |
+| --- | --- |
+| Authoring or repairing a flow | `maui-devflow-test` |
+| Promoting an Inspector recording | `maui-devflow-record` |
+| Writing the GitHub Actions workflow | `maui-devflow-ci` |
+| Diagnosing a red CI run from artifacts | `maui-devflow-ci-triage` |
+| Interactive build, deploy, launch, connection recovery | `maui-devflow-debug` |
+| MCP runs in the restricted test-agent profile (`maui_test_run`) | `maui-devflow-test` |
 
 ## Command Reality — verified verbs only
 
@@ -48,7 +67,7 @@ To build and deploy by hand, use the .NET SDK and the platform tools directly:
 ```bash
 dotnet build src/Shop/Shop.csproj -f net10.0-android -c Debug
 adb install -r <path-to-apk>
-adb shell am start -n com.contoso.shop/crc64....MainActivity
+adb shell monkey -p com.contoso.shop -c android.intent.category.LAUNCHER 1
 ```
 
 `maui devflow flow run` already does build, deploy, launch, and bind on the
@@ -60,6 +79,10 @@ to the manual sequence only when the adapter does not cover the target.
 - The committed `.md` flow path. The `<flow-base>.maui-plan.json` sidecar is
   **required** by `run`; `--plan` overrides its location.
 - The app `.csproj` for `run` and `reproduce`.
+- `-p/--platform`: `android`, `ios`, `maccatalyst`, `windows`. **`flow run`
+  defaults to `android` when it is omitted**, regardless of `-f`. The TFM does
+  not select the platform — pass both, and `--device <serial|udid>` for an
+  exact device.
 - `-f/--framework` only when the project has several matching TFMs.
 - A new or empty `-o/--output` directory — first-attempt output is immutable
   and existing files are never overwritten.
@@ -89,7 +112,7 @@ about a state nobody designed.
 
 ```bash
 maui devflow flow run maui-tests/promo-reduces-total.md \
-  --project src/Shop/Shop.csproj -f net10.0-android -c Debug \
+  --project src/Shop/Shop.csproj --platform android -f net10.0-android -c Debug \
   --output artifacts/promo-run-1 \
   --cleanup stop --agent-wait-seconds 90 \
   --evidence-on-failure
@@ -120,7 +143,7 @@ Both are diagnostic-only. Neither replays and neither applies a change.
 ```bash
 maui devflow flow reproduce maui-tests/promo-reduces-total.md \
   --import artifacts/ci-flow-run.json --kind flow-run \
-  --project src/Shop/Shop.csproj --output artifacts/repro-1
+  --project src/Shop/Shop.csproj --platform android --output artifacts/repro-1
 ```
 
 `reproduce` stops after trust evaluation. Imported CI evidence is
@@ -131,6 +154,8 @@ maui-devflow-ci-triage.
 
 - The flow validated cleanly before any driving verb ran.
 - The output directory was new or empty, and the first attempt is preserved.
+- `--platform` was passed explicitly rather than relying on the `android`
+  default of `flow run`.
 - Cleanup policy was stated rather than defaulted silently when the run
   installed a package.
 - The reported result names the exact target, and carries **not independently

@@ -2,7 +2,7 @@
 
 Distributable agent skills for .NET MAUI development. Installable via the Copilot CLI, Claude Code, or VS Code plugin system.
 
-DevFlow runtime skills are bundled with the `maui` CLI from `plugins/dotnet-maui/skills/` and exposed through the plugin manifest. `maui devflow init` installs the recommended onboarding, debugging, and session-review skills; `maui devflow skills install` or `update` also installs the optional collaborative-testing skill.
+DevFlow runtime skills are bundled with the `maui` CLI from `plugins/dotnet-maui/skills/` and exposed through the plugin manifest. `maui devflow init` installs the recommended onboarding, debugging, and session-review skills; `maui devflow skills install` or `update` also installs the optional collaborative-testing and artifact-diagnosis skills.
 
 ## Plugin
 

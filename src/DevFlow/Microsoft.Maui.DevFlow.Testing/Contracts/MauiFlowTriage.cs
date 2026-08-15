@@ -36,6 +36,13 @@ public sealed class MauiFlowTriageClassification
     [JsonPropertyName("code")] public string? Code { get; set; }
     [JsonPropertyName("category")] public string? Category { get; set; }
     [JsonPropertyName("phase")] public string? Phase { get; set; }
+
+    /// <summary>
+    /// The four-value ownership axis projected from <see cref="FailureClass"/>. It answers "who
+    /// should look at this" and never replaces the 25 stable wire failure classes. It is null when
+    /// there is no failure to project, that is when the run passed or carries no classification.
+    /// </summary>
+    [JsonPropertyName("disposition")] public string? Disposition { get; set; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
@@ -87,6 +94,26 @@ public static class MauiFlowTriageEvidenceStates
 {
     public const string Sufficient = "sufficient";
     public const string Insufficient = "insufficient";
+}
+
+/// <summary>
+/// The four dispositions a failure class projects onto. This axis is deliberately coarse: it
+/// states which owner a failure belongs to, and refuses to guess when the recorded signals cannot
+/// separate an app fault from a harness or environment fault.
+/// </summary>
+public static class MauiFlowTriageDispositions
+{
+    /// <summary>The app under test behaved differently than the flow recorded.</summary>
+    public const string AppRegression = "app-regression";
+
+    /// <summary>The committed flow, selector, or precondition no longer matches the app.</summary>
+    public const string TestDrift = "test-drift";
+
+    /// <summary>The failure happened outside the app and the flow, in tooling or the environment.</summary>
+    public const string Infrastructure = "infrastructure";
+
+    /// <summary>The recorded signals do not support any of the other three dispositions.</summary>
+    public const string Inconclusive = "inconclusive";
 }
 
 /// <summary>Known, inert next actions emitted by deterministic triage.</summary>
@@ -190,6 +217,9 @@ public static class MauiFlowTriageSerializer
                 Code = code,
                 Category = MauiTestingContractRedactor.SafeCode(classification.Category),
                 Phase = MauiTestingContractRedactor.SafeCode(classification.Phase),
+                // Derived, never copied: an imported triage cannot assert a disposition its own
+                // failure class does not support.
+                Disposition = MauiFlowFailureClassifier.Project(failureClass),
             },
             Evidence = new MauiFlowTriageEvidenceSufficiency
             {

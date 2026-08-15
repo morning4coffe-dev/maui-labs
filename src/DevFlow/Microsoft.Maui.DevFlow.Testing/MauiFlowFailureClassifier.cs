@@ -83,6 +83,59 @@ public static class MauiFlowFailureClassifier
         return Describe(mapped ?? MauiFlowFailureClasses.Infrastructure, facts);
     }
 
+    /// <summary>
+    /// Projects a stable failure class onto the four-value ownership axis in
+    /// <see cref="MauiFlowTriageDispositions"/>. Unlike <see cref="Classify"/>, an unrecognized
+    /// class projects to <c>inconclusive</c> rather than to <c>infrastructure</c>: a class this
+    /// build does not know is not evidence that the environment failed. Returns null for a passed
+    /// run or a missing class, because there is no failure to attribute.
+    /// </summary>
+    public static string? Project(string? failureClass) => failureClass?.Trim().ToLowerInvariant() switch
+    {
+        null or "" or "passed" => null,
+
+        // The app resolved the target and then behaved differently than the recording.
+        MauiFlowFailureClasses.AssertionFailed or
+        MauiFlowFailureClasses.NotVisible or
+        MauiFlowFailureClasses.Disabled or
+        MauiFlowFailureClasses.ActionRejected
+            => MauiFlowTriageDispositions.AppRegression,
+
+        // The committed flow no longer describes the app it was recorded against.
+        MauiFlowFailureClasses.LocatorNotFound or
+        MauiFlowFailureClasses.LocatorAmbiguous or
+        MauiFlowFailureClasses.RouteStateDrift or
+        MauiFlowFailureClasses.PreconditionUnsatisfied or
+        MauiFlowFailureClasses.FlowInvalid or
+        MauiFlowFailureClasses.WorkflowCommandConflict or
+        MauiFlowFailureClasses.UnsafeValue
+            => MauiFlowTriageDispositions.TestDrift,
+
+        // The failure is outside both the app and the flow.
+        MauiFlowFailureClasses.CapabilityMissing or
+        MauiFlowFailureClasses.SchemaUnsupported or
+        MauiFlowFailureClasses.LeaseConflict or
+        MauiFlowFailureClasses.LeaseLost or
+        MauiFlowFailureClasses.ResetFailed or
+        MauiFlowFailureClasses.DriveFailed or
+        MauiFlowFailureClasses.SecretUnavailable or
+        MauiFlowFailureClasses.Transport or
+        MauiFlowFailureClasses.Infrastructure
+            => MauiFlowTriageDispositions.Infrastructure,
+
+        // Nothing recorded separates an app fault from a harness or environment fault. There is no
+        // app exit code, no crash log, and no device log in this path, so agent-disconnected in
+        // particular cannot be read as a crash.
+        MauiFlowFailureClasses.Cancelled or
+        MauiFlowFailureClasses.Timeout or
+        MauiFlowFailureClasses.UnstableBounds or
+        MauiFlowFailureClasses.UnknownCompletion or
+        MauiFlowFailureClasses.AgentDisconnected
+            => MauiFlowTriageDispositions.Inconclusive,
+
+        _ => MauiFlowTriageDispositions.Inconclusive,
+    };
+
     /// <summary>Maps a legacy <see cref="FlowFailureKinds"/> value without changing its wire value.</summary>
     public static string? FromLegacyFailureKind(string? legacyKind) => legacyKind switch
     {

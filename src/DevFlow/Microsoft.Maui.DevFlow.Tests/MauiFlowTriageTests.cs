@@ -1,3 +1,4 @@
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Maui.DevFlow.Testing;
@@ -95,6 +96,155 @@ public sealed class MauiFlowTriageTests
         Assert.Contains("verification-status-match", triage.Evidence.MissingFacts);
         Assert.Null(triage.IncidentFingerprint);
         Assert.Null(triage.OccurrenceFingerprint);
+    }
+
+    [Fact]
+    public void Analyze_ProjectsDispositionBesideTheStableFailureClass()
+    {
+        var triage = MauiFlowTriageAnalyzer.Analyze(CompleteInput());
+
+        Assert.Equal(MauiFlowFailureClasses.LocatorNotFound, triage.Classification.FailureClass);
+        Assert.Equal(MauiFlowTriageDispositions.TestDrift, triage.Classification.Disposition);
+    }
+
+    public static IEnumerable<object[]> DispositionCases =>
+    [
+        [MauiFlowFailureClasses.AssertionFailed, MauiFlowTriageDispositions.AppRegression],
+        [MauiFlowFailureClasses.NotVisible, MauiFlowTriageDispositions.AppRegression],
+        [MauiFlowFailureClasses.Disabled, MauiFlowTriageDispositions.AppRegression],
+        [MauiFlowFailureClasses.ActionRejected, MauiFlowTriageDispositions.AppRegression],
+        [MauiFlowFailureClasses.LocatorNotFound, MauiFlowTriageDispositions.TestDrift],
+        [MauiFlowFailureClasses.LocatorAmbiguous, MauiFlowTriageDispositions.TestDrift],
+        [MauiFlowFailureClasses.RouteStateDrift, MauiFlowTriageDispositions.TestDrift],
+        [MauiFlowFailureClasses.PreconditionUnsatisfied, MauiFlowTriageDispositions.TestDrift],
+        [MauiFlowFailureClasses.FlowInvalid, MauiFlowTriageDispositions.TestDrift],
+        [MauiFlowFailureClasses.WorkflowCommandConflict, MauiFlowTriageDispositions.TestDrift],
+        [MauiFlowFailureClasses.UnsafeValue, MauiFlowTriageDispositions.TestDrift],
+        [MauiFlowFailureClasses.CapabilityMissing, MauiFlowTriageDispositions.Infrastructure],
+        [MauiFlowFailureClasses.SchemaUnsupported, MauiFlowTriageDispositions.Infrastructure],
+        [MauiFlowFailureClasses.LeaseConflict, MauiFlowTriageDispositions.Infrastructure],
+        [MauiFlowFailureClasses.LeaseLost, MauiFlowTriageDispositions.Infrastructure],
+        [MauiFlowFailureClasses.ResetFailed, MauiFlowTriageDispositions.Infrastructure],
+        [MauiFlowFailureClasses.DriveFailed, MauiFlowTriageDispositions.Infrastructure],
+        [MauiFlowFailureClasses.SecretUnavailable, MauiFlowTriageDispositions.Infrastructure],
+        [MauiFlowFailureClasses.Transport, MauiFlowTriageDispositions.Infrastructure],
+        [MauiFlowFailureClasses.Infrastructure, MauiFlowTriageDispositions.Infrastructure],
+        [MauiFlowFailureClasses.Cancelled, MauiFlowTriageDispositions.Inconclusive],
+        [MauiFlowFailureClasses.Timeout, MauiFlowTriageDispositions.Inconclusive],
+        [MauiFlowFailureClasses.UnstableBounds, MauiFlowTriageDispositions.Inconclusive],
+        [MauiFlowFailureClasses.UnknownCompletion, MauiFlowTriageDispositions.Inconclusive],
+        [MauiFlowFailureClasses.AgentDisconnected, MauiFlowTriageDispositions.Inconclusive],
+    ];
+
+    [Theory]
+    [MemberData(nameof(DispositionCases))]
+    public void Project_MapsKnownFailureClassOntoTheDispositionAxis(string failureClass, string expected)
+    {
+        Assert.Equal(expected, MauiFlowFailureClassifier.Project(failureClass));
+        Assert.Equal(expected, MauiFlowFailureClassifier.Project(failureClass.ToUpperInvariant()));
+    }
+
+    [Fact]
+    public void Project_CoversEveryDeclaredFailureClass()
+    {
+        var declared = typeof(MauiFlowFailureClasses)
+            .GetFields(BindingFlags.Public | BindingFlags.Static)
+            .Where(static field => field.IsLiteral && field.FieldType == typeof(string))
+            .Select(static field => (string)field.GetRawConstantValue()!)
+            .ToArray();
+        var covered = DispositionCases
+            .Select(static row => (string)row[0])
+            .ToArray();
+
+        Assert.Equal(25, declared.Length);
+        Assert.Empty(declared.Except(covered, StringComparer.Ordinal));
+    }
+
+    [Fact]
+    public void Project_UnknownFailureClass_IsInconclusiveNotInfrastructure()
+    {
+        const string unknown = "class-added-by-a-newer-build";
+
+        Assert.Equal(
+            MauiFlowFailureClasses.Infrastructure,
+            MauiFlowFailureClassifier.Classify(new MauiFlowFailureFacts
+            {
+                FailureClass = unknown,
+            }).FailureClass);
+        Assert.Equal(MauiFlowTriageDispositions.Inconclusive, MauiFlowFailureClassifier.Project(unknown));
+    }
+
+    [Fact]
+    public void Project_NoFailureToAttribute_HasNoDisposition()
+    {
+        Assert.Null(MauiFlowFailureClassifier.Project(null));
+        Assert.Null(MauiFlowFailureClassifier.Project(""));
+        Assert.Null(MauiFlowFailureClassifier.Project("passed"));
+    }
+
+    [Fact]
+    public void Analyze_UnknownFailureClass_NormalizesToInfrastructureBeforeProjection()
+    {
+        var input = CompleteInput();
+        input.Report!.Failure!.Class = "class-added-by-a-newer-build";
+        input.Report.Failure.Code = "class-added-by-a-newer-build";
+        input.Report.Failure.LegacyKind = null;
+        input.Report.Steps[0].FailureClass = null;
+
+        var triage = MauiFlowTriageAnalyzer.Analyze(input);
+
+        Assert.Equal(MauiFlowFailureClasses.Infrastructure, triage.Classification.FailureClass);
+        Assert.Equal(MauiFlowTriageDispositions.Infrastructure, triage.Classification.Disposition);
+    }
+
+    [Fact]
+    public void Serializer_ForeignFailureClass_ProjectsInconclusiveRatherThanInfrastructure()
+    {
+        var projected = MauiFlowTriageSerializer.CreateSafeProjection(new MauiFlowTriage
+        {
+            Classification = new MauiFlowTriageClassification
+            {
+                FailureClass = "class-added-by-a-newer-build",
+                Code = "class-added-by-a-newer-build",
+            },
+        });
+
+        Assert.Equal("class-added-by-a-newer-build", projected.Classification.FailureClass);
+        Assert.Equal(MauiFlowTriageDispositions.Inconclusive, projected.Classification.Disposition);
+    }
+
+    [Fact]
+    public void Serializer_DerivesDispositionFromTheFailureClassAndIgnoresAClaimedOne()
+    {
+        var projected = MauiFlowTriageSerializer.CreateSafeProjection(new MauiFlowTriage
+        {
+            Classification = new MauiFlowTriageClassification
+            {
+                FailureClass = MauiFlowFailureClasses.AssertionFailed,
+                Code = MauiFlowFailureClasses.AssertionFailed,
+                Category = "assertion",
+                Phase = "verification",
+                Disposition = MauiFlowTriageDispositions.Infrastructure,
+            },
+        });
+
+        Assert.Equal(MauiFlowTriageDispositions.AppRegression, projected.Classification.Disposition);
+        Assert.Contains(
+            "\"disposition\": \"app-regression\"",
+            Encoding.UTF8.GetString(MauiFlowTriageSerializer.SerializeToUtf8Bytes(projected)),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Serializer_WithoutAFailureClass_OmitsTheDisposition()
+    {
+        var projected = MauiFlowTriageSerializer.CreateSafeProjection(new MauiFlowTriage());
+
+        Assert.Null(projected.Classification.Disposition);
+        Assert.DoesNotContain(
+            "\"disposition\"",
+            Encoding.UTF8.GetString(MauiFlowTriageSerializer.SerializeToUtf8Bytes(projected)),
+            StringComparison.Ordinal);
     }
 
     [Fact]

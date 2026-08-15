@@ -70,6 +70,7 @@ public static class MauiFlowTriageAnalyzer
                 Code = code,
                 Category = classification.Category,
                 Phase = classification.Phase,
+                Disposition = MauiFlowFailureClassifier.Project(classification.FailureClass),
             },
             Evidence = new MauiFlowTriageEvidenceSufficiency
             {

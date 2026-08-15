@@ -115,6 +115,15 @@
         },
         "phase": {
           "type": "string"
+        },
+        "disposition": {
+          "description": "Optional four-value ownership axis projected from the failure class. Absent when the run passed or carries no classification.",
+          "enum": [
+            "app-regression",
+            "test-drift",
+            "infrastructure",
+            "inconclusive"
+          ]
         }
       },
       "additionalProperties": true

@@ -422,6 +422,10 @@ F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.None:Microsoft.Maui.De
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.TestTenantResettable:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.Unspecified:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.value__:System.Int32
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageDispositions.AppRegression:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageDispositions.Inconclusive:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageDispositions.Infrastructure:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageDispositions.TestDrift:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceStates.Insufficient:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceStates.Sufficient:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.CollectEvidence:System.String
@@ -641,6 +645,7 @@ M:Microsoft.Maui.DevFlow.Testing.MauiElementFingerprintBuilder.Build(target:Micr
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerifier.VerifyAsync(driver:Microsoft.Maui.DevFlow.Testing.IMauiFlowDriver,assertion:Microsoft.Maui.DevFlow.Testing.FlowAssert,pollTries:System.Int32=1,pollGapMs:System.Int32=0,cancellationToken:System.Threading.CancellationToken=null):System.Threading.Tasks.Task`1[Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerification]
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.Classify(facts:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts):Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.FromLegacyFailureKind(legacyKind:System.String):System.String
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.Project(failureClass:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.ToFailure(classification:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification,failureId:System.String,legacyKind:System.String,stepId:System.String,at:System.DateTimeOffset,message:System.String=null):Microsoft.Maui.DevFlow.Testing.MauiFlowFailure
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowIncidentFingerprint.Create(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow,report:Microsoft.Maui.DevFlow.Testing.MauiFlowRunReport,manifest:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest,classification:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification=null):Microsoft.Maui.DevFlow.Testing.MauiFlowFingerprintSet
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowIncidentFingerprint.CreateIncidentFingerprint(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow,report:Microsoft.Maui.DevFlow.Testing.MauiFlowRunReport,manifest:Microsoft.Maui.DevFlow.Testing.MauiTestExecutionManifest,classification:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification=null,testIdentityFingerprint:System.String=null):System.String
@@ -1761,6 +1766,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.Summary[]:System.String{get:publ
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriage.TestIdentityFingerprint[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification.Category[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification.Code[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification.Disposition[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification.FailureClass[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageClassification.Phase[]:System.String{get:public;set:public}
@@ -3545,6 +3551,7 @@ T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowRunOutcomes
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowRunReportSerializer
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicies
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowTriageAnalyzer
+T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowTriageDispositions
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowTriageEvidenceStates
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions
 T:class static Microsoft.Maui.DevFlow.Testing.MauiFlowTriageSerializer

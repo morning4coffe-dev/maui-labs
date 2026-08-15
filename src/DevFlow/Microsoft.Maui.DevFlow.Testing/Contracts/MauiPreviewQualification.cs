@@ -35,6 +35,15 @@ public static class MauiQualificationSampleSources
     /// </summary>
     public static bool IsIndependent(string? value) =>
         value is Curated or DeviceBacked;
+
+    /// <summary>
+    /// True when this source's evidence is a property of the corpus files rather than of a run.
+    /// Every accumulated run is required to share a corpus fingerprint, so static evidence is
+    /// byte-identical across runs: re-evaluating it is a repeat, never a fresh trial, and the
+    /// accumulator must count it exactly once no matter how many runs report it.
+    /// </summary>
+    public static bool IsStatic(string? value) =>
+        value is Curated or CuratedDerived or Generated;
 }
 
 /// <summary>
@@ -265,6 +274,14 @@ public sealed class MauiQualificationCorpusSummary
     [JsonPropertyName("generatedCases")] public int GeneratedCases { get; set; }
     [JsonPropertyName("deviceBackedCases")] public int DeviceBackedCases { get; set; }
     [JsonPropertyName("curatedRepairPositiveCases")] public int CuratedRepairPositiveCases { get; set; }
+
+    /// <summary>
+    /// How many curated cases were adapted from another curated case. Read
+    /// <see cref="CuratedRepairPositiveCases"/> without this and 31 restatements of one seed look
+    /// like 31 curated cases.
+    /// </summary>
+    [JsonPropertyName("curatedDerivedCases")] public int CuratedDerivedCases { get; set; }
+
     [JsonPropertyName("curatedNoRepairCases")] public int CuratedNoRepairCases { get; set; }
     [JsonPropertyName("generatedNoRepairCases")] public int GeneratedNoRepairCases { get; set; }
     [JsonPropertyName("curatedClassificationLabeledCases")] public int CuratedClassificationLabeledCases { get; set; }
@@ -445,6 +462,16 @@ public sealed class MauiQualificationRateMetric
     /// </summary>
     [JsonPropertyName("independentEvaluations")] public int IndependentEvaluations { get; set; }
 
+    /// <summary>The successes among <see cref="IndependentEvaluations"/>.</summary>
+    [JsonPropertyName("independentNumerator")] public int IndependentNumerator { get; set; }
+
+    /// <summary>
+    /// The Wilson interval over the independent subset alone. <see cref="ConfidenceInterval"/> is
+    /// computed on the pooled denominator and therefore narrows when derived clones or generated
+    /// mutants are added; that interval is disclosure only. Gates read this one.
+    /// </summary>
+    [JsonPropertyName("independentConfidenceInterval")] public MauiQualificationConfidenceInterval? IndependentConfidenceInterval { get; set; }
+
     [JsonPropertyName("independentDeviceRuns")] public bool? IndependentDeviceRuns { get; set; }
     [JsonPropertyName("exclusions")] public List<MauiQualificationExclusion> Exclusions { get; set; } = [];
 }
@@ -458,6 +485,15 @@ public sealed class MauiQualificationRateSourceCount
     [JsonPropertyName("source")] public string Source { get; set; } = "unknown";
     [JsonPropertyName("numerator")] public int Numerator { get; set; }
     [JsonPropertyName("denominator")] public int Denominator { get; set; }
+
+    /// <summary>
+    /// The share of <see cref="Denominator"/> this source contributed to the metric's
+    /// <see cref="MauiQualificationRateMetric.IndependentEvaluations"/>. Carried per source so the
+    /// accumulator can merge independence exactly rather than re-deriving it from the source name,
+    /// which is wrong for classification accuracy (a curated case with a stamped label is not an
+    /// independent classification evaluation).
+    /// </summary>
+    [JsonPropertyName("independentEvaluations")] public int IndependentEvaluations { get; set; }
 }
 
 /// <summary>

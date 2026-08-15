@@ -195,6 +195,9 @@ public static class MauiPreviewQualificationGateEvaluator
         var denominator = samples.Count;
         var numerator = samples.Count(success);
         independent ??= static sample => MauiQualificationSampleSources.IsIndependent(NormalizeSource(sample.Source));
+        var independentSamples = samples.Where(independent).ToList();
+        var independentDenominator = independentSamples.Count;
+        var independentNumerator = independentSamples.Count(success);
         return new MauiQualificationRateMetric
         {
             State = denominator == 0 ? "missing" : "measured",
@@ -219,9 +222,17 @@ public static class MauiPreviewQualificationGateEvaluator
                     Source = group.Key,
                     Numerator = group.Count(success),
                     Denominator = group.Count(),
+                    IndependentEvaluations = group.Count(independent),
                 })
                 .ToList(),
-            IndependentEvaluations = samples.Count(independent),
+            IndependentEvaluations = independentDenominator,
+            IndependentNumerator = independentNumerator,
+            // Restating one observation 30 times narrows a pooled Wilson interval toward certainty
+            // without adding a single new fact. Gates read this interval; the pooled one above is
+            // published for disclosure only.
+            IndependentConfidenceInterval = independentDenominator == 0
+                ? null
+                : MauiQualificationStatistics.WilsonInterval(independentNumerator, independentDenominator, confidenceLevel),
             IndependentDeviceRuns = denominator == 0 ? null : independentDeviceRuns,
         };
     }
@@ -597,7 +608,7 @@ public static class MauiPreviewQualificationGateEvaluator
     private static void AddRepairPrecisionGate(MauiPreviewQualificationReport report, MauiQualificationGateThresholds thresholds)
     {
         var metric = report.Metrics.RepairPrecision;
-        var lower = metric.ConfidenceInterval?.Lower;
+        var lower = metric.IndependentConfidenceInterval?.Lower;
         var status = metric.IndependentEvaluations < thresholds.MinimumRepairEvaluations
             ? MauiPreviewQualificationStates.NotQualified
             : lower >= thresholds.MinimumRepairPrecision
@@ -646,7 +657,7 @@ public static class MauiPreviewQualificationGateEvaluator
         MauiQualificationGateThresholds thresholds)
     {
         var metric = report.Metrics.ClassificationAccuracy;
-        var lower = metric.ConfidenceInterval?.Lower;
+        var lower = metric.IndependentConfidenceInterval?.Lower;
         var status = metric.IndependentEvaluations < thresholds.MinimumClassificationEvaluations
             ? MauiPreviewQualificationStates.NotQualified
             : lower >= thresholds.MinimumClassificationAccuracy
@@ -670,7 +681,7 @@ public static class MauiPreviewQualificationGateEvaluator
     private static void AddSelectorStabilityGate(MauiPreviewQualificationReport report, MauiQualificationGateThresholds thresholds)
     {
         var metric = report.Metrics.SelectorStability;
-        var status = metric.Denominator < thresholds.MinimumSelectorObservations
+        var status = metric.IndependentEvaluations < thresholds.MinimumSelectorObservations
             ? MauiPreviewQualificationStates.NotQualified
             : metric.Value >= thresholds.MinimumSelectorStability
                 ? MauiPreviewQualificationStates.Pass
@@ -684,7 +695,7 @@ public static class MauiPreviewQualificationGateEvaluator
                 : "Declared-platform real-device selector-stability evidence is insufficient or below threshold.",
             ReasonCodes = status == MauiPreviewQualificationStates.Pass
                 ? []
-                : metric.Denominator < thresholds.MinimumSelectorObservations
+                : metric.IndependentEvaluations < thresholds.MinimumSelectorObservations
                     ? ["selector-stability-device-evidence-insufficient"]
                     : ["selector-stability-below-threshold"],
         });
@@ -1030,6 +1041,7 @@ public static class MauiPreviewQualificationGateEvaluator
         GeneratedCases = Math.Max(0, source?.GeneratedCases ?? 0),
         DeviceBackedCases = Math.Max(0, source?.DeviceBackedCases ?? 0),
         CuratedRepairPositiveCases = Math.Max(0, source?.CuratedRepairPositiveCases ?? 0),
+        CuratedDerivedCases = Math.Max(0, source?.CuratedDerivedCases ?? 0),
         CuratedNoRepairCases = Math.Max(0, source?.CuratedNoRepairCases ?? 0),
         GeneratedNoRepairCases = Math.Max(0, source?.GeneratedNoRepairCases ?? 0),
         CuratedClassificationLabeledCases = Math.Max(0, source?.CuratedClassificationLabeledCases ?? 0),

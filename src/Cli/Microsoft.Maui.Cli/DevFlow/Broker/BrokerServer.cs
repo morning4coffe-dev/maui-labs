@@ -43,6 +43,7 @@ public partial class BrokerServer : IDisposable
     // instead of trusting the calling client to have done it. Only relaxed by tests that exercise
     // unrelated endpoint mechanics.
     private readonly bool _requireWorkflowRunAuthorization;
+    private readonly byte[] _workflowRunDispatchKey = RandomNumberGenerator.GetBytes(32);
     private readonly ArtifactTrustImportService _artifactTrustImports;
     private readonly ArtifactTrustStore _artifactTrustStore;
     private readonly WorkflowRepairProposalStore _workflowRepairs;
@@ -163,7 +164,8 @@ public partial class BrokerServer : IDisposable
                     : Path.Combine(recordingStorageRoot, "workflow-runs"),
             },
             clock: clock,
-            controlLedger: ControlWorkflowRunLedgerAsync);
+            controlLedger: ControlWorkflowRunLedgerAsync,
+            authorizeDispatch: AuthorizeWorkflowRunDispatch);
         _testAgentSessions = new TestAgentSessionService(clock: clock);
         _artifactTrustImports = new ArtifactTrustImportService(clock);
         _artifactTrustStore = new ArtifactTrustStore(clock: clock);
@@ -1907,8 +1909,11 @@ public partial class BrokerServer : IDisposable
                     return;
                 }
 
+                // A cheap, non-consuming filter so an ungranted caller cannot make the broker do
+                // outbound work on its behalf. It is not the authorization boundary — the coordinator
+                // still takes the single-use decision, so a surface that skips this is still refused.
                 if (_requireWorkflowRunAuthorization &&
-                    !_testAgentSessions.TryConsumeRunDispatchAuthorization(
+                    !_testAgentSessions.CanDispatchRunAuthorization(
                         request.AuthorizationId,
                         request.AgentId,
                         request.AgentInstanceId,
@@ -2200,6 +2205,102 @@ public partial class BrokerServer : IDisposable
             registration.Port,
             registration.Platform,
             registration.AppName);
+
+    /// <summary>
+    /// The broker's one authorization boundary for starting a device-mutating workflow run. The
+    /// coordinator refuses to start without a decision from here, so this stays true no matter how
+    /// many surfaces dispatch runs: MCP, the Inspector workbench, the replay bridge, or a future one.
+    /// </summary>
+    internal WorkflowRunDispatchDecision AuthorizeWorkflowRunDispatch(WorkflowRunDispatch dispatch)
+    {
+        var decision = DecideWorkflowRunDispatch(dispatch);
+        if (!decision.Allowed)
+        {
+            // A refusal has no run record to journal against, so the broker log is the only place a
+            // repeated forged or unrecognized dispatch attempt can be noticed at all.
+            Log($"Refused a workflow run dispatch from '{dispatch.Origin}' for " +
+                $"{dispatch.AgentId}/{dispatch.AgentInstanceId}: {decision.Error}");
+        }
+
+        return decision;
+    }
+
+    private WorkflowRunDispatchDecision DecideWorkflowRunDispatch(WorkflowRunDispatch dispatch)
+    {
+        switch (dispatch.Origin)
+        {
+            // The Inspector is a human at a local, read-token-gated UI rather than an agent acting
+            // for an absent human, so it has no MCP grant to present and deliberately proves
+            // something else: the broker itself created this adapter for this exact agent instance
+            // (a ticket no browser or third route can compute), and it currently holds the app's
+            // single-writer mutation lease, which the coordinator then transfers atomically.
+            case WorkflowRunDispatchOrigin.InspectorWorkbench:
+            case WorkflowRunDispatchOrigin.InspectorReplayBridge:
+                if (!IsBrokerIssuedWorkflowRunDispatchTicket(dispatch))
+                    return WorkflowRunDispatchDecision.Deny(UnticketedDispatchError);
+                return dispatch.LeaseHandoff is null
+                    ? WorkflowRunDispatchDecision.Deny(
+                        "The Inspector must already hold this app's mutation lease to start a workflow run.")
+                    : WorkflowRunDispatchDecision.Allow(
+                        dispatch.Origin == WorkflowRunDispatchOrigin.InspectorWorkbench
+                            ? "inspector-workbench-lease"
+                            : "inspector-replay-bridge-lease");
+
+            // Repair validation replays a reviewer-approved proposal from inside the broker, and the
+            // reviewer's repair grant — not an ordinary run authorization — is what permits it.
+            case WorkflowRunDispatchOrigin.RepairValidation:
+                return IsBrokerIssuedWorkflowRunDispatchTicket(dispatch)
+                    ? WorkflowRunDispatchDecision.Allow("broker-repair-validation")
+                    : WorkflowRunDispatchDecision.Deny(UnticketedDispatchError);
+
+            case WorkflowRunDispatchOrigin.TestAgentGrant:
+                if (!_requireWorkflowRunAuthorization)
+                    return WorkflowRunDispatchDecision.Allow("test-only-authorization-disabled");
+                return _testAgentSessions.TryConsumeRunDispatchAuthorization(
+                        dispatch.AuthorizationId,
+                        dispatch.AgentId,
+                        dispatch.AgentInstanceId,
+                        out var error)
+                    ? WorkflowRunDispatchDecision.Allow("test-agent-human-grant")
+                    : WorkflowRunDispatchDecision.Deny(error!);
+
+            default:
+                return WorkflowRunDispatchDecision.Deny(
+                    "The workflow run dispatch origin is not one this broker authorizes.");
+        }
+    }
+
+    private const string UnticketedDispatchError =
+        "A broker-issued dispatch ticket for this exact agent instance is required to start a workflow run.";
+
+    /// <summary>
+    /// Mints the proof a broker-owned dispatch surface presents back to the coordinator. It is
+    /// derived from a per-broker key so nothing outside this process can forge one, and it is bound
+    /// to the exact agent instance and origin it was issued for, so it can be replayed neither
+    /// against another app nor against a different origin's weaker rule. The value is an in-process
+    /// capability with no expiry: never return it to a client, log it, or write it to disk.
+    /// </summary>
+    private string IssueWorkflowRunDispatchTicket(
+        AgentRegistration registration,
+        WorkflowRunDispatchOrigin origin)
+        => ComputeWorkflowRunDispatchTicket(registration.Id, registration.InstanceId, origin);
+
+    internal string ComputeWorkflowRunDispatchTicket(
+        string agentId,
+        string agentInstanceId,
+        WorkflowRunDispatchOrigin origin)
+        => Convert.ToHexString(HMACSHA256.HashData(
+            _workflowRunDispatchKey,
+            Encoding.UTF8.GetBytes($"workflow-run-dispatch\n{origin}\n{agentId}\n{agentInstanceId}")));
+
+    private bool IsBrokerIssuedWorkflowRunDispatchTicket(WorkflowRunDispatch dispatch)
+        => !string.IsNullOrEmpty(dispatch.DispatchTicket) &&
+           CryptographicOperations.FixedTimeEquals(
+               Encoding.UTF8.GetBytes(dispatch.DispatchTicket),
+               Encoding.UTF8.GetBytes(ComputeWorkflowRunDispatchTicket(
+                   dispatch.AgentId,
+                   dispatch.AgentInstanceId,
+                   dispatch.Origin)));
 
     private bool IsCurrentAgentConnection(AgentConnection expected)
         => _agents.TryGetValue(expected.Registration.Id, out var current) &&
@@ -2511,6 +2612,9 @@ public partial class BrokerServer : IDisposable
                     _workflowXamlSources,
                     _workflowCSharpSources,
                     CreateWorkflowRunTarget(registration),
+                    IssueWorkflowRunDispatchTicket(
+                        registration,
+                        WorkflowRunDispatchOrigin.InspectorWorkbench),
                     () => IsCurrentAgentConnection(connection),
                     _cts?.Token ?? CancellationToken.None),
                 repairValidationHost: CreateRepairValidationHost(connection),
@@ -2749,7 +2853,13 @@ public partial class BrokerServer : IDisposable
                 TimeoutMs = 120_000,
             },
             CreateWorkflowRunTarget(registration),
-            () => IsCurrentAgentConnection(connection));
+            () => IsCurrentAgentConnection(connection),
+            executionOptions: null,
+            leaseHandoff: null,
+            dispatchOrigin: WorkflowRunDispatchOrigin.RepairValidation,
+            dispatchTicket: IssueWorkflowRunDispatchTicket(
+                registration,
+                WorkflowRunDispatchOrigin.RepairValidation));
         if (!started.Ok || started.Run is null || string.IsNullOrWhiteSpace(started.CapabilityToken))
         {
             return new WorkflowRepairTransientReplayOutcome
@@ -2840,7 +2950,11 @@ public partial class BrokerServer : IDisposable
             {
                 EvidenceCaptureFactory = evidenceCaptureFactory
             },
-            leaseHandoff);
+            leaseHandoff,
+            dispatchOrigin: WorkflowRunDispatchOrigin.InspectorReplayBridge,
+            dispatchTicket: IssueWorkflowRunDispatchTicket(
+                registration,
+                WorkflowRunDispatchOrigin.InspectorReplayBridge));
         if (!started.Ok || started.Run is null || string.IsNullOrWhiteSpace(started.CapabilityToken))
         {
             throw new WorkflowRunRejectedException(

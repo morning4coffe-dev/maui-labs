@@ -16,6 +16,7 @@ internal sealed class InspectorWorkflowServices
     private readonly WorkflowXamlSourceProposalStore _sources;
     private readonly WorkflowCSharpSourceProposalStore _csharpSources;
     private readonly WorkflowRunTarget _target;
+    private readonly string _dispatchTicket;
     private readonly Func<bool> _isTargetCurrent;
     private readonly CancellationToken _cancellationToken;
 
@@ -27,6 +28,7 @@ internal sealed class InspectorWorkflowServices
         WorkflowXamlSourceProposalStore sources,
         WorkflowCSharpSourceProposalStore csharpSources,
         WorkflowRunTarget target,
+        string dispatchTicket,
         Func<bool> isTargetCurrent,
         CancellationToken cancellationToken)
     {
@@ -37,6 +39,7 @@ internal sealed class InspectorWorkflowServices
         _sources = sources ?? throw new ArgumentNullException(nameof(sources));
         _csharpSources = csharpSources ?? throw new ArgumentNullException(nameof(csharpSources));
         _target = target ?? throw new ArgumentNullException(nameof(target));
+        _dispatchTicket = dispatchTicket ?? throw new ArgumentNullException(nameof(dispatchTicket));
         _isTargetCurrent = isTargetCurrent ?? throw new ArgumentNullException(nameof(isTargetCurrent));
         _cancellationToken = cancellationToken;
     }
@@ -70,7 +73,9 @@ internal sealed class InspectorWorkflowServices
                 EvidenceCaptureFactory = evidenceCaptureFactory,
                 ReproductionExpectation = request.ReproductionExpectation,
             },
-            leaseHandoff);
+            leaseHandoff,
+            dispatchOrigin: WorkflowRunDispatchOrigin.InspectorWorkbench,
+            dispatchTicket: _dispatchTicket);
     }
 
     public WorkflowRunAccessResult GetRunStatus(string runId, string? capabilityToken)

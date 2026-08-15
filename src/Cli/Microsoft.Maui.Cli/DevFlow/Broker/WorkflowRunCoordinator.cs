@@ -20,6 +20,7 @@ internal sealed class WorkflowRunCoordinator : IDisposable
     private readonly IWorkflowMutationLeaseRegistry _leases;
     private readonly Func<WorkflowRunExecution, CancellationToken, Task<Testing.FlowReplayReport>> _execute;
     private readonly Func<WorkflowRunLedgerControl, CancellationToken, Task<WorkflowRunLedgerControlResult>>? _controlLedger;
+    private readonly WorkflowRunDispatchAuthorizer _authorizeDispatch;
     private readonly WorkflowRunCoordinatorOptions _options;
     private readonly TimeProvider _clock;
     private readonly Dictionary<string, RunRecord> _runs = new(StringComparer.Ordinal);
@@ -33,11 +34,16 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         Func<WorkflowRunExecution, CancellationToken, Task<Testing.FlowReplayReport>> execute,
         WorkflowRunCoordinatorOptions? options = null,
         TimeProvider? clock = null,
-        Func<WorkflowRunLedgerControl, CancellationToken, Task<WorkflowRunLedgerControlResult>>? controlLedger = null)
+        Func<WorkflowRunLedgerControl, CancellationToken, Task<WorkflowRunLedgerControlResult>>? controlLedger = null,
+        WorkflowRunDispatchAuthorizer? authorizeDispatch = null)
     {
         _leases = leases ?? throw new ArgumentNullException(nameof(leases));
         _execute = execute ?? throw new ArgumentNullException(nameof(execute));
         _controlLedger = controlLedger;
+        // A coordinator without an authorizer refuses every start. Authorization is a precondition
+        // of this type rather than of one HTTP route, so a host that forgets to wire it up fails
+        // closed instead of silently dispatching device-mutating runs for nobody.
+        _authorizeDispatch = authorizeDispatch ?? DenyUnconfiguredDispatch;
         _options = options ?? new WorkflowRunCoordinatorOptions();
         _clock = clock ?? TimeProvider.System;
 
@@ -49,17 +55,43 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             throw new ArgumentOutOfRangeException(nameof(options), "Workflow run heartbeat interval must be positive.");
     }
 
+    /// <summary>
+    /// Starts one bounded, mutating replay. Every broker-hosted dispatch surface reaches the device
+    /// through this method, so the broker's authorization decision is taken here rather than in the
+    /// route that happens to be calling: a new entry point inherits the check instead of having to
+    /// remember it.
+    /// </summary>
     public WorkflowRunStartResult Start(
         WorkflowRunStartRequest request,
         WorkflowRunTarget target,
         Func<bool> isTargetCurrent,
         WorkflowRunExecutionOptions? executionOptions = null,
-        WorkflowRunLeaseHandoff? leaseHandoff = null)
+        WorkflowRunLeaseHandoff? leaseHandoff = null,
+        WorkflowRunDispatchOrigin dispatchOrigin = WorkflowRunDispatchOrigin.TestAgentGrant,
+        string? dispatchTicket = null)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(request);
         ArgumentNullException.ThrowIfNull(target);
         ArgumentNullException.ThrowIfNull(isTargetCurrent);
+
+        // Authorize against the broker's canonical target rather than the client-supplied ids, and
+        // before any validation, lease, token, or journal state exists for this request.
+        var decision = _authorizeDispatch(new WorkflowRunDispatch(
+            dispatchOrigin,
+            target.AgentId,
+            target.AgentInstanceId,
+            request.AuthorizationId,
+            dispatchTicket,
+            leaseHandoff));
+        if (!decision.Allowed)
+        {
+            return WorkflowRunStartResult.Rejected(
+                403,
+                decision.Error ?? "The workflow run dispatch was not authorized.",
+                null,
+                null);
+        }
 
         var prepared = Prepare(request, target);
         if (!prepared.Ok)
@@ -122,6 +154,10 @@ internal sealed class WorkflowRunCoordinator : IDisposable
                 isTargetCurrent,
                 executionOptions ?? new WorkflowRunExecutionOptions(),
                 now);
+            AddEventLocked(
+                run,
+                "dispatch-authorized",
+                $"Broker authorized this dispatch as '{decision.AuditReason}'.");
             if (leaseHandoff is not null)
             {
                 var transfer = _leases.TransferAndBegin(
@@ -1291,6 +1327,10 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         AddEventLocked(run, WorkflowRunStates.ToWireValue(next), message);
     }
 
+    private static WorkflowRunDispatchDecision DenyUnconfiguredDispatch(WorkflowRunDispatch dispatch)
+        => WorkflowRunDispatchDecision.Deny(
+            "This broker was not configured to authorize workflow run dispatch, so no run can start.");
+
     private void AddEventLocked(RunRecord run, string kind, string message)
     {
         if (run.Events.Count == MaxLifecycleEvents)
@@ -1911,6 +1951,63 @@ internal sealed record WorkflowRunLeaseHandoff(
     string HolderKind,
     string? Label);
 
+/// <summary>
+/// How one workflow-run dispatch claims to be authorized. The default is the strictest shape, so a
+/// caller that forgets to declare an origin is held to the human-grant rule instead of sailing past.
+/// </summary>
+internal enum WorkflowRunDispatchOrigin
+{
+    /// <summary>An MCP test-agent dispatch backed by a live human-issued mutation grant.</summary>
+    TestAgentGrant = 0,
+    /// <summary>The broker-owned Inspector workbench acting for a human at the local Inspector UI.</summary>
+    InspectorWorkbench,
+    /// <summary>The broker's in-process Inspector replay bridge for one exact agent instance.</summary>
+    InspectorReplayBridge,
+    /// <summary>The broker's transient replay that validates a reviewer-approved repair proposal.</summary>
+    RepairValidation,
+}
+
+/// <summary>One dispatch presented for authorization, described in the broker's own canonical terms.</summary>
+internal sealed record WorkflowRunDispatch(
+    WorkflowRunDispatchOrigin Origin,
+    string AgentId,
+    string AgentInstanceId,
+    string? AuthorizationId,
+    string? DispatchTicket,
+    WorkflowRunLeaseHandoff? LeaseHandoff)
+{
+    /// <summary>
+    /// Keeps the ticket out of the generated <c>ToString()</c>, so interpolating a dispatch into a
+    /// log line or an exception message cannot publish a credential that stays valid for the life
+    /// of the broker process.
+    /// </summary>
+    private bool PrintMembers(StringBuilder builder)
+    {
+        builder.Append($"{nameof(Origin)} = {Origin}, ");
+        builder.Append($"{nameof(AgentId)} = {AgentId}, ");
+        builder.Append($"{nameof(AgentInstanceId)} = {AgentInstanceId}, ");
+        builder.Append($"{nameof(AuthorizationId)} = {AuthorizationId}, ");
+        builder.Append($"{nameof(DispatchTicket)} = {(DispatchTicket is null ? "null" : "[redacted]")}, ");
+        builder.Append($"{nameof(LeaseHandoff)} = {LeaseHandoff}");
+        return true;
+    }
+}
+
+/// <summary>The broker's answer, with the reason recorded on the run's audit journal when allowed.</summary>
+internal sealed record WorkflowRunDispatchDecision(bool Allowed, string? Error, string? AuditReason)
+{
+    public static WorkflowRunDispatchDecision Allow(string auditReason) => new(true, null, auditReason);
+
+    public static WorkflowRunDispatchDecision Deny(string error) => new(false, error, null);
+}
+
+/// <summary>
+/// Verifies, broker-side, that one workflow-run dispatch is permitted. The coordinator refuses to
+/// start without an allowing decision, so authorization cannot be lost by adding a caller that
+/// forgets to repeat the check the way a route-level guard can be.
+/// </summary>
+internal delegate WorkflowRunDispatchDecision WorkflowRunDispatchAuthorizer(WorkflowRunDispatch dispatch);
+
 internal sealed record WorkflowRunLedgerControl(
     string Action,
     string RunId,
@@ -2015,7 +2112,8 @@ internal sealed class WorkflowRunStartRequest
     [JsonPropertyName("agentInstanceId")] public string? AgentInstanceId { get; set; }
     /// <summary>
     /// Identifier of the human-approved mutation authorization that permits this dispatch. The
-    /// broker verifies it before starting the run.
+    /// coordinator verifies it in <see cref="WorkflowRunCoordinator.Start"/> before starting the
+    /// run, so no dispatch surface can reach the device without it.
     /// </summary>
     [JsonPropertyName("authorizationId")] public string? AuthorizationId { get; set; }
     [JsonPropertyName("idempotencyKey")] public string? IdempotencyKey { get; set; }

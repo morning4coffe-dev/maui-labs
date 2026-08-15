@@ -10,7 +10,7 @@ public class WorkflowRunCoordinatorTests
     public async Task Start_PassingAndFailingRuns_PreservesTerminalReportsAndFirstDivergence()
     {
         var leases = new RecordingLeaseRegistry();
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             leases,
             (execution, _) => Task.FromResult(
                 execution.Flow.Name == "pass"
@@ -40,7 +40,7 @@ public class WorkflowRunCoordinatorTests
     public void Start_InvalidFlow_RejectsBeforeAcquiringLease()
     {
         var leases = new RecordingLeaseRegistry();
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             leases,
             static (_, _) => Task.FromResult(PassingReport()));
         var invalid = new MauiFlow
@@ -83,7 +83,7 @@ public class WorkflowRunCoordinatorTests
     {
         var leases = new RecordingLeaseRegistry();
         var releaseExecution = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             leases,
             async (_, cancellationToken) =>
             {
@@ -111,7 +111,7 @@ public class WorkflowRunCoordinatorTests
     {
         var leases = new RecordingLeaseRegistry();
         var executed = false;
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             leases,
             (_, _) =>
             {
@@ -143,7 +143,7 @@ public class WorkflowRunCoordinatorTests
     {
         var leases = new RecordingLeaseRegistry();
         var executed = false;
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             leases,
             (_, _) =>
             {
@@ -193,7 +193,7 @@ public class WorkflowRunCoordinatorTests
     {
         var leases = new RecordingLeaseRegistry();
         var executed = false;
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             leases,
             (_, _) =>
             {
@@ -244,7 +244,7 @@ public class WorkflowRunCoordinatorTests
     {
         var progressRaised = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             async (execution, cancellationToken) =>
             {
@@ -292,7 +292,7 @@ public class WorkflowRunCoordinatorTests
     {
         var leases = new RecordingLeaseRegistry();
         var executed = false;
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             leases,
             (_, _) =>
             {
@@ -341,7 +341,7 @@ public class WorkflowRunCoordinatorTests
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var leases = new RecordingLeaseRegistry();
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             leases,
             async (_, cancellationToken) =>
             {
@@ -367,7 +367,7 @@ public class WorkflowRunCoordinatorTests
     public async Task Start_SameIdempotencyKeyAndDigest_ReturnsOriginalRun_AndDifferentDigestConflicts()
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             async (_, cancellationToken) =>
             {
@@ -398,7 +398,7 @@ public class WorkflowRunCoordinatorTests
     public async Task Cancel_RunningRun_TerminatesAsCancelled()
     {
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             async (_, cancellationToken) =>
             {
@@ -421,7 +421,7 @@ public class WorkflowRunCoordinatorTests
     [Fact]
     public async Task Start_TimedOutRun_TerminatesAsTimedOut()
     {
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             async (_, cancellationToken) =>
             {
@@ -445,7 +445,7 @@ public class WorkflowRunCoordinatorTests
     [Fact]
     public async Task Start_TinyDeadlineCapsALongerRequestedTimeout()
     {
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             async (_, cancellationToken) =>
             {
@@ -473,7 +473,7 @@ public class WorkflowRunCoordinatorTests
     public async Task Run_LeaseTransactionHeartbeatsAndAlwaysCleansUpAfterRunnerException()
     {
         var passingLeases = new RecordingLeaseRegistry();
-        var passingCoordinator = new WorkflowRunCoordinator(
+        var passingCoordinator = TestCoordinator(
             passingLeases,
             async (_, cancellationToken) =>
             {
@@ -494,7 +494,7 @@ public class WorkflowRunCoordinatorTests
         Assert.Contains("release", passingLeases.Actions);
 
         var failingLeases = new RecordingLeaseRegistry();
-        var failingCoordinator = new WorkflowRunCoordinator(
+        var failingCoordinator = TestCoordinator(
             failingLeases,
             static (_, _) => throw new InvalidOperationException("runner exploded"));
 
@@ -509,7 +509,7 @@ public class WorkflowRunCoordinatorTests
     [Fact]
     public async Task Start_StaleInstanceIsRejected_AndReconnectOrphansActiveRun()
     {
-        var staleCoordinator = new WorkflowRunCoordinator(
+        var staleCoordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             static (_, _) => Task.FromResult(PassingReport()));
 
@@ -518,7 +518,7 @@ public class WorkflowRunCoordinatorTests
         Assert.Equal(409, stale.StatusCode);
 
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             async (_, cancellationToken) =>
             {
@@ -540,7 +540,7 @@ public class WorkflowRunCoordinatorTests
     public async Task Run_AgentLedgerBeginsEndsAndAbandonsOnRunnerException()
     {
         var controls = new RecordingLedgerController();
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             static (_, _) => Task.FromResult(PassingReport()),
             controlLedger: controls.ControlAsync);
@@ -550,7 +550,7 @@ public class WorkflowRunCoordinatorTests
         Assert.Equal(new[] { "begin", "end" }, controls.Actions.ToArray());
 
         var failingControls = new RecordingLedgerController();
-        var failingCoordinator = new WorkflowRunCoordinator(
+        var failingCoordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             static (_, _) => throw new InvalidOperationException("runner exploded"),
             controlLedger: failingControls.ControlAsync);
@@ -561,7 +561,7 @@ public class WorkflowRunCoordinatorTests
 
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var cancellingControls = new RecordingLedgerController();
-        var cancellingCoordinator = new WorkflowRunCoordinator(
+        var cancellingCoordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             async (_, cancellationToken) =>
             {
@@ -587,7 +587,7 @@ public class WorkflowRunCoordinatorTests
                 ? WorkflowRunLedgerControlResult.Success()
                 : WorkflowRunLedgerControlResult.Success()
         };
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             static (execution, _) => Task.FromResult(new FlowReplayReport
             {
@@ -628,7 +628,7 @@ public class WorkflowRunCoordinatorTests
                 ? WorkflowRunLedgerControlResult.Failure("workflow-command-conflict", "Command sequence conflict.")
                 : WorkflowRunLedgerControlResult.Success()
         };
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             static (_, _) => Task.FromResult(PassingReport()),
             controlLedger: controls.ControlAsync);
@@ -644,7 +644,7 @@ public class WorkflowRunCoordinatorTests
     [Fact]
     public async Task Retention_EvictsOldTerminalRunsDeterministicallyAndNeverActiveRuns()
     {
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             static (execution, _) => Task.FromResult(PassingReport(execution.Flow)),
             new WorkflowRunCoordinatorOptions
@@ -664,7 +664,7 @@ public class WorkflowRunCoordinatorTests
         Assert.Equal(200, coordinator.GetStatus(third.Run!.RunId, third.CapabilityToken).StatusCode);
 
         var activeEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        var activeCoordinator = new WorkflowRunCoordinator(
+        var activeCoordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             async (execution, cancellationToken) =>
             {
@@ -704,7 +704,7 @@ public class WorkflowRunCoordinatorTests
             Guid.NewGuid().ToString("N"));
         try
         {
-            var coordinator = new WorkflowRunCoordinator(
+            var coordinator = TestCoordinator(
                 new RecordingLeaseRegistry(),
                 static (execution, _) => Task.FromResult(FailingReport(execution.Flow)),
                 new WorkflowRunCoordinatorOptions { ArtifactRoot = root });
@@ -742,7 +742,7 @@ public class WorkflowRunCoordinatorTests
             Platform = "test",
             DeviceProfile = "test-device",
         };
-        var coordinator = new WorkflowRunCoordinator(
+        var coordinator = TestCoordinator(
             new RecordingLeaseRegistry(),
             static (execution, _) => Task.FromResult(new FlowReplayReport
             {
@@ -806,6 +806,26 @@ public class WorkflowRunCoordinatorTests
         Assert.Equal(MauiFlowFailureClasses.LocatorNotFound, local.Facts.Failure!.Code);
         Assert.Equal("/todos", local.Facts.Failure.ObservedCheckpoint!.Route);
     }
+
+    /// <summary>
+    /// Builds a coordinator for tests that exercise run mechanics rather than the dispatch
+    /// authorization boundary. The authorizer is stated explicitly here so that a coordinator
+    /// created without one keeps its production behaviour of refusing every start.
+    /// </summary>
+    private static WorkflowRunCoordinator TestCoordinator(
+        IWorkflowMutationLeaseRegistry leases,
+        Func<WorkflowRunExecution, CancellationToken, Task<FlowReplayReport>> execute,
+        WorkflowRunCoordinatorOptions? options = null,
+        TimeProvider? clock = null,
+        Func<WorkflowRunLedgerControl, CancellationToken, Task<WorkflowRunLedgerControlResult>>? controlLedger = null,
+        WorkflowRunDispatchAuthorizer? authorizeDispatch = null)
+        => new(
+            leases,
+            execute,
+            options,
+            clock,
+            controlLedger,
+            authorizeDispatch ?? (static _ => WorkflowRunDispatchDecision.Allow("test-allow-all")));
 
     private static WorkflowRunStartRequest Request(
         string name,

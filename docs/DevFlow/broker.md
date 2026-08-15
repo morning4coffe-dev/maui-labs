@@ -378,6 +378,29 @@ idempotency key and request digest returns the same run and token; the safety co
 to that digest, so using the key with changed evidence returns HTTP 409. One mutating run may
 target an agent instance at a time.
 
+#### Dispatch authorization
+
+Authorization is a precondition of the run coordinator, not of any one HTTP route. Every
+broker-hosted dispatch surface — the MCP route above, the Inspector workbench
+(`POST /api/workbench/run/start`), the Inspector replay bridge, and repair validation — reaches
+the device through the same `Start` call, and that call refuses to proceed without an allowing
+decision from the broker. A coordinator constructed without an authorizer refuses every start, so
+a new dispatch surface inherits the check instead of having to remember it. The decision is taken
+against the broker's own view of the target, not the client-supplied ids, and before any
+validation, lease, capability token, or idempotency state exists.
+
+Each origin proves something appropriate to what it is:
+
+| Origin | What it must present |
+| --- | --- |
+| MCP test agent | A live, single-use, human-issued mutation authorization (`authorizationId`) bound to the same agent instance. Refused with HTTP 403. |
+| Inspector workbench / replay bridge | A broker-issued dispatch ticket for that exact agent instance and origin, plus the app's mutation lease it already holds. The Inspector is a human at the local UI and has no MCP grant to present. |
+| Repair validation | A broker-issued dispatch ticket for that exact agent instance and origin. |
+
+Dispatch tickets are in-process capabilities derived from a per-broker key. They are never
+returned to a client, logged, or persisted. Allowed dispatches record a `dispatch-authorized`
+lifecycle event on the run journal; refusals are written to the broker log.
+
 `none` requires matching declared/observed preconditions. `test-tenant-resettable` additionally
 requires successful app and backend reset evidence with matching seed fingerprints.
 `compensated` requires that reset evidence or a successful declared compensator. `non-replayable`

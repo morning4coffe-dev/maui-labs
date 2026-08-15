@@ -282,6 +282,10 @@ internal static class FlowQualificationCommands
         CompareCount(comparison, "falseHeals independentEvaluations", baseline.Metrics.FalseHeals.IndependentEvaluations, report.Metrics.FalseHeals.IndependentEvaluations);
         CompareCount(comparison, "abstention denominator", baseline.Metrics.Abstention.Denominator, report.Metrics.Abstention.Denominator);
         CompareCount(comparison, "abstention independentEvaluations", baseline.Metrics.Abstention.IndependentEvaluations, report.Metrics.Abstention.IndependentEvaluations);
+        // Abstention's numerator counts *correct* abstentions, so unlike false heals it must not
+        // shrink. Flooring only its denominator would let correct abstentions turn into false heals
+        // one for one with no regression line.
+        CompareCount(comparison, "abstention numerator", baseline.Metrics.Abstention.Numerator, report.Metrics.Abstention.Numerator);
 
         // Evidence may grow or improve, never shrink. Without this, deleting the cases that fail
         // is reported as a rate improvement and CI goes green.
@@ -304,6 +308,17 @@ internal static class FlowQualificationCommands
             comparison.Regressions.Add(
                 $"corpus.undeclaredProjectionCollisions {baseline.Corpus.UndeclaredProjectionCollisions} -> {report.Corpus.UndeclaredProjectionCollisions}");
         }
+        if (report.Corpus.UndeclaredShapeCollisions > baseline.Corpus.UndeclaredShapeCollisions)
+        {
+            comparison.Regressions.Add(
+                $"corpus.undeclaredShapeCollisions {baseline.Corpus.UndeclaredShapeCollisions} -> {report.Corpus.UndeclaredShapeCollisions}");
+        }
+        // The privacy/security corpus feeds the privacy-security-escapes gate, which reports pass
+        // on three cases just as happily as on eighteen. Without these floors, deleting fifteen of
+        // them changes no gate status and no rate.
+        CompareCount(comparison, "corpus.securityCorpus.caseCount", baseline.Corpus.SecurityCorpus?.CaseCount ?? 0, report.Corpus.SecurityCorpus?.CaseCount ?? 0);
+        CompareCount(comparison, "corpus.securityCorpus.passedCount", baseline.Corpus.SecurityCorpus?.PassedCount ?? 0, report.Corpus.SecurityCorpus?.PassedCount ?? 0);
+        CompareCount(comparison, "metrics.privacySecurityEscapes.testCount", baseline.Metrics.PrivacySecurityEscapes.TestCount, report.Metrics.PrivacySecurityEscapes.TestCount);
 
         foreach (var baselineGate in baseline.Gates.Where(static gate => gate.Status == MauiPreviewQualificationStates.Pass))
         {

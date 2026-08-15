@@ -40,6 +40,67 @@ public sealed class FlowExecutionCoreTests
     }
 
     [Fact]
+    public void ArtifactResolver_SignedAndUnsignedAndroidPackages_SelectsTheSignedPackage()
+    {
+        var candidates = new[]
+        {
+            Artifact("com.example.app.apk") with { SigningState = "unsigned" },
+            Artifact("com.example.app-Signed.apk") with { SigningState = "signed" },
+        };
+
+        var selected = MsBuildAppArtifactResolver.SelectSingleArtifact(
+            candidates,
+            candidates[0].ProjectPath,
+            candidates[0].TargetFramework,
+            candidates[0].Configuration,
+            candidateArtifactTypes: ["apk"]);
+
+        Assert.Equal("com.example.app-Signed.apk", selected.Path);
+        Assert.Equal("signed", selected.SigningState);
+    }
+
+    [Fact]
+    public void ArtifactResolver_MultipleSignedPackages_StillRejectsAmbiguity()
+    {
+        var candidates = new[]
+        {
+            Artifact("app-arm64-Signed.apk") with { SigningState = "signed" },
+            Artifact("app-x64-Signed.apk") with { SigningState = "signed" },
+        };
+
+        var exception = Assert.Throws<FlowExecutionException>(() =>
+            MsBuildAppArtifactResolver.SelectSingleArtifact(
+                candidates,
+                candidates[0].ProjectPath,
+                candidates[0].TargetFramework,
+                candidates[0].Configuration,
+                candidateArtifactTypes: ["apk"]));
+
+        Assert.Equal("artifact-ambiguous", exception.Code);
+        Assert.Contains("signed=2", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void ArtifactResolver_SignedPackageBesideUnclassifiedPackage_RejectsAmbiguity()
+    {
+        var candidates = new[]
+        {
+            Artifact("app-Signed.apk") with { SigningState = "signed" },
+            Artifact("app-copy.apk") with { SigningState = "unknown" },
+        };
+
+        var exception = Assert.Throws<FlowExecutionException>(() =>
+            MsBuildAppArtifactResolver.SelectSingleArtifact(
+                candidates,
+                candidates[0].ProjectPath,
+                candidates[0].TargetFramework,
+                candidates[0].Configuration,
+                candidateArtifactTypes: ["apk"]));
+
+        Assert.Equal("artifact-ambiguous", exception.Code);
+    }
+
+    [Fact]
     public void ArtifactResolver_CandidateTypeAllowlist_DoesNotFallBackToForeignArtifact()
     {
         var candidate = Artifact("app.dll") with { ArtifactType = "dll" };
@@ -162,7 +223,8 @@ public sealed class FlowExecutionCoreTests
                     "apple-bundle-id",
                     "com.example.app",
                     "true",
-                    "true"));
+                    "true",
+                    AppArtifactSigningStates.NotApplicable));
             return Success();
         });
         var resolver = new MsBuildAppArtifactResolver(runner);
@@ -497,6 +559,48 @@ public sealed class FlowExecutionCoreTests
             capturedHostProjectPath);
     }
 
+    /// <summary>
+    /// A CLI paired with a targets package older than the SigningState column must still resolve.
+    /// The signing state stays unspecified, which keeps an ambiguous signed/unsigned pair failing
+    /// closed instead of turning a version skew into a hard metadata parse error.
+    /// </summary>
+    [Fact]
+    public async Task ArtifactResolver_LegacyMetadataWithoutSigningState_StillResolves()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var project = Path.Combine(workspace.Root, "App.csproj");
+        await File.WriteAllTextAsync(project, "<Project Sdk=\"Microsoft.NET.Sdk\"><PropertyGroup><TargetFramework>net10.0-android</TargetFramework></PropertyGroup></Project>");
+        var runner = new CallbackProcessRunner(async call =>
+        {
+            var host = XDocument.Load(call.Arguments[1]);
+            var outputRoot = host.Descendants("OutputRoot").Single().Value;
+            var metadataPath = host.Descendants("WriteLinesToFile").Single().Attribute("File")!.Value;
+            var artifactPath = Path.Combine(outputRoot, "package", "App.apk");
+            Directory.CreateDirectory(Path.GetDirectoryName(artifactPath)!);
+            await File.WriteAllBytesAsync(artifactPath, [1, 2, 3, 4]);
+            var legacy = ArtifactMetadata(artifactPath, project, runtimeIdentifier: "");
+            legacy = legacy[..legacy.LastIndexOf("|||DEVFLOW_ARTIFACT|||", StringComparison.Ordinal)];
+            await File.WriteAllTextAsync(metadataPath, legacy);
+            return Success();
+        });
+        var resolver = new MsBuildAppArtifactResolver(runner);
+
+        var artifact = await resolver.ResolveAsync(new AppArtifactResolutionRequest
+        {
+            ProjectPath = project,
+            AgentSessionId = "flowsession",
+            TargetFramework = "net10.0-android",
+            Configuration = "Debug",
+            WorkDirectory = workspace.Output,
+            Platform = "android",
+            TargetFrameworkPlatformIdentifiers = ["android"],
+            CandidateArtifactTypes = ["apk"],
+        });
+
+        Assert.Equal("apk", artifact.ArtifactType);
+        Assert.Null(artifact.SigningState);
+    }
+
     [Fact]
     public async Task ArtifactResolver_BuildFailure_SurfacesMsBuildErrorsAndPersistsRedactedLog()
     {
@@ -688,6 +792,26 @@ public sealed class FlowExecutionCoreTests
         Assert.Equal(FlowExecutionExitCategories.Unsupported, result.ExitCategory);
         Assert.Equal(0, adapter.MutationCalls);
         Assert.Equal("android-aab-unsupported", result.Report?.Failure?.Code);
+    }
+
+    [Fact]
+    public async Task Coordinator_UnsignedAndroidPackage_IsUnsupportedBeforePlatformMutation()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var adapter = new FakePlatformAdapter(validateWithAndroidRules: true);
+        var coordinator = CreateCoordinator(
+            new FakeArtifactResolver(Artifact(Path.Combine(workspace.Root, "app.apk")) with
+            {
+                SigningState = "unsigned",
+            }),
+            adapter);
+
+        var result = await coordinator.RunAsync(Request(bundle, workspace.Output));
+
+        Assert.Equal(FlowExecutionExitCategories.Unsupported, result.ExitCategory);
+        Assert.Equal(0, adapter.MutationCalls);
+        Assert.Equal("android-artifact-unsigned", result.Report?.Failure?.Code);
     }
 
     [Fact]
@@ -1943,7 +2067,8 @@ public sealed class FlowExecutionCoreTests
     private static string ArtifactMetadata(
         string artifactPath,
         string projectPath,
-        string runtimeIdentifier)
+        string runtimeIdentifier,
+        string signingState = AppArtifactSigningStates.Signed)
         => string.Join(
             "|||DEVFLOW_ARTIFACT|||",
             artifactPath,
@@ -1962,7 +2087,8 @@ public sealed class FlowExecutionCoreTests
             "android-package-name",
             "com.example.app",
             "true",
-            "true");
+            "true",
+            signingState);
 
     private static string FindRepositoryRoot()
     {

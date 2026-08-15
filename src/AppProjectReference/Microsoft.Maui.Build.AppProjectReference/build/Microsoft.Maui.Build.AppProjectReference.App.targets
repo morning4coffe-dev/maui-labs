@@ -15,6 +15,17 @@
       <_MauiAppAppBundleDirFullPath Condition="'$(AppBundleDir)' != ''">$([MSBuild]::EnsureTrailingSlash($([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(AppBundleDir)'))))</_MauiAppAppBundleDirFullPath>
       <_MauiAppPublishDirFullPath Condition="'$(PublishDir)' != ''">$([MSBuild]::EnsureTrailingSlash($([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(PublishDir)'))))</_MauiAppPublishDirFullPath>
       <_MauiAppRuntimeIdentifierLower>$([System.String]::Copy('$(RuntimeIdentifier)').ToLowerInvariant())</_MauiAppRuntimeIdentifierLower>
+      <!--
+        Android emits a signed and an unsigned package side by side. Classify them from the
+        Android SDK's own package properties rather than from a file name suffix, so the
+        artifact contract states signing as a fact the producing SDK declared. The properties
+        are defined by _ValidateAndroidPackageProperties during the app build, which always
+        runs before this target in the same project instance.
+      -->
+      <_MauiAppAndroidUnsignedApkFullPath Condition="'$(ApkFile)' != ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(ApkFile)'))</_MauiAppAndroidUnsignedApkFullPath>
+      <_MauiAppAndroidSignedApkFullPath Condition="'$(ApkFileSigned)' != ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(ApkFileSigned)'))</_MauiAppAndroidSignedApkFullPath>
+      <_MauiAppAndroidUnsignedAabFullPath Condition="'$(_AabFile)' != ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(_AabFile)'))</_MauiAppAndroidUnsignedAabFullPath>
+      <_MauiAppAndroidSignedAabFullPath Condition="'$(_AabFileSigned)' != ''">$([MSBuild]::NormalizePath('$(MSBuildProjectDirectory)', '$(_AabFileSigned)'))</_MauiAppAndroidSignedAabFullPath>
       <_MauiAppTargetRuntimeKind>unknown</_MauiAppTargetRuntimeKind>
       <_MauiAppTargetRuntimeKind Condition="'$(_MauiAppTargetPlatform)' == 'android'">android</_MauiAppTargetRuntimeKind>
       <_MauiAppTargetRuntimeKind Condition="'$(_MauiAppTargetPlatform)' == 'ios'">ios</_MauiAppTargetRuntimeKind>
@@ -75,6 +86,12 @@
         <ArtifactType Condition="'%(_MauiAppArtifactCandidate.Extension)' == '.dll'">dll</ArtifactType>
         <ArtifactType Condition="'$(_MauiAppPublishDirFullPath)' != '' and '%(_MauiAppArtifactCandidate._MauiAppFullPathWithTrailingSlash)' == '$(_MauiAppPublishDirFullPath)'">publish-directory</ArtifactType>
         <ArtifactContractVersion>1</ArtifactContractVersion>
+        <SigningState>not-applicable</SigningState>
+        <SigningState Condition="'%(_MauiAppArtifactCandidate.Extension)' == '.apk' or '%(_MauiAppArtifactCandidate.Extension)' == '.aab'">unknown</SigningState>
+        <SigningState Condition="'$(_MauiAppAndroidUnsignedApkFullPath)' != '' and '%(_MauiAppArtifactCandidate.FullPath)' == '$(_MauiAppAndroidUnsignedApkFullPath)'">unsigned</SigningState>
+        <SigningState Condition="'$(_MauiAppAndroidUnsignedAabFullPath)' != '' and '%(_MauiAppArtifactCandidate.FullPath)' == '$(_MauiAppAndroidUnsignedAabFullPath)'">unsigned</SigningState>
+        <SigningState Condition="'$(_MauiAppAndroidSignedApkFullPath)' != '' and '%(_MauiAppArtifactCandidate.FullPath)' == '$(_MauiAppAndroidSignedApkFullPath)'">signed</SigningState>
+        <SigningState Condition="'$(_MauiAppAndroidSignedAabFullPath)' != '' and '%(_MauiAppArtifactCandidate.FullPath)' == '$(_MauiAppAndroidSignedAabFullPath)'">signed</SigningState>
         <ArtifactRole>unknown</ArtifactRole>
         <TargetRuntimeKind>$(_MauiAppTargetRuntimeKind)</TargetRuntimeKind>
         <DeploymentModel>unknown</DeploymentModel>

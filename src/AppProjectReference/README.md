@@ -110,6 +110,7 @@ For simple property-based consumers, `$(MauiAppArtifactPaths)` contains the reso
 | `DeploymentModel` | Structural deployment shape: `package`, `store-bundle`, `physical-device-archive`, `bundle`, `apple-bundle`, `simulator-bundle`, `physical-device-bundle`, `desktop-bundle`, `descriptor`, `executable`, `library`, `directory`, or `unknown`. |
 | `LaunchIdentityKind` | The identity scheme for `LaunchIdentity`: `android-package-name`, `apple-bundle-id`, `windows-package-identity`, `file-path`, or `none`. |
 | `LaunchIdentity` | The known launch identifier. Android package and Apple bundle values come from `ApplicationId`; an executable uses its artifact path. Windows package artifacts remain empty because `ApplicationId` is not an AUMID or package identity. |
+| `SigningState` | Whether the artifact is the signing output that installation needs: `signed`, `unsigned`, `unknown` (an Android package the SDK did not identify as either, such as a per-ABI package), or `not-applicable` (a format that is not produced as a signed/unsigned pair). Android is classified from the Android SDK's own `ApkFile`, `ApkFileSigned`, `_AabFile`, and `_AabFileSigned` properties, never from a file name suffix. |
 | `Installable` / `Launchable` | Legacy compatibility values retained exactly for existing consumers. They predate the versioned artifact contract and are not conservative deployment decisions. New consumers must use `ArtifactRole`, `TargetRuntimeKind`, `DeploymentModel`, and launch identity instead. |
 
 ### Legacy compatibility values by artifact
@@ -134,8 +135,14 @@ deployable, and legacy `Launchable=true` on an MSIX does not prove package trust
 must switch on the contract version, role, runtime kind, deployment model, artifact type, and
 identity, then make environment-specific decisions without using the compatibility booleans.
 
+The legacy booleans also do not distinguish signing: a debug Android build emits both
+`<package>.apk` and `<package>-Signed.apk`, and both carry `Installable=true` / `Launchable=true`.
+Consumers that install a package must select on `SigningState` — `adb install` requires the
+`signed` one.
+
 ## Important defaults
 
 - `MauiAppRefBuildOnBuild=true`: app artifacts are prepared during the host project build. `dotnet test` normally builds first, so artifact items are available to later build/test targets.
 - `MauiAppRefSetPlatformOutputPaths=true`: platform output properties are set to deterministic locations under `MauiAppRefOutputRoot`.
+- `MauiAppRefAndroidEmbedAssembliesIntoApk=true`: a reference that declares an Android `TargetFramework` is built with `EmbedAssembliesIntoApk=true`. Without it a Debug Android build produces a fast-deployment package that carries no managed assemblies, so installing that package on its own aborts at startup with `No assemblies found in '/data/user/0/<app>/files/.__override__/<abi>'`. Set the property to `false`, or pass an explicit `EmbedAssembliesIntoApk` through the reference's `Properties`/`AdditionalProperties`, to keep the SDK default.
 - `MauiAppRefFailIfNoArtifacts=true`: declared app references must produce at least one artifact.

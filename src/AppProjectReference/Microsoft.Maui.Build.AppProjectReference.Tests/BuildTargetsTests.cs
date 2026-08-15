@@ -414,7 +414,108 @@ public sealed class BuildTargetsTests
             expectedTargetRuntimeKind: targetRuntimeKind,
             expectedDeploymentModel: deploymentModel,
             expectedLaunchIdentityKind: launchIdentityKind,
-            expectedLaunchIdentity: launchIdentityKind == "none" ? "" : "com.example.testapp");
+            expectedLaunchIdentity: launchIdentityKind == "none" ? "" : "com.example.testapp",
+            expectedSigningState: extension is "apk" or "aab" ? "unknown" : "not-applicable");
+    }
+
+    [Fact]
+    public async Task MauiAppArtifact_AndroidPackagePair_ClassifiesSigningStateFromSdkPackageProperties()
+    {
+        using var workspace = TestWorkspace.Create();
+
+        var result = await BuildWorkspaceAsync(
+            workspace,
+            """
+            <MauiAppProjectReference Include="..\App\App.csproj"
+                                     TargetFramework="net10.0"
+                                     ReferenceName="AndroidApp"
+                                     Properties="MauiAppRefSimulateAndroidPackagePair=true;MauiAppRefSimulateTargetFramework=net10.0-android;MauiAppRefSimulateRuntimeIdentifier=android-x64" />
+            """);
+
+        Assert.True(result.ExitCode == 0, result.Output);
+
+        var artifactsPath = Path.Combine(workspace.TestProjectDirectory, "maui-test-app-artifacts.txt");
+        var packages = File.ReadAllLines(artifactsPath)
+            .Select(line => line.Split('|'))
+            .Where(parts => parts.Length == 15 && parts[4] == "apk")
+            .ToArray();
+
+        Assert.Equal(2, packages.Length);
+        var signed = Assert.Single(packages, parts => parts[14] == "signed");
+        var unsigned = Assert.Single(packages, parts => parts[14] == "unsigned");
+        Assert.EndsWith("com.example.testapp-Signed.apk", signed[1], PathComparison);
+        Assert.EndsWith("com.example.testapp.apk", unsigned[1], PathComparison);
+        Assert.Equal("deployable", signed[9]);
+        Assert.Equal("deployable", unsigned[9]);
+    }
+
+    [Fact]
+    public async Task AndroidReference_RequestsSelfContainedPackage()
+    {
+        using var workspace = TestWorkspace.Create();
+
+        var properties = await ResolveAppProjectReferencePropertiesAsync(
+            workspace,
+            """
+            <MauiAppProjectReference Include="..\App\App.csproj"
+                                     TargetFramework="net10.0-android"
+                                     ReferenceName="AndroidApp" />
+            """);
+
+        // A fast-deployment package is not installable on its own, so the artifact contract has to
+        // ask for the assemblies to be embedded.
+        Assert.Contains("EmbedAssembliesIntoApk=true", properties, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task NonAndroidReference_DoesNotRequestSelfContainedPackage()
+    {
+        using var workspace = TestWorkspace.Create();
+
+        var properties = await ResolveAppProjectReferencePropertiesAsync(
+            workspace,
+            """
+            <MauiAppProjectReference Include="..\App\App.csproj"
+                                     TargetFramework="net10.0"
+                                     ReferenceName="DesktopApp" />
+            """);
+
+        Assert.DoesNotContain("EmbedAssembliesIntoApk", properties, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AndroidReference_KeepsCallerSuppliedEmbedAssembliesValue()
+    {
+        using var workspace = TestWorkspace.Create();
+
+        var properties = await ResolveAppProjectReferencePropertiesAsync(
+            workspace,
+            """
+            <MauiAppProjectReference Include="..\App\App.csproj"
+                                     TargetFramework="net10.0-android"
+                                     ReferenceName="AndroidApp"
+                                     Properties="EmbedAssembliesIntoApk=false" />
+            """);
+
+        Assert.Contains("EmbedAssembliesIntoApk=false", properties, StringComparison.Ordinal);
+        Assert.DoesNotContain("EmbedAssembliesIntoApk=true", properties, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task AndroidReference_HonorsGlobalOptOut()
+    {
+        using var workspace = TestWorkspace.Create();
+
+        var properties = await ResolveAppProjectReferencePropertiesAsync(
+            workspace,
+            """
+            <MauiAppProjectReference Include="..\App\App.csproj"
+                                     TargetFramework="net10.0-android"
+                                     ReferenceName="AndroidApp" />
+            """,
+            "-p:MauiAppRefAndroidEmbedAssembliesIntoApk=false");
+
+        Assert.DoesNotContain("EmbedAssembliesIntoApk", properties, StringComparison.Ordinal);
     }
 
     public static IEnumerable<object[]> AppBundleContractCases =>
@@ -574,6 +675,30 @@ public sealed class BuildTargetsTests
     private static async Task<ProcessResult> BuildWorkspaceAsync(TestWorkspace workspace, string projectReferenceXml, bool setOutputRoot = true)
         => await BuildWorkspaceAsync(workspace, projectReferenceXml, customAfterTargetsXml: null, setOutputRoot: setOutputRoot);
 
+    private static async Task<string> ResolveAppProjectReferencePropertiesAsync(
+        TestWorkspace workspace,
+        string projectReferenceXml,
+        params string[] additionalArguments)
+    {
+        workspace.WriteProjects(projectReferenceXml);
+
+        var arguments = new List<string>
+        {
+            "msbuild",
+            workspace.TestProjectPath,
+            "-t:ProbeResolvedAppProjectReferenceProperties",
+            "-v:minimal",
+            "-p:RestorePackagesPath=" + Path.Combine(workspace.Root, "packages"),
+        };
+        arguments.AddRange(additionalArguments);
+
+        var result = await RunDotNetAsync(workspace.Root, [.. arguments]);
+        Assert.True(result.ExitCode == 0, result.Output);
+
+        return File.ReadAllText(
+            Path.Combine(workspace.TestProjectDirectory, "maui-test-app-resolved-properties.txt"));
+    }
+
     private static async Task<ProcessResult> BuildWorkspaceAsync(
         TestWorkspace workspace,
         string projectReferenceXml,
@@ -604,7 +729,8 @@ public sealed class BuildTargetsTests
         string expectedTargetRuntimeKind = "unknown",
         string expectedDeploymentModel = "library",
         string expectedLaunchIdentityKind = "none",
-        string expectedLaunchIdentity = "")
+        string expectedLaunchIdentity = "",
+        string expectedSigningState = "not-applicable")
     {
         var artifactsPath = Path.Combine(workspace.TestProjectDirectory, "maui-test-app-artifacts.txt");
         Assert.True(File.Exists(artifactsPath), "Expected artifact capture at " + artifactsPath);
@@ -616,11 +742,11 @@ public sealed class BuildTargetsTests
         var line = Assert.Single(lines, line =>
         {
             var parts = line.Split('|');
-            return parts.Length == 14 && parts[0] == expectedName && parts[4] == expectedArtifactType;
+            return parts.Length == 15 && parts[0] == expectedName && parts[4] == expectedArtifactType;
         });
         var parts = line.Split('|');
 
-        Assert.Equal(14, parts.Length);
+        Assert.Equal(15, parts.Length);
         Assert.Equal(expectedName, parts[0]);
         if (expectedArtifactIsDirectory)
             Assert.True(Directory.Exists(parts[1]), "Expected app artifact directory at " + parts[1]);
@@ -639,6 +765,7 @@ public sealed class BuildTargetsTests
         Assert.Equal(expectedDeploymentModel, parts[11]);
         Assert.Equal(expectedLaunchIdentityKind, parts[12]);
         Assert.Equal(expectedLaunchIdentity, parts[13]);
+        Assert.Equal(expectedSigningState, parts[14]);
 
         var artifactPathsFile = Path.Combine(workspace.TestProjectDirectory, "maui-test-app-artifact-paths.txt");
         Assert.True(File.Exists(artifactPathsFile), "Expected artifact paths capture at " + artifactPathsFile);
@@ -651,7 +778,7 @@ public sealed class BuildTargetsTests
         var artifactsPath = Path.Combine(workspace.TestProjectDirectory, "maui-test-app-artifacts.txt");
         var line = Assert.Single(File.ReadAllLines(artifactsPath));
         var parts = line.Split('|');
-        Assert.Equal(14, parts.Length);
+        Assert.Equal(15, parts.Length);
         return parts[1];
     }
 
@@ -796,6 +923,27 @@ public sealed class BuildTargetsTests
                                       Overwrite="true" />
                   </Target>
 
+                  <Target Name="CreateFakeAndroidPackagePair"
+                          AfterTargets="Build"
+                          Condition="'$(MauiAppRefSimulateAndroidPackagePair)' == 'true' and '$(MauiAppRefOutputRoot)' != ''">
+                    <MakeDir Directories="$(MauiAppRefOutputRoot)" />
+                    <WriteLinesToFile File="$([System.IO.Path]::Combine('$(MauiAppRefOutputRoot)', 'com.example.testapp.apk'))"
+                                      Lines="Fake unsigned android package for tests."
+                                      Overwrite="true" />
+                    <WriteLinesToFile File="$([System.IO.Path]::Combine('$(MauiAppRefOutputRoot)', 'com.example.testapp-Signed.apk'))"
+                                      Lines="Fake signed android package for tests."
+                                      Overwrite="true" />
+                  </Target>
+
+                  <Target Name="SetFakeAndroidPackageProperties"
+                          BeforeTargets="_GetMauiAppArtifacts"
+                          Condition="'$(MauiAppRefSimulateAndroidPackagePair)' == 'true'">
+                    <PropertyGroup>
+                      <ApkFile>$([System.IO.Path]::Combine('$(MauiAppRefOutputRoot)', 'com.example.testapp.apk'))</ApkFile>
+                      <ApkFileSigned>$([System.IO.Path]::Combine('$(MauiAppRefOutputRoot)', 'com.example.testapp-Signed.apk'))</ApkFileSigned>
+                    </PropertyGroup>
+                  </Target>
+
                   <Target Name="SetFakeArtifactContractTargetFacts"
                           BeforeTargets="_GetMauiAppArtifacts"
                           Condition="'$(MauiAppRefSimulateTargetFramework)' != ''">
@@ -843,10 +991,17 @@ public sealed class BuildTargetsTests
                           AfterTargets="BuildAppProjectReferences"
                           Condition="'@(MauiAppArtifact)' != ''">
                     <WriteLinesToFile File="$(MSBuildProjectDirectory)\maui-test-app-artifacts.txt"
-                                      Lines="@(MauiAppArtifact->'%(ReferenceName)|%(Identity)|%(ProjectPath)|%(TargetFramework)|%(ArtifactType)|%(ApplicationId)|%(Installable)|%(Launchable)|%(ArtifactContractVersion)|%(ArtifactRole)|%(TargetRuntimeKind)|%(DeploymentModel)|%(LaunchIdentityKind)|%(LaunchIdentity)')"
+                                      Lines="@(MauiAppArtifact->'%(ReferenceName)|%(Identity)|%(ProjectPath)|%(TargetFramework)|%(ArtifactType)|%(ApplicationId)|%(Installable)|%(Launchable)|%(ArtifactContractVersion)|%(ArtifactRole)|%(TargetRuntimeKind)|%(DeploymentModel)|%(LaunchIdentityKind)|%(LaunchIdentity)|%(SigningState)')"
                                       Overwrite="true" />
                     <WriteLinesToFile File="$(MSBuildProjectDirectory)\maui-test-app-artifact-paths.txt"
                                       Lines="$(MauiAppArtifactPaths)"
+                                      Overwrite="true" />
+                  </Target>
+
+                  <Target Name="ProbeResolvedAppProjectReferenceProperties"
+                          DependsOnTargets="ResolveAppProjectReferences">
+                    <WriteLinesToFile File="$(MSBuildProjectDirectory)\maui-test-app-resolved-properties.txt"
+                                      Lines="@(_ResolvedMauiAppProjectReference->'%(AdditionalProperties)')"
                                       Overwrite="true" />
                   </Target>
 

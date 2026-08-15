@@ -161,6 +161,14 @@ internal interface IAppArtifactResolver
         CancellationToken cancellationToken = default);
 }
 
+internal static class AppArtifactSigningStates
+{
+    public const string Signed = "signed";
+    public const string Unsigned = "unsigned";
+    public const string NotApplicable = "not-applicable";
+    public const string Unknown = "unknown";
+}
+
 internal sealed record ResolvedAppArtifact
 {
     public required string Path { get; init; }
@@ -179,6 +187,7 @@ internal sealed record ResolvedAppArtifact
     public string? DeploymentModel { get; init; }
     public string? LaunchIdentityKind { get; init; }
     public string? LaunchIdentity { get; init; }
+    public string? SigningState { get; init; }
     public bool Installable { get; init; }
     public bool Launchable { get; init; }
     public required string PackageDigest { get; init; }

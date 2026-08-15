@@ -181,6 +181,32 @@
       </_ResolvedMauiAppProjectReference>
     </ItemGroup>
 
+    <!--
+      The artifact contract promises packages a caller can install and launch on their own.
+
+      A Debug .NET Android build does not produce one by default: Xamarin.Android.Common.targets
+      leaves EmbedAssembliesIntoApk unset in Debug when fast deployment is supported, so the
+      packaged .apk carries no managed assemblies. That package only runs when the build's own
+      deployment step has already pushed the assemblies to the device's __override__ directory -
+      installed on its own it aborts at startup with "No assemblies found in
+      '/data/user/0/<app>/files/.__override__/<abi>' ... Assuming this is part of Fast Deployment".
+
+      Ask the Android build for a self-contained package instead. Only the build pass needs it:
+      the property does not participate in restore, and restore property sets are deliberately
+      kept minimal here. A caller that wants the default behaviour back can set
+      MauiAppRefAndroidEmbedAssembliesIntoApk=false, or pass its own EmbedAssembliesIntoApk value
+      through Properties/AdditionalProperties, which is respected as-is.
+
+      This is keyed off the reference's declared TargetFramework, so a reference that leaves the
+      framework to the app project keeps whatever that project's configuration selects.
+    -->
+    <ItemGroup Condition="'$(MauiAppRefAndroidEmbedAssembliesIntoApk)' != 'false'">
+      <_ResolvedMauiAppProjectReference Update="@(_ResolvedMauiAppProjectReference)"
+                                    Condition="$([System.String]::Copy('%(_ResolvedMauiAppProjectReference.TargetFramework)').Contains('-android')) and !$([System.String]::Copy('%(_ResolvedMauiAppProjectReference.AdditionalProperties)').Contains('EmbedAssembliesIntoApk'))">
+        <AdditionalProperties>%(_ResolvedMauiAppProjectReference.AdditionalProperties);EmbedAssembliesIntoApk=true</AdditionalProperties>
+      </_ResolvedMauiAppProjectReference>
+    </ItemGroup>
+
     <ItemGroup>
       <_ResolvedMauiAppProjectReference Update="@(_ResolvedMauiAppProjectReference)"
                                     Condition="'%(_ResolvedMauiAppProjectReference.SetPlatformOutputPaths)' == 'true'">

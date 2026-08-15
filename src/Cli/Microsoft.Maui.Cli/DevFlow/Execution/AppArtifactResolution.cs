@@ -21,6 +21,10 @@ internal sealed record AppArtifactInspectionLimits
 internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
 {
     private const string Separator = "|||DEVFLOW_ARTIFACT|||";
+    /// <summary>Field count of the artifact metadata record that carries <c>SigningState</c>.</summary>
+    private const int SigningStateFieldCount = 18;
+    /// <summary>Field count emitted by targets packages that predate <c>SigningState</c>.</summary>
+    private const int LegacyFieldCount = 17;
     private const int MaximumMetadataBytes = 1_048_576;
     private const int MaximumArtifactRecords = 256;
     private const int MaximumBuildOutputCharacters = 1_048_576;
@@ -348,9 +352,37 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
         }
         if (matches.Length > 1)
         {
+            // A platform SDK can emit a signed and an unsigned copy of the same package (Android
+            // always does). Installation needs the signed one, so resolve that pair from the typed
+            // SigningState the artifact contract carries instead of guessing from file names.
+            var signed = matches
+                .Where(static candidate => string.Equals(
+                    candidate.SigningState,
+                    AppArtifactSigningStates.Signed,
+                    StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+            if (signed.Length == 1 &&
+                matches.All(candidate =>
+                    ReferenceEquals(candidate, signed[0]) ||
+                    string.Equals(
+                        candidate.SigningState,
+                        AppArtifactSigningStates.Unsigned,
+                        StringComparison.OrdinalIgnoreCase)))
+            {
+                return signed[0];
+            }
+
+            var signingFacts = matches
+                .GroupBy(
+                    static candidate => candidate.SigningState ?? "unspecified",
+                    StringComparer.OrdinalIgnoreCase)
+                .OrderBy(static group => group.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(static group => $"{group.Key}={group.Count()}")
+                .ToArray();
             throw FlowExecutionException.Invalid(
                 "artifact-ambiguous",
-                "Multiple AppProjectReference artifacts matched the requested build. Specify build inputs that produce exactly one deployable artifact.");
+                "Multiple AppProjectReference artifacts matched the requested build. Specify build inputs that produce exactly one deployable artifact. " +
+                $"Matched {matches.Length} artifacts with signing states: {string.Join(", ", signingFacts)}.");
         }
         return matches[0];
     }
@@ -391,7 +423,10 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
     private static ResolvedAppArtifact ParseRecord(string line, string agentSessionId)
     {
         var fields = line.Split(Separator, StringSplitOptions.None);
-        if (fields.Length != 17)
+        // A Microsoft.Maui.Build.AppProjectReference package older than the SigningState column
+        // emits one field fewer. Accept that shape and leave the signing state unspecified so a
+        // signed/unsigned Android pair still fails closed as ambiguous instead of failing to parse.
+        if (fields.Length is not (SigningStateFieldCount or LegacyFieldCount))
         {
             throw FlowExecutionException.Infrastructure(
                 "artifact-metadata-invalid",
@@ -428,6 +463,7 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
             LaunchIdentity = EmptyToNull(fields[14]),
             Installable = installable,
             Launchable = launchable,
+            SigningState = fields.Length == SigningStateFieldCount ? EmptyToNull(fields[17]) : null,
             PackageDigest = "",
         };
     }
@@ -468,6 +504,7 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
                 "%(LaunchIdentity)",
                 "%(Installable)",
                 "%(Launchable)",
+                "%(SigningState)",
             ]);
         var childProperties =
             $"MauiDevFlowEnabled=true;MauiDevFlowSessionId={agentSessionId}";

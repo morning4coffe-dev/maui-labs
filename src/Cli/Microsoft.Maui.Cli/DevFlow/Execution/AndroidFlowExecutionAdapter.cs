@@ -271,6 +271,12 @@ internal sealed class AndroidFlowExecutionAdapter : IFlowExecutionPlatformAdapte
                 "android-artifact-not-deployable",
                 "The AppProjectReference metadata does not describe an installable and launchable Android package.");
         }
+        if (string.Equals(artifact.SigningState, AppArtifactSigningStates.Unsigned, StringComparison.OrdinalIgnoreCase))
+        {
+            throw FlowExecutionException.Unsupported(
+                "android-artifact-unsigned",
+                "The resolved Android package is the unsigned build output; installation requires the signed package.");
+        }
         if (!string.Equals(artifact.LaunchIdentityKind, "android-package-name", StringComparison.OrdinalIgnoreCase) ||
             string.IsNullOrWhiteSpace(artifact.LaunchIdentity) ||
             (!string.IsNullOrWhiteSpace(artifact.ApplicationId) &&

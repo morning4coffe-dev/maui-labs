@@ -2,7 +2,7 @@
   "schema": 1,
   "kind": "maui-preview-qualification",
   "contractVersion": "preview-qualification-v1",
-  "generatedAt": "2026-08-15T18:42:16.9539938+00:00",
+  "generatedAt": "1970-01-01T00:00:00+00:00",
   "status": "not-qualified",
   "platform": "android",
   "fingerprints": {
@@ -114,6 +114,7 @@
       "denominator": 0,
       "sampleSources": [],
       "sourceCounts": [],
+      "independentEvaluations": 0,
       "exclusions": []
     },
     "selectorStability": {
@@ -122,6 +123,7 @@
       "denominator": 0,
       "sampleSources": [],
       "sourceCounts": [],
+      "independentEvaluations": 0,
       "exclusions": []
     },
     "repairPrecision": {
@@ -136,15 +138,22 @@
         "upper": 1
       },
       "sampleSources": [
-        "curated"
+        "curated",
+        "curated-derived"
       ],
       "sourceCounts": [
         {
           "source": "curated",
-          "numerator": 31,
-          "denominator": 31
+          "numerator": 1,
+          "denominator": 1
+        },
+        {
+          "source": "curated-derived",
+          "numerator": 30,
+          "denominator": 30
         }
       ],
+      "independentEvaluations": 1,
       "independentDeviceRuns": false,
       "exclusions": []
     },
@@ -160,15 +169,22 @@
         "upper": 1
       },
       "sampleSources": [
-        "curated"
+        "curated",
+        "curated-derived"
       ],
       "sourceCounts": [
         {
           "source": "curated",
-          "numerator": 31,
-          "denominator": 31
+          "numerator": 1,
+          "denominator": 1
+        },
+        {
+          "source": "curated-derived",
+          "numerator": 30,
+          "denominator": 30
         }
       ],
+      "independentEvaluations": 1,
       "independentDeviceRuns": false,
       "exclusions": []
     },
@@ -184,15 +200,22 @@
         "upper": 0.977067967400749
       },
       "sampleSources": [
-        "curated"
+        "curated",
+        "curated-derived"
       ],
       "sourceCounts": [
         {
           "source": "curated",
-          "numerator": 42,
-          "denominator": 45
+          "numerator": 12,
+          "denominator": 15
+        },
+        {
+          "source": "curated-derived",
+          "numerator": 30,
+          "denominator": 30
         }
       ],
+      "independentEvaluations": 8,
       "independentDeviceRuns": false,
       "exclusions": []
     },
@@ -202,6 +225,10 @@
       "sampleCount": 45,
       "correct": 42,
       "labelCount": 6,
+      "inferredSampleCount": 8,
+      "inferredCorrect": 8,
+      "stampHonouredSampleCount": 37,
+      "stampHonouredCorrect": 34,
       "cells": [
         {
           "expected": "assertion-failed",
@@ -321,6 +348,7 @@
           "denominator": 300
         }
       ],
+      "independentEvaluations": 16,
       "independentDeviceRuns": false,
       "exclusions": []
     },
@@ -351,6 +379,7 @@
           "denominator": 300
         }
       ],
+      "independentEvaluations": 16,
       "independentDeviceRuns": false,
       "exclusions": []
     },
@@ -388,57 +417,57 @@
           "state": "measured",
           "operation": "flow-markdown-parse",
           "sampleCount": 10,
-          "p50Ms": 0.13505,
-          "p95Ms": 0.17948999999999998,
-          "maxMs": 0.1839
+          "p50Ms": 0.10815,
+          "p95Ms": 0.1640349999999999,
+          "maxMs": 0.2053
         },
         {
           "state": "measured",
           "operation": "flow-validate",
           "sampleCount": 10,
-          "p50Ms": 0.0012,
-          "p95Ms": 0.008814999999999995,
-          "maxMs": 0.0112
+          "p50Ms": 0.0011,
+          "p95Ms": 0.013434999999999994,
+          "maxMs": 0.016
         },
         {
           "state": "measured",
           "operation": "report-serialize-redaction",
           "sampleCount": 10,
-          "p50Ms": 0.11655,
-          "p95Ms": 0.1884449999999999,
-          "maxMs": 0.2307
+          "p50Ms": 0.0928,
+          "p95Ms": 0.2103649999999999,
+          "maxMs": 0.251
         },
         {
           "state": "measured",
           "operation": "fingerprint",
           "sampleCount": 10,
-          "p50Ms": 0.0138,
-          "p95Ms": 0.019059999999999997,
-          "maxMs": 0.0205
+          "p50Ms": 0.0141,
+          "p95Ms": 0.018179999999999995,
+          "maxMs": 0.0198
         },
         {
           "state": "measured",
           "operation": "candidate-generation",
           "sampleCount": 10,
-          "p50Ms": 0.029150000000000002,
-          "p95Ms": 0.05400499999999997,
-          "maxMs": 0.0662
+          "p50Ms": 0.0293,
+          "p95Ms": 0.04154,
+          "maxMs": 0.0419
         },
         {
           "state": "measured",
           "operation": "candidate-ranking",
           "sampleCount": 10,
-          "p50Ms": 0.00895,
-          "p95Ms": 0.010204999999999999,
-          "maxMs": 0.0107
+          "p50Ms": 0.00885,
+          "p95Ms": 0.011579999999999998,
+          "maxMs": 0.0123
         },
         {
           "state": "measured",
           "operation": "qualification-gate",
           "sampleCount": 10,
-          "p50Ms": 0.056150000000000005,
-          "p95Ms": 0.14376999999999987,
-          "maxMs": 0.1948
+          "p50Ms": 0.0596,
+          "p95Ms": 0.15339499999999984,
+          "maxMs": 0.2222
         }
       ],
       "deviceOverhead": {
@@ -456,6 +485,7 @@
         "denominator": 0,
         "sampleSources": [],
         "sourceCounts": [],
+        "independentEvaluations": 0,
         "exclusions": []
       },
       "flows": [],
@@ -566,9 +596,11 @@
     },
     {
       "gateId": "zero-false-heals",
-      "status": "pass",
-      "message": "No false heal was observed across the required no-repair denominator.",
-      "reasonCodes": [],
+      "status": "not-qualified",
+      "message": "No-repair evidence is insufficient or includes a false heal.",
+      "reasonCodes": [
+        "no-repair-evaluation-count-insufficient"
+      ],
       "artifactRefs": []
     },
     {
@@ -640,6 +672,11 @@
       "code": "gate-classification-accuracy-not-qualified",
       "severity": "warning",
       "message": "Failure-class accuracy lacks enough labeled evaluations or misses the conservative lower-bound threshold."
+    },
+    {
+      "code": "gate-zero-false-heals-not-qualified",
+      "severity": "warning",
+      "message": "No-repair evidence is insufficient or includes a false heal."
     },
     {
       "code": "gate-selector-stability-not-qualified",

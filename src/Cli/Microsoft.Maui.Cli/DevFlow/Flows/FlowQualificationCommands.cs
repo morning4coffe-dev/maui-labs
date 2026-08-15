@@ -1,5 +1,6 @@
 using System.CommandLine;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Maui.Cli.DevFlow;
 using Microsoft.Maui.DevFlow.Testing;
 
@@ -139,8 +140,12 @@ internal static class FlowQualificationCommands
                     markError();
             }
 
-            output.WriteResult(report, json, value =>
+            output.WriteResult(
+                new MauiQualificationCommandResult(report, accumulation, baseline?.Regressions),
+                json,
+                result =>
             {
+                var value = result.Report;
                 Console.WriteLine($"Qualification: {value.Status}");
                 Console.WriteLine($"Static corpus: {value.Corpus.CuratedCases} curated ({value.Corpus.CuratedRepairPositiveCases} repair-positive, {value.Corpus.CuratedNoRepairCases} no-repair), {value.Corpus.GeneratedCases} generated no-repair cases");
                 Console.WriteLine($"False heals: {Describe(value.Metrics.FalseHeals)}");
@@ -157,10 +162,18 @@ internal static class FlowQualificationCommands
                             Console.WriteLine($"  {name}: {Describe(merged)}");
                     }
                 }
-                foreach (var regression in baseline?.Regressions ?? [])
+                foreach (var regression in result.BaselineRegressions ?? [])
                     Console.WriteLine($"regression: {regression}");
             });
-            if (ctx.GetValue(failOnNonPassOption) && report.Status != MauiPreviewQualificationStates.Pass)
+            // A failed accumulation is a failure of the artifact that would be cited as evidence,
+            // so it must be able to fail the command in exactly the way a failed run does.
+            if (ctx.GetValue(failOnNonPassOption) &&
+                (report.Status != MauiPreviewQualificationStates.Pass ||
+                 (accumulation is not null && accumulation.Status != MauiPreviewQualificationStates.Pass)))
+            {
+                markError();
+            }
+            if (accumulation is not null && accumulation.Status == MauiPreviewQualificationStates.Fail)
                 markError();
         });
         return command;
@@ -171,7 +184,7 @@ internal static class FlowQualificationCommands
         var split = metric.SourceCounts.Count == 0
             ? string.Empty
             : " [" + string.Join(", ", metric.SourceCounts.Select(static item => $"{item.Source} {item.Numerator}/{item.Denominator}")) + "]";
-        return $"{metric.Numerator}/{metric.Denominator}{split}";
+        return $"{metric.Numerator}/{metric.Denominator} (independent {metric.IndependentEvaluations}){split}";
     }
 
     /// <summary>
@@ -267,6 +280,13 @@ internal static class FlowQualificationCommands
         if (report.Metrics.FalseHeals.Denominator < baseline.Metrics.FalseHeals.Denominator)
             comparison.Regressions.Add($"falseHeals denominator {baseline.Metrics.FalseHeals.Denominator} -> {report.Metrics.FalseHeals.Denominator}");
 
+        // Evidence may grow or improve, never shrink. Without this, deleting the cases that fail
+        // is reported as a rate improvement and CI goes green.
+        CompareCount(comparison, "corpus.curatedCases", baseline.Corpus.CuratedCases, report.Corpus.CuratedCases);
+        CompareCount(comparison, "corpus.curatedRepairPositiveCases", baseline.Corpus.CuratedRepairPositiveCases, report.Corpus.CuratedRepairPositiveCases);
+        CompareCount(comparison, "corpus.curatedNoRepairCases", baseline.Corpus.CuratedNoRepairCases, report.Corpus.CuratedNoRepairCases);
+        CompareCount(comparison, "corpus.curatedClassificationLabeledCases", baseline.Corpus.CuratedClassificationLabeledCases, report.Corpus.CuratedClassificationLabeledCases);
+
         foreach (var baselineGate in baseline.Gates.Where(static gate => gate.Status == MauiPreviewQualificationStates.Pass))
         {
             var current = report.Gates.FirstOrDefault(gate => gate.GateId == baselineGate.GateId);
@@ -314,8 +334,20 @@ internal static class FlowQualificationCommands
             comparison.Regressions.Add($"{name} evidence disappeared (baseline {baseline.Numerator}/{baseline.Denominator})");
             return;
         }
+        // A shrinking denominator is a regression even when the rate improves: dropping the cases
+        // that fail raises every rate while destroying the evidence behind it.
+        if (current.Denominator < baseline.Denominator)
+            comparison.Regressions.Add($"{name} denominator {baseline.Denominator} -> {current.Denominator}");
+        if (current.IndependentEvaluations < baseline.IndependentEvaluations)
+            comparison.Regressions.Add($"{name} independentEvaluations {baseline.IndependentEvaluations} -> {current.IndependentEvaluations}");
         if (currentRate + 1e-9 < baselineRate)
             comparison.Regressions.Add($"{name} {baseline.Numerator}/{baseline.Denominator} -> {current.Numerator}/{current.Denominator}");
+    }
+
+    private static void CompareCount(MauiQualificationBaselineComparison comparison, string name, int baseline, int current)
+    {
+        if (current < baseline)
+            comparison.Regressions.Add($"{name} {baseline} -> {current}");
     }
 
     private sealed class MauiQualificationBaselineComparison
@@ -502,7 +534,20 @@ internal static class FlowQualificationCommands
         }
         finally
         {
-            try { File.Delete(temporary); } catch { }
+            try { File.Delete(temporary); }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException) { }
         }
     }
 }
+
+/// <summary>
+/// The full qualification command payload. The accumulation status and baseline regressions ride
+/// in the same object as the report so a <c>--json</c> consumer (the QA harness always passes it)
+/// cannot miss them; they were previously visible only in the human-readable output.
+/// A null <c>baselineRegressions</c> means no baseline diff ran; an empty array means one ran and
+/// found nothing. The two must stay distinguishable or "no regressions" is unfalsifiable.
+/// </summary>
+internal sealed record MauiQualificationCommandResult(
+    [property: JsonPropertyName("report")] MauiPreviewQualificationReport Report,
+    [property: JsonPropertyName("accumulation")] MauiQualificationAccumulation? Accumulation,
+    [property: JsonPropertyName("baselineRegressions")] IReadOnlyList<string>? BaselineRegressions);

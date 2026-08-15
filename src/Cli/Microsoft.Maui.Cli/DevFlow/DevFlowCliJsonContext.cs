@@ -61,6 +61,7 @@ namespace Microsoft.Maui.Cli.DevFlow;
 [JsonSerializable(typeof(Testing.MauiPreviewQualificationReport))]
 [JsonSerializable(typeof(Testing.MauiAuthoringStudyReport))]
 [JsonSerializable(typeof(Flows.StudyCommandResult))]
+[JsonSerializable(typeof(Flows.MauiQualificationCommandResult))]
 internal sealed partial class DevFlowCliJsonContext : JsonSerializerContext;
 
 internal sealed class FlowValidationCliResult

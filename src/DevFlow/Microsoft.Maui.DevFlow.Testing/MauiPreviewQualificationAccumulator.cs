@@ -95,7 +95,10 @@ public static class MauiPreviewQualificationAccumulator
         accumulation.Platform = reference.Platform;
         accumulation.PolicyVersion = reference.Thresholds.PolicyVersion;
         accumulation.CorpusFingerprint = reference.Fingerprints.CorpusFingerprint;
-        accumulation.Thresholds = reference.Thresholds;
+        // Thresholds are anchored to the compiled policy defaults, never adopted from a run file.
+        // A hand-edited run could otherwise set minimumRepairEvaluations to 1 and the accumulated
+        // gates would obligingly agree.
+        accumulation.Thresholds = new MauiQualificationGateThresholds();
 
         var accepted = new List<MauiPreviewQualificationReport>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
@@ -164,6 +167,15 @@ public static class MauiPreviewQualificationAccumulator
                     errors.Add("accumulate-run-file-unreadable");
                     continue;
                 }
+                // Explicit JSON nulls deserialize to null non-nullable members and then throw far
+                // from here. Reject the file instead of crashing mid-merge.
+                if (parsed.Metrics is null || parsed.Corpus is null || parsed.Fingerprints is null ||
+                    parsed.Thresholds is null || parsed.Profiles is null || parsed.Gates is null ||
+                    parsed.Metrics.FlakeFirstAttemptStability is null)
+                {
+                    errors.Add("accumulate-run-file-incomplete");
+                    continue;
+                }
                 reports.Add(parsed);
             }
             catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or JsonException or ArgumentException or NotSupportedException)
@@ -188,8 +200,15 @@ public static class MauiPreviewQualificationAccumulator
             .Append(report.Platform).Append('\n')
             .Append(report.Status).Append('\n')
             .Append(JsonSerializer.Serialize(report.Fingerprints, MauiTestingJsonContext.Default.MauiQualificationFingerprints)).Append('\n')
-            .Append(JsonSerializer.Serialize(report.Profiles, MauiTestingJsonContext.Default.ListMauiQualificationPlatformProfile)).Append('\n')
             .Append(JsonSerializer.Serialize(report.Corpus, MauiTestingJsonContext.Default.MauiQualificationCorpusSummary)).Append('\n');
+        // Profiles are hashed in a stable order so that reordering the same platform evidence
+        // cannot be presented as a second, independent run.
+        foreach (var profile in report.Profiles
+            .Select(static profile => JsonSerializer.Serialize(profile, MauiTestingJsonContext.Default.MauiQualificationPlatformProfile))
+            .OrderBy(static text => text, StringComparer.Ordinal))
+        {
+            payload.Append(profile).Append('\n');
+        }
         foreach (var name in MergedMetricNames)
             AppendRate(payload, name, Select(report.Metrics, name));
         foreach (var flow in report.Metrics.FlakeFirstAttemptStability.Flows.OrderBy(static flow => flow.FlowId, StringComparer.Ordinal))
@@ -208,6 +227,7 @@ public static class MauiPreviewQualificationAccumulator
         builder
             .Append(name).Append('|')
             .Append(metric.Numerator).Append('/').Append(metric.Denominator).Append('|')
+            .Append(metric.IndependentEvaluations).Append('|')
             .Append(metric.IndependentDeviceRuns);
         foreach (var count in (metric.SourceCounts ?? []).OrderBy(static count => count.Source, StringComparer.Ordinal))
             builder.Append('|').Append(count.Source).Append(':').Append(count.Numerator).Append('/').Append(count.Denominator);
@@ -218,6 +238,7 @@ public static class MauiPreviewQualificationAccumulator
         MauiPreviewQualificationReport reference,
         MauiPreviewQualificationReport candidate)
     {
+        var policy = new MauiQualificationGateThresholds();
         var reasons = new List<string>();
         if (!string.Equals(reference.ContractVersion, candidate.ContractVersion, StringComparison.Ordinal))
             reasons.Add("accumulate-contract-version-mismatch");
@@ -229,6 +250,19 @@ public static class MauiPreviewQualificationAccumulator
             reasons.Add("accumulate-corpus-fingerprint-mismatch");
         if (!ThresholdsMatch(reference.Thresholds, candidate.Thresholds))
             reasons.Add("accumulate-threshold-mismatch");
+        // A run whose own thresholds were relaxed relative to policy cannot contribute evidence to
+        // a gate decision, no matter how many other runs agree with it.
+        if (!ThresholdsMatch(policy, candidate.Thresholds))
+            reasons.Add("accumulate-threshold-not-policy-default");
+        // Unknown JSON properties survive a round-trip through [JsonExtensionData] but are not
+        // hashed, so two reports differing only there share a fingerprint and dedupe would treat
+        // one as a repeat of the other. Refuse to reason about evidence we did not model.
+        if (candidate.Fingerprints.ExtensionData?.Count > 0 ||
+            candidate.Corpus.ExtensionData?.Count > 0 ||
+            candidate.Profiles.Any(static profile => profile.ExtensionData?.Count > 0))
+        {
+            reasons.Add("accumulate-unmodelled-evidence");
+        }
         return reasons;
     }
 
@@ -258,8 +292,14 @@ public static class MauiPreviewQualificationAccumulator
     private static MauiQualificationRateMetric MergeRate(IEnumerable<MauiQualificationRateMetric> metrics)
     {
         var list = metrics.Where(static metric => metric is not null).ToList();
-        var numerator = list.Sum(static metric => Math.Max(0, metric.Numerator));
-        var denominator = list.Sum(static metric => Math.Max(0, metric.Denominator));
+        // Summed in long and clamped: a checked int overflow here throws out of the accumulator's
+        // catch filter and takes the whole command down instead of failing the merge closed.
+        var numerator = (int)Math.Clamp(list.Sum(static metric => (long)Math.Max(0, metric.Numerator)), 0, int.MaxValue);
+        var denominator = (int)Math.Clamp(list.Sum(static metric => (long)Math.Max(0, metric.Denominator)), 0, int.MaxValue);
+        var independent = (int)Math.Clamp(list.Sum(static metric => (long)Math.Max(0, metric.IndependentEvaluations)), 0, int.MaxValue);
+        // A numerator larger than its denominator is incoherent evidence, not a rate above 1.
+        numerator = Math.Min(numerator, denominator);
+        independent = Math.Min(independent, denominator);
         var confidence = list
             .Select(static metric => metric.ConfidenceInterval?.ConfidenceLevel)
             .FirstOrDefault(static level => level is > 0 and < 1) ?? 0.95;
@@ -269,7 +309,9 @@ public static class MauiPreviewQualificationAccumulator
             State = denominator == 0 ? "missing" : "measured",
             Numerator = numerator,
             Denominator = denominator,
-            Value = denominator == 0 ? null : (double)numerator / denominator,            ConfidenceInterval = denominator == 0
+            IndependentEvaluations = independent,
+            Value = denominator == 0 ? null : (double)numerator / denominator,
+            ConfidenceInterval = denominator == 0
                 ? null
                 : MauiQualificationStatistics.WilsonInterval(numerator, denominator, confidence),
             SampleSources = list
@@ -284,8 +326,8 @@ public static class MauiPreviewQualificationAccumulator
                 .Select(static group => new MauiQualificationRateSourceCount
                 {
                     Source = group.Key,
-                    Numerator = group.Sum(static count => Math.Max(0, count.Numerator)),
-                    Denominator = group.Sum(static count => Math.Max(0, count.Denominator)),
+                    Numerator = (int)Math.Clamp(group.Sum(static count => (long)Math.Max(0, count.Numerator)), 0, int.MaxValue),
+                    Denominator = (int)Math.Clamp(group.Sum(static count => (long)Math.Max(0, count.Denominator)), 0, int.MaxValue),
                 })
                 .ToList(),
             // Independence is conjunctive: one pooled or non-device contributor makes the
@@ -328,7 +370,7 @@ public static class MauiPreviewQualificationAccumulator
             "classification-accuracy-lower-bound-below-threshold");
 
         var falseHeals = accumulation.Metrics.GetValueOrDefault("falseHeals") ?? new MauiQualificationRateMetric();
-        var falseHealStatus = falseHeals.Denominator < thresholds.MinimumNoRepairEvaluations
+        var falseHealStatus = falseHeals.IndependentEvaluations < thresholds.MinimumNoRepairEvaluations
             ? MauiPreviewQualificationStates.NotQualified
             : falseHeals.Numerator <= thresholds.MaximumFalseHeals
                 ? MauiPreviewQualificationStates.Pass
@@ -338,11 +380,11 @@ public static class MauiPreviewQualificationAccumulator
             GateId = "accumulated-zero-false-heals",
             Status = falseHealStatus,
             Message = falseHealStatus == MauiPreviewQualificationStates.Pass
-                ? "No false heal was observed across the accumulated no-repair denominator."
-                : "Accumulated no-repair evidence is insufficient or includes a false heal.",
+                ? "No false heal was observed across the accumulated independent no-repair denominator."
+                : "Accumulated independent no-repair evidence is insufficient or includes a false heal.",
             ReasonCodes = falseHealStatus == MauiPreviewQualificationStates.Pass
                 ? []
-                : falseHeals.Denominator < thresholds.MinimumNoRepairEvaluations
+                : falseHeals.IndependentEvaluations < thresholds.MinimumNoRepairEvaluations
                     ? ["no-repair-evaluation-count-insufficient"]
                     : ["false-heal-observed"],
         });
@@ -376,21 +418,24 @@ public static class MauiPreviewQualificationAccumulator
     {
         var metric = accumulation.Metrics.GetValueOrDefault(metricName) ?? new MauiQualificationRateMetric();
         var observed = useLowerBound ? metric.ConfidenceInterval?.Lower : metric.Value;
-        var status = metric.Denominator < minimumDenominator
+        // Counts independent evaluations, not raw denominator: restating one seed a hundred times
+        // is one trial, and the per-run gates hold the same line.
+        var status = metric.IndependentEvaluations < minimumDenominator
             ? MauiPreviewQualificationStates.NotQualified
             : observed >= minimumLowerBound
                 ? MauiPreviewQualificationStates.Pass
                 : MauiPreviewQualificationStates.Fail;
+        var criterion = useLowerBound ? "conservative Wilson lower-bound" : "point-estimate";
         accumulation.Gates.Add(new MauiQualificationGateResult
         {
             GateId = gateId,
             Status = status,
             Message = status == MauiPreviewQualificationStates.Pass
-                ? $"Accumulated {metricName} meets the conservative Wilson lower-bound threshold."
-                : $"Accumulated {metricName} lacks enough evaluations or misses the conservative lower-bound threshold.",
+                ? $"Accumulated {metricName} meets the {criterion} threshold."
+                : $"Accumulated {metricName} lacks enough independent evaluations or misses the {criterion} threshold.",
             ReasonCodes = status == MauiPreviewQualificationStates.Pass
                 ? []
-                : metric.Denominator < minimumDenominator
+                : metric.IndependentEvaluations < minimumDenominator
                     ? [insufficientCode]
                     : [belowThresholdCode],
         });

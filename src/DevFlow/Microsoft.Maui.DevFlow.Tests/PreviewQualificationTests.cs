@@ -1183,6 +1183,180 @@ public sealed class PreviewQualificationTests
 
         var classification = report.Metrics.ClassificationAccuracy;
         Assert.True(classification.IndependentConfidenceInterval!.Lower < classification.ConfidenceInterval!.Lower);
+
+        // The assertions above are published values; they stay true even if the gates read the
+        // wrong interval. This is the one that inverts: enough independent evidence to clear the
+        // count check, an independent lower bound below the threshold, and a pooled lower bound
+        // above it. If a gate reverts to metric.ConfidenceInterval it passes and this fails.
+        var input = new MauiPreviewQualificationInput { Platform = "android" };
+        for (var index = 0; index < 100; index++)
+        {
+            input.Samples.Add(new MauiQualificationExecutionSample
+            {
+                SampleId = $"device-repair-{index}",
+                Source = MauiQualificationSampleSources.DeviceBacked,
+                Platform = "android",
+                RealDevice = true,
+                RepairExpected = true,
+                RepairProposed = true,
+                RepairCorrect = index >= 4,
+            });
+        }
+        for (var index = 0; index < 900; index++)
+        {
+            input.Samples.Add(new MauiQualificationExecutionSample
+            {
+                SampleId = $"derived-repair-{index}",
+                Source = MauiQualificationSampleSources.CuratedDerived,
+                Platform = "android",
+                RepairExpected = true,
+                RepairProposed = true,
+                RepairCorrect = true,
+            });
+        }
+        var skewed = MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch).Metrics.RepairPrecision;
+        Assert.Equal(1000, skewed.Denominator);
+        Assert.Equal(100, skewed.IndependentEvaluations);
+        Assert.True(skewed.ConfidenceInterval!.Lower > 0.95, $"pooled lower bound was {skewed.ConfidenceInterval.Lower}");
+        Assert.True(skewed.IndependentConfidenceInterval!.Lower < 0.95, $"independent lower bound was {skewed.IndependentConfidenceInterval.Lower}");
+
+        var gate = MauiPreviewQualificationGateEvaluator
+            .Evaluate(input, DateTimeOffset.UnixEpoch)
+            .Gates.Single(static item => item.GateId == "repair-precision");
+        Assert.Equal(MauiPreviewQualificationStates.Fail, gate.Status);
+        Assert.Contains("repair-precision-lower-bound-below-threshold", gate.ReasonCodes);
+    }
+
+    [Fact]
+    public void Accumulator_SumsCleanFirstAttemptsAcrossRunsButNotUnknownSources()
+    {
+        // The whole argument for --accumulate over a higher --repeat cap: 20 attempts per run is
+        // the harness limit, so 100 clean first attempts per flow has to come from separate jobs.
+        var runs = new List<MauiPreviewQualificationReport>();
+        for (var run = 0; run < 5; run++)
+        {
+            var input = new MauiPreviewQualificationInput { Platform = "android" };
+            input.Tier1Flows.Add("checkout");
+            // Independent shards run on distinct devices; the evidence fingerprint refuses
+            // two runs whose recorded evidence is indistinguishable.
+            input.Profiles.Add(new MauiQualificationPlatformProfile
+            {
+                Platform = "android",
+                Scope = "tier1",
+                DeviceEvidenceKind = "physical-device",
+                RealDevice = true,
+                DeviceFingerprint = $"device-{run}",
+            });
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                input.Samples.Add(new MauiQualificationExecutionSample
+                {
+                    SampleId = $"run{run}-attempt{attempt}",
+                    Source = MauiQualificationSampleSources.DeviceBacked,
+                    Platform = "android",
+                    RealDevice = true,
+                    DeviceEvidenceKind = "physical-device",
+                    FlowId = "checkout",
+                    FirstAttempt = true,
+                    CleanState = true,
+                    Outcome = MauiFlowRunOutcomes.Passed,
+                });
+            }
+            runs.Add(MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch.AddDays(run)));
+        }
+
+        var single = MauiPreviewQualificationAccumulator.Accumulate([runs[0]], DateTimeOffset.UnixEpoch);
+        var singleFlow = Assert.Single(single.FirstAttemptFlows);
+        Assert.Equal(20, singleFlow.CleanFirstAttempts);
+        Assert.NotEqual(MauiPreviewQualificationStates.Pass, Gate(single, "accumulated-tier1-first-attempts").Status);
+
+        var merged = MauiPreviewQualificationAccumulator.Accumulate(runs, DateTimeOffset.UnixEpoch);
+        Assert.Equal(5, merged.AcceptedRuns);
+        var flow = Assert.Single(merged.FirstAttemptFlows);
+        Assert.Equal(singleFlow.FlowId, flow.FlowId);
+        Assert.Equal(100, flow.CleanFirstAttempts);
+        Assert.Equal(100, flow.PassedFirstAttempts);
+        Assert.True(flow.RealDeviceEvidence);
+        Assert.Equal(MauiPreviewQualificationStates.Pass, Gate(merged, "accumulated-tier1-first-attempts").Status);
+    }
+
+    [Fact]
+    public void Accumulator_RefusesRunsCarryingAnUnrecognisedSampleSource()
+    {
+        var honest = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput(), DateTimeOffset.UnixEpoch);
+        var smuggled = MauiPreviewQualificationGateEvaluator.Evaluate(QualifiedInput(), DateTimeOffset.UnixEpoch.AddDays(1));
+        // A source name the merge does not model would be classified as "not static" and summed as
+        // fresh evidence. 300 zero-false-heal samples under a plausible-looking label is all it
+        // would take to clear the 300-evaluation minimum.
+        smuggled.Metrics.FalseHeals.SourceCounts.Add(new MauiQualificationRateSourceCount
+        {
+            Source = "device-backed-lab",
+            Numerator = 0,
+            Denominator = 300,
+            IndependentEvaluations = 300,
+        });
+        smuggled.Metrics.FalseHeals.Denominator += 300;
+        smuggled.Metrics.FalseHeals.IndependentEvaluations += 300;
+
+        var accumulation = MauiPreviewQualificationAccumulator.Accumulate([honest, smuggled], DateTimeOffset.UnixEpoch);
+        Assert.Equal(1, accumulation.AcceptedRuns);
+        Assert.Contains(
+            accumulation.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-unknown-sample-source"));
+        Assert.Equal(
+            honest.Metrics.FalseHeals.IndependentEvaluations,
+            accumulation.Metrics["falseHeals"].IndependentEvaluations);
+    }
+
+    [Fact]
+    public void CorpusRunner_ReportsUndeclaredClonesAndPinsTheCaseContentsInTheFingerprint()
+    {
+        var scratch = Path.Combine(
+            Path.GetDirectoryName(typeof(PreviewQualificationTests).Assembly.Location)!,
+            "corpus-clone-tests",
+            Guid.NewGuid().ToString("N"));
+        CopyDirectory(Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus"), scratch);
+        try
+        {
+            var before = RunCorpus(scratch).Summary;
+            Assert.Equal(0, before.UndeclaredProjectionCollisions);
+
+            // A copy of a repair-positive seed that claims to be hand-authored is counted as an
+            // independent trial by the provenance split. The projection check is what discloses it.
+            var seedPath = Directory.GetFiles(Path.Combine(scratch, "cases"), "repair-positive-*.json")
+                .OrderBy(static path => path, StringComparer.Ordinal)
+                .First();
+            var clone = JsonNode.Parse(File.ReadAllText(seedPath))!.AsObject();
+            clone["id"] = "repair-positive-undeclared-clone";
+            clone["provenance"]!.AsObject()["method"] = "hand-authored";
+            clone["provenance"]!.AsObject().Remove("derivedFrom");
+            File.WriteAllText(Path.Combine(scratch, "cases", "repair-positive-undeclared-clone.json"), clone.ToJsonString());
+            var manifestPath = Path.Combine(scratch, "corpus-manifest.json");
+            var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+            manifest["cases"]!.AsArray().Add(new JsonObject
+            {
+                ["id"] = "repair-positive-undeclared-clone",
+                ["file"] = "cases/repair-positive-undeclared-clone.json",
+                ["kind"] = "repair-positive",
+                ["disposition"] = "repair-eligible",
+            });
+            File.WriteAllText(manifestPath, manifest.ToJsonString());
+
+            var after = RunCorpus(scratch).Summary;
+            Assert.Empty(after.Errors);
+            Assert.Equal(before.CuratedCases + 1, after.CuratedCases);
+            Assert.Equal(before.CuratedDerivedCases, after.CuratedDerivedCases);
+            Assert.True(after.UndeclaredProjectionCollisions > 0);
+
+            // Editing a case without touching the manifest must change the corpus fingerprint, or
+            // the accumulator would treat two different corpora as the same static evidence.
+            Assert.NotEqual(before.ManifestFingerprint, after.ManifestFingerprint);
+        }
+        finally
+        {
+            try { Directory.Delete(scratch, recursive: true); }
+            catch (IOException) { /* best effort */ }
+        }
     }
 
     private static MauiPreviewQualificationReport Report(

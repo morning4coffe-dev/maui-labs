@@ -3,6 +3,19 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
+    <!-- Always runs unattended, so it is held to the coverage threshold. See eng/Tests.targets.
+         Measured through Arcade with eng/test.runsettings, Release on windows-latest (the leg
+         _build.yml pins the gate to via coverage-os, and the only leg ci-devflow.yml runs):
+         line 49.03%, branch 47.33% over 51885 lines, across every first-party assembly this
+         suite loads. Debug measures 48.94% / 46.87% over 60531 lines; Release emits fewer
+         sequence points, which is why the lines-valid floor below is set from the Release
+         number. Branch is the binding half, so 44 leaves 3.33 points of headroom. The aggregate
+         is dragged down by maui.dll (35.18% line), which this suite only touches through the
+         broker; the DevFlow assemblies it targets run far higher, for example Devices 93.77%,
+         Testing 83.92%, Analyzers 88.17%, Agent.Core 59.62%. -->
+    <EnforceCoverageThreshold>true</EnforceCoverageThreshold>
+    <CoverageThreshold>44</CoverageThreshold>
+    <CoverageMinimumLinesValid>46000</CoverageMinimumLinesValid>
   </PropertyGroup>
 
   <ItemGroup>

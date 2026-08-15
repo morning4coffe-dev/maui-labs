@@ -16,4 +16,17 @@
              Condition="!Exists('$(NuGetPackageRoot)microsoft.wixtoolset.sdk\$(MicrosoftWixToolsetSdkVersion)\tools\net472\arm64')" />
   </Target>
 
+  <!--
+    coverlet's data collector lives in the package's build folder and is normally added to the
+    test adapter path by coverlet.collector.targets, which only runs on the MSBuild VSTest target
+    (that is, dotnet test on a project). Arcade runs dotnet test on the built assembly instead, so
+    that target never executes and VSTest reports "Unable to find a datacollector with friendly
+    name 'XPlat Code Coverage'". eng/Tests.targets passes the path explicitly; this makes the
+    package location discoverable. It is unconditional so restore produces the same assets whether
+    or not a build collects coverage.
+  -->
+  <ItemGroup>
+    <PackageReference Update="coverlet.collector" GeneratePathProperty="true" />
+  </ItemGroup>
+
 </Project>

@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Repo-owned test run settings.
+
+  CI never calls `dotnet test` directly: .github/workflows/_build.yml runs the Arcade
+  build.cmd/build.sh entry point with the projects switch pointing at a solution filter.
+  Arcade's RunTests target forwards $(VSTestRunSettingsFile) to its internal `dotnet test`
+  invocation, so eng/Tests.targets points that property here when /p:CollectCoverage=true
+  is passed.
+
+  Locally: dotnet test <project> /settings:eng/test.runsettings
+-->
+<RunSettings>
+  <RunConfiguration>
+    <!-- Arcade overrides this on the command line; it only affects direct local runs. -->
+    <ResultsDirectory>artifacts/TestResults</ResultsDirectory>
+  </RunConfiguration>
+
+  <DataCollectionRunSettings>
+    <DataCollectors>
+      <DataCollector friendlyName="XPlat Code Coverage">
+        <Configuration>
+          <Format>cobertura</Format>
+          <!-- Only measure shipping product code; the Include filter alone would match test assemblies.
+               The CLI ships as the `maui` global tool, so its assembly name is `maui`, not Microsoft.Maui.Cli.
+
+               Both suites load both products, so the report each one produces is a portfolio
+               average across every assembly listed here, not a measurement of the code that suite
+               targets. The DevFlow suite's number is roughly 60% maui.dll by line weight and the
+               CLI suite's is roughly 30% DevFlow. Read the per-assembly `package` rates in the
+               cobertura report before drawing any conclusion from the headline percentage, and
+               see CoverageMinimumLinesValid in eng/Tests.targets for the denominator guard. -->
+          <Include>[Microsoft.Maui.DevFlow.*]*,[maui]*</Include>
+          <Exclude>[*.Tests]*,[*.UnitTests]*,[*.IntegrationTests]*,[*SmokeTests]*,[*.TestAgent.Host]*</Exclude>
+          <ExcludeByAttribute>Obsolete,GeneratedCodeAttribute,CompilerGeneratedAttribute,ExcludeFromCodeCoverageAttribute</ExcludeByAttribute>
+          <ExcludeByFile>**/obj/**/*.g.cs,**/*.Designer.cs</ExcludeByFile>
+          <IncludeTestAssembly>false</IncludeTestAssembly>
+          <SkipAutoProps>true</SkipAutoProps>
+          <UseSourceLink>false</UseSourceLink>
+          <DeterministicReport>false</DeterministicReport>
+        </Configuration>
+      </DataCollector>
+    </DataCollectors>
+  </DataCollectionRunSettings>
+</RunSettings>

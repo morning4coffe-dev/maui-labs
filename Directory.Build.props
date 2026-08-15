@@ -59,4 +59,22 @@
     <DefineConstants>$(DefineConstants);MACOS</DefineConstants>
   </PropertyGroup>
 
+  <!--
+    Code coverage runner selection.
+
+    Arcade defaults to the xunit console runner (TestRunnerName=XUnit), which has no data
+    collector seam, so coverlet.collector never loads and no coverage report is produced.
+    coverlet's collector is a VSTest data collector, so collecting coverage requires Arcade's
+    VSTest runner, which is the only path that forwards $(VSTestRunSettingsFile) to the test
+    command line. This has to be decided here rather than in eng/Tests.targets: Arcade picks
+    the runner targets file during its own Tests.targets import, which happens before the
+    repo hook is imported.
+
+    Only the coverage legs switch runners. CollectCoverage defaults to false, so ordinary
+    builds keep the xunit console runner and its .xml result files unchanged.
+  -->
+  <PropertyGroup Condition="'$(CollectCoverage)' == 'true'">
+    <UseVSTestRunner>true</UseVSTestRunner>
+  </PropertyGroup>
+
 </Project>

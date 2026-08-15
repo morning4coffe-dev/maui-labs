@@ -20,6 +20,10 @@ public static class MauiAuthoringStudyProtocol
     public const string AssistedArm = "assisted";
     public const string ControlArm = "unassisted-control";
 
+    /// <summary>The salt shape documented in docs/DevFlow/authoring-time-protocol.md.</summary>
+    private static readonly System.Text.RegularExpressions.Regex ParticipantSaltPattern =
+        new("^participant-[0-9a-f]{8,64}$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
     /// <summary>Minimum sessions per arm, per task, before a comparison is reported.</summary>
     public const int MinimumSessionsPerArm = 5;
 
@@ -96,6 +100,15 @@ public static class MauiAuthoringStudyProtocol
         if (string.IsNullOrWhiteSpace(participantSalt))
         {
             rejection = "study-session-participant-unlinkable";
+            return null;
+        }
+        // The control arm has no capture path, so control exports are hand-authored and the
+        // browser-side format check binds nothing for exactly the arm that decides the result.
+        // Two cosmetically different salts for one person inflate the participant count and defeat
+        // the cross-arm blocker, so enforce the documented shape here too.
+        if (!ParticipantSaltPattern.IsMatch(participantSalt))
+        {
+            rejection = "study-session-participant-salt-invalid";
             return null;
         }
         var sessionId = root.TryGetProperty("session", out var session) && session.ValueKind == JsonValueKind.Object

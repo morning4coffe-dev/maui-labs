@@ -111,7 +111,11 @@ the pre-existing per-session `redactionSalt` continues to opaque-ify run, approv
 ids.
 
 A session without a participant salt is **rejected** by the aggregator
-(`study-session-participant-unlinkable`) rather than counted as an anonymous extra data point.
+(`study-session-participant-unlinkable`) rather than counted as an anonymous extra data point, and a
+salt that does not match `participant-<8–64 lowercase hex>` is rejected as
+`study-session-participant-salt-invalid`. That format check matters most for the control arm, whose
+exports are hand-authored: two cosmetically different salts for one person would inflate the
+participant count and slip past the both-arms blocker.
 
 ## Recording and export
 

@@ -125,7 +125,7 @@ internal static class FlowStudyCommands
             if (json)
             {
                 output.WriteResult(new StudyCommandResult(
-                    true,
+                    rejected.Count == 0,
                     report,
                     files.Count,
                     deduped.Count,
@@ -166,10 +166,13 @@ internal static class FlowStudyCommands
                 return 1;
             }
             // A run that silently discarded exports is not a clean run. The report still stands on
-            // what survived, so this is an error signal rather than a nonzero exit, but a caller
-            // reading only the exit code must not conclude every session was counted.
+            // what survived and is still written, but the exit code says plainly that not every
+            // session was counted — an aggregation job must not report success on partial data.
             if (rejected.Count > 0)
+            {
                 markError();
+                return 1;
+            }
             return 0;
         });
         return command;

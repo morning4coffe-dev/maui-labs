@@ -9,6 +9,9 @@ namespace Microsoft.Maui.DevFlow.Agent.IntegrationTests.Fixtures;
 /// </summary>
 internal sealed class AndroidFlowTestHost : IAsyncDisposable
 {
+    /// <summary>Route the harness verifies when a plan declares no checkpoint route.</summary>
+    internal const string DefaultCheckpointRoute = "//native";
+
     readonly IPlatformFlowTestLifecycle _lifecycle;
     readonly IMauiFlowDriver _driver;
     readonly AgentClient? _agentClient;
@@ -74,7 +77,7 @@ internal sealed class AndroidFlowTestHost : IAsyncDisposable
             var seed = await _lifecycle.SeedAsync(request.Seed, cancellationToken).ConfigureAwait(false);
             verification = await _lifecycle.VerifyCheckpointAsync(new PlatformCheckpointRequest
             {
-                Expected = request.ExpectedCheckpoint ?? new MauiFlowCheckpoint { Route = "//native" },
+                Expected = request.ExpectedCheckpoint ?? new MauiFlowCheckpoint { Route = DefaultCheckpointRoute },
                 Reset = reset,
                 Seed = seed,
             }, cancellationToken).ConfigureAwait(false);

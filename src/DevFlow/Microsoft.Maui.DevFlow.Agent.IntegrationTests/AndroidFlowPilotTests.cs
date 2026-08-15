@@ -13,6 +13,7 @@ namespace Microsoft.Maui.DevFlow.Agent.IntegrationTests;
 public sealed class AndroidFlowPilotTests
 {
     const int DefaultCleanRepetitions = 3;
+    const string PilotCheckpointRoute = AndroidFlowTestHost.DefaultCheckpointRoute;
     readonly ITestOutputHelper _output;
 
     public AndroidFlowPilotTests(ITestOutputHelper output)
@@ -90,6 +91,9 @@ public sealed class AndroidFlowPilotTests
                             RunId = runId,
                             ArtifactRoot = configuration.ArtifactRoot,
                             FailureEvidenceCapture = evidence,
+                            ExpectedCheckpoint = string.IsNullOrWhiteSpace(flow.Plan.Checkpoint?.Route)
+                                ? null
+                                : new MauiFlowCheckpoint { Route = flow.Plan.Checkpoint!.Route },
                         });
 
                     manifest.RecordCleanAttempt(flow.Flow, flow.SourcePath, repetition, result.Report);
@@ -204,6 +208,19 @@ public sealed class AndroidFlowPilotTests
                 throw new InvalidOperationException(
                     $"{Path.GetFileName(path)} declares sideEffectPolicy '{bundle.Plan.SideEffectPolicy}'; " +
                     "the Android flow pilot only replays plans with 'none'.");
+            }
+
+            // The harness verifies PilotCheckpointRoute. A committed plan may leave the checkpoint
+            // empty (declaring checkpoint requirements makes plain `maui devflow flow run` demand a
+            // state-evidence provider), but if it does declare a route it has to be the same one, so
+            // a plan and the harness can never disagree silently.
+            var declaredRoute = bundle.Plan.Checkpoint?.Route;
+            if (!string.IsNullOrWhiteSpace(declaredRoute)
+                && !string.Equals(declaredRoute, PilotCheckpointRoute, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"{Path.GetFileName(path)} declares checkpoint route '{declaredRoute}', " +
+                    $"but the Android flow pilot verifies '{PilotCheckpointRoute}'.");
             }
 
             sources.Add(new FlowPilotFlowSource(path, bundle.Flow, bundle.Plan));

@@ -39,6 +39,12 @@ public sealed class MauiQualificationAccumulation
     [JsonPropertyName("distinctEvidenceRuns")] public int DistinctEvidenceRuns { get; set; }
     [JsonPropertyName("runs")] public List<MauiQualificationAccumulatedRun> Runs { get; set; } = [];
     [JsonPropertyName("metrics")] public Dictionary<string, MauiQualificationRateMetric> Metrics { get; set; } = [];
+
+    /// <summary>
+    /// Clean first attempts per Tier-1 flow, summed across accepted runs. This is the evidence the
+    /// 20-attempt <c>--repeat</c> cap makes unreachable in a single run.
+    /// </summary>
+    [JsonPropertyName("firstAttemptFlows")] public List<MauiQualificationFlowAttemptSummary> FirstAttemptFlows { get; set; } = [];
     [JsonPropertyName("thresholds")] public MauiQualificationGateThresholds Thresholds { get; set; } = new();
     [JsonPropertyName("gates")] public List<MauiQualificationGateResult> Gates { get; set; } = [];
 }
@@ -133,6 +139,7 @@ public static class MauiPreviewQualificationAccumulator
 
         foreach (var name in MergedMetricNames)
             accumulation.Metrics[name] = MergeRate(accepted.Select(report => Select(report.Metrics, name)));
+        accumulation.FirstAttemptFlows = MergeFirstAttemptFlows(accepted);
 
         AddGates(accumulation);
         accumulation.Status = accumulation.Gates.Any(static gate => gate.Status == MauiPreviewQualificationStates.Fail)
@@ -281,8 +288,18 @@ public static class MauiPreviewQualificationAccumulator
         // than it claims to, so it cannot be merged with the reference.
         if (!StaticEvidenceMatches(reference, candidate))
             reasons.Add("accumulate-static-evidence-mismatch");
+        // MergeRate sums device-backed counts and takes the minimum of everything else. A source
+        // name it does not model would be silently classified as "not device-backed" and quietly
+        // de-duplicated, or — before this check — silently summed. The single-run input validator
+        // already rejects unknown sources; the merge path must agree with it.
+        if (!SampleSourcesAreKnown(candidate))
+            reasons.Add("accumulate-unknown-sample-source");
         return reasons;
     }
+
+    private static bool SampleSourcesAreKnown(MauiPreviewQualificationReport report) =>
+        MergedMetricNames.All(name => (Select(report.Metrics, name).SourceCounts ?? [])
+            .All(static count => MauiQualificationSampleSources.IsKnown(count.Source)));
 
     private static bool IsCoherent(MauiQualificationRateMetric metric)
     {
@@ -362,11 +379,12 @@ public static class MauiPreviewQualificationAccumulator
             .GroupBy(static count => count.Source, StringComparer.Ordinal)
             .OrderBy(static group => group.Key, StringComparer.Ordinal))
         {
-            if (MauiQualificationSampleSources.IsStatic(group.Key))
+            if (!MauiQualificationSampleSources.DeviceBacked.Equals(group.Key, StringComparison.Ordinal))
             {
-                // Identical by construction (the corpus fingerprint is an accumulation
-                // precondition, and Incompatibilities rejects any run that disagrees). Taking the
-                // minimum rather than the first keeps this fail-closed if that ever stops holding.
+                // Only device-backed evidence is a fresh observation. Everything else is a re-read
+                // of the same corpus, and an unrecognised source name is refused outright by
+                // Incompatibilities before it reaches here — taking the minimum keeps this
+                // fail-closed if that ever stops holding.
                 merged.Add(new MauiQualificationRateSourceCount
                 {
                     Source = group.Key,
@@ -433,6 +451,40 @@ public static class MauiPreviewQualificationAccumulator
         };
     }
 
+    /// <summary>
+    /// Sums clean first attempts per Tier-1 flow across runs. This is the whole reason
+    /// <c>--accumulate</c> exists rather than a higher <c>--repeat</c> cap: the stability gate wants
+    /// 100 clean first attempts per flow and the harness caps a single run at 20, so the count has
+    /// to come from independent jobs. Unlike the static corpus share, these are genuinely fresh
+    /// device observations and summing them is correct — duplicate runs are already refused by the
+    /// evidence fingerprint, which hashes the per-flow attempt counts.
+    /// </summary>
+    private static List<MauiQualificationFlowAttemptSummary> MergeFirstAttemptFlows(
+        IReadOnlyList<MauiPreviewQualificationReport> accepted)
+    {
+        var merged = new List<MauiQualificationFlowAttemptSummary>();
+        foreach (var group in accepted
+            .SelectMany(static report => report.Metrics.FlakeFirstAttemptStability.Flows)
+            .Where(static flow => !string.IsNullOrWhiteSpace(flow.FlowId))
+            .GroupBy(static flow => flow.FlowId!, StringComparer.Ordinal)
+            .OrderBy(static group => group.Key, StringComparer.Ordinal))
+        {
+            var clean = (int)Math.Clamp(group.Sum(static flow => (long)Math.Max(0, flow.CleanFirstAttempts)), 0, int.MaxValue);
+            var passed = (int)Math.Clamp(group.Sum(static flow => (long)Math.Max(0, flow.PassedFirstAttempts)), 0, int.MaxValue);
+            merged.Add(new MauiQualificationFlowAttemptSummary
+            {
+                FlowId = group.Key,
+                CleanFirstAttempts = clean,
+                PassedFirstAttempts = Math.Min(passed, clean),
+                Stability = clean == 0 ? null : (double)Math.Min(passed, clean) / clean,
+                // One run without real-device evidence taints the merged flow. A flow is only
+                // device-backed if every contribution to it was.
+                RealDeviceEvidence = group.All(static flow => flow.RealDeviceEvidence),
+            });
+        }
+        return merged;
+    }
+
     private static void AddGates(MauiQualificationAccumulation accumulation)
     {
         var thresholds = accumulation.Thresholds;
@@ -482,6 +534,37 @@ public static class MauiPreviewQualificationAccumulator
                 : falseHeals.IndependentEvaluations < thresholds.MinimumNoRepairEvaluations
                     ? ["no-repair-evaluation-count-insufficient"]
                     : ["false-heal-observed"],
+        });
+
+        var flows = accumulation.FirstAttemptFlows;
+        var firstAttemptReasons = new List<string>();
+        if (flows.Count == 0)
+            firstAttemptReasons.Add("tier1-flow-declaration-missing");
+        foreach (var flow in flows)
+        {
+            if (!flow.RealDeviceEvidence)
+                firstAttemptReasons.Add("android-real-device-evidence-missing");
+            if (flow.CleanFirstAttempts < thresholds.MinimumCleanFirstAttemptsPerTier1Flow)
+                firstAttemptReasons.Add("android-clean-first-attempt-count-insufficient");
+            if (flow.Stability < thresholds.MinimumFirstAttemptStability)
+                firstAttemptReasons.Add("android-first-attempt-stability-below-threshold");
+        }
+        // Mirrors AddAndroidFirstAttemptGate: a shortfall in evidence is not-qualified, but a
+        // sufficient sample that misses the threshold is a real failure.
+        var firstAttemptStatus = firstAttemptReasons.Count == 0
+            ? MauiPreviewQualificationStates.Pass
+            : firstAttemptReasons.Contains("android-first-attempt-stability-below-threshold") &&
+              flows.All(flow => flow.CleanFirstAttempts >= thresholds.MinimumCleanFirstAttemptsPerTier1Flow)
+                ? MauiPreviewQualificationStates.Fail
+                : MauiPreviewQualificationStates.NotQualified;
+        accumulation.Gates.Add(new MauiQualificationGateResult
+        {
+            GateId = "accumulated-tier1-first-attempts",
+            Status = firstAttemptStatus,
+            Message = firstAttemptStatus == MauiPreviewQualificationStates.Pass
+                ? "Every declared Tier-1 flow reached the clean real-device first-attempt count across accumulated runs."
+                : "Accumulated Tier-1 first-attempt evidence is insufficient or below the stability threshold.",
+            ReasonCodes = firstAttemptReasons.Distinct(StringComparer.Ordinal).OrderBy(static code => code, StringComparer.Ordinal).ToList(),
         });
 
         if (accumulation.RejectedRuns > 0)

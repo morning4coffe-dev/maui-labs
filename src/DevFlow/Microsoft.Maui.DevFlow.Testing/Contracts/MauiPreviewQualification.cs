@@ -282,6 +282,14 @@ public sealed class MauiQualificationCorpusSummary
     /// </summary>
     [JsonPropertyName("curatedDerivedCases")] public int CuratedDerivedCases { get; set; }
 
+    /// <summary>
+    /// Curated cases that do not declare a seed yet evaluate to exactly the same evidence as
+    /// another case. The curated-versus-derived split is self-declared, so this is the only signal
+    /// that an undeclared clone is being counted as an independent trial. Disclosure, not a
+    /// rejection — genuinely distinct cases can coincide.
+    /// </summary>
+    [JsonPropertyName("undeclaredProjectionCollisions")] public int UndeclaredProjectionCollisions { get; set; }
+
     [JsonPropertyName("curatedNoRepairCases")] public int CuratedNoRepairCases { get; set; }
     [JsonPropertyName("generatedNoRepairCases")] public int GeneratedNoRepairCases { get; set; }
     [JsonPropertyName("curatedClassificationLabeledCases")] public int CuratedClassificationLabeledCases { get; set; }

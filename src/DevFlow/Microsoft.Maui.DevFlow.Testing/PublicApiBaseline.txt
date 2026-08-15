@@ -2086,6 +2086,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.ConsideredRuns[]:
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.ContractVersion[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.CorpusFingerprint[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.DistinctEvidenceRuns[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.FirstAttemptFlows[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationFlowAttemptSummary]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.Gates[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationGateResult]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.GeneratedAt[]:System.DateTimeOffset{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.Kind[]:System.String{get:public;set:public}
@@ -2206,6 +2207,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.ProvenanceComple
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.ProvenanceSourceCounts[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceCount]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.SecurityCorpus[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationSecurityCorpusSummary{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.StaticOnly[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.UndeclaredProjectionCollisions[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.Version[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationDurationMetric.MaxMs[]:System.Nullable`1[System.Double]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationDurationMetric.MissingReason[]:System.String{get:public;set:public}

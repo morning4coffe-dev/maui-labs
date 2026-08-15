@@ -214,6 +214,8 @@ public static class MauiPreviewQualificationCorpusRunner
         summary.DeviceBackedCases = 0;
         summary.CuratedRepairPositiveCases = cases.Count(static item =>
             string.Equals(item.Disposition, "repair-eligible", StringComparison.Ordinal));
+        summary.CuratedDerivedCases = cases.Count(static item =>
+            string.Equals(item.ProvenanceMethod, "adapted-from-case", StringComparison.Ordinal));
         summary.CuratedNoRepairCases = cases.Count(static item =>
             string.Equals(item.Disposition, "no-repair", StringComparison.Ordinal));
         summary.GeneratedNoRepairCases = samples.Count(static item =>
@@ -548,17 +550,18 @@ public static class MauiPreviewQualificationCorpusRunner
         if (id.Contains("virtualized", StringComparison.Ordinal))
             ineligibility.Add("target-virtualized-unscoped");
 
+        var classification = MauiFlowFailureClassifier.Classify(BuildFailureFacts(fixture));
         return new CorpusEvaluation(
             diagnostics.OrderBy(static value => value, StringComparer.Ordinal).ToList(),
             candidates.Distinct(StringComparer.Ordinal).ToList(),
             ineligibility.OrderBy(static value => value, StringComparer.Ordinal).ToList(),
             repairEligible,
-            MauiFlowFailureClassifier.Classify(BuildFailureFacts(fixture)).FailureClass,
-            // The classifier short-circuits on a failure class the facts already carry. When the
-            // fixture stamps one, the answer is copied, not inferred, and must not be presented as
-            // evidence that classification works.
-            !(TryGetString(fixture, "failure", out var stampedClass) &&
-              MauiFlowFailureClassifier.IsKnownFailureClass(stampedClass)));
+            classification.FailureClass,
+            // The classifier reports which input decided the answer. Anything other than "inferred"
+            // means the class was read off a fixture field that already named it -- a stamped
+            // failure class, a terminal outcome, or an otherFailures flag. Those are correct by
+            // construction and must never be presented as evidence that classification works.
+            classification.Basis == MauiFlowClassificationBases.Inferred);
     }
 
     /// <summary>

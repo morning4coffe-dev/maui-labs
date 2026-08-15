@@ -15,6 +15,13 @@ namespace Microsoft.Maui.DevFlow.Tests;
 /// start" flakes. Remembering every port handed out removes the in-process half of it; the probe
 /// listener is still held while the port is claimed, so two concurrent callers cannot collide
 /// either. Ports handed to other processes remain outside our control.
+/// <para>
+/// The handed-out set is never trimmed, so every reservation permanently retires a port for the
+/// lifetime of the process. That is deliberate: reuse is exactly what this class exists to
+/// prevent, and it is only affordable because the suite reserves a few hundred ports against an
+/// ephemeral range of roughly 16k. A suite an order of magnitude larger would start losing the
+/// 128-attempt retry loop and would need a bounded ring with an age-based eviction policy instead.
+/// </para>
 /// </remarks>
 internal static class TestPorts
 {

@@ -74,44 +74,68 @@ internal static class FlowQaLaneGate
 }
 
 /// <summary>A fact that runs only when the Android flow-pilot lane is explicitly requested.</summary>
+/// <remarks>
+/// Readiness is evaluated in the constructor, so xUnit decides to skip at discovery time rather
+/// than when the test runs. A fixture that mutated the lane variable after discovery could no
+/// longer influence it; the lane variables are expected to be set before the process starts.
+/// </remarks>
 public sealed class AndroidFlowPilotFactAttribute : FactAttribute
 {
     public AndroidFlowPilotFactAttribute()
+        : this(FlowQaLaneGate.AndroidFlowPilot())
     {
-        var readiness = FlowQaLaneGate.AndroidFlowPilot();
+    }
+
+    internal AndroidFlowPilotFactAttribute(FlowQaLaneReadiness readiness)
+    {
         if (!readiness.IsEnabled)
             Skip = readiness.Reason;
     }
 }
 
 /// <summary>A fact that runs only on a Windows host with the Windows flow-QA lane requested.</summary>
+/// <remarks>Readiness is evaluated at discovery time; see <see cref="AndroidFlowPilotFactAttribute"/>.</remarks>
 public sealed class WindowsFlowQaFactAttribute : FactAttribute
 {
     public WindowsFlowQaFactAttribute()
+        : this(FlowQaLaneGate.WindowsFlowQa())
     {
-        var readiness = FlowQaLaneGate.WindowsFlowQa();
+    }
+
+    internal WindowsFlowQaFactAttribute(FlowQaLaneReadiness readiness)
+    {
         if (!readiness.IsEnabled)
             Skip = readiness.Reason;
     }
 }
 
 /// <summary>A fact that runs only on a macOS host with the experimental AppKit lane requested.</summary>
+/// <remarks>Readiness is evaluated at discovery time; see <see cref="AndroidFlowPilotFactAttribute"/>.</remarks>
 public sealed class AppKitFlowQaFactAttribute : FactAttribute
 {
     public AppKitFlowQaFactAttribute()
+        : this(FlowQaLaneGate.AppKitFlowQa())
     {
-        var readiness = FlowQaLaneGate.AppKitFlowQa();
+    }
+
+    internal AppKitFlowQaFactAttribute(FlowQaLaneReadiness readiness)
+    {
         if (!readiness.IsEnabled)
             Skip = readiness.Reason;
     }
 }
 
 /// <summary>A fact that runs only on a macOS host with the Apple flow-QA lane requested.</summary>
+/// <remarks>Readiness is evaluated at discovery time; see <see cref="AndroidFlowPilotFactAttribute"/>.</remarks>
 public sealed class AppleFlowQaFactAttribute : FactAttribute
 {
     public AppleFlowQaFactAttribute()
+        : this(FlowQaLaneGate.AppleFlowQa())
     {
-        var readiness = FlowQaLaneGate.AppleFlowQa();
+    }
+
+    internal AppleFlowQaFactAttribute(FlowQaLaneReadiness readiness)
+    {
         if (!readiness.IsEnabled)
             Skip = readiness.Reason;
     }

@@ -177,6 +177,15 @@ public partial class BrokerServer
 
         try
         {
+            // KNOWN HAZARD, not fixed here. When `socket` is HttpListener's server-side
+            // WebSocket, CloseAsync can block in Monitor.Enter in its synchronous prologue,
+            // before it returns a Task -- see the lock-ordering analysis on
+            // BrokerServer.Shutdown(). Neither this token nor a timeout on the returned task
+            // can bound that, and a later Abort() cannot rescue it either because Abort waits
+            // on the same lock the wedged thread already holds. The only reliable fix is to
+            // skip the handshake for HttpListener sockets, which changes what the streaming
+            // peer observes, so it is deliberately left for a change that can be validated
+            // against a real device rather than folded into a test-hardening pass.
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(2));
             await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "stream ended", timeout.Token);
         }

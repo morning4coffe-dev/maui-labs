@@ -878,10 +878,13 @@ public partial class BrokerServer : IDisposable
                 teardowns.Add(thread);
             }
 
-            var deadline = DateTime.UtcNow + TimeSpan.FromSeconds(2);
+            // Stopwatch rather than DateTime.UtcNow: the wall clock is not monotonic, and an NTP
+            // step during shutdown would either collapse the budget to zero or extend it.
+            var budget = TimeSpan.FromSeconds(2);
+            var elapsed = System.Diagnostics.Stopwatch.StartNew();
             foreach (var thread in teardowns)
             {
-                var remaining = deadline - DateTime.UtcNow;
+                var remaining = budget - elapsed.Elapsed;
                 if (remaining <= TimeSpan.Zero)
                     break;
 

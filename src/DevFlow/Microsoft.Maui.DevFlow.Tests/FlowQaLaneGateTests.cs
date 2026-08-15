@@ -118,24 +118,71 @@ public class FlowQaLaneGateTests
 
     // The four attributes are the only part of the gate the suites actually consume. A mis-wire
     // (say WindowsFlowQaFactAttribute asking the AppKit lane) compiles cleanly and then silently
-    // skips or silently runs the wrong lane, so pin each attribute to its own lane.
-    static string? SkipFor(FlowQaLaneReadiness readiness) => readiness.IsEnabled ? null : readiness.Reason;
+    // skips or silently runs the wrong lane. Two things are pinned below: that the attribute maps
+    // readiness to Skip in both directions, and that each attribute's real Skip is one of the
+    // reasons its own lane can produce. Comparing the attribute against another call to the same
+    // production method under the same environment would pass either way, so it is not used here.
+
+    [Theory]
+    [InlineData(typeof(AndroidFlowPilotFactAttribute))]
+    [InlineData(typeof(WindowsFlowQaFactAttribute))]
+    [InlineData(typeof(AppKitFlowQaFactAttribute))]
+    [InlineData(typeof(AppleFlowQaFactAttribute))]
+    public void EveryLaneFact_MapsReadinessOntoSkipInBothDirections(Type attributeType)
+    {
+        var enabled = Construct(attributeType, new FlowQaLaneReadiness(true, ""));
+        var disabled = Construct(attributeType, new FlowQaLaneReadiness(false, "lane is off because reasons"));
+
+        Assert.Null(enabled.Skip);
+        Assert.Equal("lane is off because reasons", disabled.Skip);
+    }
+
+    static FactAttribute Construct(Type attributeType, FlowQaLaneReadiness readiness)
+        => (FactAttribute)Activator.CreateInstance(
+            attributeType,
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic,
+            binder: null,
+            args: [readiness],
+            culture: null)!;
 
     [Fact]
-    public void AndroidFlowPilotFact_SkipsExactlyWhenTheAndroidLaneIsDisabled()
-        => Assert.Equal(SkipFor(FlowQaLaneGate.AndroidFlowPilot()), new AndroidFlowPilotFactAttribute().Skip);
+    public void AndroidFlowPilotFact_IsWiredToTheAndroidLane()
+        => AssertWiredToLane(
+            new AndroidFlowPilotFactAttribute().Skip,
+            FlowQaLaneGate.AndroidFlowPilot(_ => null));
 
     [Fact]
-    public void WindowsFlowQaFact_SkipsExactlyWhenTheWindowsLaneIsDisabled()
-        => Assert.Equal(SkipFor(FlowQaLaneGate.WindowsFlowQa()), new WindowsFlowQaFactAttribute().Skip);
+    public void WindowsFlowQaFact_IsWiredToTheWindowsLane()
+        => AssertWiredToLane(
+            new WindowsFlowQaFactAttribute().Skip,
+            FlowQaLaneGate.WindowsFlowQa(_ => null, isWindowsHost: false),
+            FlowQaLaneGate.WindowsFlowQa(_ => null, isWindowsHost: true));
 
     [Fact]
-    public void AppKitFlowQaFact_SkipsExactlyWhenTheAppKitLaneIsDisabled()
-        => Assert.Equal(SkipFor(FlowQaLaneGate.AppKitFlowQa()), new AppKitFlowQaFactAttribute().Skip);
+    public void AppKitFlowQaFact_IsWiredToTheAppKitLane()
+        => AssertWiredToLane(
+            new AppKitFlowQaFactAttribute().Skip,
+            FlowQaLaneGate.AppKitFlowQa(_ => null, isMacOSHost: false),
+            FlowQaLaneGate.AppKitFlowQa(_ => null, isMacOSHost: true));
 
     [Fact]
-    public void AppleFlowQaFact_SkipsExactlyWhenTheAppleLaneIsDisabled()
-        => Assert.Equal(SkipFor(FlowQaLaneGate.AppleFlowQa()), new AppleFlowQaFactAttribute().Skip);
+    public void AppleFlowQaFact_IsWiredToTheAppleLane()
+        => AssertWiredToLane(
+            new AppleFlowQaFactAttribute().Skip,
+            FlowQaLaneGate.AppleFlowQa(_ => null, isMacOSHost: false),
+            FlowQaLaneGate.AppleFlowQa(_ => null, isMacOSHost: true));
+
+    // A null Skip means the lane opted in on this host, which is legitimate and cannot be pinned
+    // to a string. Any other value has to be one of the reasons this lane can produce; because
+    // EveryDisabledLaneReportsItsOwnReason proves the four lanes' reasons are all distinct, an
+    // attribute wired to the wrong lane fails here.
+    static void AssertWiredToLane(string? skip, params FlowQaLaneReadiness[] disabledFormsOfThisLane)
+    {
+        if (skip is null)
+            return;
+
+        Assert.Contains(skip, disabledFormsOfThisLane.Select(form => form.Reason));
+    }
 
     // Every lane reason is distinct on every host, which is what makes the four assertions above
     // able to tell the lanes apart rather than all matching the same message.

@@ -641,7 +641,8 @@ public class FlowReplayTests
         // 4. Triage the report the replayer actually produced. A plan-less legacy replay is
         // deliberately not repair-eligible on its own, so the decision a plan-carrying host
         // records is supplied alongside it.
-        Assert.False(run.ReplayEligibility?.RepairValidationAllowed);
+        Assert.NotNull(run.ReplayEligibility);
+        Assert.False(run.ReplayEligibility.RepairValidationAllowed);
         var replayEligibility = new MauiFlowReplayEligibilityDecision
         {
             SideEffectPolicy = MauiFlowSideEffectPolicies.None,
@@ -1043,6 +1044,11 @@ public class FlowReplayTests
 
             if (method == "GET" && path == "/api/v1/ui/tree")
             {
+                // A flat list, not the nested Children shape the real agent returns. That is
+                // enough for selector resolution by AutomationId, type and text, which is all
+                // this loopback agent models; a test that needs scoped or collectionScope
+                // resolution must not use this fake, because it would pass against a tree shape
+                // the product never emits.
                 var visible = _els.Where(e => e.VisibleAfter is null || e.VisibleAfter <= DateTimeOffset.UtcNow);
                 return JsonSerializer.Serialize(visible.Select(ToJson));
             }

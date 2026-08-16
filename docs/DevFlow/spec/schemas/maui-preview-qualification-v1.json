@@ -104,6 +104,20 @@
           "type": [ "boolean", "null" ],
           "description": "True when every curated case records who labeled it, when, by what method, and from what source kind."
         },
+        "generatedBaseFixtures": {
+          "type": [ "integer", "null" ],
+          "minimum": 0,
+          "description": "Distinct curated fixtures the generated mutants were drawn from. The generated denominator resamples this many originals, so this bounds the power it can add."
+        },
+        "generatedSeedCount": {
+          "type": [ "integer", "null" ],
+          "minimum": 0,
+          "description": "Distinct mutation seeds behind the generated share. One seed means the whole generated denominator is a single deterministic draw."
+        },
+        "exercisesShippedAnalyzer": {
+          "type": [ "boolean", "null" ],
+          "description": "True only when every diagnostic and repair decision the corpus scored came from the shipped analyzer. False means the harness re-implements those rules and the corpus scores itself."
+        },
         "provenanceSourceCounts": {
           "type": "array",
           "description": "Curated case counts grouped by provenance source kind. A corpus whose counts are entirely 'synthetic' has no observed-run evidence.",
@@ -146,6 +160,26 @@
           "description": "Evaluations that are independent evidence, excluding cases derived from another case and machine-generated mutants. Count gates compare this, never the pooled denominator."
         },
         "independentDeviceRuns": { "type": [ "boolean", "null" ] },
+        "exercises": {
+          "type": [ "object", "null" ],
+          "description": "Which code decided the observations this metric counted. A metric whose kind is not shipped-analyzer measures agreement between the harness and its own expectations, not product behaviour, however large its denominator.",
+          "required": [ "component", "kind" ],
+          "properties": {
+            "component": {
+              "type": "string",
+              "description": "The type and member that decided the observation."
+            },
+            "kind": {
+              "type": "string",
+              "enum": [ "shipped-analyzer", "harness-local-rules", "sample-supplied", "unknown" ]
+            },
+            "note": {
+              "type": [ "string", "null" ],
+              "description": "What a reader must not conclude from this metric."
+            }
+          },
+          "additionalProperties": false
+        },
         "sourceCounts": {
           "type": "array",
           "description": "Numerator and denominator split by sample source so a pooled rate can never be read as a single independent-trial count.",

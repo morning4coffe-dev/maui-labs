@@ -305,6 +305,26 @@ public sealed class MauiQualificationCorpusSummary
     [JsonPropertyName("provenanceSourceCounts")] public List<MauiQualificationCorpusProvenanceCount> ProvenanceSourceCounts { get; set; } = [];
     [JsonPropertyName("mutationSeed")] public int? MutationSeed { get; set; }
     [JsonPropertyName("generatorVersion")] public string? GeneratorVersion { get; set; }
+
+    /// <summary>
+    /// How many distinct curated fixtures the generated mutants were actually drawn from. The
+    /// generated denominator is a resampling of this many originals, so this — not the mutant
+    /// count — bounds the statistical power the generated share can contribute.
+    /// </summary>
+    [JsonPropertyName("generatedBaseFixtures")] public int? GeneratedBaseFixtures { get; set; }
+
+    /// <summary>
+    /// How many distinct mutation seeds produced the generated share. One seed means the whole
+    /// generated denominator is a single deterministic draw, repeatable but not repeated.
+    /// </summary>
+    [JsonPropertyName("generatedSeedCount")] public int? GeneratedSeedCount { get; set; }
+
+    /// <summary>
+    /// Whether every diagnostic and repair decision the corpus scored came from the shipped
+    /// analyzer. False means the harness re-implements those rules and the corpus is scoring
+    /// itself; see <see cref="MauiQualificationRateMetric.Exercises"/> for which metrics.
+    /// </summary>
+    [JsonPropertyName("exercisesShippedAnalyzer")] public bool? ExercisesShippedAnalyzer { get; set; }
     [JsonPropertyName("errors")] public List<string> Errors { get; set; } = [];
     [JsonPropertyName("securityCorpus")] public MauiQualificationSecurityCorpusSummary? SecurityCorpus { get; set; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
@@ -490,6 +510,55 @@ public sealed class MauiQualificationRateMetric
 
     [JsonPropertyName("independentDeviceRuns")] public bool? IndependentDeviceRuns { get; set; }
     [JsonPropertyName("exclusions")] public List<MauiQualificationExclusion> Exclusions { get; set; } = [];
+
+    /// <summary>
+    /// Which code decided each observation this metric counted. A large denominator says nothing
+    /// about the product if the harness produced the observation itself, so the component and the
+    /// kind are published next to the number rather than left to be inferred from the metric name.
+    /// </summary>
+    [JsonPropertyName("exercises")] public MauiQualificationMetricProvenance? Exercises { get; set; }
+}
+
+/// <summary>Names the code that produced a metric's observations.</summary>
+public static class MauiQualificationMetricProvenanceKinds
+{
+    /// <summary>The metric called the same entry point the product calls at runtime.</summary>
+    public const string ShippedAnalyzer = "shipped-analyzer";
+
+    /// <summary>
+    /// The metric called rules re-implemented inside the qualification harness. The number is a
+    /// self-consistency check between those rules and the expectations authored beside them, and
+    /// it is not evidence about the shipped analyzer's behaviour.
+    /// </summary>
+    public const string HarnessLocalRules = "harness-local-rules";
+
+    /// <summary>The observation was supplied by the run that submitted the sample.</summary>
+    public const string SampleSupplied = "sample-supplied";
+
+    /// <summary>
+    /// True when the observation came from product code rather than from rules re-implemented in
+    /// the qualification harness. <see cref="SampleSupplied"/> qualifies because a submitting run
+    /// observed the product itself — subject to the standing caveat that a self-reported run file
+    /// is trusted as written. <c>unknown</c> and an absent declaration never qualify.
+    /// </summary>
+    public static bool IsProductEvidence(string? kind) =>
+        string.Equals(kind, ShippedAnalyzer, StringComparison.Ordinal) ||
+        string.Equals(kind, SampleSupplied, StringComparison.Ordinal);
+}
+
+/// <summary>
+/// Which component produced a metric's observations, and whether that component is the shipped one.
+/// </summary>
+public sealed class MauiQualificationMetricProvenance
+{
+    /// <summary>The type and member that decided the observation.</summary>
+    [JsonPropertyName("component")] public string Component { get; set; } = "unknown";
+
+    /// <summary>One of <see cref="MauiQualificationMetricProvenanceKinds"/>.</summary>
+    [JsonPropertyName("kind")] public string Kind { get; set; } = "unknown";
+
+    /// <summary>What a reader must not conclude from this metric.</summary>
+    [JsonPropertyName("note")] public string? Note { get; set; }
 }
 
 /// <summary>

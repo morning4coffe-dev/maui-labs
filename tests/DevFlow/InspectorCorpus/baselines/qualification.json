@@ -80,6 +80,9 @@
     ],
     "mutationSeed": 20260802,
     "generatorVersion": "sha256:39b35a7028472dc4f4400b6ffe9e1b3e3e7b5e65a64008f98a0a5396cb9e540e",
+    "generatedBaseFixtures": 16,
+    "generatedSeedCount": 1,
+    "exercisesShippedAnalyzer": false,
     "errors": [],
     "securityCorpus": {
       "version": "sha256:7420b08a19ac73c2ad94a07f52442bd1a5f28936e9db61fa67f68c36cdea844a",
@@ -169,7 +172,12 @@
         "upper": 1
       },
       "independentDeviceRuns": false,
-      "exclusions": []
+      "exclusions": [],
+      "exercises": {
+        "component": "MauiPreviewQualificationCorpusRunner.EvaluateRepairFixture",
+        "kind": "harness-local-rules",
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls."
+      }
     },
     "repairRecall": {
       "state": "measured",
@@ -209,7 +217,12 @@
         "upper": 1
       },
       "independentDeviceRuns": false,
-      "exclusions": []
+      "exclusions": [],
+      "exercises": {
+        "component": "MauiPreviewQualificationCorpusRunner.EvaluateRepairFixture",
+        "kind": "harness-local-rules",
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls."
+      }
     },
     "classificationAccuracy": {
       "state": "measured",
@@ -249,7 +262,12 @@
         "upper": 1
       },
       "independentDeviceRuns": false,
-      "exclusions": []
+      "exclusions": [],
+      "exercises": {
+        "component": "MauiFlowFailureClassifier.Classify",
+        "kind": "shipped-analyzer",
+        "note": "The same classifier entry point MauiFlowRunner and WorkflowRunCoordinator call at runtime. The expected label is corpus ground truth; the observed label is the product's answer."
+      }
     },
     "classificationMatrix": {
       "state": "measured",
@@ -391,7 +409,12 @@
         "upper": 0.1936076805344365
       },
       "independentDeviceRuns": false,
-      "exclusions": []
+      "exclusions": [],
+      "exercises": {
+        "component": "MauiPreviewQualificationCorpusRunner.EvaluateFixture",
+        "kind": "harness-local-rules",
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls."
+      }
     },
     "abstention": {
       "state": "measured",
@@ -431,7 +454,12 @@
         "upper": 1
       },
       "independentDeviceRuns": false,
-      "exclusions": []
+      "exclusions": [],
+      "exercises": {
+        "component": "MauiPreviewQualificationCorpusRunner.EvaluateFixture",
+        "kind": "harness-local-rules",
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls."
+      }
     },
     "humanDecisionOutcomes": {
       "approved": 0,
@@ -655,6 +683,15 @@
       "artifactRefs": []
     },
     {
+      "gateId": "product-analyzer-coverage",
+      "status": "not-qualified",
+      "message": "Metrics scored by harness-local rules instead of the shipped analyzer: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour.",
+      "reasonCodes": [
+        "corpus-does-not-exercise-shipped-analyzer"
+      ],
+      "artifactRefs": []
+    },
+    {
       "gateId": "selector-stability",
       "status": "not-qualified",
       "message": "Declared-platform real-device selector-stability evidence is insufficient or below threshold.",
@@ -728,6 +765,11 @@
       "code": "gate-zero-false-heals-not-qualified",
       "severity": "warning",
       "message": "No-repair evidence is insufficient or includes a false heal."
+    },
+    {
+      "code": "gate-product-analyzer-coverage-not-qualified",
+      "severity": "warning",
+      "message": "Metrics scored by harness-local rules instead of the shipped analyzer: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour."
     },
     {
       "code": "gate-selector-stability-not-qualified",

@@ -293,11 +293,18 @@ Goal #4 names five metrics. Their recorded state is tracked deliberately rather 
 the **independent** count in each row: a denominator can be grown by restating evidence, an
 independent count cannot.
 
+**Read `exercises` before reading any number.** The static corpus runner re-implements the
+selector-health and repair-eligibility rules instead of calling `MauiSelectorHealthAnalyzer.Analyze`,
+so the repair and false-heal numbers measure the harness agreeing with expectations authored beside
+it, not the shipped analyzer. Each metric publishes what produced it, the `product-analyzer-coverage`
+gate reports the gap, and `tests/DevFlow/InspectorCorpus/baselines/README.md` explains it in full.
+Closing that gap is worth more than any further corpus growth.
+
 | Metric | Recorded value today | Where |
 |---|---|---|
-| False repair rate | `0/316` pooled, but **16 independent** — `curated 0/16` + `generated 0/300`. Static corpus only, no device trials. Gate needs 300 independent. | `tests/DevFlow/InspectorCorpus/README.md` |
-| Classification accuracy | `42/45` pooled, but **8 independent** — 37 of the 45 handed the classifier its own answer. Confusion matrix published with an inferred/stamp-honoured split. Gate needs 100 *genuinely inferred* evaluations, so 100 stamped labels would still be `not-qualified`. | `tests/DevFlow/InspectorCorpus/baselines/README.md` |
-| Repair acceptance / precision | `31/31` pooled, but **1 independent** — 30 of the 31 repair-positive cases are `adapted-from-case` restatements of one seed. No human-acceptance signal exists at all. | `tests/DevFlow/InspectorCorpus/baselines/qualification.json` |
+| False repair rate | `0/316` pooled, but **16 independent** — `curated 0/16` + `generated 0/300`. Static corpus only, no device trials. **Scored by harness-local rules, not the shipped analyzer**, so it is not evidence about product behaviour. The 300 mutants are one seed drawn from 16 originals. Gate needs 300 independent. | `tests/DevFlow/InspectorCorpus/README.md` |
+| Classification accuracy | `42/45` pooled, but **8 independent** — 37 of the 45 handed the classifier its own answer. The observed label does come from the shipped `MauiFlowFailureClassifier.Classify`, so this is the one corpus metric that exercises product code. Confusion matrix published with an inferred/stamp-honoured split. Gate needs 100 *genuinely inferred* evaluations, so 100 stamped labels would still be `not-qualified`. | `tests/DevFlow/InspectorCorpus/baselines/README.md` |
+| Repair acceptance / precision | `31/31` pooled, but **1 independent** — 30 of the 31 repair-positive cases are `adapted-from-case` restatements of one seed. **Scored by harness-local rules, not the shipped analyzer.** No human-acceptance signal exists at all. | `tests/DevFlow/InspectorCorpus/baselines/qualification.json` |
 | Replay stability | **No recorded number.** Needs real-device runs. `maui devflow flow qualify --accumulate` sums clean first attempts per Tier-1 flow across independent jobs and gates them at `accumulated-tier1-first-attempts`, so the ≥100 threshold is reachable without raising the 20-attempt `--repeat` cap — but no run has produced any first-attempt evidence yet | [flow-qa.md](../../docs/DevFlow/flow-qa.md) |
 | Authoring time | **No recorded number.** The protocol, export path, and aggregation CLI exist; zero sessions have been collected, **no unassisted-control capture path exists**, and no control sessions have been run | [authoring-time-protocol.md](../../docs/DevFlow/authoring-time-protocol.md) |
 

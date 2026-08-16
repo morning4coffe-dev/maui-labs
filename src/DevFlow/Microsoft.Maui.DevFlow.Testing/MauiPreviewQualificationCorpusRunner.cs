@@ -75,6 +75,13 @@ public static class MauiPreviewQualificationCorpusRunner
             StaticOnly = true,
             MutationSeed = request.MutationSeed,
             GeneratorVersion = GeneratorVersion,
+            // EvaluateFixture re-implements the selector-health and repair-eligibility rules against
+            // the fixture JSON; it borrows MauiSelectorHealthDiagnosticIds but never calls
+            // MauiSelectorHealthAnalyzer.Analyze. Every diagnostic, false-heal and repair number the
+            // corpus produces is therefore harness rules scored against expectations authored beside
+            // them. Only the failure class comes from shipped code. Stated here so the report says so
+            // without a reader having to read this file.
+            ExercisesShippedAnalyzer = false,
         };
 
         string root;
@@ -189,9 +196,11 @@ public static class MauiPreviewQualificationCorpusRunner
         {
             var count = Math.Max(0, request.GeneratedNoRepairEvaluations);
             var random = new DeterministicRandom((uint)request.MutationSeed);
+            var basisIds = new HashSet<string>(StringComparer.Ordinal);
             for (var index = 0; index < count; index++)
             {
                 var basis = noRepairFixtures[(int)(random.Next() % (uint)noRepairFixtures.Count)];
+                basisIds.Add(basis.Id);
                 var generatedId = $"generated:{basis.Id}:{index}:{request.MutationSeed}";
                 using var generated = GenerateNoRepairFixture(
                     basis.Fixture,
@@ -215,6 +224,12 @@ public static class MauiPreviewQualificationCorpusRunner
                     Abstained = !evaluation.RepairEligible,
                 });
             }
+
+            // The generated denominator is a resampling of these originals with one seed. Publishing
+            // both bounds the power the mutants can add: 300 draws from a handful of fixtures under a
+            // single deterministic draw are not 300 independent trials.
+            summary.GeneratedBaseFixtures = basisIds.Count;
+            summary.GeneratedSeedCount = count > 0 ? 1 : 0;
         }
 
         var security = MauiQualificationSecurityCorpusRunner.Run(root);

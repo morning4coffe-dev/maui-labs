@@ -41,6 +41,51 @@ Gates that are `not-qualified` in the baseline and why:
 | `selector-stability` | No device evidence. |
 | `android-device-overhead` | No device evidence. |
 | `android-tier1-first-attempts` | No Tier-1 flow declared and no device runs. |
+| `product-analyzer-coverage` | The corpus scores repair and false heals with harness rules, not the shipped analyzer. See below. |
+
+## The largest gap: the corpus does not exercise the shipped analyzer
+
+`MauiPreviewQualificationCorpusRunner.EvaluateFixture` **re-implements** the selector-health and
+repair-eligibility rules against the fixture JSON. It borrows the diagnostic id constants from
+`MauiSelectorHealthDiagnosticIds` but never calls `MauiSelectorHealthAnalyzer.Analyze`, which is the
+entry point the product actually uses. `MatchesExpectations` then compares those harness rules
+against `expect.diagnosticIds` values that were hand-authored beside them.
+
+**Consequence: `falseHeals`, `repairPrecision`, `repairRecall` and `abstention` are self-consistency
+checks, not product tests.** A false-heal rate of `0/316` says the harness agrees with its own
+expectations. It says nothing about whether the shipped analyzer would have proposed that repair.
+Growing the corpus makes such a number look more authoritative while measuring the same thing, so
+the size of the denominator must not be read as confidence in the product.
+
+This is stated in the report itself rather than only here:
+
+- `corpus.exercisesShippedAnalyzer` is `false`.
+- Every rate metric carries `exercises: { component, kind }`. `kind` is `harness-local-rules` for
+  the four metrics above and `shipped-analyzer` for `classificationAccuracy`.
+- The `product-analyzer-coverage` gate is `not-qualified` and lists exactly which metrics are
+  harness-scored. It cannot reach `pass` until the corpus calls the shipped analyzer.
+- `MauiPreviewQualificationAccumulator` merges `exercises` conjunctively, so pooling a
+  harness-scored run with a device-backed one does not upgrade what the merged number measures.
+
+`classificationAccuracy` is the exception: the observed label comes from
+`MauiFlowFailureClassifier.Classify`, the same entry point `MauiFlowRunner`, `WorkflowRunCoordinator`
+and `MauiFlowTriage` call at runtime. Its 8 independent evaluations are small, but they are real
+product observations.
+
+**Fixing this is worth more than any further corpus growth.** It requires expressing each fixture as
+a `MauiFlow` plus `LiveElements` so `MauiSelectorHealthAnalysisInput` can be built, which is a
+corpus format change, not a runner tweak — the current fixtures are ad-hoc JSON shapes
+(`recordedRoute`/`observedRoute`, `androidCandidateKinds`, `hardAssertion`) with no flow structure.
+`Corpus_KeepsTheAnalyzerCoverageDisclosureHonestWhenTheRunnerChanges` fails if the runner starts
+calling the analyzer without this disclosure being updated, and also if the disclosure is flipped
+without the wiring.
+
+## Statistical power of the generated share
+
+The 300 generated mutants are drawn from `generatedBaseFixtures` originals — currently **16** — under
+`generatedSeedCount` seeds, currently **1**. They are one deterministic resampling of the curated
+no-repair cases, repeatable but not repeated, and they contribute **0** independent evaluations.
+Both numbers are published in `corpus` so the generated denominator cannot be quoted as 300 trials.
 
 ## Regression diffing
 

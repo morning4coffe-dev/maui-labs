@@ -615,6 +615,42 @@ public static class MauiPreviewQualificationAccumulator
             IndependentDeviceRuns = denominator == 0
                 ? null
                 : contributing.Count > 0 && contributing.All(static metric => metric.IndependentDeviceRuns == true),
+            Exercises = MergeExercises(contributing),
+        };
+    }
+
+    /// <summary>
+    /// Merges what the contributing runs actually exercised. Conjunctive, like independence: if any
+    /// contributor scored a sample with harness-local rules, the merged number did too, and pooling
+    /// must not launder it into product evidence. Disagreement about the component itself is
+    /// reported rather than resolved.
+    /// </summary>
+    private static MauiQualificationMetricProvenance? MergeExercises(
+        IReadOnlyList<MauiQualificationRateMetric> contributing)
+    {
+        var declared = contributing
+            .Select(static metric => metric.Exercises)
+            .Where(static exercises => exercises is not null)
+            .Select(static exercises => exercises!)
+            .ToList();
+        if (declared.Count == 0)
+            return null;
+
+        var components = declared
+            .Select(static exercises => exercises.Component ?? "unknown")
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static component => component, StringComparer.Ordinal)
+            .ToList();
+        var weakest = declared.FirstOrDefault(static exercises =>
+            !MauiQualificationMetricProvenanceKinds.IsProductEvidence(exercises.Kind)) ?? declared[0];
+        var undeclared = contributing.Count - declared.Count;
+        return new MauiQualificationMetricProvenance
+        {
+            Component = components.Count == 1 ? components[0] : string.Join(" + ", components),
+            Kind = weakest.Kind,
+            Note = undeclared > 0
+                ? $"{weakest.Note} {undeclared} contributing run(s) declared no component."
+                : weakest.Note,
         };
     }
 

@@ -25,6 +25,14 @@ namespace Microsoft.Maui.Cli.Providers.Android;
 /// made the foreign-mapping conflict guard unreachable. Reading the raw output here keeps both
 /// checks real.
 /// </para>
+/// <para>
+/// The port-mapping writers are overridden for a different upstream defect: they let the adb
+/// child process inherit this process's console, so <c>adb reverse tcp:19223 tcp:19223</c> echoes
+/// its allocated port straight onto our stdout. That corrupts <c>--json</c> output with a bare
+/// integer before the JSON document, and the adb server daemon adb forks on first use inherits
+/// the same handle for its whole lifetime, so a caller piping our stdout never sees the pipe
+/// close. Running adb through <see cref="ProcessRunner"/> captures both streams instead.
+/// </para>
 /// </remarks>
 internal sealed class MauiAdbRunner : AdbRunner
 {
@@ -62,6 +70,83 @@ internal sealed class MauiAdbRunner : AdbRunner
 		}
 
 		return ParseReverseList(result.StandardOutput);
+	}
+
+	public override Task ReversePortAsync(
+		string serial,
+		AdbPortSpec remote,
+		AdbPortSpec local,
+		CancellationToken cancellationToken = default)
+		=> RunPortCommandAsync("reverse", serial, remote, local, cancellationToken);
+
+	public override Task ForwardPortAsync(
+		string serial,
+		AdbPortSpec local,
+		AdbPortSpec remote,
+		CancellationToken cancellationToken = default)
+		=> RunPortCommandAsync("forward", serial, local, remote, cancellationToken);
+
+	public override Task RemoveReversePortAsync(
+		string serial,
+		AdbPortSpec remote,
+		CancellationToken cancellationToken = default)
+		=> RunPortRemovalAsync("reverse", serial, remote, cancellationToken);
+
+	public override Task RemoveForwardPortAsync(
+		string serial,
+		AdbPortSpec local,
+		CancellationToken cancellationToken = default)
+		=> RunPortRemovalAsync("forward", serial, local, cancellationToken);
+
+	/// <summary>
+	/// Runs an <c>adb reverse</c>/<c>adb forward</c> mapping command with both child streams
+	/// captured, so adb's own port echo never reaches this process's stdout.
+	/// </summary>
+	async Task RunPortCommandAsync(
+		string direction,
+		string serial,
+		AdbPortSpec first,
+		AdbPortSpec second,
+		CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(serial);
+		ArgumentNullException.ThrowIfNull(first);
+		ArgumentNullException.ThrowIfNull(second);
+
+		await RunCapturedAsync(
+			["-s", serial, direction, first.ToSocketSpec(), second.ToSocketSpec()],
+			$"`adb {direction} {first.ToSocketSpec()} {second.ToSocketSpec()}`",
+			cancellationToken).ConfigureAwait(false);
+	}
+
+	async Task RunPortRemovalAsync(
+		string direction,
+		string serial,
+		AdbPortSpec spec,
+		CancellationToken cancellationToken)
+	{
+		ArgumentException.ThrowIfNullOrWhiteSpace(serial);
+		ArgumentNullException.ThrowIfNull(spec);
+
+		await RunCapturedAsync(
+			["-s", serial, direction, "--remove", spec.ToSocketSpec()],
+			$"`adb {direction} --remove {spec.ToSocketSpec()}`",
+			cancellationToken).ConfigureAwait(false);
+	}
+
+	async Task RunCapturedAsync(string[] arguments, string description, CancellationToken cancellationToken)
+	{
+		var result = await ProcessRunner.RunAsync(
+			_adbPath,
+			arguments,
+			environmentVariables: _environmentVariables,
+			cancellationToken: cancellationToken).ConfigureAwait(false);
+
+		if (!result.Success)
+		{
+			var detail = FirstLine(result.StandardError) ?? FirstLine(result.StandardOutput) ?? "no output";
+			throw new InvalidOperationException($"{description} exited with code {result.ExitCode}: {detail}");
+		}
 	}
 
 	/// <summary>

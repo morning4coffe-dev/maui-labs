@@ -22,7 +22,14 @@ Required:
   --results-root <path>   Exact repository-local results directory for the selected platform
 
 Options:
-  --repeat <N>            Clean repetitions (default: 3; maximum: 20)
+  --repeat <N>            Clean repetitions per invocation (default: 3; maximum: 20).
+                          The cap is deliberate: gates that need 100+ clean first attempts want
+                          100 independent runs, not 100 iterations of one warm process. Use
+                          --accumulate to merge evidence across separate runs instead.
+  --accumulate <dir>      Merge qualification metric numerators/denominators across independent
+                          runs into <dir>. Requires --qualification.
+  --baseline <path>       Fail when a gated qualification metric regresses below this committed
+                          baseline report. Requires --qualification.
   --configuration <name>  Test configuration (default: Debug)
   --flow-filter <filter>  Additional VSTest filter appended to the platform filter
   --no-build              Pass --no-build to dotnet test
@@ -562,6 +569,8 @@ run_qualification() {
   local -a arguments=(run --project "$cli_project" -f net10.0 --configuration "$configuration")
   [[ "$no_build" == true ]] && arguments+=(--no-build)
   arguments+=(-- devflow flow qualify --platform "$platform" --corpus "$repo_root/tests/DevFlow/InspectorCorpus" --artifact-manifest "$manifest_path" --output "$output" --json --fail-on-non-pass)
+  [[ -n "$accumulate_directory" ]] && arguments+=(--accumulate "$accumulate_directory")
+  [[ -n "$baseline_path" ]] && arguments+=(--baseline "$baseline_path")
   temporary_paths+=("$raw")
   umask 077
   dotnet "${arguments[@]}" >"$raw" 2>&1
@@ -1100,6 +1109,8 @@ configuration=Debug
 flow_filter=
 no_build=false
 qualification=false
+accumulate_directory=
+baseline_path=
 experimental=false
 physical_device=false
 device_id=
@@ -1143,6 +1154,12 @@ while (( $# > 0 )); do
       ;;
     --qualification|-qualification)
       qualification=true; shift
+      ;;
+    --accumulate|-accumulate)
+      require_value "$1" "${2-}"; accumulate_directory=$2; shift 2
+      ;;
+    --baseline|-baseline)
+      require_value "$1" "${2-}"; baseline_path=$2; shift 2
       ;;
     --experimental|-experimental)
       experimental=true; shift
@@ -1206,8 +1223,12 @@ platform=${platform,,}
   die_usage '--platform is required and must be android, windows, ios, maccatalyst, or macos.'
 [[ -n "$results_root_input" ]] || die_usage '--results-root is required.'
 [[ "$repeat" =~ ^[0-9]+$ ]] && (( 10#$repeat >= 1 && 10#$repeat <= 20 )) ||
-  die_usage '--repeat must be an integer from 1 through 20.'
+  die_usage '--repeat must be an integer from 1 through 20. Use --accumulate to merge evidence across independent runs instead of raising this cap.'
 repeat=$((10#$repeat))
+[[ -z "$accumulate_directory" || "$qualification" == true ]] ||
+  die_usage '--accumulate requires --qualification.'
+[[ -z "$baseline_path" || "$qualification" == true ]] ||
+  die_usage '--baseline requires --qualification.'
 validate_single_line '--configuration' "$configuration"
 [[ "$configuration" =~ ^[A-Za-z0-9._-]+$ ]] ||
   die_usage '--configuration may contain only letters, digits, dot, underscore, and hyphen.'

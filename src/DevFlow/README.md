@@ -287,6 +287,20 @@ exits before agent readiness (for example, from a disconnected RDP session), the
 redacted process-exit host diagnostic and returns `infrastructure-failure`; it does not claim a
 flow failure or Windows qualification.
 
+### Measurement status
+
+Goal #4 names five metrics. Their recorded state is tracked deliberately rather than implied. Read
+the **independent** count in each row: a denominator can be grown by restating evidence, an
+independent count cannot.
+
+| Metric | Recorded value today | Where |
+|---|---|---|
+| False repair rate | `0/316` pooled, but **16 independent** — `curated 0/16` + `generated 0/300`. Static corpus only, no device trials. Gate needs 300 independent. | `tests/DevFlow/InspectorCorpus/README.md` |
+| Classification accuracy | `42/45` pooled, but **8 independent** — 37 of the 45 handed the classifier its own answer. Confusion matrix published with an inferred/stamp-honoured split. Gate needs 100 *genuinely inferred* evaluations, so 100 stamped labels would still be `not-qualified`. | `tests/DevFlow/InspectorCorpus/baselines/README.md` |
+| Repair acceptance / precision | `31/31` pooled, but **1 independent** — 30 of the 31 repair-positive cases are `adapted-from-case` restatements of one seed. No human-acceptance signal exists at all. | `tests/DevFlow/InspectorCorpus/baselines/qualification.json` |
+| Replay stability | **No recorded number.** Needs real-device runs. `maui devflow flow qualify --accumulate` sums clean first attempts per Tier-1 flow across independent jobs and gates them at `accumulated-tier1-first-attempts`, so the ≥100 threshold is reachable without raising the 20-attempt `--repeat` cap — but no run has produced any first-attempt evidence yet | [flow-qa.md](../../docs/DevFlow/flow-qa.md) |
+| Authoring time | **No recorded number.** The protocol, export path, and aggregation CLI exist; zero sessions have been collected, **no unassisted-control capture path exists**, and no control sessions have been run | [authoring-time-protocol.md](../../docs/DevFlow/authoring-time-protocol.md) |
+
 ### On-demand diagnostics
 
 Two explicit, read-only diagnostics are available from the CLI, the MCP tools, and the Inspector's

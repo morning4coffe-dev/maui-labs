@@ -15,11 +15,35 @@ public static class MauiPreviewQualificationStates
 public static class MauiQualificationSampleSources
 {
     public const string Curated = "curated";
+
+    /// <summary>
+    /// A curated case adapted from another curated case. Kept separate from <see cref="Curated"/>
+    /// because N derivations of one seed are one piece of evidence repeated, not N trials, and a
+    /// Wilson interval computed over them would claim a confidence the sample cannot support.
+    /// </summary>
+    public const string CuratedDerived = "curated-derived";
+
     public const string Generated = "generated";
     public const string DeviceBacked = "device-backed";
 
     public static bool IsKnown(string? value) =>
-        value is Curated or Generated or DeviceBacked;
+        value is Curated or CuratedDerived or Generated or DeviceBacked;
+
+    /// <summary>
+    /// True when a sample from this source counts toward a gate's minimum-evaluation requirement.
+    /// Derived and generated samples are reported but never counted as independent trials.
+    /// </summary>
+    public static bool IsIndependent(string? value) =>
+        value is Curated or DeviceBacked;
+
+    /// <summary>
+    /// True when this source's evidence is a property of the corpus files rather than of a run.
+    /// Every accumulated run is required to share a corpus fingerprint, so static evidence is
+    /// byte-identical across runs: re-evaluating it is a repeat, never a fresh trial, and the
+    /// accumulator must count it exactly once no matter how many runs report it.
+    /// </summary>
+    public static bool IsStatic(string? value) =>
+        value is Curated or CuratedDerived or Generated;
 }
 
 /// <summary>
@@ -249,11 +273,85 @@ public sealed class MauiQualificationCorpusSummary
     [JsonPropertyName("curatedCases")] public int CuratedCases { get; set; }
     [JsonPropertyName("generatedCases")] public int GeneratedCases { get; set; }
     [JsonPropertyName("deviceBackedCases")] public int DeviceBackedCases { get; set; }
+    [JsonPropertyName("curatedRepairPositiveCases")] public int CuratedRepairPositiveCases { get; set; }
+
+    /// <summary>
+    /// How many curated cases were adapted from another curated case. Read
+    /// <see cref="CuratedRepairPositiveCases"/> without this and 31 restatements of one seed look
+    /// like 31 curated cases.
+    /// </summary>
+    [JsonPropertyName("curatedDerivedCases")] public int CuratedDerivedCases { get; set; }
+
+    /// <summary>
+    /// Curated cases that do not declare a seed yet evaluate to exactly the same evidence as
+    /// another case. The curated-versus-derived split is self-declared, so this is the only signal
+    /// that an undeclared clone is being counted as an independent trial. Disclosure, not a
+    /// rejection — genuinely distinct cases can coincide.
+    /// </summary>
+    [JsonPropertyName("undeclaredProjectionCollisions")] public int UndeclaredProjectionCollisions { get; set; }
+
+    /// <summary>
+    /// Curated cases that do not declare a seed yet share a fixture *shape* — the set of key
+    /// paths, values ignored — with another case of the same kind. Catches the clone that evades
+    /// <see cref="UndeclaredProjectionCollisions"/> by perturbing values until its diagnostics
+    /// differ. Also a disclosure, not a rejection.
+    /// </summary>
+    [JsonPropertyName("undeclaredShapeCollisions")] public int UndeclaredShapeCollisions { get; set; }
+
+    [JsonPropertyName("curatedNoRepairCases")] public int CuratedNoRepairCases { get; set; }
+    [JsonPropertyName("generatedNoRepairCases")] public int GeneratedNoRepairCases { get; set; }
+    [JsonPropertyName("curatedClassificationLabeledCases")] public int CuratedClassificationLabeledCases { get; set; }
+    [JsonPropertyName("provenanceComplete")] public bool? ProvenanceComplete { get; set; }
+    [JsonPropertyName("provenanceSourceCounts")] public List<MauiQualificationCorpusProvenanceCount> ProvenanceSourceCounts { get; set; } = [];
     [JsonPropertyName("mutationSeed")] public int? MutationSeed { get; set; }
     [JsonPropertyName("generatorVersion")] public string? GeneratorVersion { get; set; }
     [JsonPropertyName("errors")] public List<string> Errors { get; set; } = [];
     [JsonPropertyName("securityCorpus")] public MauiQualificationSecurityCorpusSummary? SecurityCorpus { get; set; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+/// <summary>
+/// How many curated cases carry each provenance source kind. Reported so a curated denominator
+/// is never read as a set of independent observed trials.
+/// </summary>
+public sealed class MauiQualificationCorpusProvenanceCount
+{
+    [JsonPropertyName("sourceKind")] public string SourceKind { get; set; } = MauiQualificationCorpusProvenanceSourceKinds.Unknown;
+    [JsonPropertyName("count")] public int Count { get; set; }
+}
+
+/// <summary>The closed set of corpus provenance source kinds.</summary>
+public static class MauiQualificationCorpusProvenanceSourceKinds
+{
+    public const string Synthetic = "synthetic";
+    public const string ObservedLocalRun = "observed-local-run";
+    public const string ObservedCiRun = "observed-ci-run";
+    public const string ReportedIssue = "reported-issue";
+    public const string Unknown = "unknown";
+
+    /// <summary>Returns the supplied value when it is a recognized source kind, otherwise <c>unknown</c>.</summary>
+    public static string Normalize(string? value) => value switch
+    {
+        Synthetic or ObservedLocalRun or ObservedCiRun or ReportedIssue => value,
+        _ => Unknown,
+    };
+
+    /// <summary>Returns whether the source kind describes an observed run rather than an authored fixture.</summary>
+    public static bool IsObserved(string? value) =>
+        value is ObservedLocalRun or ObservedCiRun;
+}
+
+/// <summary>The closed set of corpus labeling methods.</summary>
+public static class MauiQualificationCorpusProvenanceMethods
+{
+    public const string HandAuthored = "hand-authored";
+    public const string AdaptedFromCase = "adapted-from-case";
+    public const string DerivedFromReplay = "derived-from-replay";
+    public const string DerivedFromIncident = "derived-from-incident";
+
+    /// <summary>Returns whether the supplied labeling method is recognized.</summary>
+    public static bool IsKnown(string? value) =>
+        value is HandAuthored or AdaptedFromCase or DerivedFromReplay or DerivedFromIncident;
 }
 
 /// <summary>
@@ -284,6 +382,14 @@ public sealed class MauiQualificationExecutionSample
     [JsonPropertyName("repairExpected")] public bool? RepairExpected { get; set; }
     [JsonPropertyName("repairCorrect")] public bool? RepairCorrect { get; set; }
     [JsonPropertyName("noRepairExpected")] public bool? NoRepairExpected { get; set; }
+    [JsonPropertyName("expectedFailureClass")] public string? ExpectedFailureClass { get; set; }
+    [JsonPropertyName("observedFailureClass")] public string? ObservedFailureClass { get; set; }
+    /// <summary>
+    /// False when the classifier merely honoured a failure class the evidence already carried.
+    /// Such a case is correct by construction and says nothing about inference quality, so it is
+    /// reported in its own bucket rather than pooled into a single accuracy headline.
+    /// </summary>
+    [JsonPropertyName("failureClassInferred")] public bool? FailureClassInferred { get; set; }
     [JsonPropertyName("falseHeal")] public bool? FalseHeal { get; set; }
     [JsonPropertyName("abstained")] public bool? Abstained { get; set; }
     [JsonPropertyName("humanDecision")] public string? HumanDecision { get; set; }
@@ -323,6 +429,8 @@ public sealed class MauiQualificationGateThresholds
     [JsonPropertyName("maximumFalseHeals")] public int MaximumFalseHeals { get; set; }
     [JsonPropertyName("minimumSelectorStability")] public double MinimumSelectorStability { get; set; } = 0.99;
     [JsonPropertyName("minimumSelectorObservations")] public int MinimumSelectorObservations { get; set; } = 100;
+    [JsonPropertyName("minimumClassificationAccuracy")] public double MinimumClassificationAccuracy { get; set; } = 0.90;
+    [JsonPropertyName("minimumClassificationEvaluations")] public int MinimumClassificationEvaluations { get; set; } = 100;
     [JsonPropertyName("maximumCalibrationEce")] public double MaximumCalibrationEce { get; set; } = 0.05;
     [JsonPropertyName("minimumCleanFirstAttemptsPerTier1Flow")] public int MinimumCleanFirstAttemptsPerTier1Flow { get; set; } = 100;
     [JsonPropertyName("minimumFirstAttemptStability")] public double MinimumFirstAttemptStability { get; set; } = 0.99;
@@ -339,6 +447,8 @@ public sealed class MauiQualificationMetrics
     [JsonPropertyName("selectorStability")] public MauiQualificationRateMetric SelectorStability { get; set; } = new();
     [JsonPropertyName("repairPrecision")] public MauiQualificationRateMetric RepairPrecision { get; set; } = new();
     [JsonPropertyName("repairRecall")] public MauiQualificationRateMetric RepairRecall { get; set; } = new();
+    [JsonPropertyName("classificationAccuracy")] public MauiQualificationRateMetric ClassificationAccuracy { get; set; } = new();
+    [JsonPropertyName("classificationMatrix")] public MauiQualificationClassificationMatrix ClassificationMatrix { get; set; } = new();
     [JsonPropertyName("falseHeals")] public MauiQualificationRateMetric FalseHeals { get; set; } = new();
     [JsonPropertyName("abstention")] public MauiQualificationRateMetric Abstention { get; set; } = new();
     [JsonPropertyName("humanDecisionOutcomes")] public MauiQualificationHumanDecisionOutcomes HumanDecisionOutcomes { get; set; } = new();
@@ -359,8 +469,88 @@ public sealed class MauiQualificationRateMetric
     [JsonPropertyName("value")] public double? Value { get; set; }
     [JsonPropertyName("confidenceInterval")] public MauiQualificationConfidenceInterval? ConfidenceInterval { get; set; }
     [JsonPropertyName("sampleSources")] public List<string> SampleSources { get; set; } = [];
+    [JsonPropertyName("sourceCounts")] public List<MauiQualificationRateSourceCount> SourceCounts { get; set; } = [];
+
+    /// <summary>
+    /// The share of <see cref="Denominator"/> that is independent evidence — curated originals and
+    /// device-backed runs, excluding derived cases and generated mutants. Gates count this, not the
+    /// pooled denominator, so a metric cannot reach its minimum by repeating one seed.
+    /// </summary>
+    [JsonPropertyName("independentEvaluations")] public int IndependentEvaluations { get; set; }
+
+    /// <summary>The successes among <see cref="IndependentEvaluations"/>.</summary>
+    [JsonPropertyName("independentNumerator")] public int IndependentNumerator { get; set; }
+
+    /// <summary>
+    /// The Wilson interval over the independent subset alone. <see cref="ConfidenceInterval"/> is
+    /// computed on the pooled denominator and therefore narrows when derived clones or generated
+    /// mutants are added; that interval is disclosure only. Gates read this one.
+    /// </summary>
+    [JsonPropertyName("independentConfidenceInterval")] public MauiQualificationConfidenceInterval? IndependentConfidenceInterval { get; set; }
+
     [JsonPropertyName("independentDeviceRuns")] public bool? IndependentDeviceRuns { get; set; }
     [JsonPropertyName("exclusions")] public List<MauiQualificationExclusion> Exclusions { get; set; } = [];
+}
+
+/// <summary>
+/// The share of a rate metric contributed by one sample source. Reported so a pooled
+/// denominator such as 0/316 cannot be read as 316 independent trials.
+/// </summary>
+public sealed class MauiQualificationRateSourceCount
+{
+    [JsonPropertyName("source")] public string Source { get; set; } = "unknown";
+    [JsonPropertyName("numerator")] public int Numerator { get; set; }
+    [JsonPropertyName("denominator")] public int Denominator { get; set; }
+
+    /// <summary>
+    /// The share of <see cref="Denominator"/> this source contributed to the metric's
+    /// <see cref="MauiQualificationRateMetric.IndependentEvaluations"/>. Carried per source so the
+    /// accumulator can merge independence exactly rather than re-deriving it from the source name,
+    /// which is wrong for classification accuracy (a curated case with a stamped label is not an
+    /// independent classification evaluation).
+    /// </summary>
+    [JsonPropertyName("independentEvaluations")] public int IndependentEvaluations { get; set; }
+}
+
+/// <summary>
+/// A bounded failure-class confusion matrix. Labels are normalized to the closed
+/// <see cref="MauiFlowFailureClasses"/> set so the matrix can never carry free text.
+/// </summary>
+public sealed class MauiQualificationClassificationMatrix
+{
+    [JsonPropertyName("state")] public string State { get; set; } = "missing";
+    [JsonPropertyName("method")] public string Method { get; set; } = "expected-versus-observed-failure-class";
+    [JsonPropertyName("sampleCount")] public int SampleCount { get; set; }
+    [JsonPropertyName("correct")] public int Correct { get; set; }
+    [JsonPropertyName("labelCount")] public int LabelCount { get; set; }
+    /// <summary>Cases where the classifier had to infer the class from replay facts.</summary>
+    [JsonPropertyName("inferredSampleCount")] public int InferredSampleCount { get; set; }
+    [JsonPropertyName("inferredCorrect")] public int InferredCorrect { get; set; }
+    /// <summary>Cases whose evidence already stamped a known class; correct by construction.</summary>
+    [JsonPropertyName("stampHonouredSampleCount")] public int StampHonouredSampleCount { get; set; }
+    [JsonPropertyName("stampHonouredCorrect")] public int StampHonouredCorrect { get; set; }
+    [JsonPropertyName("cells")] public List<MauiQualificationClassificationCell> Cells { get; set; } = [];
+    [JsonPropertyName("perClass")] public List<MauiQualificationClassificationClassResult> PerClass { get; set; } = [];
+    [JsonPropertyName("missingReason")] public string? MissingReason { get; set; }
+}
+
+/// <summary>One confusion-matrix cell: how often an expected class was reported as an observed class.</summary>
+public sealed class MauiQualificationClassificationCell
+{
+    [JsonPropertyName("expected")] public string Expected { get; set; } = "unknown";
+    [JsonPropertyName("observed")] public string Observed { get; set; } = "unknown";
+    [JsonPropertyName("count")] public int Count { get; set; }
+}
+
+/// <summary>Per-class support, precision, and recall derived from the confusion matrix.</summary>
+public sealed class MauiQualificationClassificationClassResult
+{
+    [JsonPropertyName("failureClass")] public string FailureClass { get; set; } = "unknown";
+    [JsonPropertyName("support")] public int Support { get; set; }
+    [JsonPropertyName("predicted")] public int Predicted { get; set; }
+    [JsonPropertyName("correct")] public int Correct { get; set; }
+    [JsonPropertyName("precision")] public double? Precision { get; set; }
+    [JsonPropertyName("recall")] public double? Recall { get; set; }
 }
 
 /// <summary>Wilson score interval. The lower bound is used for conservative release decisions.</summary>
@@ -447,6 +637,10 @@ public sealed class MauiQualificationFlowAttemptSummary
     [JsonPropertyName("passedFirstAttempts")] public int PassedFirstAttempts { get; set; }
     [JsonPropertyName("stability")] public double? Stability { get; set; }
     [JsonPropertyName("realDeviceEvidence")] public bool RealDeviceEvidence { get; set; }
+    /// <summary>Number of accepted runs that contributed to <see cref="CleanFirstAttempts"/>. Only set when accumulating.</summary>
+    [JsonPropertyName("contributingRuns")] public int ContributingRuns { get; set; }
+    /// <summary>Distinct declared real-device fingerprints behind those runs. Self-reported; the merge cannot verify it.</summary>
+    [JsonPropertyName("contributingDevices")] public int ContributingDevices { get; set; }
 }
 
 /// <summary>Counts review outcomes without retaining reviewer text or grant content.</summary>

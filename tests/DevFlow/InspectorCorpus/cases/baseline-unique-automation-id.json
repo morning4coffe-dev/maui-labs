@@ -3,6 +3,29 @@
   "id": "baseline-unique-automation-id",
   "kind": "baseline",
   "disposition": "diagnostic-only",
-  "fixture": { "route": "/settings", "elements": [{ "type": "Button", "automationId": "save-settings", "visible": true, "enabled": true }] },
-  "expect": { "diagnosticIds": [], "candidateKinds": ["automation-id"] }
+  "provenance": {
+    "labeledBy": "devflow-maintainers",
+    "labeledOn": "2026-08-15",
+    "method": "hand-authored",
+    "sourceKind": "synthetic",
+    "reviewStatus": "unreviewed",
+    "notes": "Healthy baseline; models no runtime failure."
+  },
+  "fixture": {
+    "route": "/settings",
+    "elements": [
+      {
+        "type": "Button",
+        "automationId": "save-settings",
+        "visible": true,
+        "enabled": true
+      }
+    ]
+  },
+  "expect": {
+    "diagnosticIds": [],
+    "candidateKinds": [
+      "automation-id"
+    ]
+  }
 }

@@ -24,6 +24,27 @@ public sealed class MauiFlowFailureFacts
 }
 
 /// <summary>The stable, typed result produced from <see cref="MauiFlowFailureFacts"/>.</summary>
+/// <summary>
+/// Why <see cref="MauiFlowFailureClassifier.Classify"/> returned the class it returned.
+/// Only <see cref="Inferred"/> means the classifier derived the class from observable structure.
+/// The other three mean the facts already named the class, so the answer was copied and is not
+/// evidence that classification works.
+/// </summary>
+public static class MauiFlowClassificationBases
+{
+    /// <summary>The facts carried an explicit, known <c>FailureClass</c>.</summary>
+    public const string Stamped = "stamped";
+
+    /// <summary>The terminal outcome mapped directly onto a class.</summary>
+    public const string Outcome = "outcome";
+
+    /// <summary>A fact flag (transport, agent-disconnected, flow-invalid, ...) named the class.</summary>
+    public const string FactFlag = "fact-flag";
+
+    /// <summary>The class was derived from replay structure rather than read off an input.</summary>
+    public const string Inferred = "inferred";
+}
+
 public sealed class MauiFlowFailureClassification
 {
     public string FailureClass { get; init; } = MauiFlowFailureClasses.Infrastructure;
@@ -32,6 +53,12 @@ public sealed class MauiFlowFailureClassification
     public string Phase { get; init; } = "execution";
     public bool Retryable { get; init; }
     public bool RepairEligible { get; init; }
+
+    /// <summary>
+    /// One of <see cref="MauiFlowClassificationBases"/>. Accuracy measurement must count only
+    /// <see cref="MauiFlowClassificationBases.Inferred"/> results, or it measures its own inputs.
+    /// </summary>
+    public string Basis { get; init; } = MauiFlowClassificationBases.Inferred;
 }
 
 /// <summary>
@@ -46,27 +73,27 @@ public static class MauiFlowFailureClassifier
 
         var terminal = ClassFromOutcome(facts.TerminalOutcome);
         if (terminal is not null)
-            return Describe(terminal, facts);
+            return Describe(terminal, facts, MauiFlowClassificationBases.Outcome);
 
         if (facts.CompletionCertain == false)
-            return Describe(MauiFlowFailureClasses.UnknownCompletion, facts);
+            return Describe(MauiFlowFailureClasses.UnknownCompletion, facts, MauiFlowClassificationBases.FactFlag);
         if (facts.AgentDisconnected == true)
-            return Describe(MauiFlowFailureClasses.AgentDisconnected, facts);
+            return Describe(MauiFlowFailureClasses.AgentDisconnected, facts, MauiFlowClassificationBases.FactFlag);
         if (facts.TransportFailure == true)
-            return Describe(MauiFlowFailureClasses.Transport, facts);
+            return Describe(MauiFlowFailureClasses.Transport, facts, MauiFlowClassificationBases.FactFlag);
         if (facts.FlowInvalid == true)
-            return Describe(MauiFlowFailureClasses.FlowInvalid, facts);
+            return Describe(MauiFlowFailureClasses.FlowInvalid, facts, MauiFlowClassificationBases.FactFlag);
         if (facts.SchemaUnsupported == true)
-            return Describe(MauiFlowFailureClasses.SchemaUnsupported, facts);
+            return Describe(MauiFlowFailureClasses.SchemaUnsupported, facts, MauiFlowClassificationBases.FactFlag);
         if (facts.CapabilityMissing == true)
-            return Describe(MauiFlowFailureClasses.CapabilityMissing, facts);
+            return Describe(MauiFlowFailureClasses.CapabilityMissing, facts, MauiFlowClassificationBases.FactFlag);
         if (facts.ResetFailed == true)
-            return Describe(MauiFlowFailureClasses.ResetFailed, facts);
+            return Describe(MauiFlowFailureClasses.ResetFailed, facts, MauiFlowClassificationBases.FactFlag);
         if (facts.ActionRejected == true)
-            return Describe(MauiFlowFailureClasses.ActionRejected, facts);
+            return Describe(MauiFlowFailureClasses.ActionRejected, facts, MauiFlowClassificationBases.FactFlag);
 
         if (IsKnownClass(facts.FailureClass))
-            return Describe(NormalizeClass(facts.FailureClass!), facts);
+            return Describe(NormalizeClass(facts.FailureClass!), facts, MauiFlowClassificationBases.Stamped);
 
         var mapped = FromLegacyFailureKind(facts.LegacyFailureKind);
         if (mapped == MauiFlowFailureClasses.LocatorNotFound)
@@ -75,12 +102,12 @@ public static class MauiFlowFailureClassifier
             // route state disagree. Absence of checkpoint evidence is diagnostic-only, not repair
             // eligible, but preserves the legacy locator result for compatibility.
             if (facts.RouteMatches == false)
-                return Describe(MauiFlowFailureClasses.RouteStateDrift, facts);
+                return Describe(MauiFlowFailureClasses.RouteStateDrift, facts, MauiFlowClassificationBases.Inferred);
             if (facts.CheckpointMatches == false)
-                return Describe(MauiFlowFailureClasses.PreconditionUnsatisfied, facts);
+                return Describe(MauiFlowFailureClasses.PreconditionUnsatisfied, facts, MauiFlowClassificationBases.Inferred);
         }
 
-        return Describe(mapped ?? MauiFlowFailureClasses.Infrastructure, facts);
+        return Describe(mapped ?? MauiFlowFailureClasses.Infrastructure, facts, MauiFlowClassificationBases.Inferred);
     }
 
     /// <summary>
@@ -177,7 +204,7 @@ public static class MauiFlowFailureClassifier
         Message = MauiFlowReportRedactor.SafeMessage(message),
     };
 
-    private static MauiFlowFailureClassification Describe(string failureClass, MauiFlowFailureFacts facts)
+    private static MauiFlowFailureClassification Describe(string failureClass, MauiFlowFailureFacts facts, string basis)
     {
         var (category, phase, retryable) = failureClass switch
         {
@@ -224,6 +251,7 @@ public static class MauiFlowFailureClassifier
             Phase = phase,
             Retryable = retryable,
             RepairEligible = repairEligible,
+            Basis = basis,
         };
     }
 
@@ -240,6 +268,9 @@ public static class MauiFlowFailureClassifier
 
     private static bool IsKnownClass(string? value)
         => value is not null && KnownClasses.Contains(value);
+
+    /// <summary>Returns whether the supplied value is one of the closed stable failure classes.</summary>
+    public static bool IsKnownFailureClass(string? value) => IsKnownClass(value);
 
     private static string NormalizeClass(string value)
         => value.Trim().ToLowerInvariant();

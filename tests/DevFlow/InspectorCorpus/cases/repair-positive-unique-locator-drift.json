@@ -3,6 +3,15 @@
   "id": "repair-positive-unique-locator-drift",
   "kind": "repair-positive",
   "disposition": "repair-eligible",
+  "expectedFailureClass": "locator-not-found",
+  "provenance": {
+    "labeledBy": "devflow-maintainers",
+    "labeledOn": "2026-08-15",
+    "method": "hand-authored",
+    "sourceKind": "synthetic",
+    "reviewStatus": "unreviewed",
+    "notes": "Single unique repair candidate with a fully matching checkpoint."
+  },
   "fixture": {
     "failure": "locator-not-found",
     "phase": "pre-dispatch",
@@ -15,7 +24,9 @@
   },
   "expect": {
     "diagnosticIds": [],
-    "candidateKinds": ["automation-id"],
+    "candidateKinds": [
+      "automation-id"
+    ],
     "repairEligible": true
   }
 }

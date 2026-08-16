@@ -50,6 +50,7 @@ public static class MauiPreviewQualificationGateEvaluator
         AddReviewGate(report, thresholds);
         AddRequiredEvidenceGate(report, input, samples);
         AddRepairPrecisionGate(report, thresholds);
+        AddClassificationAccuracyGate(report, thresholds);
         AddFalseHealGate(report, thresholds);
         AddSelectorStabilityGate(report, thresholds);
         AddCalibrationGate(report, thresholds);
@@ -121,6 +122,11 @@ public static class MauiPreviewQualificationGateEvaluator
 
         var privacy = BuildPrivacySecurityMetric(input, included);
         var firstAttempts = BuildFirstAttemptMetric(input, samples, platform, thresholds);
+        var classification = included
+            .Where(static sample =>
+                MauiFlowFailureClassifier.IsKnownFailureClass(sample.ExpectedFailureClass) &&
+                sample.ObservedFailureClass is not null)
+            .ToList();
 
         return new MauiQualificationMetrics
         {
@@ -154,6 +160,21 @@ public static class MauiPreviewQualificationGateEvaluator
                 static sample => sample.SelectorStable == true,
                 independentDeviceRuns: deviceSelector.Count > 0,
                 thresholds.ConfidenceLevel),
+            ClassificationAccuracy = BuildRate(
+                classification,
+                static sample => string.Equals(
+                    NormalizeFailureClass(sample.ExpectedFailureClass),
+                    NormalizeFailureClass(sample.ObservedFailureClass),
+                    StringComparison.Ordinal),
+                independentDeviceRuns: classification.Count > 0 && classification.All(IsRealDeviceSample),
+                thresholds.ConfidenceLevel,
+                // A case whose evidence already stamped its failure class is answered by copying,
+                // not by classifying. Those cases are reported but never count toward the gate's
+                // minimum, or the accuracy headline would measure the corpus, not the classifier.
+                independent: static sample =>
+                    MauiQualificationSampleSources.IsIndependent(NormalizeSource(sample.Source)) &&
+                    sample.FailureClassInferred == true),
+            ClassificationMatrix = BuildClassificationMatrix(classification),
             Calibration = calibration,
             TimeToDiagnosis = diagnosis,
             TraceReportSize = trace,
@@ -168,10 +189,15 @@ public static class MauiPreviewQualificationGateEvaluator
         IReadOnlyList<MauiQualificationExecutionSample> samples,
         Func<MauiQualificationExecutionSample, bool> success,
         bool independentDeviceRuns,
-        double confidenceLevel)
+        double confidenceLevel,
+        Func<MauiQualificationExecutionSample, bool>? independent = null)
     {
         var denominator = samples.Count;
         var numerator = samples.Count(success);
+        independent ??= static sample => MauiQualificationSampleSources.IsIndependent(NormalizeSource(sample.Source));
+        var independentSamples = samples.Where(independent).ToList();
+        var independentDenominator = independentSamples.Count;
+        var independentNumerator = independentSamples.Count(success);
         return new MauiQualificationRateMetric
         {
             State = denominator == 0 ? "missing" : "measured",
@@ -186,7 +212,104 @@ public static class MauiPreviewQualificationGateEvaluator
                 .Distinct(StringComparer.Ordinal)
                 .OrderBy(static source => source, StringComparer.Ordinal)
                 .ToList(),
+            // Per-source counts keep a pooled denominator honest: 0/316 is reported as the
+            // curated and generated shares it is actually made of.
+            SourceCounts = samples
+                .GroupBy(static sample => NormalizeSource(sample.Source), StringComparer.Ordinal)
+                .OrderBy(static group => group.Key, StringComparer.Ordinal)
+                .Select(group => new MauiQualificationRateSourceCount
+                {
+                    Source = group.Key,
+                    Numerator = group.Count(success),
+                    Denominator = group.Count(),
+                    IndependentEvaluations = group.Count(independent),
+                })
+                .ToList(),
+            IndependentEvaluations = independentDenominator,
+            IndependentNumerator = independentNumerator,
+            // Restating one observation 30 times narrows a pooled Wilson interval toward certainty
+            // without adding a single new fact. Gates read this interval; the pooled one above is
+            // published for disclosure only.
+            IndependentConfidenceInterval = independentDenominator == 0
+                ? null
+                : MauiQualificationStatistics.WilsonInterval(independentNumerator, independentDenominator, confidenceLevel),
             IndependentDeviceRuns = denominator == 0 ? null : independentDeviceRuns,
+        };
+    }
+
+    /// <summary>
+    /// Builds a bounded expected-versus-observed failure-class confusion matrix. Labels are
+    /// normalized to the closed failure-class set so free text can never reach the report.
+    /// </summary>
+    private static MauiQualificationClassificationMatrix BuildClassificationMatrix(
+        IReadOnlyList<MauiQualificationExecutionSample> samples)
+    {
+        if (samples.Count == 0)
+        {
+            return new MauiQualificationClassificationMatrix
+            {
+                State = "missing",
+                MissingReason = "No sample carried both a ground-truth and an observed failure class.",
+            };
+        }
+
+        var pairs = samples
+            .Select(static sample => (
+                Expected: NormalizeFailureClass(sample.ExpectedFailureClass),
+                Observed: NormalizeFailureClass(sample.ObservedFailureClass)))
+            .ToList();
+        var cells = pairs
+            .GroupBy(static pair => pair, EqualityComparer<(string Expected, string Observed)>.Default)
+            .Select(static group => new MauiQualificationClassificationCell
+            {
+                Expected = group.Key.Expected,
+                Observed = group.Key.Observed,
+                Count = group.Count(),
+            })
+            .OrderBy(static cell => cell.Expected, StringComparer.Ordinal)
+            .ThenBy(static cell => cell.Observed, StringComparer.Ordinal)
+            .ToList();
+        var labels = pairs
+            .SelectMany(static pair => new[] { pair.Expected, pair.Observed })
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static label => label, StringComparer.Ordinal)
+            .ToList();
+        var perClass = labels
+            .Select(label =>
+            {
+                var support = pairs.Count(pair => pair.Expected == label);
+                var predicted = pairs.Count(pair => pair.Observed == label);
+                var correct = pairs.Count(pair => pair.Expected == label && pair.Observed == label);
+                return new MauiQualificationClassificationClassResult
+                {
+                    FailureClass = label,
+                    Support = support,
+                    Predicted = predicted,
+                    Correct = correct,
+                    Precision = predicted == 0 ? null : (double)correct / predicted,
+                    Recall = support == 0 ? null : (double)correct / support,
+                };
+            })
+            .ToList();
+
+        return new MauiQualificationClassificationMatrix
+        {
+            State = "measured",
+            SampleCount = pairs.Count,
+            Correct = pairs.Count(static pair => pair.Expected == pair.Observed),
+            LabelCount = labels.Count,
+            // Splits the headline: cases whose evidence already named the failure class are
+            // answered by copying it, so pooling them with genuine inference overstates accuracy.
+            InferredSampleCount = samples.Count(static sample => sample.FailureClassInferred == true),
+            InferredCorrect = samples.Count(static sample =>
+                sample.FailureClassInferred == true &&
+                NormalizeFailureClass(sample.ExpectedFailureClass) == NormalizeFailureClass(sample.ObservedFailureClass)),
+            StampHonouredSampleCount = samples.Count(static sample => sample.FailureClassInferred != true),
+            StampHonouredCorrect = samples.Count(static sample =>
+                sample.FailureClassInferred != true &&
+                NormalizeFailureClass(sample.ExpectedFailureClass) == NormalizeFailureClass(sample.ObservedFailureClass)),
+            Cells = cells,
+            PerClass = perClass,
         };
     }
 
@@ -485,8 +608,8 @@ public static class MauiPreviewQualificationGateEvaluator
     private static void AddRepairPrecisionGate(MauiPreviewQualificationReport report, MauiQualificationGateThresholds thresholds)
     {
         var metric = report.Metrics.RepairPrecision;
-        var lower = metric.ConfidenceInterval?.Lower;
-        var status = metric.Denominator < thresholds.MinimumRepairEvaluations
+        var lower = metric.IndependentConfidenceInterval?.Lower;
+        var status = metric.IndependentEvaluations < thresholds.MinimumRepairEvaluations
             ? MauiPreviewQualificationStates.NotQualified
             : lower >= thresholds.MinimumRepairPrecision
                 ? MauiPreviewQualificationStates.Pass
@@ -500,7 +623,7 @@ public static class MauiPreviewQualificationGateEvaluator
                 : "Repair precision lacks enough evaluations or misses the conservative lower-bound threshold.",
             ReasonCodes = status == MauiPreviewQualificationStates.Pass
                 ? []
-                : metric.Denominator < thresholds.MinimumRepairEvaluations
+                : metric.IndependentEvaluations < thresholds.MinimumRepairEvaluations
                     ? ["repair-evaluation-count-insufficient"]
                     : ["repair-precision-lower-bound-below-threshold"],
         });
@@ -509,7 +632,7 @@ public static class MauiPreviewQualificationGateEvaluator
     private static void AddFalseHealGate(MauiPreviewQualificationReport report, MauiQualificationGateThresholds thresholds)
     {
         var metric = report.Metrics.FalseHeals;
-        var status = metric.Denominator < thresholds.MinimumNoRepairEvaluations
+        var status = metric.IndependentEvaluations < thresholds.MinimumNoRepairEvaluations
             ? MauiPreviewQualificationStates.NotQualified
             : metric.Numerator <= thresholds.MaximumFalseHeals
                 ? MauiPreviewQualificationStates.Pass
@@ -523,16 +646,42 @@ public static class MauiPreviewQualificationGateEvaluator
                 : "No-repair evidence is insufficient or includes a false heal.",
             ReasonCodes = status == MauiPreviewQualificationStates.Pass
                 ? []
-                : metric.Denominator < thresholds.MinimumNoRepairEvaluations
+                : metric.IndependentEvaluations < thresholds.MinimumNoRepairEvaluations
                     ? ["no-repair-evaluation-count-insufficient"]
                     : ["false-heal-observed"],
+        });
+    }
+
+    private static void AddClassificationAccuracyGate(
+        MauiPreviewQualificationReport report,
+        MauiQualificationGateThresholds thresholds)
+    {
+        var metric = report.Metrics.ClassificationAccuracy;
+        var lower = metric.IndependentConfidenceInterval?.Lower;
+        var status = metric.IndependentEvaluations < thresholds.MinimumClassificationEvaluations
+            ? MauiPreviewQualificationStates.NotQualified
+            : lower >= thresholds.MinimumClassificationAccuracy
+                ? MauiPreviewQualificationStates.Pass
+                : MauiPreviewQualificationStates.Fail;
+        report.Gates.Add(new MauiQualificationGateResult
+        {
+            GateId = "classification-accuracy",
+            Status = status,
+            Message = status == MauiPreviewQualificationStates.Pass
+                ? "Failure-class accuracy meets the conservative Wilson lower-bound threshold."
+                : "Failure-class accuracy lacks enough labeled evaluations or misses the conservative lower-bound threshold.",
+            ReasonCodes = status == MauiPreviewQualificationStates.Pass
+                ? []
+                : metric.IndependentEvaluations < thresholds.MinimumClassificationEvaluations
+                    ? ["classification-evaluation-count-insufficient"]
+                    : ["classification-accuracy-lower-bound-below-threshold"],
         });
     }
 
     private static void AddSelectorStabilityGate(MauiPreviewQualificationReport report, MauiQualificationGateThresholds thresholds)
     {
         var metric = report.Metrics.SelectorStability;
-        var status = metric.Denominator < thresholds.MinimumSelectorObservations
+        var status = metric.IndependentEvaluations < thresholds.MinimumSelectorObservations
             ? MauiPreviewQualificationStates.NotQualified
             : metric.Value >= thresholds.MinimumSelectorStability
                 ? MauiPreviewQualificationStates.Pass
@@ -546,7 +695,7 @@ public static class MauiPreviewQualificationGateEvaluator
                 : "Declared-platform real-device selector-stability evidence is insufficient or below threshold.",
             ReasonCodes = status == MauiPreviewQualificationStates.Pass
                 ? []
-                : metric.Denominator < thresholds.MinimumSelectorObservations
+                : metric.IndependentEvaluations < thresholds.MinimumSelectorObservations
                     ? ["selector-stability-device-evidence-insufficient"]
                     : ["selector-stability-below-threshold"],
         });
@@ -665,22 +814,36 @@ public static class MauiPreviewQualificationGateEvaluator
         var reasons = new List<string>();
         if (metric.Flows.Count == 0)
             reasons.Add("tier1-flow-declaration-missing");
+        // Each flow is judged on its own evidence and the worst verdict wins. Pooling the reasons
+        // would let one flow that has not run yet downgrade another flow's measured stability
+        // failure to not-qualified, which reports exit 0 on a real regression.
+        var status = metric.Flows.Count == 0
+            ? MauiPreviewQualificationStates.NotQualified
+            : MauiPreviewQualificationStates.Pass;
         foreach (var flow in metric.Flows)
         {
+            var flowStatus = MauiPreviewQualificationStates.Pass;
             if (!flow.RealDeviceEvidence)
                 reasons.Add("android-real-device-evidence-missing");
             if (flow.CleanFirstAttempts < thresholds.MinimumCleanFirstAttemptsPerTier1Flow)
+            {
                 reasons.Add("android-clean-first-attempt-count-insufficient");
-            if (flow.Stability < thresholds.MinimumFirstAttemptStability)
-                reasons.Add("android-first-attempt-stability-below-threshold");
+                flowStatus = MauiPreviewQualificationStates.NotQualified;
+            }
+            else
+            {
+                if (!flow.RealDeviceEvidence)
+                    flowStatus = MauiPreviewQualificationStates.Fail;
+                if (flow.Stability < thresholds.MinimumFirstAttemptStability)
+                {
+                    reasons.Add("android-first-attempt-stability-below-threshold");
+                    flowStatus = MauiPreviewQualificationStates.Fail;
+                }
+            }
+
+            status = WorseGateStatus(status, flowStatus);
         }
 
-        var status = reasons.Count == 0
-            ? MauiPreviewQualificationStates.Pass
-            : reasons.Any(static code => code == "android-first-attempt-stability-below-threshold") &&
-              metric.Flows.All(flow => flow.CleanFirstAttempts >= thresholds.MinimumCleanFirstAttemptsPerTier1Flow)
-                ? MauiPreviewQualificationStates.Fail
-                : MauiPreviewQualificationStates.NotQualified;
         report.Gates.Add(new MauiQualificationGateResult
         {
             GateId = "android-tier1-first-attempts",
@@ -692,8 +855,19 @@ public static class MauiPreviewQualificationGateEvaluator
         });
     }
 
-    private static MauiQualificationGateThresholds NormalizeThresholds(MauiQualificationGateThresholds source)
+    /// <summary>Fail is worse than not-qualified, which is worse than pass.</summary>
+    private static string WorseGateStatus(string left, string right)
     {
+        static int Rank(string status) => status switch
+        {
+            MauiPreviewQualificationStates.Fail => 2,
+            MauiPreviewQualificationStates.NotQualified => 1,
+            _ => 0,
+        };
+        return Rank(right) > Rank(left) ? right : left;
+    }
+
+    private static MauiQualificationGateThresholds NormalizeThresholds(MauiQualificationGateThresholds source)    {
         return new MauiQualificationGateThresholds
         {
             PolicyVersion = MauiQualificationSanitizer.FingerprintOrUnknown(source.PolicyVersion),
@@ -704,6 +878,8 @@ public static class MauiPreviewQualificationGateEvaluator
             MaximumFalseHeals = Math.Max(0, source.MaximumFalseHeals),
             MinimumSelectorStability = Math.Clamp(source.MinimumSelectorStability, 0, 1),
             MinimumSelectorObservations = Math.Max(1, source.MinimumSelectorObservations),
+            MinimumClassificationAccuracy = Math.Clamp(source.MinimumClassificationAccuracy, 0, 1),
+            MinimumClassificationEvaluations = Math.Max(1, source.MinimumClassificationEvaluations),
             MaximumCalibrationEce = Math.Clamp(source.MaximumCalibrationEce, 0, 1),
             MinimumCleanFirstAttemptsPerTier1Flow = Math.Max(1, source.MinimumCleanFirstAttemptsPerTier1Flow),
             MinimumFirstAttemptStability = Math.Clamp(source.MinimumFirstAttemptStability, 0, 1),
@@ -744,6 +920,9 @@ public static class MauiPreviewQualificationGateEvaluator
 
     private static string NormalizeSource(string? value) =>
         MauiQualificationSampleSources.IsKnown(value) ? value! : "unknown";
+
+    private static string NormalizeFailureClass(string? value) =>
+        MauiFlowFailureClassifier.IsKnownFailureClass(value) ? value! : "unknown";
 
     private static string AggregateStatus(IEnumerable<MauiQualificationGateResult> gates)
     {
@@ -886,6 +1065,26 @@ public static class MauiPreviewQualificationGateEvaluator
         CuratedCases = Math.Max(0, source?.CuratedCases ?? 0),
         GeneratedCases = Math.Max(0, source?.GeneratedCases ?? 0),
         DeviceBackedCases = Math.Max(0, source?.DeviceBackedCases ?? 0),
+        CuratedRepairPositiveCases = Math.Max(0, source?.CuratedRepairPositiveCases ?? 0),
+        CuratedDerivedCases = Math.Max(0, source?.CuratedDerivedCases ?? 0),
+        UndeclaredProjectionCollisions = Math.Max(0, source?.UndeclaredProjectionCollisions ?? 0),
+        UndeclaredShapeCollisions = Math.Max(0, source?.UndeclaredShapeCollisions ?? 0),
+        CuratedNoRepairCases = Math.Max(0, source?.CuratedNoRepairCases ?? 0),
+        GeneratedNoRepairCases = Math.Max(0, source?.GeneratedNoRepairCases ?? 0),
+        CuratedClassificationLabeledCases = Math.Max(0, source?.CuratedClassificationLabeledCases ?? 0),
+        ProvenanceComplete = source?.ProvenanceComplete,
+        ProvenanceSourceCounts = (source?.ProvenanceSourceCounts ?? [])
+            .Where(static item => item is not null)
+            .GroupBy(
+                static item => MauiQualificationCorpusProvenanceSourceKinds.Normalize(item.SourceKind),
+                StringComparer.Ordinal)
+            .OrderBy(static group => group.Key, StringComparer.Ordinal)
+            .Select(static group => new MauiQualificationCorpusProvenanceCount
+            {
+                SourceKind = group.Key,
+                Count = group.Sum(static item => Math.Max(0, item.Count)),
+            })
+            .ToList(),
         MutationSeed = source?.MutationSeed,
         GeneratorVersion = MauiQualificationSanitizer.FingerprintOrUnknown(source?.GeneratorVersion),
         Errors = (source?.Errors ?? []).Select(static _ => "corpus-validation-error").Distinct(StringComparer.Ordinal).ToList(),

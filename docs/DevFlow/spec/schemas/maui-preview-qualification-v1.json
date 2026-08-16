@@ -79,16 +79,151 @@
     "corpus": {
       "type": "object",
       "required": [ "staticOnly", "manifestValid", "caseSchemaValid", "curatedCases", "generatedCases", "deviceBackedCases", "mutationSeed", "generatorVersion", "errors" ],
+      "properties": {
+        "curatedRepairPositiveCases": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Curated cases that model an eligible repair. Reported separately so a pooled denominator is never read as independent repair trials."
+        },
+        "curatedNoRepairCases": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Hand-authored no-repair seeds. This is the curated share of the false-heal denominator."
+        },
+        "generatedNoRepairCases": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Machine-generated no-repair mutants derived from the curated seeds. These are not independent trials."
+        },
+        "curatedClassificationLabeledCases": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Curated cases carrying hand-assigned expectedFailureClass ground truth. Compare against curatedCases to see label coverage."
+        },
+        "provenanceComplete": {
+          "type": [ "boolean", "null" ],
+          "description": "True when every curated case records who labeled it, when, by what method, and from what source kind."
+        },
+        "provenanceSourceCounts": {
+          "type": "array",
+          "description": "Curated case counts grouped by provenance source kind. A corpus whose counts are entirely 'synthetic' has no observed-run evidence.",
+          "items": {
+            "type": "object",
+            "required": [ "sourceKind", "count" ],
+            "properties": {
+              "sourceKind": { "enum": [ "synthetic", "observed-local-run", "observed-ci-run", "reported-issue", "unknown" ] },
+              "count": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
       "additionalProperties": true
     },
     "metrics": {
       "type": "object",
       "required": [ "recordingValidity", "selectorStability", "repairPrecision", "repairRecall", "falseHeals", "abstention", "humanDecisionOutcomes", "calibration", "timeToDiagnosis", "traceReportSize", "runtimeOverhead", "flakeFirstAttemptStability", "privacySecurityEscapes" ],
+      "properties": {
+        "classificationAccuracy": {
+          "$ref": "#/$defs/rateMetric",
+          "description": "Share of labeled samples whose observed failure class matches the hand-assigned ground truth. Additive in v1; becomes required once every supported platform emits it."
+        },
+        "classificationMatrix": { "$ref": "#/$defs/classificationMatrix" }
+      },
+      "additionalProperties": true
+    },
+    "rateMetric": {
+      "type": "object",
+      "required": [ "state", "numerator", "denominator" ],
+      "properties": {
+        "state": { "type": "string" },
+        "numerator": { "type": "integer", "minimum": 0 },
+        "denominator": { "type": "integer", "minimum": 0 },
+        "rate": { "type": [ "number", "null" ] },
+        "independentEvaluations": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Evaluations that are independent evidence, excluding cases derived from another case and machine-generated mutants. Count gates compare this, never the pooled denominator."
+        },
+        "independentDeviceRuns": { "type": [ "boolean", "null" ] },
+        "sourceCounts": {
+          "type": "array",
+          "description": "Numerator and denominator split by sample source so a pooled rate can never be read as a single independent-trial count.",
+          "items": {
+            "type": "object",
+            "required": [ "source", "numerator", "denominator" ],
+            "properties": {
+              "source": { "type": "string" },
+              "numerator": { "type": "integer", "minimum": 0 },
+              "denominator": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "classificationMatrix": {
+      "type": "object",
+      "required": [ "state" ],
+      "properties": {
+        "state": { "enum": [ "missing", "measured" ] },
+        "method": { "type": "string" },
+        "sampleCount": { "type": "integer", "minimum": 0 },
+        "correct": { "type": "integer", "minimum": 0 },
+        "labelCount": { "type": "integer", "minimum": 0 },
+        "inferredSampleCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Cases where the classifier derived the class from replay facts rather than honouring a class the evidence already carried."
+        },
+        "inferredCorrect": { "type": "integer", "minimum": 0 },
+        "stampHonouredSampleCount": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Cases whose evidence already named a known failure class, so the answer was copied rather than inferred."
+        },
+        "stampHonouredCorrect": { "type": "integer", "minimum": 0 },
+        "missingReason": { "type": [ "string", "null" ] },
+        "cells": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [ "expected", "observed", "count" ],
+            "properties": {
+              "expected": { "type": "string" },
+              "observed": { "type": "string" },
+              "count": { "type": "integer", "minimum": 0 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "perClass": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [ "failureClass", "support", "predicted", "correct" ],
+            "properties": {
+              "failureClass": { "type": "string" },
+              "support": { "type": "integer", "minimum": 0 },
+              "predicted": { "type": "integer", "minimum": 0 },
+              "correct": { "type": "integer", "minimum": 0 },
+              "precision": { "type": [ "number", "null" ] },
+              "recall": { "type": [ "number", "null" ] }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
       "additionalProperties": true
     },
     "thresholds": {
       "type": "object",
       "required": [ "confidenceLevel", "minimumRepairPrecision", "minimumNoRepairEvaluations", "maximumFalseHeals", "minimumSelectorStability", "maximumCalibrationEce", "minimumCleanFirstAttemptsPerTier1Flow" ],
+      "properties": {
+        "minimumClassificationAccuracy": { "type": "number", "minimum": 0, "maximum": 1 },
+        "minimumClassificationEvaluations": { "type": "integer", "minimum": 1 }
+      },
       "additionalProperties": true
     },
     "gate": {

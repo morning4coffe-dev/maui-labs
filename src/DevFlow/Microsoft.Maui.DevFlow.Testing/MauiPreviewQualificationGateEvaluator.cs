@@ -175,7 +175,8 @@ public static class MauiPreviewQualificationGateEvaluator
                 staticKind: corpusKind,
                 staticNote: corpusNote,
                 // AddFalseHealGate compares Numerator, not IndependentNumerator, so this is the one
-                // metric whose pooled share is read by a gate rather than only by the baseline diff.
+                // metric whose pooled share is compared against a threshold rather than only being
+                // diffed — subject to that gate's count check short-circuiting ahead of it.
                 pooledNumeratorIsGated: true),
             Abstention = BuildRate(
                 abstention,
@@ -305,8 +306,11 @@ public static class MauiPreviewQualificationGateEvaluator
     /// Describes what actually decided a metric's observations, from the samples it counted.
     /// Static corpus samples are scored by <see cref="MauiPreviewQualificationCorpusRunner"/>;
     /// device-backed samples were observed by the run that submitted them. A judged subset holding
-    /// both publishes <c>unknown</c> — weaker than either — because no single component produced
-    /// it, and because pooling must not upgrade what a number measures.
+    /// both never publishes more than the weaker of the two claims, because pooling must not
+    /// upgrade what a number measures. When the static kind is the stronger one — as it is for
+    /// <c>classificationAccuracy</c>, whose samples name the shipped classifier — the mix drops all
+    /// the way to <c>unknown</c>, since no single component produced the subset and no weaker named
+    /// kind describes it either.
     /// </summary>
     /// <param name="judged">
     /// The subset the gates read, which is what the kind describes.
@@ -326,9 +330,10 @@ public static class MauiPreviewQualificationGateEvaluator
     /// <c>unknown</c>, which the coverage gate treats as a failure rather than as evidence.
     /// </param>
     /// <param name="pooledNumeratorIsGated">
-    /// True when a gate reads this metric's <em>pooled</em> numerator rather than only its
-    /// independent subset. Only <c>falseHeals</c> does — <c>AddFalseHealGate</c> compares
-    /// <c>Numerator</c> — so only its note may say a gate reads the pooled share.
+    /// True when a gate compares this metric's <em>pooled</em> numerator against a threshold rather
+    /// than reading only its independent subset. Only <c>falseHeals</c> does — <c>AddFalseHealGate</c>
+    /// compares <c>Numerator</c> — so only its note may say a gate reads the pooled share, and only
+    /// with the count short-circuit that precedes it stated alongside.
     /// </param>
     private static MauiQualificationMetricProvenance? Exercised(
         IReadOnlyList<MauiQualificationExecutionSample> judged,
@@ -353,13 +358,18 @@ public static class MauiPreviewQualificationGateEvaluator
                 MauiQualificationSampleSources.DeviceBacked,
                 StringComparison.Ordinal);
         // AddFalseHealGate compares Numerator, not IndependentNumerator, so falseHeals is the only
-        // metric whose pooled share is read by a gate rather than only by the baseline diff. The
+        // metric whose pooled share is compared against a threshold rather than only diffed. The
         // clause is additive so the base sentence stays true for all five rates; saying it of the
-        // other four would overstate which numbers are actually enforced. Note it names the pooled
-        // numerator specifically — the pooled denominator is read by no gate, since the count check
-        // in the same gate reads IndependentEvaluations.
+        // other four would overstate which numbers are enforced. It also has to state the gate's
+        // short-circuit: that gate checks IndependentEvaluations first and returns not-qualified
+        // without ever reading Numerator, which is exactly the state the committed baseline is in.
+        // Claiming unconditional enforcement there would attach a gate to the 0/316 headline that
+        // is not currently guarding it — the precise overstatement this disclosure exists to stop.
         var pooledGateClause = pooledNumeratorIsGated
-            ? " A false heal among them would fail the zero-false-heals gate, which reads the pooled numerator."
+            ? " The zero-false-heals gate compares that pooled numerator, but only once"
+                + " independentEvaluations reaches the no-repair minimum; below it the gate is"
+                + " not-qualified on the count alone and the pooled numerator is enforced only by"
+                + " the baseline diff."
             : string.Empty;
         var deviceOnly = !judged.Any(ScoredHere);
         if (deviceOnly)

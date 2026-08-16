@@ -106,8 +106,13 @@ This is stated in the report itself rather than only here:
   are pooled in beyond the judged set, the note says how many, and which reader sees them: the count
   and lower-bound gates read only the independent subset, and the baseline diff compares the pooled
   numerator and denominator of every rate. `falseHeals` adds a clause the other four do not, because
-  it is the only rate whose **pooled numerator** is also read by a *gate* — `zero-false-heals`
-  compares `numerator`, not `independentNumerator`. No gate reads any pooled *denominator*.
+  it is the only rate whose **pooled numerator** is compared against a threshold by a *gate* —
+  `zero-false-heals` compares `numerator`, not `independentNumerator`. That gate checks the
+  independent count first and returns `not-qualified` without ever reading the numerator, which is
+  the state this baseline is in, so the clause states the condition rather than implying the `0/316`
+  headline is currently enforced by a gate. No gate compares a pooled *denominator* against a
+  threshold; `product-analyzer-coverage` does read the pooled denominators, but only as "is there
+  any evidence here at all", which can only widen the set of metrics it inspects.
 - `MauiPreviewQualificationAccumulator` merges `exercises` conjunctively — the merged kind is the
   **weakest** any contributor declared, ranked `unknown` < `harness-local-rules` < `sample-supplied`
   < `shipped-analyzer`, so pooling can never upgrade what the merged number measures and the result
@@ -149,16 +154,21 @@ one exists. Equality catches both directions: wiring the analyzer up without fli
 fails, and flipping the flag without wiring it up fails.
 
 Its limits are real and stated rather than papered over. It only sees that file glob, so wiring the
-analyzer in from a differently named file would leave it green; and it only sees that call shape, so
-an indirection through a delegate or reflection would too. Under an equality assert a **false
-negative** is the dangerous direction, because it makes the tripwire agree with a `false` declaration
-instead of tightening it — which is why it **parses rather than greps**. Deciding "is this text a
-call or a mention" by blanking string literals with regexes turned out to be a losing game: quote
-parity has to be exactly right across verbatim, raw and interpolated forms, and three separate
-attempts each left a shape (`"…$"`, `$@"…\"`, a hole containing braces) that swallowed the rest of
-the file and hid a real call. A `CSharpSyntaxTree` answers the question by construction — comments
-and literal text are trivia and can never be invocations, while an interpolation hole is syntax and
-is therefore still seen. `Tripwire_SeesEveryWiredCallInEveryFileItScans` injects a call at every
+analyzer in from a differently named file would leave it green; and it matches the type by name —
+bare, namespace-qualified or alias-qualified — so an indirection through a delegate, a `using
+static`, a type alias, an injected instance or reflection would too. Under an equality assert a
+**false negative** is the dangerous direction, because it makes the tripwire agree with a `false`
+declaration instead of tightening it — which is why it **parses rather than greps**. Deciding "is
+this text a call or a mention" by blanking string literals with regexes turned out to be a losing
+game: quote parity has to be exactly right across verbatim, raw and interpolated forms, and three
+separate attempts each left a shape (`"…$"`, `$@"…\"`, a hole containing braces) that swallowed the
+rest of the file and hid a real call. A `CSharpSyntaxTree` settles that class of question by
+construction — comments and literal text are trivia and can never be invocations, while an
+interpolation hole is syntax and is therefore still seen. Two things a parse can still be blind to
+are refused rather than guessed at: a file that does not parse, and a file carrying an `#if`, whose
+inactive branch is trivia with no diagnostic at all. Both fail the test loudly instead of counting
+zero calls and quietly agreeing with the declaration.
+`Tripwire_SeesEveryWiredCallInEveryFileItScans` injects a call at every
 `private static` in each scanned file and asserts the **count** matches, not merely that one
 survived; an existential assert stayed green while a scanner lost 48 of 49 sites.
 

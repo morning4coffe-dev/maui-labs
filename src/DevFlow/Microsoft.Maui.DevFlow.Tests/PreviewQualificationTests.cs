@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Microsoft.CodeAnalysis;
 using Microsoft.CodeAnalysis.CSharp;
 using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Maui.DevFlow.Driver;
@@ -2660,11 +2661,41 @@ public sealed class PreviewQualificationTests
         Assert.Equal(301, falseHeals.SourceCounts.Single(
             static count => count.Source == MauiQualificationSampleSources.Generated).Denominator);
         Assert.Contains("Pooled with 301 sample(s) scored by", falseHeals.Exercises!.Note);
-        // falseHeals is the one metric whose pooled numerator a gate reads (AddFalseHealGate
-        // compares Numerator, not IndependentNumerator), so its note must name that gate.
-        Assert.Contains(
-            "A false heal among them would fail the zero-false-heals gate, which reads the pooled numerator.",
-            falseHeals.Exercises.Note);
+        // falseHeals is the one metric whose pooled numerator a gate compares against a threshold
+        // (AddFalseHealGate reads Numerator, not IndependentNumerator) — but that gate checks the
+        // independent count first, so the note states a condition. Prove both halves rather than
+        // asserting the sentence exists: here the count is satisfied, so a false heal among the
+        // pooled samples must flip the gate...
+        Assert.Contains("The zero-false-heals gate compares that pooled numerator", falseHeals.Exercises.Note);
+        Assert.Contains("independentEvaluations reaches the no-repair minimum", falseHeals.Exercises.Note);
+        Assert.Equal(
+            MauiPreviewQualificationStates.Pass,
+            report.Gates.Single(static gate => gate.GateId == "zero-false-heals").Status);
+
+        var pooledFalseHeal = QualifiedInput();
+        pooledFalseHeal.Samples.Add(new MauiQualificationExecutionSample
+        {
+            SampleId = "pooled-generated-false-heal",
+            Source = MauiQualificationSampleSources.Generated,
+            NoRepairExpected = true,
+            FalseHeal = true,
+            Abstained = true,
+        });
+        var flipped = MauiPreviewQualificationGateEvaluator
+            .Evaluate(pooledFalseHeal, DateTimeOffset.UnixEpoch)
+            .Gates.Single(static gate => gate.GateId == "zero-false-heals");
+
+        Assert.Equal(MauiPreviewQualificationStates.Fail, flipped.Status);
+        Assert.Contains("false-heal-observed", flipped.ReasonCodes);
+
+        // ...while the committed corpus, whose independent count is far below the minimum, leaves
+        // that same gate not-qualified on the count without ever reading the pooled numerator. The
+        // clause has to say so, or it would attach gate enforcement to the published 0/316.
+        var corpusGate = Report(RunCorpus(), DateTimeOffset.UnixEpoch)
+            .Gates.Single(static gate => gate.GateId == "zero-false-heals");
+
+        Assert.Equal(MauiPreviewQualificationStates.NotQualified, corpusGate.Status);
+        Assert.Contains("no-repair-evaluation-count-insufficient", corpusGate.ReasonCodes);
 
         // ...and the metrics whose pooled share only the diff reads must not claim otherwise, or
         // the disclosure would overstate which numbers are actually enforced.
@@ -2735,10 +2766,12 @@ public sealed class PreviewQualificationTests
         // text are trivia and never invocations, while an interpolation hole is real syntax and is
         // therefore still seen.
         //
-        // Two limits remain and are worth stating rather than papering over. It only sees this file
-        // glob, so wiring the analyzer in from a differently named file would leave it green; and
-        // it only matches on the name, so an indirection through a delegate, an alias or reflection
-        // would too.
+        // Three limits remain and are worth stating rather than papering over. It only sees this
+        // file glob, so wiring the analyzer in from a differently named file would leave it green;
+        // it matches the type by name (bare, namespace- or alias-qualified), so an indirection
+        // through a delegate, a `using static`, a type alias, an injected instance or reflection
+        // would too; and it refuses to scan a file that fails to parse or carries a conditional
+        // directive rather than guessing, so those fail loudly instead of reading as "no call".
         var callsAnalyzer = ScannedHarnessSources().Any(static path => CountsAnalyzerCalls(File.ReadAllText(path)) > 0);
         var declared = Report(RunCorpus(), DateTimeOffset.UnixEpoch).Corpus.ExercisesShippedAnalyzer;
 
@@ -2754,14 +2787,19 @@ public sealed class PreviewQualificationTests
         foreach (var path in ScannedHarnessSources())
         {
             var original = File.ReadAllText(path);
+            const string anchor = "\n    private static";
+            var sites = Regex.Matches(original, Regex.Escape(anchor)).Count;
             var injected = original.Replace(
-                "\n    private static",
+                anchor,
                 "\n    private static void Wired(MauiSelectorHealthAnalysisInput i) =>"
-                    + " MauiSelectorHealthAnalyzer.Analyze(i);\n    private static",
+                    + " MauiSelectorHealthAnalyzer.Analyze(i);" + anchor,
                 StringComparison.Ordinal);
-            var expected = Regex.Matches(injected, @"MauiSelectorHealthAnalyzer\.Analyze\(").Count;
+            // Counted from what was injected, not by re-scanning the text: a text scan would also
+            // count the analyzer's name where these files legitimately mention it in a comment or
+            // a disclosure string, and would then fail for a documentation edit rather than a bug.
+            var expected = CountsAnalyzerCalls(original) + sites;
 
-            Assert.True(expected > 0, path);
+            Assert.True(sites > 0, $"No injection site in {path}; the tripwire would be unverified here.");
             Assert.Equal(expected, CountsAnalyzerCalls(injected));
         }
     }
@@ -2778,13 +2816,20 @@ public sealed class PreviewQualificationTests
     [InlineData("class C { void M() { var m = $\"{MauiSelectorHealthAnalyzer.Analyze(new X { A = 1 })}\"; } }", 1)]
     [InlineData("class C { void M() { var s = \"cost: $\"; MauiSelectorHealthAnalyzer.Analyze(i); var t = \"x\"; } }", 1)]
     [InlineData("class C { void M() { var p = $@\"{d}\\\"; MauiSelectorHealthAnalyzer.Analyze(i); var t = \"x\"; } }", 1)]
+    [InlineData("class C { void M() { Testing.MauiSelectorHealthAnalyzer.Analyze(i); } }", 1)]
+    [InlineData("class C { void M() { Microsoft.Maui.DevFlow.Testing.MauiSelectorHealthAnalyzer.Analyze(i); } }", 1)]
+    [InlineData("class C { void M() { global::Microsoft.Maui.DevFlow.Testing.MauiSelectorHealthAnalyzer.Analyze(i); } }", 1)]
+    [InlineData("class C { void M() { MauiSelectorHealthAnalyzer.Analyze<Foo>(i); } }", 1)]
     public void Tripwire_ReadsCodeRatherThanProseInEitherDirection(string source, int expected)
     {
         // Under an equality assert both mistakes matter, but not equally: prose that looks like a
         // call forces the disclosure to overstate and fails loudly, while a literal that swallows a
-        // real call lets it understate while the test stays green. The last four rows are shapes a
-        // regex stripper got wrong — a nested-brace hole, a literal ending in '$', and a verbatim
-        // literal ending in a backslash, all of which broke quote parity for the rest of the file.
+        // real call lets it understate while the test stays green. Rows 8-11 are shapes a regex
+        // stripper got wrong — a nested-brace hole, a literal ending in '$', and a verbatim literal
+        // ending in a backslash, all of which broke quote parity for the rest of the file. The last
+        // four are shapes a bare-identifier match got wrong; `Testing.MauiSelectorHealthAnalyzer`
+        // is how the one real call in this repo is actually written, and it compiles unchanged
+        // inside every file this tripwire scans.
         Assert.Equal(expected, CountsAnalyzerCalls(source));
     }
 
@@ -2792,15 +2837,45 @@ public sealed class PreviewQualificationTests
     /// Counts real <c>MauiSelectorHealthAnalyzer.Analyze(...)</c> invocations in a compilation unit.
     /// Parsing means comments and literal text cannot be mistaken for calls, and equally that a
     /// call inside an interpolation hole cannot be lost — the hole is syntax, not literal text.
+    /// Matches the type written bare, namespace- or alias-qualified, because the one non-test call
+    /// in this repo today (<c>InspectorServer.cs</c>) writes it qualified, and a rewiring is likely
+    /// to copy that house style.
     /// </summary>
-    private static int CountsAnalyzerCalls(string source) => CSharpSyntaxTree
-        .ParseText(source)
-        .GetRoot()
-        .DescendantNodes()
-        .OfType<InvocationExpressionSyntax>()
-        .Count(static invocation => invocation.Expression is MemberAccessExpressionSyntax member &&
-            member.Name.Identifier.ValueText == "Analyze" &&
-            member.Expression is IdentifierNameSyntax { Identifier.ValueText: "MauiSelectorHealthAnalyzer" });
+    private static int CountsAnalyzerCalls(string source)
+    {
+        // Preview, not the parser's default: syntax newer than the bundled Roslyn would otherwise
+        // produce errors that this method silently reports as "no calls" — the fail-open direction.
+        var tree = CSharpSyntaxTree.ParseText(
+            source, new CSharpParseOptions(LanguageVersion.Preview));
+
+        // A file that does not parse yields zero invocations, which reads exactly like a file with
+        // no call in it. Refusing to answer is the only safe response.
+        Assert.DoesNotContain(
+            tree.GetDiagnostics(),
+            static diagnostic => diagnostic.Severity == DiagnosticSeverity.Error);
+
+        // Text inside an inactive #if is trivia, so a call there is invisible with no diagnostic at
+        // all. Rather than guess which symbols to define, refuse to scan a file that has any
+        // branching directive; today none of them do, and a future one must be handled knowingly.
+        // BranchingDirectiveTriviaSyntax is #if/#elif/#else only, so #nullable, #region and
+        // #pragma — which these files do use — stay allowed.
+        Assert.DoesNotContain(
+            tree.GetRoot().DescendantNodes(descendIntoTrivia: true),
+            static node => node is BranchingDirectiveTriviaSyntax);
+
+        return tree
+            .GetRoot()
+            .DescendantNodes()
+            .OfType<InvocationExpressionSyntax>()
+            .Count(static invocation => invocation.Expression is MemberAccessExpressionSyntax member &&
+                member.Name.Identifier.ValueText == "Analyze" &&
+                member.Expression is
+                    IdentifierNameSyntax { Identifier.ValueText: AnalyzerTypeName } or
+                    MemberAccessExpressionSyntax { Name.Identifier.ValueText: AnalyzerTypeName } or
+                    AliasQualifiedNameSyntax { Name.Identifier.ValueText: AnalyzerTypeName });
+    }
+
+    private const string AnalyzerTypeName = "MauiSelectorHealthAnalyzer";
 
     private static IEnumerable<string> ScannedHarnessSources()
     {

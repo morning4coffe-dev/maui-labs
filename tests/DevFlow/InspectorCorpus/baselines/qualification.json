@@ -413,7 +413,7 @@
       "exercises": {
         "component": "MauiPreviewQualificationCorpusRunner.EvaluateFixture",
         "kind": "harness-local-rules",
-        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 16 judged sample(s); 300 further sample(s) sit in the pooled denominator the baseline diff compares. A false heal among them would fail the zero-false-heals gate, which reads the pooled numerator."
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 16 judged sample(s); 300 further sample(s) sit in the pooled denominator the baseline diff compares. The zero-false-heals gate compares that pooled numerator, but only once independentEvaluations reaches the no-repair minimum; below it the gate is not-qualified on the count alone and the pooled numerator is enforced only by the baseline diff."
       }
     },
     "abstention": {

@@ -366,7 +366,8 @@ public static class MauiPreviewQualificationGateEvaluator
         // Claiming unconditional enforcement there would attach a gate to the 0/316 headline that
         // is not currently guarding it — the precise overstatement this disclosure exists to stop.
         var pooledGateClause = pooledNumeratorIsGated
-            ? " The zero-false-heals gate compares that pooled numerator, but only once"
+            ? " The zero-false-heals gate (accumulated-zero-false-heals in a merged report) compares"
+                + " this metric's whole pooled numerator, judged and pooled alike, but only once"
                 + " independentEvaluations reaches the no-repair minimum; below it the gate is"
                 + " not-qualified on the count alone and the pooled numerator is enforced only by"
                 + " the baseline diff."

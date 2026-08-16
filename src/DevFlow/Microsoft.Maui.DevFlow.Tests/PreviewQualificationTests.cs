@@ -2666,8 +2666,12 @@ public sealed class PreviewQualificationTests
         // independent count first, so the note states a condition. Prove both halves rather than
         // asserting the sentence exists: here the count is satisfied, so a false heal among the
         // pooled samples must flip the gate...
-        Assert.Contains("The zero-false-heals gate compares that pooled numerator", falseHeals.Exercises.Note);
+        Assert.Contains("compares", falseHeals.Exercises.Note);
+        Assert.Contains("this metric's whole pooled numerator", falseHeals.Exercises.Note);
         Assert.Contains("independentEvaluations reaches the no-repair minimum", falseHeals.Exercises.Note);
+        // The same note travels verbatim into a merged report, where the gate carries a different
+        // id, so it has to name both or it would point at a gate that document does not contain.
+        Assert.Contains("accumulated-zero-false-heals", falseHeals.Exercises.Note);
         Assert.Equal(
             MauiPreviewQualificationStates.Pass,
             report.Gates.Single(static gate => gate.GateId == "zero-false-heals").Status);
@@ -2769,9 +2773,10 @@ public sealed class PreviewQualificationTests
         // Three limits remain and are worth stating rather than papering over. It only sees this
         // file glob, so wiring the analyzer in from a differently named file would leave it green;
         // it matches the type by name (bare, namespace- or alias-qualified), so an indirection
-        // through a delegate, a `using static`, a type alias, an injected instance or reflection
-        // would too; and it refuses to scan a file that fails to parse or carries a conditional
-        // directive rather than guessing, so those fail loudly instead of reading as "no call".
+        // through a delegate, a `using static`, a type alias or reflection would too — while a
+        // member merely carrying the name is counted, which can only overstate and fail loudly;
+        // and it refuses to scan a file that fails to parse or carries a conditional directive
+        // rather than guessing, so those fail loudly instead of reading as "no call".
         var callsAnalyzer = ScannedHarnessSources().Any(static path => CountsAnalyzerCalls(File.ReadAllText(path)) > 0);
         var declared = Report(RunCorpus(), DateTimeOffset.UnixEpoch).Corpus.ExercisesShippedAnalyzer;
 
@@ -2820,16 +2825,22 @@ public sealed class PreviewQualificationTests
     [InlineData("class C { void M() { Microsoft.Maui.DevFlow.Testing.MauiSelectorHealthAnalyzer.Analyze(i); } }", 1)]
     [InlineData("class C { void M() { global::Microsoft.Maui.DevFlow.Testing.MauiSelectorHealthAnalyzer.Analyze(i); } }", 1)]
     [InlineData("class C { void M() { MauiSelectorHealthAnalyzer.Analyze<Foo>(i); } }", 1)]
+    [InlineData("class C { void M() { MauiSelectorHealthAnalyzer<Foo>.Analyze(i); } }", 1)]
+    [InlineData("class C { void M() { this.MauiSelectorHealthAnalyzer.Analyze(i); } }", 1)]
+    [InlineData("class C { void M() { unrelated.Analyze(i); } }", 0)]
+    [InlineData("class C { void M() { var n = nameof(MauiSelectorHealthAnalyzer); } }", 0)]
     public void Tripwire_ReadsCodeRatherThanProseInEitherDirection(string source, int expected)
     {
         // Under an equality assert both mistakes matter, but not equally: prose that looks like a
         // call forces the disclosure to overstate and fails loudly, while a literal that swallows a
         // real call lets it understate while the test stays green. Rows 8-11 are shapes a regex
         // stripper got wrong — a nested-brace hole, a literal ending in '$', and a verbatim literal
-        // ending in a backslash, all of which broke quote parity for the rest of the file. The last
-        // four are shapes a bare-identifier match got wrong; `Testing.MauiSelectorHealthAnalyzer`
+        // ending in a backslash, all of which broke quote parity for the rest of the file. Rows
+        // 12-16 are shapes a bare-identifier match got wrong; `Testing.MauiSelectorHealthAnalyzer`
         // is how the one real call in this repo is actually written, and it compiles unchanged
-        // inside every file this tripwire scans.
+        // inside every file this tripwire scans. The last rows pin the cost of that breadth: an
+        // instance or field that happens to carry the analyzer's name now matches, which can only
+        // make the disclosure overstate and fail loudly, while an unrelated `Analyze` still does not.
         Assert.Equal(expected, CountsAnalyzerCalls(source));
     }
 
@@ -2837,9 +2848,11 @@ public sealed class PreviewQualificationTests
     /// Counts real <c>MauiSelectorHealthAnalyzer.Analyze(...)</c> invocations in a compilation unit.
     /// Parsing means comments and literal text cannot be mistaken for calls, and equally that a
     /// call inside an interpolation hole cannot be lost — the hole is syntax, not literal text.
-    /// Matches the type written bare, namespace- or alias-qualified, because the one non-test call
-    /// in this repo today (<c>InspectorServer.cs</c>) writes it qualified, and a rewiring is likely
-    /// to copy that house style.
+    /// Matches the type written bare, namespace- or alias-qualified, generic or not, because the
+    /// one non-test call in this repo today (<c>InspectorServer.cs</c>) writes it qualified and a
+    /// rewiring is likely to copy that house style. <c>SimpleNameSyntax</c> rather than
+    /// <c>IdentifierNameSyntax</c> on the bare arm so a future generic spelling cannot be lost —
+    /// the qualified arms already accept one, and the asymmetry would only ever lose a match.
     /// </summary>
     private static int CountsAnalyzerCalls(string source)
     {
@@ -2870,7 +2883,7 @@ public sealed class PreviewQualificationTests
             .Count(static invocation => invocation.Expression is MemberAccessExpressionSyntax member &&
                 member.Name.Identifier.ValueText == "Analyze" &&
                 member.Expression is
-                    IdentifierNameSyntax { Identifier.ValueText: AnalyzerTypeName } or
+                    SimpleNameSyntax { Identifier.ValueText: AnalyzerTypeName } or
                     MemberAccessExpressionSyntax { Name.Identifier.ValueText: AnalyzerTypeName } or
                     AliasQualifiedNameSyntax { Name.Identifier.ValueText: AnalyzerTypeName });
     }

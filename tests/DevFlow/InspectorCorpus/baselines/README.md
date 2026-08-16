@@ -156,7 +156,9 @@ fails, and flipping the flag without wiring it up fails.
 Its limits are real and stated rather than papered over. It only sees that file glob, so wiring the
 analyzer in from a differently named file would leave it green; and it matches the type by name —
 bare, namespace-qualified or alias-qualified — so an indirection through a delegate, a `using
-static`, a type alias, an injected instance or reflection would too. Under an equality assert a
+static`, a type alias or reflection would too. Matching by name cuts the other way as well: a field
+or property that merely *carries* the name is counted, which can only make the disclosure overstate
+and fail loudly. Under an equality assert a
 **false negative** is the dangerous direction, because it makes the tripwire agree with a `false`
 declaration instead of tightening it — which is why it **parses rather than greps**. Deciding "is
 this text a call or a mention" by blanking string literals with regexes turned out to be a losing

@@ -483,6 +483,7 @@ F:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceSourceKinds.Un
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.HarnessLocalRules:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.SampleSupplied:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.ShippedAnalyzer:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.Unknown:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationSampleSources.Curated:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationSampleSources.CuratedDerived:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationSampleSources.DeviceBacked:System.String

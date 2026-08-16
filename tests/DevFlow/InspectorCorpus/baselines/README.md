@@ -43,6 +43,12 @@ Gates that are `not-qualified` in the baseline and why:
 | `android-tier1-first-attempts` | No Tier-1 flow declared and no device runs. |
 | `product-analyzer-coverage` | The corpus scores repair and false heals with harness rules, not the shipped analyzer. See below. |
 
+**`abstention` has no gate.** It is published as `316/316` and reads like a perfect score, but no
+gate consumes it, so nothing fails if it degrades — only the baseline diff notices, and only in the
+numerator direction (see *Regression diffing*). It is a descriptive counter of how often the harness
+declined to propose a repair when none was expected, scored by the same harness-local rules as
+`falseHeals`. Do not quote it as a result.
+
 ## The largest gap: the corpus does not exercise the shipped analyzer
 
 `MauiPreviewQualificationCorpusRunner.EvaluateFixture` **re-implements** the selector-health and
@@ -64,10 +70,12 @@ This is stated in the report itself rather than only here:
   the four metrics above and `shipped-analyzer` for `classificationAccuracy`.
 - The `product-analyzer-coverage` gate is `not-qualified` and lists exactly which metrics are
   harness-scored. It is evaluated both per-run and over an accumulated verdict, so
-  `--accumulate --fail-on-non-pass` sees it too. The gate reaches `pass` only when nothing was
-  harness-scored, and when the basis is a run's own assertion rather than an analyzer call it
-  passes with the reason code `provenance-self-reported` and says so in its message — it never
-  reports coverage it did not verify.
+  `--accumulate --fail-on-non-pass` sees it too. It reaches `pass` only when no judged metric was
+  harness-scored, none is undeclared, and none has an unrecognised provenance kind. When the basis
+  is a label read out of a run file rather than one this process computed, it passes with the
+  reason code `provenance-self-reported` and says so in its message. That distinction is the whole
+  point: a kind this process derived from its own constants is an observation, the same string read
+  back from JSON is only a claim.
 - `MauiPreviewQualificationAccumulator` merges `exercises` conjunctively, so pooling a
   harness-scored run with a device-backed one does not upgrade what the merged number measures.
   A contributing run that counted samples without declaring a component makes the merged kind
@@ -95,11 +103,13 @@ mapping is correct", not as "the classifier was tested".
   (`recordedRoute`/`observedRoute`, `androidCandidateKinds`, `hardAssertion`) with no flow
   structure. That is a corpus format change.
 
-`Corpus_KeepsTheAnalyzerCoverageDisclosureHonestWhenTheRunnerChanges` fails if the disclosure ever
-claims more than the code does — it scans the whole `Microsoft.Maui.DevFlow.Testing` directory for a
-real (non-comment) analyzer call and asserts the summary never declares coverage without one. It is
-deliberately one-directional: a test that demanded equality could end up *insisting* on an
-overstatement.
+`Corpus_KeepsTheAnalyzerCoverageDisclosureHonestWhenTheRunnerChanges` ties the disclosure to the
+code — it scans the `MauiPreviewQualification*.cs` sources for a real (non-comment) call to
+`MauiSelectorHealthAnalyzer.Analyze` and asserts `corpus.exercisesShippedAnalyzer` equals whether
+one exists. Equality catches both directions: wiring the analyzer up without flipping the flag
+fails, and flipping the flag without wiring it up fails. The cost of equality is that the check is
+only as good as its own pattern, so it deliberately excludes `obj`/`bin` and matches the call shape
+rather than a bare identifier that a string literal could satisfy.
 
 ## Statistical power of the generated share
 

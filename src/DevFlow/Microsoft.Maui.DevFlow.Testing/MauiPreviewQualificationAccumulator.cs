@@ -502,17 +502,25 @@ public static class MauiPreviewQualificationAccumulator
             .Select(static count => $"{count.Source}:{count.Numerator}/{count.Denominator}/{count.IndependentEvaluations}");
 
     /// <summary>
-    /// A metric's declared provenance is derivable from the sources it counted, so it is verified
-    /// rather than trusted. The rule mirrors how the per-run evaluator assigns it: the gates read
-    /// the independent subset when there is one, a subset that is entirely device-backed was scored
-    /// by the submitting run, and a subset holding any statically scored sample was scored here.
-    /// The exact static component is not asserted — that legitimately changes when the corpus is
-    /// rewired — but the two directions of the claim cannot be swapped.
+    /// A metric's declared provenance is partly derivable from the sources it counted, so that part
+    /// is verified rather than trusted. The rule mirrors how the per-run evaluator assigns it: the
+    /// gates read the independent subset when there is one, and only device-backed evidence arrived
+    /// with the run.
+    /// <para>
+    /// Deliberately one-directional. It refuses a claim the sources cannot support — "the run
+    /// observed this" over evidence this harness scored — and accepts an understatement, because
+    /// rejecting an understatement would discard honest evidence written by an earlier version of
+    /// this tool, and a discarded run never reaches the gates at all. The harness-versus-shipped
+    /// axis is not checkable from sources; the coverage gate handles it by refusing to treat an
+    /// unverified <c>shipped-analyzer</c> string as verified coverage.
+    /// </para>
     /// </summary>
     private static bool ProvenanceMatchesSources(MauiQualificationRateMetric metric)
     {
         var declared = metric.Exercises?.Kind;
         if (metric.Denominator <= 0 || string.IsNullOrWhiteSpace(declared))
+            return true;
+        if (!string.Equals(declared, MauiQualificationMetricProvenanceKinds.SampleSupplied, StringComparison.Ordinal))
             return true;
         var counts = (metric.SourceCounts ?? []).Where(static count => count.Denominator > 0).ToList();
         if (counts.Count == 0)
@@ -520,14 +528,12 @@ public static class MauiPreviewQualificationAccumulator
         var judged = counts.Where(static count => count.IndependentEvaluations > 0).ToList();
         if (judged.Count == 0)
             judged = counts;
-        var deviceOnly = judged.All(static count => !MauiQualificationSampleSources.IsStatic(count.Source));
-        var selfReported = string.Equals(
-            declared,
-            MauiQualificationMetricProvenanceKinds.SampleSupplied,
-            StringComparison.Ordinal);
-        // Device-only evidence cannot have been scored by this harness, and evidence that includes
-        // statically scored samples cannot have been observed entirely by a submitting run.
-        return deviceOnly == selfReported;
+        // Only device-backed evidence can be credited to the submitting run. A source this harness
+        // does not model is not device-backed, so a "the run observed it" claim over it is refused.
+        return judged.All(static count => string.Equals(
+            count.Source,
+            MauiQualificationSampleSources.DeviceBacked,
+            StringComparison.Ordinal));
     }
 
     /// <summary>
@@ -674,29 +680,32 @@ public static class MauiPreviewQualificationAccumulator
         if (declared.Count == 0)
             return null;
 
-        // A contributor with an empty denominator legitimately has nothing to declare. One that
-        // counted samples and still declared nothing is the case this guards.
-        var undeclared = contributing.Count(static metric => metric.Exercises is null && metric.Denominator > 0);
+        // Every contributing metric here already has a non-zero denominator, so silence is a
+        // genuine omission rather than "nothing to declare".
+        var undeclared = contributing.Count(static metric => metric.Exercises is null);
         var components = declared
-            .Select(static exercises => exercises.Component ?? "unknown")
+            .Select(static exercises => exercises.Component ?? MauiQualificationMetricProvenanceKinds.Unknown)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(static component => component, StringComparer.Ordinal)
             .ToList();
+        var weakest = declared.FirstOrDefault(static exercises =>
+            !MauiQualificationMetricProvenanceKinds.IsProductEvidence(exercises.Kind)) ?? declared[0];
         if (undeclared > 0)
         {
-            components.Add("undeclared");
-            components = components.Distinct(StringComparer.Ordinal).OrderBy(static c => c, StringComparer.Ordinal).ToList();
+            // The merged kind drops to unknown, but the specific disclosure the declared
+            // contributors made is kept in the note: "we cannot tell" is less actionable than
+            // "one contributor was harness-scored and another said nothing", and the gate reports
+            // both facts rather than collapsing them.
             return new MauiQualificationMetricProvenance
             {
-                Component = string.Join(" + ", components),
-                Kind = "unknown",
+                Component = string.Join(" + ", components.Append("undeclared")),
+                Kind = MauiQualificationMetricProvenanceKinds.Unknown,
                 Note = $"{undeclared} contributing run(s) counted samples without declaring what produced them, "
-                    + "so the merged total cannot claim any provenance.",
+                    + $"so the merged total cannot claim any provenance. The runs that did declare reported "
+                    + $"'{weakest.Kind}'.",
             };
         }
 
-        var weakest = declared.FirstOrDefault(static exercises =>
-            !MauiQualificationMetricProvenanceKinds.IsProductEvidence(exercises.Kind)) ?? declared[0];
         return new MauiQualificationMetricProvenance
         {
             Component = components.Count == 1 ? components[0] : string.Join(" + ", components),
@@ -810,7 +819,10 @@ public static class MauiPreviewQualificationAccumulator
                 {
                     var metric = accumulation.Metrics.GetValueOrDefault(name);
                     return (Name: name, Denominator: metric?.Denominator ?? 0, Exercises: metric?.Exercises);
-                })));
+                }),
+            // These labels were read from run files. A shipped-analyzer string in a file is a
+            // claim, so the merged verdict reports it as self-reported rather than as verified.
+            verifiedInProcess: false));
 
         var flows = accumulation.FirstAttemptFlows;
         var firstAttemptReasons = new List<string>();

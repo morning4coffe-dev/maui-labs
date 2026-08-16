@@ -539,6 +539,12 @@ public static class MauiQualificationMetricProvenanceKinds
     public const string SampleSupplied = "sample-supplied";
 
     /// <summary>
+    /// Nothing can be said about what produced the observation — typically a merged total whose
+    /// contributors disagreed or did not all declare. Never product evidence.
+    /// </summary>
+    public const string Unknown = "unknown";
+
+    /// <summary>
     /// True when the observation is claimed to come from product code rather than from rules
     /// re-implemented in the qualification harness. <see cref="SampleSupplied"/> qualifies because a
     /// submitting run observed the product itself — subject to the standing caveat that a

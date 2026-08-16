@@ -685,7 +685,7 @@
     {
       "gateId": "product-analyzer-coverage",
       "status": "not-qualified",
-      "message": "Scored by harness-local rules instead of the shipped analyzer: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour.",
+      "message": "Not produced by the shipped analyzer — scored by harness-local rules: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour.",
       "reasonCodes": [
         "corpus-does-not-exercise-shipped-analyzer"
       ],
@@ -769,7 +769,7 @@
     {
       "code": "gate-product-analyzer-coverage-not-qualified",
       "severity": "warning",
-      "message": "Scored by harness-local rules instead of the shipped analyzer: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour."
+      "message": "Not produced by the shipped analyzer — scored by harness-local rules: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour."
     },
     {
       "code": "gate-selector-stability-not-qualified",

@@ -99,9 +99,11 @@ public static class MauiPreviewQualificationCorpusRunner
         // would otherwise share a fingerprint, and the accumulator relies on that fingerprint to
         // conclude that the static evidence in both runs is the same evidence. Everything under the
         // root is hashed — cases, schemas, and the privacy/security corpus — because all of it
-        // feeds a published number.
+        // feeds a published number. The manifest goes through the same line-ending normalisation
+        // as the tree: hashing its raw bytes made the fingerprint, and therefore the committed
+        // baseline, depend on whether the checkout used CRLF.
         summary.ManifestFingerprint = Hash(Encoding.UTF8.GetBytes(
-            Hash(manifestBytes) + "|" + HashCorpusTree(root)));
+            HashNormalized(manifestBytes) + "|" + HashCorpusTree(root)));
 
         if (!TryReadObject(schemaPath, out var schema, out _, out var schemaError))
             errors.Add(schemaError ?? "corpus-schema-invalid");
@@ -943,6 +945,12 @@ public static class MauiPreviewQualificationCorpusRunner
         }
     }
 
+    /// <summary>
+    /// Resolves a manifest-declared path under the corpus root, refusing anything outside it and
+    /// anything inside <c>baselines/</c>. The baselines directory is excluded from the corpus
+    /// fingerprint, so a case evaluated from there would be evidence that could be rewritten
+    /// without moving the fingerprint the accumulator and the baseline diff both rely on.
+    /// </summary>
     private static bool TryResolveUnderRoot(string root, string relative, out string path)
     {
         path = string.Empty;
@@ -956,7 +964,9 @@ public static class MauiPreviewQualificationCorpusRunner
         {
             path = Path.GetFullPath(Path.Combine(root, relative));
             var resolved = Path.GetRelativePath(root, path);
-            return !resolved.StartsWith("..", StringComparison.Ordinal) && !Path.IsPathRooted(resolved);
+            return !resolved.StartsWith("..", StringComparison.Ordinal) &&
+                !Path.IsPathRooted(resolved) &&
+                !IsUnderBaselines(resolved.Replace('\\', '/'));
         }
         catch (Exception ex) when (ex is ArgumentException or NotSupportedException)
         {
@@ -1082,6 +1092,19 @@ public static class MauiPreviewQualificationCorpusRunner
         }
     }
 
+    /// <summary>
+    /// Counts cases whose fixture shape is a near-restatement of an earlier case of the same kind:
+    /// either a superset of it, or within <see cref="ShapeDistanceTolerance"/> key paths of it in
+    /// symmetric difference.
+    /// <para>
+    /// Containment alone was evadable in one edit. A clone that <em>adds</em> an ignored key and
+    /// <em>removes</em> an optional one is neither a subset nor a superset of its source — the two
+    /// shapes are incomparable — so it read as independent evidence. Symmetric distance closes
+    /// that specific escape and nothing more: an author who adds and deletes enough keys still
+    /// gets past it. This is a disclosure that makes accidental and lazy cloning visible, not a
+    /// defence against a determined one. Only review catches that.
+    /// </para>
+    /// </summary>
     private static int CountShapeContainments(
         List<(string Kind, string ProvenanceMethod, SortedSet<string> Shape)> shapes)
     {
@@ -1093,11 +1116,22 @@ public static class MauiPreviewQualificationCorpusRunner
             var ordered = kind.Select(static item => item.Shape).OrderBy(static shape => shape.Count).ToList();
             for (var index = 1; index < ordered.Count; index++)
             {
-                if (ordered.Take(index).Any(earlier => earlier.IsSubsetOf(ordered[index])))
+                if (ordered.Take(index).Any(earlier => IsNearRestatement(earlier, ordered[index])))
                     count++;
             }
         }
         return count;
+    }
+
+    private const int ShapeDistanceTolerance = 2;
+
+    private static bool IsNearRestatement(SortedSet<string> earlier, SortedSet<string> later)
+    {
+        if (earlier.IsSubsetOf(later))
+            return true;
+        var distance = earlier.Except(later, StringComparer.Ordinal).Count()
+            + later.Except(earlier, StringComparer.Ordinal).Count();
+        return distance <= ShapeDistanceTolerance;
     }
 
     /// <summary>
@@ -1108,11 +1142,12 @@ public static class MauiPreviewQualificationCorpusRunner
     /// <para>
     /// Two exclusions, both deliberate. <c>baselines/</c> holds the report generated *from* this
     /// fingerprint, so hashing it would make the fingerprint a fixed point that no regeneration
-    /// ever reaches. Documentation (<c>*.md</c>) is excluded because it is not evaluated — every
-    /// case is enumerated by the manifest and every fixture is JSON — and hashing prose would fail
-    /// the baseline diff on a typo fix, teaching exactly the reflexive "just regenerate it" habit
-    /// these gates exist to prevent. Anything that is read to produce a number is a
-    /// <c>.json</c> file and is hashed.
+    /// ever reaches — and because it is unhashed, the manifest is forbidden from resolving cases
+    /// into it (see <see cref="IsUnderBaselines"/>), or a case could change a published number
+    /// with the fingerprint frozen. Documentation (<c>*.md</c>) is excluded because it is not
+    /// evaluated — every evaluated fixture is JSON — and hashing prose would fail the baseline
+    /// diff on a typo fix, teaching exactly the reflexive "just regenerate it" habit these gates
+    /// exist to prevent.
     /// </para>
     /// Line endings are normalised so a CRLF checkout of an unchanged corpus hashes the same as an
     /// LF one.
@@ -1124,15 +1159,13 @@ public static class MauiPreviewQualificationCorpusRunner
         var builder = new StringBuilder();
         foreach (var file in Directory.GetFiles(root, "*.json", SearchOption.AllDirectories)
             .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/'))
-            .Where(static path => !path.StartsWith("baselines/", StringComparison.Ordinal))
+            .Where(static path => !IsUnderBaselines(path))
             .OrderBy(static path => path, StringComparer.Ordinal))
         {
             builder.Append(file).Append('=');
             try
             {
-                var bytes = File.ReadAllBytes(Path.Combine(root, file));
-                builder.Append(Hash(Encoding.UTF8.GetBytes(
-                    Encoding.UTF8.GetString(bytes).Replace("\r\n", "\n", StringComparison.Ordinal))));
+                builder.Append(HashNormalized(File.ReadAllBytes(Path.Combine(root, file))));
             }
             catch (IOException)
             {
@@ -1146,6 +1179,24 @@ public static class MauiPreviewQualificationCorpusRunner
         }
         return Hash(Encoding.UTF8.GetBytes(builder.ToString()));
     }
+
+    /// <summary>
+    /// True for a root-relative, <c>/</c>-normalised path inside the unhashed baselines directory.
+    /// Compared case-insensitively because the same corpus is read on Windows and Linux and the
+    /// answer must not depend on which one asked.
+    /// </summary>
+    private static bool IsUnderBaselines(string relativePath) =>
+        relativePath.StartsWith("baselines/", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Hashes file bytes with CRLF folded to LF, so a fingerprint describes what a file says
+    /// rather than which platform checked it out. Every site that hashes corpus bytes must use
+    /// this: one raw-byte hash is enough to make a committed baseline unreproducible on a clean
+    /// clone.
+    /// </summary>
+    private static string HashNormalized(byte[] bytes) =>
+        Hash(Encoding.UTF8.GetBytes(
+            Encoding.UTF8.GetString(bytes).Replace("\r\n", "\n", StringComparison.Ordinal)));
 
     private static string Hash(ReadOnlySpan<byte> bytes) =>
         "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();

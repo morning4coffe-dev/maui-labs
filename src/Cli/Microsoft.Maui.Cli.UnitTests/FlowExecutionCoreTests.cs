@@ -5,6 +5,8 @@ using System.Xml.Linq;
 using Microsoft.Maui.Cli.DevFlow;
 using Microsoft.Maui.Cli.DevFlow.Broker;
 using Microsoft.Maui.Cli.DevFlow.Execution;
+using FlowCommitCommands = Microsoft.Maui.Cli.DevFlow.Flows.FlowCommitCommands;
+using FlowCommitException = Microsoft.Maui.Cli.DevFlow.Flows.FlowCommitException;
 using Microsoft.Maui.Cli.Models;
 using Microsoft.Maui.Cli.Providers.Android;
 using Microsoft.Maui.Cli.UnitTests.Fakes;
@@ -996,12 +998,25 @@ public sealed class FlowExecutionCoreTests
         Assert.Equal("0123456789abcdef0123456789abcdef01234567", result.Manifest?.Build?.SourceRevision);
         Assert.Contains(server.RecordedRequests, request => request.Path == "/api/v1/agent/status");
         var junit = XDocument.Load(result.JUnitPath!);
-        Assert.Equal("1", junit.Root?.Attribute("failures")?.Value);
+        // An unverified run is not a regression in the app under test, so it must not read as a
+        // JUnit failure -- every shipped flow would otherwise be red in CI while passing.
+        Assert.Equal("0", junit.Root?.Attribute("failures")?.Value);
         Assert.Equal("0", junit.Root?.Attribute("errors")?.Value);
-        Assert.Equal("0", junit.Root?.Attribute("skipped")?.Value);
+        Assert.Equal("1", junit.Root?.Attribute("skipped")?.Value);
+        Assert.Empty(junit.Descendants("failure"));
+        Assert.Single(junit.Descendants("skipped"));
         Assert.Equal(
             FlowExecutionExitCategories.Unverified,
-            junit.Descendants("failure").Single().Attribute("type")?.Value);
+            junit.Descendants("property")
+                .Single(property => property.Attribute("name")?.Value == "devflow.exitCategory")
+                .Attribute("value")?.Value);
+        Assert.Equal(
+            "false",
+            junit.Descendants("property")
+                .Single(property => property.Attribute("name")?.Value == "devflow.verified")
+                .Attribute("value")?.Value);
+        // The CLI message must lead with the verification reason, not "Flow replay passed."
+        Assert.Contains("independent-oracle-absent", result.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -2134,6 +2149,209 @@ public sealed class FlowExecutionCoreTests
         }
     }
 
+    [Fact]
+    public async Task Coordinator_DeviceAdmissionRefusal_HappensBeforeTheAppBuild()
+    {
+        // Regression: `android-preexisting-app-unsafe` used to fire during platform-launch, after
+        // a multi-minute build and artifact resolution. The refusal is correct policy, but the
+        // package the flow drives is declared in the committed flow itself, so the answer is
+        // available before any expensive stage runs.
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var resolver = new FakeArtifactResolver(Artifact(Path.Combine(workspace.Root, "app.apk")));
+        var adapter = new FakePlatformAdapter { RefuseAdmissionFor = "App" };
+        var coordinator = CreateCoordinator(resolver, adapter);
+
+        var result = await coordinator.RunAsync(Request(bundle, workspace.Output));
+
+        Assert.Equal("android-preexisting-app-unsafe", result.Report?.Failure?.Code);
+        Assert.Equal(1, adapter.AdmissionCalls);
+        Assert.Equal("App", adapter.AdmissionAppId);
+        // The whole point: nothing expensive ran.
+        Assert.Equal(0, resolver.Calls);
+        Assert.Equal(0, adapter.MutationCalls);
+        var stages = result.Manifest?.Lifecycle?.Stages ?? [];
+        var admission = Assert.Single(stages, stage => stage.Name == "device-admission");
+        Assert.Equal("failed", admission.Status);
+        Assert.DoesNotContain(stages, stage => stage.Name == "resolve-artifact");
+    }
+
+    [Fact]
+    public async Task Coordinator_DeviceAdmissionAccepted_StillRunsTheRestOfThePipeline()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var resolver = new FakeArtifactResolver(Artifact(Path.Combine(workspace.Root, "app.apk")));
+        var adapter = new FakePlatformAdapter();
+        var coordinator = CreateCoordinator(resolver, adapter);
+
+        var result = await coordinator.RunAsync(Request(bundle, workspace.Output));
+
+        Assert.Equal(1, adapter.AdmissionCalls);
+        Assert.Equal(1, resolver.Calls);
+        var stages = result.Manifest?.Lifecycle?.Stages ?? [];
+        var admissionIndex = stages.FindIndex(stage => stage.Name == "device-admission");
+        var resolveIndex = stages.FindIndex(stage => stage.Name == "resolve-artifact");
+        Assert.True(admissionIndex >= 0, "device-admission must be recorded in the lifecycle");
+        Assert.True(resolveIndex > admissionIndex, "device-admission must precede resolve-artifact");
+    }
+
+    [Fact]
+    public async Task CommittedBundleLoader_StaleFlowDigest_NamesTheSupportedRebindingVerb()
+    {
+        // Regression: the refusal told the author to "commit the matching flow and plan again"
+        // while no verb existed to do so, which forced reflection into the shipping assembly.
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var parsed = FlowMarkdown.Parse(await File.ReadAllTextAsync(bundle.Flow)).Flow!;
+        parsed.Name = "changed-after-plan-commit";
+        await File.WriteAllTextAsync(bundle.Flow, FlowMarkdown.Serialize(parsed));
+
+        var exception = await Assert.ThrowsAsync<FlowExecutionException>(() =>
+            new CommittedFlowBundleLoader().LoadAsync(bundle.Flow, bundle.Plan));
+
+        Assert.Equal("plan-flow-digest-stale", exception.Code);
+        Assert.Contains("maui devflow flow commit", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task FlowCommit_StaleSidecar_RebindsAndMakesTheBundleRunnableAgain()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var parsed = FlowMarkdown.Parse(await File.ReadAllTextAsync(bundle.Flow)).Flow!;
+        parsed.Steps[0].Target = new FlowSelector { AutomationId = "RenamedByTheAuthor" };
+        await File.WriteAllTextAsync(bundle.Flow, FlowMarkdown.Serialize(parsed));
+
+        // Before: the edit is refused, which is the safety property and must not change.
+        var stale = await Assert.ThrowsAsync<FlowExecutionException>(() =>
+            new CommittedFlowBundleLoader().LoadAsync(bundle.Flow, bundle.Plan));
+        Assert.Equal("plan-flow-digest-stale", stale.Code);
+
+        var check = await FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: true);
+        Assert.False(check.Ok);
+        Assert.False(check.Changed);
+
+        var committed = await FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: false);
+        Assert.True(committed.Ok);
+        Assert.True(committed.Changed);
+        Assert.NotEqual(committed.PreviousDigest, committed.Digest);
+
+        // After: the author's own edit is runnable again, without reflection.
+        var loaded = await new CommittedFlowBundleLoader().LoadAsync(bundle.Flow, bundle.Plan);
+        Assert.Equal(committed.Digest, loaded.FlowDigest);
+
+        var recheck = await FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: true);
+        Assert.True(recheck.Ok);
+        Assert.False(recheck.Changed);
+    }
+
+    [Fact]
+    public async Task FlowCommit_CurrentSidecar_IsAnUnchangedNoOp()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var before = await File.ReadAllTextAsync(bundle.Plan);
+
+        var result = await FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: false);
+
+        Assert.True(result.Ok);
+        Assert.False(result.Changed);
+        Assert.Equal(before, await File.ReadAllTextAsync(bundle.Plan));
+    }
+
+    [Fact]
+    public async Task FlowCommit_PreservesEveryOtherPlanField()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var before = JsonNode.Parse(await File.ReadAllTextAsync(bundle.Plan))!.AsObject();
+        var parsed = FlowMarkdown.Parse(await File.ReadAllTextAsync(bundle.Flow)).Flow!;
+        parsed.Steps[0].Target = new FlowSelector { AutomationId = "RenamedByTheAuthor" };
+        await File.WriteAllTextAsync(bundle.Flow, FlowMarkdown.Serialize(parsed));
+
+        await FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: false);
+
+        var after = JsonNode.Parse(await File.ReadAllTextAsync(bundle.Plan))!.AsObject();
+        foreach (var (key, value) in before)
+        {
+            if (key == "flow")
+                continue;
+            Assert.Equal(value?.ToJsonString(), after[key]?.ToJsonString());
+        }
+    }
+
+    [Fact]
+    public async Task FlowCommit_MissingSidecar_RefusesInsteadOfAuthoringOne()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        File.Delete(bundle.Plan);
+
+        var failure = await Assert.ThrowsAsync<FlowCommitException>(() =>
+            FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: false));
+
+        Assert.Equal("plan-missing", failure.Code);
+    }
+
+    [Fact]
+    public async Task FlowCommit_UnparsableFlow_IsRefusedBeforeAnyWrite()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var before = await File.ReadAllTextAsync(bundle.Plan);
+        await File.WriteAllTextAsync(bundle.Flow, "# not a flow\n\nno maui-test block here\n");
+
+        var failure = await Assert.ThrowsAsync<FlowCommitException>(() =>
+            FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: false));
+
+        Assert.Equal("flow-invalid", failure.Code);
+        Assert.Equal(before, await File.ReadAllTextAsync(bundle.Plan));
+    }
+
+    [Fact]
+    public async Task FlowCommit_UnrelatedPlanPath_IsRefused()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var elsewhere = Path.Combine(workspace.Root, "someone-elses.maui-plan.json");
+        File.Copy(bundle.Plan, elsewhere);
+
+        var failure = await Assert.ThrowsAsync<FlowCommitException>(() =>
+            FlowCommitCommands.ExecuteAsync(bundle.Flow, elsewhere, checkOnly: false));
+
+        Assert.Equal("plan-sidecar-mismatch", failure.Code);
+    }
+
+    [Fact]
+    public async Task FlowCommit_DropsApprovalsBoundToTheSupersededFlow()
+    {
+        // Re-blessing must never carry a review of the old bytes onto the new ones.
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var plan = JsonNode.Parse(await File.ReadAllTextAsync(bundle.Plan))!.AsObject();
+        var staleDigest = (string?)plan["flow"]?["digest"];
+        plan["approvals"] = new JsonArray(
+            new JsonObject
+            {
+                ["approvedBy"] = "reviewer",
+                ["approvedAt"] = "2026-08-15T20:00:00.0000000+00:00",
+                ["digest"] = staleDigest,
+            });
+        await File.WriteAllTextAsync(bundle.Plan, plan.ToJsonString());
+
+        var parsed = FlowMarkdown.Parse(await File.ReadAllTextAsync(bundle.Flow)).Flow!;
+        parsed.Steps[0].Target = new FlowSelector { AutomationId = "RenamedByTheAuthor" };
+        await File.WriteAllTextAsync(bundle.Flow, FlowMarkdown.Serialize(parsed));
+
+        var result = await FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: false);
+
+        Assert.True(result.Ok);
+        Assert.Equal(1, result.RemovedApprovals);
+        var after = JsonNode.Parse(await File.ReadAllTextAsync(bundle.Plan))!.AsObject();
+        Assert.Empty(after["approvals"]?.AsArray() ?? []);
+    }
+
     private sealed class FakeArtifactResolver(ResolvedAppArtifact artifact) : IAppArtifactResolver
     {
         public int Calls { get; private set; }
@@ -2229,6 +2447,9 @@ public sealed class FlowExecutionCoreTests
     {
         public int MutationCalls { get; private set; }
         public int CleanupCalls { get; private set; }
+        public int AdmissionCalls { get; private set; }
+        public string? AdmissionAppId { get; private set; }
+        public string? RefuseAdmissionFor { get; set; }
         public FlowExecutionPlatformDescriptor Descriptor { get; } = new()
         {
             Platform = "android",
@@ -2245,6 +2466,22 @@ public sealed class FlowExecutionCoreTests
         }
 
         public string? GetDefaultRuntimeIdentifier() => null;
+
+        public Task ValidateDeviceAdmissionAsync(
+            FlowExecutionDeviceAdmissionRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            AdmissionCalls++;
+            AdmissionAppId = request.DeclaredAppId;
+            if (RefuseAdmissionFor is { } refused &&
+                string.Equals(refused, request.DeclaredAppId, StringComparison.Ordinal))
+            {
+                throw FlowExecutionException.Unsupported(
+                    "android-preexisting-app-unsafe",
+                    "The exact Android device already contains the app.");
+            }
+            return Task.CompletedTask;
+        }
 
         public Task<FlowExecutionPlatformPreflight> PreflightAsync(
             FlowExecutionPlatformPreflightRequest request,

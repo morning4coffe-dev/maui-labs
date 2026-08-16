@@ -42,6 +42,30 @@ internal sealed class AndroidFlowExecutionAdapter : IFlowExecutionPlatformAdapte
 
     public string? GetDefaultRuntimeIdentifier() => null;
 
+    public async Task ValidateDeviceAdmissionAsync(
+        FlowExecutionDeviceAdmissionRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        // The flow declares the app it drives. When it does, the pre-existing-package refusal can
+        // be answered from adb alone, before the build. When it does not, the run proceeds and the
+        // authoritative check still runs at deployment against the built launch identity.
+        if (string.IsNullOrWhiteSpace(request.DeclaredAppId))
+            return;
+
+        var device = await ResolveDeviceAsync(request.DeviceSerial, cancellationToken).ConfigureAwait(false);
+        var installed = await _deployment
+            .IsPackageInstalledAsync(device.Id, request.DeclaredAppId, cancellationToken)
+            .ConfigureAwait(false);
+        if (installed)
+        {
+            throw FlowExecutionException.Unsupported(
+                "android-preexisting-app-unsafe",
+                $"The exact Android device already contains '{request.DeclaredAppId}'. Flow run v1 refuses to replace app state it does not own. " +
+                $"Remove it first with 'adb -s {device.Id} uninstall {request.DeclaredAppId}', or target a device without it.");
+        }
+    }
+
     public async Task<FlowExecutionPlatformPreflight> PreflightAsync(
         FlowExecutionPlatformPreflightRequest request,
         CancellationToken cancellationToken = default)

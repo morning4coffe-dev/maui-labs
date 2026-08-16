@@ -128,6 +128,21 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             ValidateBundleTarget(bundle, adapter.Descriptor);
             AddStage(lifecycle, currentStage, "passed", "target-supported", durationMs: 0);
 
+            currentStage = "device-admission";
+            await StageAsync(
+                lifecycle,
+                currentStage,
+                async () =>
+                {
+                    await adapter.ValidateDeviceAdmissionAsync(new FlowExecutionDeviceAdmissionRequest
+                    {
+                        DeclaredAppId = bundle.Flow.App,
+                        DeviceSerial = request.DeviceSerial,
+                    }, cancellationToken).ConfigureAwait(false);
+                    return true;
+                },
+                cancellationToken).ConfigureAwait(false);
+
             currentStage = "resolve-artifact";
             artifact = await StageAsync(
                 lifecycle,
@@ -331,7 +346,13 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
 
             exitCategory = ClassifyReport(report);
             detailCode = report.Failure?.Code ?? exitCategory;
-            message = report.Outcome?.Summary ?? MessageForCategory(exitCategory);
+            // The replay's own summary ("Flow replay passed.") is true but, on its own, reads as a
+            // contradiction next to ok:false. Lead with why the run is unverified and keep the
+            // replay summary as context, so the operator sees an actionable reason rather than a
+            // pass that failed.
+            message = exitCategory == FlowExecutionExitCategories.Unverified
+                ? ComposeUnverifiedMessage(report)
+                : report.Outcome?.Summary ?? MessageForCategory(exitCategory);
         }
         catch (FlowExecutionPlatformLaunchException ex)
         {
@@ -1117,8 +1138,20 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             _ => MauiFlowRunOutcomes.Failed,
         };
 
-    private static string MessageForCategory(string exitCategory)
-        => exitCategory switch
+    internal static string ComposeUnverifiedMessage(MauiFlowRunReport report)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        var reason = report.Outcome?.VerificationReason ?? report.Verification?.Reason;
+        var summary = report.Outcome?.Summary;
+        var message = string.IsNullOrWhiteSpace(reason)
+            ? MessageForCategory(FlowExecutionExitCategories.Unverified)
+            : reason!;
+        return string.IsNullOrWhiteSpace(summary) || message.Contains(summary!, StringComparison.Ordinal)
+            ? message
+            : $"{message} ({summary})";
+    }
+
+    private static string MessageForCategory(string exitCategory)        => exitCategory switch
         {
             FlowExecutionExitCategories.Pass => "The flow passed with required independent verification.",
             FlowExecutionExitCategories.Unverified => "The flow completed but is not independently verified.",

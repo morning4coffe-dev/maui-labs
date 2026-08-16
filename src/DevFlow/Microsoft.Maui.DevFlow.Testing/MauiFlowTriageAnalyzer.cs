@@ -136,6 +136,8 @@ public static class MauiFlowTriageAnalyzer
                 : null,
             FailureClass = canonicalFailureClass ?? report?.Failure?.Code,
             LegacyFailureKind = report?.Failure?.LegacyKind,
+            AssertionTargetResolution = MauiFlowFailureClassifier.AssertionTargetResolutionOf(
+                FindNamedFailedStep(report)),
             CompletionCertain = string.Equals(completion, "unknown", StringComparison.Ordinal)
                 ? false
                 : completion is null ? null : true,
@@ -723,6 +725,20 @@ public static class MauiFlowTriageAnalyzer
         return (report.Steps ?? []).FirstOrDefault(step =>
                 string.Equals(step.StepId, stepId, StringComparison.Ordinal))
             ?? (report.Steps ?? []).FirstOrDefault(static step => !string.IsNullOrWhiteSpace(step.FailureClass));
+    }
+
+    /// <summary>
+    /// The step the report itself names as the failure, with no first-failed-step fallback.
+    /// Assertion-target drift is read only from here: crediting this failure with a different
+    /// step's unresolved assertion selector would invent a signal the report does not carry.
+    /// </summary>
+    private static MauiFlowStepAttempt? FindNamedFailedStep(MauiFlowRunReport? report)
+    {
+        var stepId = report?.Failure?.StepId ?? report?.DivergenceStepId;
+        return string.IsNullOrWhiteSpace(stepId)
+            ? null
+            : (report?.Steps ?? []).FirstOrDefault(step =>
+                string.Equals(step.StepId, stepId, StringComparison.Ordinal));
     }
 
     private static MauiTestExecutionOutcomeFacts? ProjectOutcome(

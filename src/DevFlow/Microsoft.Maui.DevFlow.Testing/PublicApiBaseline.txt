@@ -304,6 +304,7 @@ F:Microsoft.Maui.DevFlow.Testing.FlowActions.Scroll:System.String
 F:Microsoft.Maui.DevFlow.Testing.FlowActions.SetProperty:System.String
 F:Microsoft.Maui.DevFlow.Testing.FlowActions.SetTheme:System.String
 F:Microsoft.Maui.DevFlow.Testing.FlowActions.Tap:System.String
+F:Microsoft.Maui.DevFlow.Testing.FlowAssertTargetStatuses.Resolved:System.String
 F:Microsoft.Maui.DevFlow.Testing.FlowFailureKinds.Ambiguous:System.String
 F:Microsoft.Maui.DevFlow.Testing.FlowFailureKinds.Assertion:System.String
 F:Microsoft.Maui.DevFlow.Testing.FlowFailureKinds.Disabled:System.String
@@ -687,6 +688,7 @@ M:Microsoft.Maui.DevFlow.Testing.MauiCSharpSourceEligibilityAnalyzer.Analyze(inp
 M:Microsoft.Maui.DevFlow.Testing.MauiElementFingerprintBuilder.Build(observation:Microsoft.Maui.DevFlow.Driver.MauiSelectorObservation,currentSourceHash:System.String=null):Microsoft.Maui.DevFlow.Testing.MauiElementFingerprint
 M:Microsoft.Maui.DevFlow.Testing.MauiElementFingerprintBuilder.Build(target:Microsoft.Maui.DevFlow.Driver.MauiSelectorObservationElement,elements:System.Collections.Generic.IReadOnlyList`1[Microsoft.Maui.DevFlow.Driver.MauiSelectorObservationElement],context:Microsoft.Maui.DevFlow.Driver.MauiSelectorObservationContext=null,currentSourceHash:System.String=null):Microsoft.Maui.DevFlow.Testing.MauiElementFingerprint
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerifier.VerifyAsync(driver:Microsoft.Maui.DevFlow.Testing.IMauiFlowDriver,assertion:Microsoft.Maui.DevFlow.Testing.FlowAssert,pollTries:System.Int32=1,pollGapMs:System.Int32=0,cancellationToken:System.Threading.CancellationToken=null):System.Threading.Tasks.Task`1[Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerification]
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.AssertionTargetResolutionOf(step:Microsoft.Maui.DevFlow.Testing.MauiFlowStepAttempt):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.Classify(facts:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts):Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.FromLegacyFailureKind(legacyKind:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.IsKnownFailureClass(value:System.String):System.Boolean
@@ -847,6 +849,8 @@ P:Microsoft.Maui.DevFlow.Testing.FlowAssertResult.Name[]:System.String{get:publi
 P:Microsoft.Maui.DevFlow.Testing.FlowAssertResult.Ok[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowAssertResult.Skipped[]:System.Boolean{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowAssertResult.TargetHint[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.FlowAssertResult.TargetMatchCount[]:System.Nullable`1[System.Int32]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.FlowAssertResult.TargetStatus[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowParseResult.Error[]:System.String{get:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowParseResult.File[]:System.String{get:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowParseResult.Flow[]:Microsoft.Maui.DevFlow.Testing.MauiFlow{get:public}
@@ -1318,6 +1322,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionResult.Kind[]:System.String{ge
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionResult.Message[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionResult.Passed[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionResult.Skipped[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionResult.TargetResolution[]:Microsoft.Maui.DevFlow.Testing.MauiFlowTargetResolution{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerification.Actual[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerification.Error[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerification.MatchCount[]:System.Int32{get:public;set:public}
@@ -1411,6 +1416,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification.RepairEligible[]:
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification.Retryable[]:System.Boolean{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts.ActionRejected[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts.AgentDisconnected[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts.AssertionTargetResolution[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts.BeforeDispatch[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts.CapabilityMissing[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts.CheckpointMatches[]:System.Nullable`1[System.Boolean]{get:public;set:public}
@@ -3725,6 +3731,7 @@ T:class sealed Microsoft.Maui.DevFlow.Testing.MauiXamlSourceRollbackState
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiXamlSourceUniquenessEvidence
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiXamlSourceVerificationState
 T:class static Microsoft.Maui.DevFlow.Testing.FlowActions
+T:class static Microsoft.Maui.DevFlow.Testing.FlowAssertTargetStatuses
 T:class static Microsoft.Maui.DevFlow.Testing.FlowFailureKinds
 T:class static Microsoft.Maui.DevFlow.Testing.FlowMarkdown
 T:class static Microsoft.Maui.DevFlow.Testing.FlowReplayReportAdapter

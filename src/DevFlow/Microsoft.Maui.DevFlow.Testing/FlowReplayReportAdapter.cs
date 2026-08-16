@@ -47,6 +47,8 @@ public static class FlowReplayReportAdapter
                 Skipped = assertion.Skipped ?? false,
                 Expected = assertion.Expected,
                 Actual = assertion.Actual,
+                TargetStatus = assertion.TargetResolution?.Status,
+                TargetMatchCount = assertion.TargetResolution?.MatchCount,
             }));
             result.Results.Add(legacyStep);
             if (passed)

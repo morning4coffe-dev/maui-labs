@@ -400,7 +400,14 @@ public static class MauiFlowRunReportSerializer
         foreach (var actionability in step.Actionability)
             actionability.Message = MauiFlowReportRedactor.SafeMessage(actionability.Message, maxTextLength);
         foreach (var assertion in step.Assertions)
+        {
             assertion.Message = MauiFlowReportRedactor.SafeMessage(assertion.Message, maxTextLength);
+            assertion.TargetResolution?.Let(value =>
+            {
+                value.Message = MauiFlowReportRedactor.SafeMessage(value.Message, maxTextLength);
+                value.FinalResolution = MauiFlowReportRedactor.SafeMessage(value.FinalResolution, maxTextLength);
+            });
+        }
     }
 
     private static void SanitizeReport(MauiFlowRunReport report, int maxTextLength)
@@ -493,6 +500,11 @@ public static class MauiFlowRunReportSerializer
             foreach (var assertion in step.Assertions)
             {
                 assertion.Kind = MauiFlowReportRedactor.SafeIdentifier(assertion.Kind);
+                assertion.TargetResolution?.Let(value =>
+                {
+                    value.Status = MauiFlowReportRedactor.SafeIdentifier(value.Status);
+                    value.ElementId = MauiFlowReportRedactor.SafeIdentifier(value.ElementId);
+                });
                 // A failed assertion is the one place where the observed value is the whole point
                 // of the report. Withholding it leaves the author a length and a digest, which is
                 // unusable. Disclosure still has to clear IsSafeText.
@@ -955,6 +967,7 @@ public static class MauiFlowRunReportSerializer
                 assertion.ExtensionData = null;
                 assertion.ExpectedDisclosure?.Let(value => value.ExtensionData = null);
                 assertion.ActualDisclosure?.Let(value => value.ExtensionData = null);
+                assertion.TargetResolution?.Let(value => value.ExtensionData = null);
             }
             foreach (var artifact in step.Artifacts)
                 artifact.ExtensionData = null;

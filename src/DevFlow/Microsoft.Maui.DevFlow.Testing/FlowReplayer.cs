@@ -21,6 +21,21 @@ public sealed class FlowAssertResult
     /// not recognise <c>PasswordEntry.Text</c> as sensitive.
     /// </summary>
     public string? TargetHint { get; set; }
+
+    /// <summary>
+    /// How the assertion's own selector resolved: <c>resolved</c>,
+    /// <see cref="FlowFailureKinds.NotFound"/>, or <see cref="FlowFailureKinds.Ambiguous"/>.
+    /// An assertion that failed because its selector never resolved read no value from the app,
+    /// so triage must be able to see that and attribute the failure to the test rather than to
+    /// the app. Only the kinds that must resolve a selector to reach a verdict set this, which
+    /// is why <c>notExists</c> and <c>routeIs</c> leave it null: for <c>notExists</c> a selector
+    /// that does not resolve <em>is</em> the expectation, so a failure there means the element
+    /// really was present and the app really did diverge.
+    /// </summary>
+    public string? TargetStatus { get; set; }
+
+    /// <summary>How many elements the assertion's selector matched, when it was evaluated.</summary>
+    public int? TargetMatchCount { get; set; }
 }
 
 /// <summary>
@@ -497,10 +512,10 @@ public sealed class FlowReplayer
                 if (a.Kind == "propEquals")
                 {
                     // Re-resolve every attempt — the element id can change across a navigation.
-                    var id = await ResolveToIdAsync(a.Selector, ct);
-                    if (id is not null)
+                    var resolution = await ResolveAssertTargetAsync(r, a.Selector, ct);
+                    if (resolution.Ok)
                     {
-                        var val = await _agent.GetPropertyAsync(id, string.IsNullOrEmpty(a.Name) ? "Text" : a.Name!);
+                        var val = await _agent.GetPropertyAsync(resolution.Element!.Id, string.IsNullOrEmpty(a.Name) ? "Text" : a.Name!);
                         r.Actual = val;
                         if (PropertyValuesEqual(val, a.Expected))
                         {
@@ -511,8 +526,8 @@ public sealed class FlowReplayer
                 }
                 else if (a.Kind == "exists")
                 {
-                    var id = await ResolveToIdAsync(a.Selector, ct);
-                    if (id is not null)
+                    var resolution = await ResolveAssertTargetAsync(r, a.Selector, ct);
+                    if (resolution.Ok)
                     {
                         r.Ok = true;
                         return r;
@@ -632,6 +647,21 @@ public sealed class FlowReplayer
     {
         var resolution = await _actionability.ResolveAsync(selector, ct);
         return resolution.Ok ? resolution.Element!.Id : null;
+    }
+
+    /// <summary>
+    /// Resolves an assertion's own selector and records the outcome on the result, so a failure
+    /// caused by a selector that no longer matches is distinguishable from a value that changed.
+    /// </summary>
+    private async Task<FlowTargetResolution> ResolveAssertTargetAsync(
+        FlowAssertResult result,
+        FlowSelector? selector,
+        CancellationToken ct)
+    {
+        var resolution = await _actionability.ResolveAsync(selector, ct);
+        result.TargetStatus = resolution.Ok ? FlowAssertTargetStatuses.Resolved : resolution.Kind;
+        result.TargetMatchCount = resolution.MatchCount;
+        return resolution;
     }
 
     private static bool TryParseTheme(string? s, out DevFlowTheme theme)

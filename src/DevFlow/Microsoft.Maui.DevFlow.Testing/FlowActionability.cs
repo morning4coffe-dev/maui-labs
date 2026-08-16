@@ -274,6 +274,16 @@ public static class FlowFailureKinds
     public const string WorkflowCommandConflict = "workflow-command-conflict";
 }
 
+/// <summary>
+/// The outcome of resolving an assertion's own selector. Failure values reuse
+/// <see cref="FlowFailureKinds"/> so a reader does not have to learn a second vocabulary.
+/// </summary>
+public static class FlowAssertTargetStatuses
+{
+    /// <summary>The assertion's selector matched exactly one element, so its value was read.</summary>
+    public const string Resolved = "resolved";
+}
+
 public sealed class FlowTargetResolution
 {
     public bool Ok { get; init; }

@@ -332,6 +332,7 @@ public sealed class MauiFlowRunner
 
                 legacyStep.MatchCount = drive.Target?.MatchCount;
                 legacyStep.SelectorQuality = drive.Target?.Quality;
+                string? assertionTargetResolution = null;
                 if (!drive.Ok)
                 {
                     legacyStep.Ok = false;
@@ -372,6 +373,10 @@ public sealed class MauiFlowRunner
                             legacyStep.Ok = false;
                             if (FlowValidator.VerifiableAssertKinds.Contains(assertion.Kind))
                             {
+                                // The step is attributed to the first assertion that failed, so
+                                // the resolution outcome is taken from that same assertion.
+                                if (legacyStep.FailureKind is null)
+                                    assertionTargetResolution = assertionResult.TargetStatus;
                                 legacyStep.FailureKind ??= FlowFailureKinds.Assertion;
                                 legacyStep.Error ??= $"{assertion.Kind} assertion failed.";
                             }
@@ -391,6 +396,7 @@ public sealed class MauiFlowRunner
                     : MauiFlowFailureClassifier.Classify(new MauiFlowFailureFacts
                     {
                         LegacyFailureKind = legacyStep.FailureKind,
+                        AssertionTargetResolution = assertionTargetResolution,
                         BeforeDispatch = receipt is null,
                         CompletionCertain = drive.Kind == FlowFailureKinds.UnknownCompletion ? false : null,
                         CheckpointVerified = observedCheckpoint is not null && expectedCheckpoint is not null,
@@ -590,6 +596,13 @@ public sealed class MauiFlowRunner
         }
     }
 
+    /// <summary>Finds the recorded attempt for a step id, so run-level facts agree with the step.</summary>
+    private static MauiFlowStepAttempt? FindStepAttempt(MauiFlowRunReport report, string? stepId)
+        => string.IsNullOrWhiteSpace(stepId)
+            ? null
+            : (report.Steps ?? []).FirstOrDefault(step =>
+                string.Equals(step?.StepId, stepId, StringComparison.Ordinal));
+
     private async Task<MauiFlowRunExecutionResult> FinalizeAsync(
         MauiFlowRunReport report,
         FlowReplayReport legacy,
@@ -610,10 +623,15 @@ public sealed class MauiFlowRunner
         };
         if (!legacy.Ok && report.Failure is null)
         {
+            // Belt and braces: the step loop already stamps the corrected class into report.Failure,
+            // so this branch is reached only when no step recorded one (cancellation or an
+            // infrastructure error). Passing the fact here keeps the two paths from disagreeing.
             var classification = MauiFlowFailureClassifier.Classify(new MauiFlowFailureFacts
             {
                 TerminalOutcome = outcome,
                 LegacyFailureKind = failedLegacyStep?.FailureKind,
+                AssertionTargetResolution = MauiFlowFailureClassifier.AssertionTargetResolutionOf(
+                    FindStepAttempt(report, report.DivergenceStepId)),
             });
             report.Failure = MauiFlowFailureClassifier.ToFailure(
                 classification,
@@ -630,6 +648,8 @@ public sealed class MauiFlowRunner
             {
                 TerminalOutcome = outcome,
                 LegacyFailureKind = report.Failure.LegacyKind,
+                AssertionTargetResolution = MauiFlowFailureClassifier.AssertionTargetResolutionOf(
+                    FindStepAttempt(report, report.Failure.StepId)),
             });
             report.Failure = MauiFlowFailureClassifier.ToFailure(
                 classification,
@@ -966,11 +986,11 @@ public sealed class MauiFlowRunner
             {
                 if (assertion.Kind == "propEquals")
                 {
-                    var id = await ResolveToIdAsync(assertion.Selector, cancellationToken).ConfigureAwait(false);
-                    if (id is not null)
+                    var resolution = await ResolveAssertionTargetAsync(result, assertion.Selector, cancellationToken).ConfigureAwait(false);
+                    if (resolution.Ok)
                     {
                         var actual = await _driver.GetPropertyAsync(
-                            id,
+                            resolution.Element!.Id,
                             string.IsNullOrEmpty(assertion.Name) ? "Text" : assertion.Name!).ConfigureAwait(false);
                         result.Actual = actual;
                         if (FlowReplayer.PropertyValuesEqual(actual, assertion.Expected))
@@ -982,7 +1002,8 @@ public sealed class MauiFlowRunner
                 }
                 else if (assertion.Kind == "exists")
                 {
-                    if (await ResolveToIdAsync(assertion.Selector, cancellationToken).ConfigureAwait(false) is not null)
+                    var resolution = await ResolveAssertionTargetAsync(result, assertion.Selector, cancellationToken).ConfigureAwait(false);
+                    if (resolution.Ok)
                     {
                         result.Ok = true;
                         return result;
@@ -1035,11 +1056,22 @@ public sealed class MauiFlowRunner
         return result;
     }
 
-    private async Task<string?> ResolveToIdAsync(FlowSelector? selector, CancellationToken cancellationToken)
+    /// <summary>
+    /// Resolves an assertion's own selector and records the outcome on the result. A failed
+    /// assertion whose selector never resolved read no value from the app, so recording the
+    /// resolution is what lets triage separate a drifted assertion selector from a real
+    /// behavioural change.
+    /// </summary>
+    private async Task<FlowTargetResolution> ResolveAssertionTargetAsync(
+        FlowAssertResult result,
+        FlowSelector? selector,
+        CancellationToken cancellationToken)
     {
         var actionability = new FlowActionabilityEngine(_driver, _options.PollTries, _options.PollGapMs);
         var resolution = await actionability.ResolveAsync(selector, cancellationToken).ConfigureAwait(false);
-        return resolution.Ok ? resolution.Element!.Id : null;
+        result.TargetStatus = resolution.Ok ? FlowAssertTargetStatuses.Resolved : resolution.Kind;
+        result.TargetMatchCount = resolution.MatchCount;
+        return resolution;
     }
 
     private MauiFlowStepAttempt CreateStructuredStep(
@@ -1262,6 +1294,13 @@ public sealed class MauiFlowRunner
             Actual = actual.Value,
             ExpectedDisclosure = expected,
             ActualDisclosure = actual,
+            // Without this a failed assertion is indistinguishable from an app regression, even
+            // when the assertion's selector is what stopped matching and no value was ever read.
+            TargetResolution = result.TargetStatus is null ? null : new MauiFlowTargetResolution
+            {
+                Status = MauiFlowReportRedactor.SafeIdentifier(result.TargetStatus),
+                MatchCount = result.TargetMatchCount,
+            },
             Message = result.Ok == false ? "Assertion did not match." : null,
         };
     }

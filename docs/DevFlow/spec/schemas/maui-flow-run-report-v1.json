@@ -815,6 +815,9 @@
         "actualDisclosure": {
           "$ref": "#/$defs/ValueDisclosure"
         },
+        "targetResolution": {
+          "$ref": "#/$defs/TargetResolution"
+        },
         "message": {
           "type": "string"
         }

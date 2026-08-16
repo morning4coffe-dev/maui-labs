@@ -9,6 +9,15 @@ public sealed class MauiFlowFailureFacts
     public string? TerminalOutcome { get; set; }
     public string? FailureClass { get; set; }
     public string? LegacyFailureKind { get; set; }
+
+    /// <summary>
+    /// How the failing assertion's own selector resolved: <c>resolved</c>,
+    /// <see cref="FlowFailureKinds.NotFound"/>, or <see cref="FlowFailureKinds.Ambiguous"/>.
+    /// Only set for assertion kinds that must resolve a selector to reach a verdict, so a
+    /// <c>notExists</c> assertion that failed because the element was present is never read as
+    /// selector drift.
+    /// </summary>
+    public string? AssertionTargetResolution { get; set; }
     public bool? FlowInvalid { get; set; }
     public bool? SchemaUnsupported { get; set; }
     public bool? CapabilityMissing { get; set; }
@@ -92,22 +101,41 @@ public static class MauiFlowFailureClassifier
         if (facts.ActionRejected == true)
             return Describe(MauiFlowFailureClasses.ActionRejected, facts, MauiFlowClassificationBases.FactFlag);
 
+        // An assertion that failed because its own selector no longer resolves read no value from
+        // the app, so the app was never observed to misbehave. This is checked before the stamped
+        // class is honoured because the stamp is the very thing being corrected: the runner and
+        // older reports both stamp `assertionFailed` from the legacy kind alone.
+        if (AssertionTargetDrift(facts) is { } assertionDrift)
+            return Describe(RefineLocatorDrift(assertionDrift, facts), facts, MauiFlowClassificationBases.Inferred);
+
         if (IsKnownClass(facts.FailureClass))
             return Describe(NormalizeClass(facts.FailureClass!), facts, MauiFlowClassificationBases.Stamped);
 
         var mapped = FromLegacyFailureKind(facts.LegacyFailureKind);
         if (mapped == MauiFlowFailureClasses.LocatorNotFound)
         {
-            // A zero-match selector is never locator drift if the recorded run preconditions or
-            // route state disagree. Absence of checkpoint evidence is diagnostic-only, not repair
-            // eligible, but preserves the legacy locator result for compatibility.
-            if (facts.RouteMatches == false)
-                return Describe(MauiFlowFailureClasses.RouteStateDrift, facts, MauiFlowClassificationBases.Inferred);
-            if (facts.CheckpointMatches == false)
-                return Describe(MauiFlowFailureClasses.PreconditionUnsatisfied, facts, MauiFlowClassificationBases.Inferred);
+            var refined = RefineLocatorDrift(mapped, facts);
+            if (!string.Equals(refined, mapped, StringComparison.Ordinal))
+                return Describe(refined, facts, MauiFlowClassificationBases.Inferred);
         }
 
         return Describe(mapped ?? MauiFlowFailureClasses.Infrastructure, facts, MauiFlowClassificationBases.Inferred);
+    }
+
+    /// <summary>
+    /// A zero-match selector is never locator drift if the recorded run preconditions or route
+    /// state disagree. Absence of checkpoint evidence is diagnostic-only, not repair eligible, but
+    /// preserves the legacy locator result for compatibility.
+    /// </summary>
+    private static string RefineLocatorDrift(string failureClass, MauiFlowFailureFacts facts)
+    {
+        if (!string.Equals(failureClass, MauiFlowFailureClasses.LocatorNotFound, StringComparison.Ordinal))
+            return failureClass;
+        if (facts.RouteMatches == false)
+            return MauiFlowFailureClasses.RouteStateDrift;
+        if (facts.CheckpointMatches == false)
+            return MauiFlowFailureClasses.PreconditionUnsatisfied;
+        return failureClass;
     }
 
     /// <summary>
@@ -162,6 +190,54 @@ public static class MauiFlowFailureClassifier
 
         _ => MauiFlowTriageDispositions.Inconclusive,
     };
+
+    /// <summary>
+    /// Maps an assertion failure onto locator drift when the assertion's own selector did not
+    /// resolve. Returns null when the failure was not an assertion, when the selector resolved
+    /// (the value genuinely differed, which is an app regression), or when no resolution was
+    /// recorded — an absent signal must never be invented into drift.
+    /// </summary>
+    private static string? AssertionTargetDrift(MauiFlowFailureFacts facts)
+    {
+        if (!AssertionSelectorDrifted(facts))
+            return null;
+        var declared = IsKnownClass(facts.FailureClass)
+            ? NormalizeClass(facts.FailureClass!)
+            : FromLegacyFailureKind(facts.LegacyFailureKind);
+        if (!string.Equals(declared, MauiFlowFailureClasses.AssertionFailed, StringComparison.Ordinal))
+            return null;
+        return NormalizeAssertionTargetResolution(facts) == FlowFailureKinds.Ambiguous
+            ? MauiFlowFailureClasses.LocatorAmbiguous
+            : MauiFlowFailureClasses.LocatorNotFound;
+    }
+
+    /// <summary>
+    /// True when the failing assertion's own selector stopped matching a single element. Selector
+    /// repair rewrites a step's <em>action</em> selector, so it must stay switched off here: the
+    /// selector that drifted belongs to the assertion and repairing the action would replace a
+    /// selector that is still resolving correctly. Read from the fact rather than from the
+    /// classification branch, so re-classifying an already-corrected report reaches the same
+    /// answer.
+    /// </summary>
+    private static bool AssertionSelectorDrifted(MauiFlowFailureFacts facts)
+        => NormalizeAssertionTargetResolution(facts) is FlowFailureKinds.NotFound or FlowFailureKinds.Ambiguous;
+
+    private static string? NormalizeAssertionTargetResolution(MauiFlowFailureFacts facts)
+    {
+        var resolution = facts.AssertionTargetResolution?.Trim().ToLowerInvariant();
+        return string.IsNullOrEmpty(resolution) ? null : resolution;
+    }
+
+    /// <summary>
+    /// Reads how the first failed assertion's own selector resolved from a recorded step attempt.
+    /// A report classified after the fact must reach the same answer as the run that produced it,
+    /// so both read the signal from here.
+    /// </summary>
+    public static string? AssertionTargetResolutionOf(MauiFlowStepAttempt? step)
+        => (step?.Assertions ?? [])
+            .FirstOrDefault(static assertion =>
+                assertion is not null && assertion.Passed == false && assertion.Skipped != true)
+            ?.TargetResolution?.Status;
 
     /// <summary>Maps a legacy <see cref="FlowFailureKinds"/> value without changing its wire value.</summary>
     public static string? FromLegacyFailureKind(string? legacyKind) => legacyKind switch
@@ -238,6 +314,7 @@ public static class MauiFlowFailureClassifier
         };
 
         var repairEligible = failureClass == MauiFlowFailureClasses.LocatorNotFound &&
+            !AssertionSelectorDrifted(facts) &&
             facts.BeforeDispatch == true &&
             facts.CheckpointVerified == true &&
             facts.CheckpointMatches == true &&

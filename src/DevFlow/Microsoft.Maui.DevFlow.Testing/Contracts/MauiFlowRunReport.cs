@@ -246,6 +246,13 @@ public sealed class MauiFlowAssertionResult
     [JsonPropertyName("actual")] public string? Actual { get; set; }
     [JsonPropertyName("expectedDisclosure")] public MauiFlowValueDisclosure? ExpectedDisclosure { get; set; }
     [JsonPropertyName("actualDisclosure")] public MauiFlowValueDisclosure? ActualDisclosure { get; set; }
+
+    /// <summary>
+    /// How the assertion's own selector resolved, recorded only for the kinds that must resolve a
+    /// selector to reach a verdict. A failed assertion whose selector did not resolve never read a
+    /// value from the app, so triage attributes it to the test rather than to the app.
+    /// </summary>
+    [JsonPropertyName("targetResolution")] public MauiFlowTargetResolution? TargetResolution { get; set; }
     [JsonPropertyName("message")] public string? Message { get; set; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }

@@ -335,6 +335,17 @@ internal static class FlowQualificationCommands
                 comparison.Regressions.Add($"gate {baselineGate.GateId} {baselineGate.Status} -> {current.Status}");
         }
 
+        // A gate the baseline never saw is not automatically a regression — adding a gate is how
+        // this branch made metrics visible in the first place — but a *failing* new gate is a
+        // measured failure, and iterating only the baseline's gate list would report it as nothing
+        // at all. Adding one is then a deliberate baseline refresh rather than a silent pass.
+        var baselineGateIds = baseline.Gates.Select(static gate => gate.GateId).ToHashSet(StringComparer.Ordinal);
+        foreach (var added in report.Gates.Where(gate => !baselineGateIds.Contains(gate.GateId)))
+        {
+            if (GateRank(added.Status) >= GateRank(MauiPreviewQualificationStates.Fail))
+                comparison.Regressions.Add($"gate {added.GateId} absent from baseline and {added.Status}");
+        }
+
         if (accumulation is not null)
         {
             foreach (var name in MauiPreviewQualificationAccumulator.MergedMetricNames)

@@ -176,7 +176,7 @@
       "exercises": {
         "component": "MauiPreviewQualificationCorpusRunner.EvaluateRepairFixture",
         "kind": "harness-local-rules",
-        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 1 judged sample(s); 30 further sample(s) sit in the pooled denominator that the false-heal gate and the baseline diff compare."
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 1 judged sample(s); 30 further sample(s) sit in the pooled denominator that the baseline diff compares."
       }
     },
     "repairRecall": {
@@ -221,7 +221,7 @@
       "exercises": {
         "component": "MauiPreviewQualificationCorpusRunner.EvaluateRepairFixture",
         "kind": "harness-local-rules",
-        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 1 judged sample(s); 30 further sample(s) sit in the pooled denominator that the false-heal gate and the baseline diff compare."
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 1 judged sample(s); 30 further sample(s) sit in the pooled denominator that the baseline diff compares."
       }
     },
     "classificationAccuracy": {
@@ -266,7 +266,7 @@
       "exercises": {
         "component": "MauiFlowFailureClassifier.Classify",
         "kind": "shipped-analyzer",
-        "note": "The same classifier entry point MauiFlowRunner and WorkflowRunCoordinator call at runtime. The expected label is corpus ground truth; the observed label is the product's answer to replay facts the harness derived, so the harness still chooses the classifier's input. Most static cases reach the classifier through a legacy-kind constant table, which exercises far less of it than cases that require precedence resolution. Describes the 8 judged sample(s); 37 further sample(s) sit in the pooled denominator that the false-heal gate and the baseline diff compare."
+        "note": "The same classifier entry point MauiFlowRunner and WorkflowRunCoordinator call at runtime. The expected label is corpus ground truth; the observed label is the product's answer to replay facts the harness derived, so the harness still chooses the classifier's input. Most static cases reach the classifier through a legacy-kind constant table, which exercises far less of it than cases that require precedence resolution. Describes the 8 judged sample(s); 37 further sample(s) sit in the pooled denominator that the baseline diff compares."
       }
     },
     "classificationMatrix": {
@@ -413,7 +413,7 @@
       "exercises": {
         "component": "MauiPreviewQualificationCorpusRunner.EvaluateFixture",
         "kind": "harness-local-rules",
-        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 16 judged sample(s); 300 further sample(s) sit in the pooled denominator that the false-heal gate and the baseline diff compare."
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 16 judged sample(s); 300 further sample(s) sit in the pooled denominator that the baseline diff compares."
       }
     },
     "abstention": {
@@ -458,7 +458,7 @@
       "exercises": {
         "component": "MauiPreviewQualificationCorpusRunner.EvaluateFixture",
         "kind": "harness-local-rules",
-        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 16 judged sample(s); 300 further sample(s) sit in the pooled denominator that the false-heal gate and the baseline diff compare."
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 16 judged sample(s); 300 further sample(s) sit in the pooled denominator that the baseline diff compares."
       }
     },
     "humanDecisionOutcomes": {

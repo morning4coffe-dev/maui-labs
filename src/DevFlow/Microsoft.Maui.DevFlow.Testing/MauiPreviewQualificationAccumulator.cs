@@ -693,7 +693,7 @@ public static class MauiPreviewQualificationAccumulator
         // first-match rule would let run order decide between shipped-analyzer and sample-supplied,
         // and merge order here is wall-clock sort order.
         var weakest = declared
-            .OrderBy(static exercises => ProvenanceStrength(exercises.Kind))
+            .OrderBy(static exercises => MauiQualificationMetricProvenanceKinds.Strength(exercises.Kind))
             .ThenBy(static exercises => exercises.Kind, StringComparer.Ordinal)
             .First();
         if (undeclared > 0)
@@ -719,20 +719,6 @@ public static class MauiPreviewQualificationAccumulator
             Note = weakest.Note,
         };
     }
-
-    /// <summary>
-    /// Orders provenance kinds weakest first so merging can take a minimum. Anything unrecognised
-    /// sorts below every named kind, because a kind this build does not model is not a claim it can
-    /// weigh — a newer writer's stronger label must not win by being unknown here.
-    /// </summary>
-    private static int ProvenanceStrength(string? kind) => kind switch
-    {
-        MauiQualificationMetricProvenanceKinds.Unknown => 0,
-        MauiQualificationMetricProvenanceKinds.HarnessLocalRules => 1,
-        MauiQualificationMetricProvenanceKinds.SampleSupplied => 2,
-        MauiQualificationMetricProvenanceKinds.ShippedAnalyzer => 3,
-        _ => 0,
-    };
 
     /// <summary>
     /// Sums clean first attempts per Tier-1 flow across runs. This is the whole reason

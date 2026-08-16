@@ -564,6 +564,22 @@ public static class MauiQualificationMetricProvenanceKinds
     public static bool IsProductEvidence(string? kind) =>
         string.Equals(kind, ShippedAnalyzer, StringComparison.Ordinal) ||
         string.Equals(kind, SampleSupplied, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Orders the kinds weakest first so callers can take a minimum rather than letting whichever
+    /// kind they happened to check first decide. Both merging across runs and mixing within a run
+    /// must take the weaker claim, so the ranking lives here rather than being restated at each
+    /// site: two copies that drift would make the within-run and across-run answers disagree
+    /// silently. Unrecognised sorts below every named kind, so an unknown string can never win.
+    /// </summary>
+    public static int Strength(string? kind) => kind switch
+    {
+        Unknown => 0,
+        HarnessLocalRules => 1,
+        SampleSupplied => 2,
+        ShippedAnalyzer => 3,
+        _ => 0,
+    };
 }
 
 /// <summary>
@@ -571,11 +587,18 @@ public static class MauiQualificationMetricProvenanceKinds
 /// </summary>
 public sealed class MauiQualificationMetricProvenance
 {
+    /// <summary>
+    /// The value <see cref="Component"/> holds when nothing set it. Named so the coverage gate can
+    /// recognise the contract default without coupling a component to a kind constant that merely
+    /// happens to share its spelling.
+    /// </summary>
+    public const string UndeclaredComponent = "unknown";
+
     /// <summary>The type and member that decided the observation.</summary>
-    [JsonPropertyName("component")] public string Component { get; set; } = "unknown";
+    [JsonPropertyName("component")] public string Component { get; set; } = UndeclaredComponent;
 
     /// <summary>One of <see cref="MauiQualificationMetricProvenanceKinds"/>.</summary>
-    [JsonPropertyName("kind")] public string Kind { get; set; } = "unknown";
+    [JsonPropertyName("kind")] public string Kind { get; set; } = MauiQualificationMetricProvenanceKinds.Unknown;
 
     /// <summary>What a reader must not conclude from this metric.</summary>
     [JsonPropertyName("note")] public string? Note { get; set; }

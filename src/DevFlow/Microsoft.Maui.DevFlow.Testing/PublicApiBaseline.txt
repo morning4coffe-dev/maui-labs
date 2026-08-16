@@ -480,6 +480,7 @@ F:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceSourceKinds.Ob
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceSourceKinds.ReportedIssue:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceSourceKinds.Synthetic:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceSourceKinds.Unknown:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenance.UndeclaredComponent:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.HarnessLocalRules:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.SampleSupplied:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.ShippedAnalyzer:System.String
@@ -777,6 +778,7 @@ M:Microsoft.Maui.DevFlow.Testing.MauiQualificationFuzzOptions.FromEnvironment():
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationHashChain.CreateDigest(previousDigest:System.String,payloadDigest:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationHashChain.IsValid(entries:System.Collections.Generic.IEnumerable`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationHashChainEntry]):System.Boolean
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.IsProductEvidence(kind:System.String):System.Boolean
+M:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.Strength(kind:System.String):System.Int32
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationPrivacyScanner.RedactUntrusted(value:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationPrivacyScanner.Scan(projection:System.Collections.Generic.IEnumerable`1[System.Collections.Generic.KeyValuePair`2[System.String,System.String]],canaries:System.Collections.Generic.IEnumerable`1[System.String]):Microsoft.Maui.DevFlow.Testing.MauiQualificationCanaryScanResult
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransitionPolicy.Evaluate(transition:Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransition):Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransitionResult

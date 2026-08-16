@@ -90,16 +90,19 @@ This is stated in the report itself rather than only here:
   it replaced; what it removes is the *accidental* claim, where a hand-written or partial sample
   earned the product's name merely for not being device-backed. This is why the coverage gate has no
   unqualified pass.
-- A judged subset that **mixes** stamped static rows with rows a run submitted takes the weaker of
-  the two claims, the same minimum the accumulator applies across runs. "Any statically scored sample
-  wins" would be conservative only while the static kind is the weak one; for `classificationAccuracy`
-  it is the strongest kind in the model, so one corpus fixture could otherwise upgrade a subset of
-  run-supplied rows. The published component reads `... + submitting-run` and the note says it was
-  downgraded.
+- A judged subset that **mixes** stamped static rows with rows a run submitted publishes `unknown`.
+  "Any statically scored sample wins" would be conservative only while the static kind is the weak
+  one; for `classificationAccuracy` it is the strongest kind in the model, so one corpus fixture
+  could otherwise upgrade a subset of run-supplied rows. `unknown` rather than `sample-supplied`
+  because that is the honest answer — no single component produced the subset — and because the
+  accumulator refuses a declared `sample-supplied` whose judged sources are not all `device-backed`,
+  and it refuses the **whole report**. Publishing `sample-supplied` here would make a run's own
+  honest understatement delete its stability and device evidence along with the label. The published
+  component reads `... + submitting-run` and the note says it was downgraded.
 - The label describes the **judged** subset, which is not always the whole denominator. When samples
   are pooled in beyond the judged set, the note says how many, and which gates read which: the count
-  and lower-bound gates read the independent subset, while the false-heal gate and the baseline diff
-  compare the pooled numerator.
+  and lower-bound gates read the independent subset, while the baseline diff compares the pooled
+  numerator and denominator of every rate.
 - `MauiPreviewQualificationAccumulator` merges `exercises` conjunctively — the merged kind is the
   **weakest** any contributor declared, ranked `unknown` < `harness-local-rules` < `sample-supplied`
   < `shipped-analyzer`, so pooling can never upgrade what the merged number measures and the result
@@ -144,11 +147,14 @@ Its limits are real and stated rather than papered over. It only sees that file 
 analyzer in from a differently named file would leave it green; and it only sees that call shape, so
 an indirection through a delegate or reflection would too. Under an equality assert a **false
 negative** is the dangerous direction, because it makes the tripwire agree with a `false` declaration
-instead of tightening it — which is why the scan strips string literals as well as comments, why it
-deliberately leaves *interpolated* literals intact (their `{...}` holes are executable code, so
-blanking them would hide a real call), and why
-`Tripwire_ReadsCodeRatherThanProseInEitherDirection` pins that behaviour on a literal that
-contains a comment marker, a sentence that names the call, and all three interpolated forms.
+instead of tightening it — which is why the scan strips string literals as well as comments, and why
+interpolated literals collapse to just their `{...}` holes rather than being blanked whole or being
+skipped: their holes are executable code, and skipping only their opening quote would leave the
+closing quote to open a runaway match that swallows every line after it. Single-line snippets cannot
+catch that class of bug — they have no later quote to swallow — so
+`Tripwire_StillSeesAWiredCallInEveryFileItScans` injects a real call into each scanned file and
+asserts the stripper still shows it, alongside
+`Tripwire_ReadsCodeRatherThanProseInEitherDirection` for the isolated shapes.
 
 ## Statistical power of the generated share
 

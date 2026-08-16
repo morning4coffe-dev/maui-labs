@@ -226,6 +226,191 @@ public sealed class MauiFlowRunReportTests : IDisposable
     }
 
     [Fact]
+    public async Task RunWithLegacyAsync_FailedAssertionOnOrdinaryText_DisclosesActualToTheAuthor()
+    {
+        // Regression: a failed assertion used to emit the expected value in the clear while
+        // redacting the observed one to {state:redacted,length:N,digest:...}. The tree carries no
+        // text, so the only copy of the value the author needed was inside an opt-in screenshot.
+        const string observed = "4 items, 0 completed";
+        var driver = new FakeDriver { PropertyValue = observed };
+        var flow = AssertTextFlow("Text", expected: "5 items, 0 completed");
+
+        var result = await new MauiFlowRunner(driver, new MauiFlowRunnerOptions
+        {
+            PollTries = 1,
+            PollGapMs = 0,
+        }).RunWithLegacyAsync(flow);
+
+        var assertion = Assert.Single(Assert.Single(result.Report.Steps).Assertions);
+        Assert.False(assertion.Passed);
+        Assert.Equal(observed, assertion.Actual);
+        Assert.Equal("disclosed", assertion.ActualDisclosure!.State);
+        Assert.Equal("5 items, 0 completed", assertion.Expected);
+    }
+
+    [Fact]
+    public async Task RunWithLegacyAsync_PassingAssertionOnOrdinaryText_StillRedactsActual()
+    {
+        // The disclosure is scoped to failures. A passing assertion tells the author nothing they
+        // did not already write down, so there is no reason to copy app state into the report.
+        const string observed = "4 items, 0 completed";
+        var driver = new FakeDriver { PropertyValue = observed };
+        var flow = AssertTextFlow("Text", expected: observed);
+
+        var result = await new MauiFlowRunner(driver, new MauiFlowRunnerOptions
+        {
+            PollTries = 1,
+            PollGapMs = 0,
+        }).RunWithLegacyAsync(flow);
+
+        var assertion = Assert.Single(Assert.Single(result.Report.Steps).Assertions);
+        Assert.True(assertion.Passed);
+        Assert.Null(assertion.Actual);
+        Assert.Equal("redacted", assertion.ActualDisclosure!.State);
+    }
+
+    [Fact]
+    public async Task RunWithLegacyAsync_FailedAssertionOnSensitiveName_StillRedactsActual()
+    {
+        const string observed = "hunter2-not-the-expected-one";
+        var driver = new FakeDriver { PropertyValue = observed };
+        var flow = AssertTextFlow("Password", expected: "something-else");
+
+        var result = await new MauiFlowRunner(driver, new MauiFlowRunnerOptions
+        {
+            PollTries = 1,
+            PollGapMs = 0,
+        }).RunWithLegacyAsync(flow);
+
+        var assertion = Assert.Single(Assert.Single(result.Report.Steps).Assertions);
+        Assert.False(assertion.Passed);
+        Assert.Null(assertion.Actual);
+        Assert.Equal("redacted", assertion.ActualDisclosure!.State);
+        Assert.DoesNotContain(
+            observed,
+            JsonSerializer.Serialize(result.Report, MauiTestingJsonContext.Default.MauiFlowRunReport),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunWithLegacyAsync_FailedAssertionOnSensitiveSelector_StillRedactsActual()
+    {
+        // The assert name alone is not enough: `Text` on a PasswordEntry is still a password. The
+        // selector the author aimed at is carried into the sensitivity decision.
+        const string observed = "hunter2-not-the-expected-one";
+        var driver = new FakeDriver { PropertyValue = observed, ElementAutomationId = "PasswordEntry" };
+        var flow = AssertTextFlow("Text", expected: "something-else", automationId: "PasswordEntry");
+
+        var result = await new MauiFlowRunner(driver, new MauiFlowRunnerOptions
+        {
+            PollTries = 1,
+            PollGapMs = 0,
+        }).RunWithLegacyAsync(flow);
+
+        var assertion = Assert.Single(Assert.Single(result.Report.Steps).Assertions);
+        Assert.False(assertion.Passed);
+        Assert.Null(assertion.Actual);
+        Assert.Equal("redacted", assertion.ActualDisclosure!.State);
+    }
+
+    [Theory]
+    // An address, an absolute path, a bearer token and an opaque blob all stay redacted because
+    // the disclosure predicate uses the existing redaction pipeline as its own oracle: a value is
+    // disclosed only when redacting it is a byte-for-byte no-op.
+    [InlineData("someone@contoso.com")]
+    [InlineData(@"C:\Users\alice\Documents\secret-plan.txt")]
+    [InlineData("Bearer abcdefghijklmnopqrstuvwxyz0123456789")]
+    [InlineData("ZmFrZS1vcGFxdWUtYmxvYi12YWx1ZS1mb3ItdGVzdGluZy0xMjM0NTY3ODkw")]
+    public async Task RunWithLegacyAsync_FailedAssertionOnUnsafeText_StillRedactsActual(string observed)
+    {
+        var driver = new FakeDriver { PropertyValue = observed };
+        var flow = AssertTextFlow("Text", expected: "something-else");
+
+        var result = await new MauiFlowRunner(driver, new MauiFlowRunnerOptions
+        {
+            PollTries = 1,
+            PollGapMs = 0,
+        }).RunWithLegacyAsync(flow);
+
+        var assertion = Assert.Single(Assert.Single(result.Report.Steps).Assertions);
+        Assert.False(assertion.Passed);
+        Assert.Null(assertion.Actual);
+        Assert.Equal("redacted", assertion.ActualDisclosure!.State);
+        Assert.DoesNotContain(
+            observed,
+            JsonSerializer.Serialize(result.Report, MauiTestingJsonContext.Default.MauiFlowRunReport),
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task RunWithLegacyAsync_FailedAssertionOnOverlongText_StillRedactsActual()
+    {
+        var observed = new string('x', 600);
+        var driver = new FakeDriver { PropertyValue = observed };
+        var flow = AssertTextFlow("Text", expected: "something-else");
+
+        var result = await new MauiFlowRunner(driver, new MauiFlowRunnerOptions
+        {
+            PollTries = 1,
+            PollGapMs = 0,
+        }).RunWithLegacyAsync(flow);
+
+        var assertion = Assert.Single(Assert.Single(result.Report.Steps).Assertions);
+        Assert.False(assertion.Passed);
+        Assert.Null(assertion.Actual);
+        Assert.Equal("redacted", assertion.ActualDisclosure!.State);
+    }
+
+    [Fact]
+    public async Task ApplyLimits_FailedAssertionDisclosure_SurvivesReimport()
+    {
+        // ApplyLimits re-normalizes every disclosure on import, so a producer-side-only fix would
+        // be silently undone by any consumer that round-trips the report.
+        const string observed = "4 items, 0 completed";
+        var driver = new FakeDriver { PropertyValue = observed };
+        var flow = AssertTextFlow("Text", expected: "5 items, 0 completed");
+
+        var result = await new MauiFlowRunner(driver, new MauiFlowRunnerOptions
+        {
+            PollTries = 1,
+            PollGapMs = 0,
+        }).RunWithLegacyAsync(flow);
+
+        var json = JsonSerializer.Serialize(result.Report, MauiTestingJsonContext.Default.MauiFlowRunReport);
+        var reimported = JsonSerializer.Deserialize(json, MauiTestingJsonContext.Default.MauiFlowRunReport);
+        MauiFlowRunReportSerializer.ApplyLimits(reimported!, new MauiFlowRunReportLimits());
+        var assertion = Assert.Single(Assert.Single(reimported!.Steps).Assertions);
+
+        Assert.Equal(observed, assertion.Actual);
+        Assert.Equal("disclosed", assertion.ActualDisclosure!.State);
+    }
+
+    private static MauiFlow AssertTextFlow(string name, string expected, string automationId = "submit")
+        => new()
+        {
+            Name = "assert-text",
+            Steps =
+            {
+                new FlowStep
+                {
+                    Seq = 1,
+                    Action = FlowActions.Assert,
+                    Asserts =
+                    [
+                        new FlowAssert
+                        {
+                            Kind = "propEquals",
+                            Verify = true,
+                            Name = name,
+                            Expected = expected,
+                            Selector = new FlowSelector { AutomationId = automationId },
+                        },
+                    ],
+                },
+            },
+        };
+
+    [Fact]
     public async Task RunAsync_BoundedEventsAndActionability_RecordsExplicitTruncation()
     {
         var report = await new MauiFlowRunner(
@@ -776,6 +961,12 @@ public sealed class MauiFlowRunReportTests : IDisposable
         public Exception? TapFailure { get; set; }
         public string? PropertyValue { get; set; } = "value";
         public WorkflowCommandReceipt? LastWorkflowCommandReceipt { get; private set; }
+
+        public string ElementAutomationId
+        {
+            get => _element.AutomationId!;
+            set => _element.AutomationId = value;
+        }
 
         public Task<List<ElementInfo>> QueryAsync(string? type = null, string? automationId = null, string? text = null)
             => Task.FromResult(

@@ -207,6 +207,16 @@ internal sealed record FlowExecutionPlatformPreflightRequest
     public string? DeviceSerial { get; init; }
 }
 
+/// <summary>
+/// The device preconditions decidable from the committed flow, evaluated before the app build.
+/// </summary>
+internal sealed record FlowExecutionDeviceAdmissionRequest
+{
+    /// <summary>The app identity the flow declares, or null when the flow does not name one.</summary>
+    public string? DeclaredAppId { get; init; }
+    public string? DeviceSerial { get; init; }
+}
+
 internal sealed record FlowExecutionPlatformPreflight
 {
     public required Device Device { get; init; }
@@ -268,6 +278,23 @@ internal interface IFlowExecutionPlatformAdapter
     void ValidateHost();
 
     string? GetDefaultRuntimeIdentifier();
+
+    /// <summary>
+    /// Checks the device preconditions that can be decided from the committed flow alone, before
+    /// anything expensive runs.
+    /// </summary>
+    /// <remarks>
+    /// The pre-existing-app refusal used to fire during <c>platform-launch</c>, which is after a
+    /// multi-minute app build - so an operator paid for the whole build to be told the run was
+    /// never admissible. The flow itself names the app under test, so the same question can be
+    /// asked first. This is an additional, earlier gate: the authoritative check still runs at
+    /// deployment against the built artifact's real launch identity, because the flow's declared
+    /// package is an authoring claim rather than proof of what the build produced.
+    /// </remarks>
+    Task ValidateDeviceAdmissionAsync(
+        FlowExecutionDeviceAdmissionRequest request,
+        CancellationToken cancellationToken = default)
+        => Task.CompletedTask;
 
     Task<FlowExecutionPlatformPreflight> PreflightAsync(
         FlowExecutionPlatformPreflightRequest request,

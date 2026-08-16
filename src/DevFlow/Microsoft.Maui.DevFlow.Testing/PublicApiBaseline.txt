@@ -713,6 +713,7 @@ M:Microsoft.Maui.DevFlow.Testing.MauiFlowReplaySafetyEvaluator.Evaluate(request:
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReplaySafetyEvaluator.EvaluateWithFlow(request:Microsoft.Maui.DevFlow.Testing.MauiFlowRunRequest,flow:Microsoft.Maui.DevFlow.Testing.MauiFlow):Microsoft.Maui.DevFlow.Testing.MauiFlowReplayEligibilityDecision
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.DescribeElement(type:System.String,automationId:System.String,id:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.DescribeSelector(selector:Microsoft.Maui.DevFlow.Testing.FlowSelector):Microsoft.Maui.DevFlow.Testing.MauiFlowSelectorRequest
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.DescribeValue(value:System.String,allowPlain:System.Boolean,allowSafeText:System.Boolean):Microsoft.Maui.DevFlow.Testing.MauiFlowValueDisclosure
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.DescribeValue(value:System.String,allowPlain:System.Boolean=false):Microsoft.Maui.DevFlow.Testing.MauiFlowValueDisclosure
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.SafeFileSegment(value:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowReportRedactor.SafeIdentifier(value:System.String,maximumLength:System.Int32=128):System.String
@@ -837,6 +838,7 @@ P:Microsoft.Maui.DevFlow.Testing.FlowAssertResult.Kind[]:System.String{get:publi
 P:Microsoft.Maui.DevFlow.Testing.FlowAssertResult.Name[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowAssertResult.Ok[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowAssertResult.Skipped[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.FlowAssertResult.TargetHint[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowParseResult.Error[]:System.String{get:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowParseResult.File[]:System.String{get:public}
 P:Microsoft.Maui.DevFlow.Testing.FlowParseResult.Flow[]:Microsoft.Maui.DevFlow.Testing.MauiFlow{get:public}

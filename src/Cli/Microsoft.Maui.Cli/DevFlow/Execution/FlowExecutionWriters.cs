@@ -76,10 +76,17 @@ internal sealed class JUnitFlowExecutionWriter
             case FlowExecutionExitCategories.Pass:
                 break;
             case FlowExecutionExitCategories.Unverified:
-                failures = 1;
+                // The replay ran and every assertion in it held; what is missing is independent
+                // business evidence, which is a property of the flow's design rather than a
+                // regression in the app. Reporting that as a JUnit <failure> made every shipped
+                // flow red in CI while passing, so the signal was unusable and would have been
+                // muted wholesale. <skipped> keeps the result visibly not-green without claiming
+                // the app broke, and the devflow.exitCategory/devflow.verified properties above
+                // carry the exact reason for anyone who wants to gate on it. The process exit
+                // code and report `ok` stay false, so nothing that consumes those weakens.
+                skipped = 1;
                 testCase.Add(new XElement(
-                    "failure",
-                    new XAttribute("type", FlowExecutionExitCategories.Unverified),
+                    "skipped",
                     new XAttribute("message", "The flow completed but lacks required independent verification evidence.")));
                 break;
             case FlowExecutionExitCategories.TestFailure:

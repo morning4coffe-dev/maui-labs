@@ -49,6 +49,7 @@ namespace Microsoft.Maui.Cli.DevFlow;
 [JsonSerializable(typeof(FlowValidationCliResult))]
 [JsonSerializable(typeof(FlowReplayCliResult))]
 [JsonSerializable(typeof(FlowRunCliResult))]
+[JsonSerializable(typeof(FlowCommitCliResult))]
 [JsonSerializable(typeof(InspectorLaunchCliResult))]
 [JsonSerializable(typeof(AppleQaArtifactVerificationResult))]
 [JsonSerializable(typeof(AppleQaVerifiedArtifact))]
@@ -89,9 +90,21 @@ internal sealed class FlowReplayCliResult
     [JsonPropertyName("reportDigest")] public string? ReportDigest { get; init; }
 }
 
-internal sealed class FlowRunCliResult
+/// <summary>Outcome of re-binding a plan sidecar to the current bytes of its Markdown flow.</summary>
+internal sealed class FlowCommitCliResult
 {
     [JsonPropertyName("ok")] public bool Ok { get; init; }
+    [JsonPropertyName("changed")] public bool Changed { get; init; }
+    [JsonPropertyName("flowPath")] public string FlowPath { get; init; } = "";
+    [JsonPropertyName("planPath")] public string PlanPath { get; init; } = "";
+    [JsonPropertyName("digest")] public string Digest { get; init; } = "";
+    [JsonPropertyName("previousDigest")] public string? PreviousDigest { get; init; }
+    [JsonPropertyName("removedApprovals")] public int RemovedApprovals { get; init; }
+    [JsonPropertyName("message")] public string Message { get; init; } = "";
+}
+
+internal sealed class FlowRunCliResult
+{    [JsonPropertyName("ok")] public bool Ok { get; init; }
     [JsonPropertyName("exitCategory")] public string ExitCategory { get; init; } = "";
     [JsonPropertyName("message")] public string? Message { get; init; }
     [JsonPropertyName("outputDirectory")] public string? OutputDirectory { get; init; }

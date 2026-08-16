@@ -13,6 +13,30 @@ public sealed class FlowAssertResult
     public string? Name { get; set; }
     public string? Expected { get; set; }
     public string? Actual { get; set; }
+
+    /// <summary>
+    /// A human-readable hint at which element was asserted, e.g. <c>PasswordEntry</c>. Reporting
+    /// uses it to decide sensitivity: the property name alone ("Text") never reveals that the
+    /// element holds a credential, so a disclosure rule keyed only on <see cref="Name"/> would
+    /// not recognise <c>PasswordEntry.Text</c> as sensitive.
+    /// </summary>
+    public string? TargetHint { get; set; }
+}
+
+/// <summary>
+/// Derives the short, non-identifying element hint recorded on <see cref="FlowAssertResult.TargetHint"/>.
+/// </summary>
+internal static class FlowAssertTargetHint
+{
+    public static string? Describe(FlowSelector? selector)
+    {
+        if (selector is null)
+            return null;
+        return selector.AutomationId
+            ?? selector.CollectionScope
+            ?? selector.TypeIndex?.Type
+            ?? selector.Type;
+    }
 }
 
 public sealed class FlowStepResult
@@ -450,7 +474,13 @@ public sealed class FlowReplayer
 
     private async Task<FlowAssertResult> VerifyAsync(FlowAssert a, CancellationToken ct)
     {
-        var r = new FlowAssertResult { Kind = a.Kind, Name = a.Name, Expected = a.Expected };
+        var r = new FlowAssertResult
+        {
+            Kind = a.Kind,
+            Name = a.Name,
+            Expected = a.Expected,
+            TargetHint = FlowAssertTargetHint.Describe(a.Selector),
+        };
         for (var attempt = 0; attempt < _pollTries; attempt++)
         {
             ct.ThrowIfCancellationRequested();

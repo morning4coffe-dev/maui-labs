@@ -282,12 +282,21 @@ internal sealed partial class AndroidAppDeployment : IAndroidAppDeployment
         }
     }
 
+    public Task<bool> IsPackageInstalledAsync(
+        string deviceSerial,
+        string packageId,
+        CancellationToken cancellationToken = default)
+    {
+        ValidateSerial(deviceSerial);
+        ValidatePackageId(packageId);
+        return IsPackageInstalledAsync(ResolveAdbPath(), deviceSerial, packageId, cancellationToken);
+    }
+
     private async Task<bool> IsPackageInstalledAsync(
         string adbPath,
         string serial,
         string packageId,
-        CancellationToken cancellationToken)
-    {
+        CancellationToken cancellationToken)    {
         var result = await RunAsync(
             adbPath,
             serial,

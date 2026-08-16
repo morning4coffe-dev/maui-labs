@@ -182,14 +182,7 @@ internal sealed class FlowTriageCoordinator : IFlowTriageCoordinator
             "triage-platform-mismatch",
             "The execution manifest and flow run report do not identify the same platform.");
         RequireDeviceProfileMatch(manifest.Device?.Profile, report.Target?.DeviceProfile);
-        RequireTimestampMatch(
-            manifest.Lifecycle?.StartedAt,
-            report.StartedAt,
-            "triage-started-at-mismatch");
-        RequireTimestampMatch(
-            manifest.Lifecycle?.EndedAt,
-            report.EndedAt,
-            "triage-ended-at-mismatch");
+        RequireLifecycleContainment(manifest.Lifecycle, report);
         RequireExactMatch(
             manifest.Outcome?.Status,
             report.Outcome?.Status,
@@ -344,18 +337,64 @@ internal sealed class FlowTriageCoordinator : IFlowTriageCoordinator
             : Fingerprint(value, "device-profile") ?? string.Empty;
     }
 
-    private static void RequireTimestampMatch(
-        DateTimeOffset? left,
-        DateTimeOffset? right,
-        string code)
+    /// <summary>
+    /// The manifest lifecycle window covers the whole invocation (build, install, launch, replay,
+    /// cleanup); the report window covers the replay alone. The two are therefore never equal, and
+    /// requiring equality made every real <c>flow run</c> pair unreadable by <c>flow triage</c>.
+    /// The invariant that was actually intended is containment: the replay has to have happened
+    /// during the invocation the manifest describes.
+    /// </summary>
+    /// <remarks>
+    /// This relaxes a consistency check, not an identity check. Sameness of run is still proved by
+    /// the run id, flow digest, flow id and revision, app build, app source, package digest, app
+    /// id, platform, device profile, outcome, and — decisively — by the manifest artifact entry
+    /// committing to the exact SHA-256, byte length, and file name of the report bytes being read.
+    /// A report from a different invocation cannot satisfy those and would not be admitted here by
+    /// a timestamp comparison either.
+    /// </remarks>
+    private static void RequireLifecycleContainment(
+        MauiTestExecutionLifecycleFacts? lifecycle,
+        MauiFlowRunReport report)
     {
-        if (left is { } leftValue &&
-            right is { } rightValue &&
-            leftValue.ToUniversalTime() != rightValue.ToUniversalTime())
+        var invocationStart = lifecycle?.StartedAt?.ToUniversalTime();
+        var invocationEnd = lifecycle?.EndedAt?.ToUniversalTime();
+        var replayStart = report.StartedAt?.ToUniversalTime();
+        var replayEnd = report.EndedAt?.ToUniversalTime();
+
+        if (invocationStart is { } manifestOpen &&
+            invocationEnd is { } manifestClose &&
+            manifestClose < manifestOpen)
         {
             throw FlowExecutionException.Invalid(
-                code,
-                "The execution manifest and flow run report do not have matching lifecycle timestamps.");
+                "triage-lifecycle-window-invalid",
+                "The execution manifest lifecycle window ends before it starts.");
+        }
+        if (replayStart is { } reportOpen &&
+            replayEnd is { } reportClose &&
+            reportClose < reportOpen)
+        {
+            throw FlowExecutionException.Invalid(
+                "triage-lifecycle-window-invalid",
+                "The flow run report window ends before it starts.");
+        }
+
+        // Both timestamps are produced by one process from one clock, so no slack is warranted:
+        // a replay that starts before its own invocation, or outlives it, is a real inconsistency.
+        if (invocationStart is { } start &&
+            (replayStart is { } startedBefore && startedBefore < start ||
+             replayEnd is { } endedBefore && endedBefore < start))
+        {
+            throw FlowExecutionException.Invalid(
+                "triage-started-at-mismatch",
+                "The flow run report describes a replay that started before the execution manifest invocation.");
+        }
+        if (invocationEnd is { } end &&
+            (replayEnd is { } endedAfter && endedAfter > end ||
+             replayStart is { } startedAfter && startedAfter > end))
+        {
+            throw FlowExecutionException.Invalid(
+                "triage-ended-at-mismatch",
+                "The flow run report describes a replay that ended after the execution manifest invocation.");
         }
     }
 

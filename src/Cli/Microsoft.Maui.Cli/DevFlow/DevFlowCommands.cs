@@ -1650,6 +1650,11 @@ public class DevFlowCommands
             noJsonOption,
             output,
             static () => _errorOccurred = true));
+        flowCommand.Add(Flows.FlowCommitCommands.Create(
+            jsonOption,
+            noJsonOption,
+            output,
+            static () => _errorOccurred = true));
         devflowCommand.Add(flowCommand);
 
         // ===== shared Inspector / Test Workbench =====
@@ -1960,7 +1965,7 @@ public class DevFlowCommands
             var json = ctx.GetValue(jsonOption);
             var noJson = ctx.GetValue(noJsonOption);
             var isJson = output.ResolveJsonMode(json, noJson);
-            var cmds = GetCommandDescriptions();
+            var cmds = GetCommandDescriptions(devflowCommand);
             output.WriteResult(cmds, isJson, list =>
             {
                 Console.WriteLine($"{"Command",-35} {"Mutating",-10} {"Description"}");
@@ -1984,8 +1989,21 @@ public class DevFlowCommands
         {
             var profileValue = ctx.GetValue(mcpProfileOption);
             if (!Mcp.McpServerHost.TryParseProfile(profileValue, out var profile))
-                throw new ArgumentException("--profile must be either 'full' or 'test-agent'.");
-            await Mcp.McpServerHost.RunAsync(profile);
+            {
+                WriteError($"--profile must be either 'full' or 'test-agent'. Received '{profileValue}'.");
+                return;
+            }
+
+            try
+            {
+                await Mcp.McpServerHost.RunAsync(profile);
+            }
+            catch (Mcp.McpProfileDisabledException ex)
+            {
+                // A gated preview profile is an operator choice with a documented remedy. Let the
+                // message carry the remedy instead of a stack trace with build-machine paths.
+                WriteError(ex.Message);
+            }
         });
         devflowCommand.Add(mcpCmd);
 
@@ -3136,97 +3154,98 @@ public class DevFlowCommands
 
     // ===== Command Descriptions (Schema Discovery) =====
 
-    private static List<CommandDescription> GetCommandDescriptions() => new()
+    /// <summary>
+    /// Command paths whose mutating classification cannot be inferred from the verb alone.
+    /// "Mutating" means the command can change the app or device under test; writing a local
+    /// artifact does not count. Everything not listed is derived by <see cref="IsMutatingCommand"/>.
+    /// </summary>
+    private static readonly Dictionary<string, bool> MutatingOverrides = new(StringComparer.Ordinal)
     {
-        new("ui status", "Check agent connection and app info", false),
-        new("ui tree", "Dump visual element tree", false),
-        new("ui query", "Find elements by type, automationId, text, or CSS selector", false),
-        new("ui element", "Get detailed element info by ID", false),
-        new("ui hit-test", "Find elements at screen coordinates", false),
-        new("ui tap", "Tap a UI element", true),
-        new("ui fill", "Fill text into an input element", true),
-        new("ui clear", "Clear text from an input element", true),
-        new("ui focus", "Set focus to an element", true),
-        new("ui navigate", "Navigate to a Shell route", true),
-        new("ui scroll", "Scroll content or scroll element into view", true),
-        new("ui resize", "Resize app window", true),
-        new("ui property", "Get element property value", false),
-        new("ui set-property", "Set element property value", true),
-        new("ui screenshot", "Take screenshot of app or element", false),
-        new("ui assert", "Assert element property equals expected value", false),
-        new("recording start", "Start screen recording", true),
-        new("recording stop", "Stop screen recording", true),
-        new("recording status", "Check recording status", false),
-        new("ui alert detect", "Check if a system dialog is visible", false),
-        new("ui alert dismiss", "Dismiss a system dialog", true),
-        new("ui alert tree", "Show accessibility tree for dialog detection", false),
-        new("ui permission grant", "Grant iOS simulator permission", true),
-        new("ui permission revoke", "Revoke iOS simulator permission", true),
-        new("ui permission reset", "Reset iOS simulator permission", true),
-        new("logs", "Fetch or stream application logs", false),
-        new("network", "Monitor HTTP network requests (live)", false),
-        new("network list", "List recent network requests", false),
-        new("network detail", "Show full network request details", false),
-        new("network clear", "Clear network request buffer", true),
-        new("diagnostics layout", "Run a one-shot, read-only layout diagnostics scan", false),
-        new("diagnostics performance", "Record a bounded performance triage window", false),
-        new("storage preferences list", "List all known preference keys", false),
-        new("storage preferences get", "Get a preference value by key", false),
-        new("storage preferences set", "Set a preference value", true),
-        new("storage preferences delete", "Remove a preference", true),
-        new("storage preferences clear", "Clear all preferences", true),
-        new("storage secure-storage get", "Get a secure storage value", false),
-        new("storage secure-storage set", "Set a secure storage value", true),
-        new("storage secure-storage delete", "Remove a secure storage entry", true),
-        new("storage secure-storage clear", "Clear all secure storage", true),
-        new("device app-info", "Get app name, version, theme", false),
-        new("device device-info", "Get device manufacturer, model, OS", false),
-        new("device display", "Get screen density, size, orientation", false),
-        new("device battery", "Get battery level, state, power source", false),
-        new("device connectivity", "Get network access and profiles", false),
-        new("device version-tracking", "Get version history and launch info", false),
-        new("device permissions", "Check permission status", false),
-        new("device geolocation", "Get current GPS coordinates", false),
-        new("device sensors list", "List available sensors and status", false),
-        new("device sensors start", "Start a device sensor", true),
-        new("device sensors stop", "Stop a device sensor", true),
-        new("device sensors stream", "Stream sensor readings via WebSocket", false),
-        new("webview webviews", "List available CDP WebViews", false),
-        new("webview status", "Check CDP connection status", false),
-        new("webview Browser getVersion", "Get browser version", false),
-        new("webview Runtime evaluate", "Evaluate JavaScript expression", false),
-        new("webview DOM getDocument", "Get DOM document tree", false),
-        new("webview DOM querySelector", "Find element by CSS selector", false),
-        new("webview DOM querySelectorAll", "Find all elements by CSS selector", false),
-        new("webview DOM getOuterHTML", "Get element outer HTML", false),
-        new("webview Input click", "Click element by CSS selector", true),
-        new("webview Input insertText", "Insert text at cursor", true),
-        new("webview Input fill", "Fill form field by CSS selector", true),
-        new("webview Page navigate", "Navigate WebView to URL", true),
-        new("webview Page reload", "Reload WebView page", true),
-        new("webview Page captureScreenshot", "Take WebView screenshot", false),
-        new("webview snapshot", "Get simplified DOM snapshot", false),
-        new("webview source", "Get page HTML source", false),
-        new("theme get", "Get the current app theme", false),
-        new("theme set", "Set the app or system light-dark theme", true),
-        new("agent list", "List all connected agents", false),
-        new("agent wait", "Wait for an agent to connect", false),
-        new("batch", "Execute commands from stdin", true),
-        new("broker start", "Start the broker daemon", true),
-        new("broker stop", "Stop the broker daemon", true),
-        new("broker status", "Show broker status", false),
-        new("broker log", "Show broker log", false),
-        new("init", "Install DevFlow onboarding skills for this workspace", true),
-        new("skills install", "Install bundled DevFlow skills", true),
-        new("skills list", "List DevFlow skill install status", false),
-        new("skills check", "Check installed DevFlow skills", false),
-        new("skills update", "Update DevFlow skills from the current CLI bundle", true),
-        new("skills remove", "Remove an installed DevFlow skill", true),
-        new("skills doctor", "Validate DevFlow skills and CLI drift", false),
-        new("mcp", "Start the MCP server", false),
-        new("commands", "List all available commands", false),
-        new("version", "Show CLI version", false),
+        ["approve"] = true,
+        ["batch"] = true,
+        ["extensions call"] = true,
+        ["init"] = true,
+        ["ui navigate"] = true,
+        ["ui resize"] = true,
+        ["ui scroll"] = true,
+        ["webview Input dispatchClickEvent"] = true,
+        ["webview Input insertText"] = true,
+        ["webview Runtime evaluate"] = true,
+        // Read-only despite a mutating-sounding verb.
+        ["device sensors stream"] = false,
+        ["devices setup"] = false,
+        ["diagnostics performance"] = false,
+        ["evidence capture"] = false,
+        ["evidence view"] = false,
+        ["flow qualify"] = false,
+        ["mcp"] = false,
+        ["recording status"] = false,
+        ["resume status"] = false,
+        ["storage files download"] = false,
     };
+
+    private static readonly string[] MutatingVerbs =
+    [
+        "add", "approve", "boot", "clear", "clear-all", "click", "commit", "delete", "dismiss",
+        "download", "erase", "fill", "focus", "grant", "install", "invoke", "launch", "navigate",
+        "record", "release", "reload", "remove", "replay", "reset", "resize", "restore", "revoke",
+        "run", "save", "scroll", "set", "set-property", "shutdown", "start", "stop", "tap",
+        "uninstall", "update", "upload", "write",
+    ];
+
+    /// <summary>
+    /// Walks the live command tree instead of restating it. A hand-maintained list silently
+    /// omitted whole families (<c>flow</c>, <c>approve</c>, <c>inspect</c>) as they were added,
+    /// which made this verb - the one an agent uses for discovery - actively misleading.
+    /// </summary>
+    internal static List<CommandDescription> GetCommandDescriptions(Command devflowCommand)
+    {
+        var descriptions = new List<CommandDescription>();
+        Collect(devflowCommand, string.Empty);
+        descriptions.Sort(static (left, right) => string.CompareOrdinal(left.Command, right.Command));
+        return descriptions;
+
+        void Collect(Command command, string prefix)
+        {
+            foreach (var child in command.Subcommands)
+            {
+                if (IsHiddenCommand(child))
+                    continue;
+
+                var path = string.IsNullOrEmpty(prefix) ? child.Name : $"{prefix} {child.Name}";
+                // A group with an action of its own (for example `network`) is invocable and is
+                // listed; a pure grouping node is not, but its children still are.
+                if (child.Action is not null)
+                {
+                    descriptions.Add(new CommandDescription(
+                        path,
+                        string.IsNullOrWhiteSpace(child.Description) ? path : child.Description!,
+                        IsMutatingCommand(path)));
+                }
+                Collect(child, path);
+            }
+        }
+    }
+
+    private static bool IsHiddenCommand(Command command)
+        => command.Hidden || string.Equals(command.Name, "help", StringComparison.Ordinal);
+
+    private static bool IsMutatingCommand(string path)
+    {
+        if (MutatingOverrides.TryGetValue(path, out var known))
+            return known;
+
+        var segments = path.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        for (var index = segments.Length - 1; index >= 0; index--)
+        {
+            var segment = segments[index];
+            if (MutatingVerbs.Contains(segment, StringComparer.OrdinalIgnoreCase))
+                return true;
+            if (segment.StartsWith("set-", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
 
     // ===== MAUI Agent Commands =====
 

@@ -1393,6 +1393,17 @@ public sealed class FlowExecutionPlatformAdapterTests
     {
         public int DeployCalls { get; private set; }
         public int CleanupCalls { get; private set; }
+        public int PackageQueries { get; private set; }
+        public bool PackageInstalled { get; set; }
+
+        public Task<bool> IsPackageInstalledAsync(
+            string deviceSerial,
+            string packageId,
+            CancellationToken cancellationToken = default)
+        {
+            PackageQueries++;
+            return Task.FromResult(PackageInstalled);
+        }
 
         public Task<AndroidAppDeploymentSession> DeployAndLaunchAsync(
             AndroidAppDeploymentRequest request,

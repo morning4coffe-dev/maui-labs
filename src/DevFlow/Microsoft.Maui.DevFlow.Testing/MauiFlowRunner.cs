@@ -957,6 +957,7 @@ public sealed class MauiFlowRunner
             Kind = assertion.Kind,
             Name = assertion.Name,
             Expected = assertion.Expected,
+            TargetHint = FlowAssertTargetHint.Describe(assertion.Selector),
         };
         for (var attempt = 0; attempt < Math.Max(1, _options.PollTries); attempt++)
         {
@@ -1242,9 +1243,16 @@ public sealed class MauiFlowRunner
 
     private static MauiFlowAssertionResult CreateStructuredAssertion(FlowAssertResult result)
     {
-        var sensitive = FlowSecretReference.LooksSensitive(result.Name);
-        var expected = MauiFlowReportRedactor.DescribeValue(result.Expected, allowPlain: !sensitive);
-        var actual = MauiFlowReportRedactor.DescribeValue(result.Actual, allowPlain: !sensitive);
+        // A failed assertion is the only case where the observed value carries the diagnosis. The
+        // author already committed the expectation to the flow file, so disclosing the counterpart
+        // withholds nothing from anyone who can read the test — and withholding it leaves a length
+        // and a digest, which cannot be acted on. Passing and skipped assertions keep the strict
+        // scalar-only rule, and every disclosure still has to clear the safe-text screen.
+        var failed = result.Ok == false && !result.Skipped;
+        var sensitive = FlowSecretReference.LooksSensitive(result.Name) ||
+            FlowSecretReference.LooksSensitive(result.TargetHint);
+        var expected = MauiFlowReportRedactor.DescribeValue(result.Expected, allowPlain: !sensitive, allowSafeText: failed && !sensitive);
+        var actual = MauiFlowReportRedactor.DescribeValue(result.Actual, allowPlain: !sensitive, allowSafeText: failed && !sensitive);
         return new MauiFlowAssertionResult
         {
             Kind = MauiFlowReportRedactor.SafeIdentifier(result.Kind),

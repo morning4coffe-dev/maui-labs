@@ -429,8 +429,11 @@ public sealed class MauiFlowTriageTests
                 input.Manifest!.Outcome!.Status = MauiFlowRunOutcomes.InfrastructureError;
                 break;
             case "lifecycle-ended-at-match":
+                // The manifest must cover the replay. Ending before the replay ended means the
+                // report describes work this invocation did not do. (Ending *after* is normal:
+                // the manifest also spans build, install, launch and cleanup.)
                 input.Manifest!.Lifecycle!.EndedAt =
-                    input.Manifest.Lifecycle.EndedAt!.Value.AddSeconds(1);
+                    input.Manifest.Lifecycle.EndedAt!.Value.AddSeconds(-1);
                 break;
         }
 
@@ -438,6 +441,37 @@ public sealed class MauiFlowTriageTests
 
         Assert.Equal(MauiFlowTriageEvidenceStates.Insufficient, triage.Evidence.State);
         Assert.Contains(expectedFact, triage.Evidence.MissingFacts);
+    }
+
+    [Fact]
+    public void Analyze_ManifestWindowWiderThanReportWindow_IsSufficient()
+    {
+        // Regression: this required manifest.lifecycle == report window exactly. The manifest
+        // spans the whole invocation (build, install, launch, replay, cleanup) and the report
+        // spans only the replay, so no real run could ever satisfy it and every genuine set of
+        // evidence was scored insufficient. Containment is the relation that was intended.
+        var input = CompleteInput();
+        input.Manifest!.Lifecycle!.StartedAt = input.Report!.StartedAt!.Value.AddMinutes(-3);
+        input.Manifest.Lifecycle.EndedAt = input.Report.EndedAt!.Value.AddSeconds(7);
+        RefreshFingerprints(input);
+
+        var triage = MauiFlowTriageAnalyzer.Analyze(input);
+
+        Assert.DoesNotContain("lifecycle-started-at-match", triage.Evidence.MissingFacts);
+        Assert.DoesNotContain("lifecycle-ended-at-match", triage.Evidence.MissingFacts);
+        Assert.Equal(MauiFlowTriageEvidenceStates.Sufficient, triage.Evidence.State);
+    }
+
+    [Fact]
+    public void Analyze_ReportStartingBeforeTheManifest_IsInsufficient()
+    {
+        var input = CompleteInput();
+        input.Manifest!.Lifecycle!.StartedAt = input.Report!.StartedAt!.Value.AddSeconds(1);
+
+        var triage = MauiFlowTriageAnalyzer.Analyze(input);
+
+        Assert.Equal(MauiFlowTriageEvidenceStates.Insufficient, triage.Evidence.State);
+        Assert.Contains("lifecycle-started-at-match", triage.Evidence.MissingFacts);
     }
 
     [Fact]

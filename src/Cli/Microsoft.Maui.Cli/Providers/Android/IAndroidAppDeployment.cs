@@ -50,6 +50,15 @@ internal interface IAndroidAppDeployment
         AndroidAppDeploymentRequest request,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Reports whether the exact device already holds the package, without installing anything.
+    /// Used to refuse an inadmissible run before the app build rather than after it.
+    /// </summary>
+    Task<bool> IsPackageInstalledAsync(
+        string deviceSerial,
+        string packageId,
+        CancellationToken cancellationToken = default);
+
     Task<AndroidAppDeploymentCleanupResult> CleanupAsync(
         AndroidAppDeploymentSession session,
         string cleanupPolicy,

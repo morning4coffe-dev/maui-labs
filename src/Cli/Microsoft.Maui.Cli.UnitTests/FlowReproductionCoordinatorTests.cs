@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -15,6 +16,12 @@ public sealed class FlowReproductionCoordinatorTests
 
     private static readonly DateTimeOffset LocalStartedAt =
         ImportedAt.AddMinutes(1);
+
+    // A real invocation's manifest spans build + install + launch + replay + cleanup, while the
+    // flow-run report spans only the replay. The two windows are therefore never equal. The fake
+    // below reproduces that shape so triage tests exercise the relation the shipped CLI produces.
+    private static readonly DateTimeOffset ManifestStartedAt = LocalStartedAt.AddMinutes(-3);
+    private static readonly DateTimeOffset ManifestEndedAt = LocalStartedAt.AddSeconds(12);
 
     [Fact]
     public async Task Reproduce_ExactMatch_WritesDiagnosticOnlyHandoff()
@@ -388,6 +395,126 @@ public sealed class FlowReproductionCoordinatorTests
         Assert.Contains("- Code: `locator-not-found`", markdownText, StringComparison.Ordinal);
         Assert.Contains("- Category: `selector`", markdownText, StringComparison.Ordinal);
         Assert.Contains("- Phase: `resolution`", markdownText, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Triage_ManifestWindowWiderThanReportWindow_IsAcceptedByLifecycleContainment()
+    {
+        // Regression: the coordinator used to require manifest.Lifecycle.StartedAt/EndedAt to equal
+        // report.StartedAt/EndedAt. The manifest spans the whole invocation (build, install, launch,
+        // replay, cleanup) while the report spans only the replay, so the two are never equal and
+        // every real `flow run` output was unusable by `flow triage`.
+        using var workspace = new ReproductionWorkspace();
+        var bundle = workspace.WriteBundle();
+        var local = await new FakeExecutionCoordinator(bundle.FlowDigest).RunAsync(new FlowExecutionRequest
+        {
+            FlowPath = bundle.Flow,
+            PlanPath = bundle.Plan,
+            ProjectPath = workspace.Project,
+            Platform = "android",
+            OutputDirectory = workspace.Output,
+        });
+
+        var manifest = JsonNode.Parse(await File.ReadAllTextAsync(local.ManifestPath!))!.AsObject();
+        var report = JsonNode.Parse(await File.ReadAllTextAsync(local.ReportPath!))!.AsObject();
+        var manifestStarted = DateTimeOffset.Parse(
+            manifest["lifecycle"]!["startedAt"]!.GetValue<string>(),
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind);
+        var manifestEnded = DateTimeOffset.Parse(
+            manifest["lifecycle"]!["endedAt"]!.GetValue<string>(),
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind);
+        var reportStarted = DateTimeOffset.Parse(
+            report["startedAt"]!.GetValue<string>(),
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind);
+        var reportEnded = DateTimeOffset.Parse(
+            report["endedAt"]!.GetValue<string>(),
+            CultureInfo.InvariantCulture,
+            DateTimeStyles.RoundtripKind);
+        Assert.True(manifestStarted < reportStarted, "fixture must model a manifest that starts first");
+        Assert.True(manifestEnded > reportEnded, "fixture must model a manifest that ends last");
+
+        var result = await new FlowTriageCoordinator().AnalyzeAsync(new FlowTriageRequest
+        {
+            ManifestPath = local.ManifestPath!,
+            ReportPath = local.ReportPath!,
+            Format = FlowTriageOutputFormats.Json,
+        });
+
+        Assert.Equal(MauiFlowTriageEvidenceStates.Sufficient, result.Triage.Evidence.State);
+        Assert.False(result.Triage.RepairEligible);
+    }
+
+    [Theory]
+    // Manifest starts after the replay began -> the replay is not inside this invocation.
+    [InlineData(1, 12, "triage-started-at-mismatch")]
+    // Manifest ends before the replay finished -> same.
+    [InlineData(-180, 2, "triage-ended-at-mismatch")]
+    public async Task Triage_ReportWindowOutsideManifestWindow_IsStillRejected(
+        int manifestStartOffsetSeconds,
+        int manifestEndOffsetSeconds,
+        string expectedCode)
+    {
+        // Containment replaced equality, but the report still has to describe work the manifest
+        // actually covers. A replay that began before the invocation, or ended after it, is not
+        // evidence from that invocation. The fake report runs LocalStartedAt .. +5s.
+        using var workspace = new ReproductionWorkspace();
+        var bundle = workspace.WriteBundle();
+        var local = await new FakeExecutionCoordinator(bundle.FlowDigest).RunAsync(new FlowExecutionRequest
+        {
+            FlowPath = bundle.Flow,
+            PlanPath = bundle.Plan,
+            ProjectPath = workspace.Project,
+            Platform = "android",
+            OutputDirectory = workspace.Output,
+        });
+        var manifest = JsonNode.Parse(await File.ReadAllTextAsync(local.ManifestPath!))!.AsObject();
+        manifest["lifecycle"]!["startedAt"] = LocalStartedAt
+            .AddSeconds(manifestStartOffsetSeconds)
+            .ToString("O", CultureInfo.InvariantCulture);
+        manifest["lifecycle"]!["endedAt"] = LocalStartedAt
+            .AddSeconds(manifestEndOffsetSeconds)
+            .ToString("O", CultureInfo.InvariantCulture);
+        await File.WriteAllTextAsync(local.ManifestPath!, manifest.ToJsonString());
+
+        var failure = await Assert.ThrowsAsync<FlowExecutionException>(() =>
+            new FlowTriageCoordinator().AnalyzeAsync(new FlowTriageRequest
+            {
+                ManifestPath = local.ManifestPath!,
+                ReportPath = local.ReportPath!,
+            }));
+
+        Assert.Equal(expectedCode, failure.Code);
+    }
+
+    [Fact]
+    public async Task Triage_InvertedManifestWindow_IsRejectedAsMalformed()
+    {
+        using var workspace = new ReproductionWorkspace();
+        var bundle = workspace.WriteBundle();
+        var local = await new FakeExecutionCoordinator(bundle.FlowDigest).RunAsync(new FlowExecutionRequest
+        {
+            FlowPath = bundle.Flow,
+            PlanPath = bundle.Plan,
+            ProjectPath = workspace.Project,
+            Platform = "android",
+            OutputDirectory = workspace.Output,
+        });
+        var manifest = JsonNode.Parse(await File.ReadAllTextAsync(local.ManifestPath!))!.AsObject();
+        manifest["lifecycle"]!["startedAt"] = ManifestEndedAt.ToString("O", CultureInfo.InvariantCulture);
+        manifest["lifecycle"]!["endedAt"] = ManifestStartedAt.ToString("O", CultureInfo.InvariantCulture);
+        await File.WriteAllTextAsync(local.ManifestPath!, manifest.ToJsonString());
+
+        var failure = await Assert.ThrowsAsync<FlowExecutionException>(() =>
+            new FlowTriageCoordinator().AnalyzeAsync(new FlowTriageRequest
+            {
+                ManifestPath = local.ManifestPath!,
+                ReportPath = local.ReportPath!,
+            }));
+
+        Assert.Equal("triage-lifecycle-window-invalid", failure.Code);
     }
 
     [Fact]
@@ -839,8 +966,8 @@ public sealed class FlowReproductionCoordinatorTests
                 },
                 Lifecycle = new MauiTestExecutionLifecycleFacts
                 {
-                    StartedAt = LocalStartedAt,
-                    EndedAt = LocalStartedAt.AddSeconds(5),
+                    StartedAt = ManifestStartedAt,
+                    EndedAt = ManifestEndedAt,
                     CleanupPolicy = FlowExecutionCleanupPolicies.Stop,
                     CleanupCompleted = true,
                     Stages = LifecycleDetailCode is null

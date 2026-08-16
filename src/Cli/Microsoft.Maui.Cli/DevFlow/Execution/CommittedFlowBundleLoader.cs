@@ -72,7 +72,8 @@ internal sealed class CommittedFlowBundleLoader
         {
             throw FlowExecutionException.Invalid(
                 "plan-flow-digest-stale",
-                "The plan sidecar references a stale flow digest. Review and commit the matching flow and plan again.");
+                "The plan sidecar references a stale flow digest. Review the edited flow, then run " +
+                $"'maui devflow flow commit {Path.GetFileName(fullFlowPath)}' to re-bind the sidecar to the current bytes.");
         }
 
         var flowId = ReadExtensionString(parsed.Flow.ExtensionData, "flowId");

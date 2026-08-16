@@ -1,6 +1,7 @@
 using System.CommandLine;
 using Microsoft.Maui.Cli.Commands;
 using Microsoft.Maui.Cli.DevFlow;
+using Microsoft.Maui.Cli.DevFlow.Execution;
 using Xunit;
 
 namespace Microsoft.Maui.Cli.UnitTests;
@@ -209,6 +210,94 @@ public class CommandConstructionTests
 			"--manifest execution-manifest.json --report flow-run.json --format markdown").Errors);
 		Assert.NotEmpty(triage.Parse(
 			"--manifest execution-manifest.json --report flow-run.json --format html").Errors);
+	}
+
+	[Fact]
+	public void FlowCommitCommand_IsPresentAndAcceptsAFlowPath()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var flow = Assert.Single(devflowCommand.Subcommands, command => command.Name == "flow");
+		var commit = Assert.Single(flow.Subcommands, command => command.Name == "commit");
+
+		Assert.Empty(commit.Parse("scenario.md").Errors);
+		Assert.Empty(commit.Parse("scenario.md --check").Errors);
+		Assert.Contains(commit.Options, option => option.Name == "--plan");
+		Assert.Contains(commit.Options, option => option.Name == "--check");
+	}
+
+	[Fact]
+	public void DevFlowCommandsInventory_ListsEveryInvocableCommandInTheTree()
+	{
+		// Regression: the inventory was a hand-maintained list and had drifted, omitting the whole
+		// `flow` family plus `approve` and `inspect`. Anything an operator can actually invoke has
+		// to appear, or the discovery surface silently lies about what the tool can do.
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var listed = DevFlowCommands
+			.GetCommandDescriptions(devflowCommand)
+			.Select(entry => entry.Command)
+			.ToHashSet(StringComparer.Ordinal);
+
+		var expected = new List<string>();
+		Walk(devflowCommand, "", expected);
+
+		Assert.NotEmpty(expected);
+		foreach (var name in expected)
+			Assert.Contains(name, listed);
+		Assert.Equal(expected.Count, listed.Count);
+
+		static void Walk(Command command, string prefix, List<string> into)
+		{
+			foreach (var child in command.Subcommands)
+			{
+				if (child.Hidden || child.Name == "help")
+					continue;
+				var name = prefix.Length == 0 ? child.Name : prefix + " " + child.Name;
+				if (child.Action is not null)
+					into.Add(name);
+				Walk(child, name, into);
+			}
+		}
+	}
+
+	[Fact]
+	public void DevFlowCommandsInventory_IncludesThePreviouslyMissingFamilies()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var listed = DevFlowCommands
+			.GetCommandDescriptions(devflowCommand)
+			.Select(entry => entry.Command)
+			.ToHashSet(StringComparer.Ordinal);
+
+		foreach (var name in new[]
+		{
+			"flow qualify",
+			"flow replay",
+			"flow validate",
+			"flow run",
+			"flow reproduce",
+			"flow triage",
+			"flow commit",
+			"approve",
+			"inspect",
+			"mcp",
+		})
+		{
+			Assert.Contains(name, listed);
+		}
+	}
+
+	[Fact]
+	public void FlowPlatformTags_NullOrNullBearingSequence_ParsesToEmptyInsteadOfThrowing()
+	{
+		// Regression: this threw ArgumentNullException, which the coordinator reported as
+		// `unexpected-execution-error` with class `infrastructure` -- a user authoring mistake
+		// presented as a tool fault, with nothing actionable in the message.
+		Assert.Empty(FlowPlatformTags.Parse((IEnumerable<string>?)null));
+		Assert.Empty(FlowPlatformTags.Parse(new string?[] { null, null }!));
+		Assert.Equal(["android"], FlowPlatformTags.Parse(new string?[] { null, "Android" }!));
 	}
 
 	[Fact]

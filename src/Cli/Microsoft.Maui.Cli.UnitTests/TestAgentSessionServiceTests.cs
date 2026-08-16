@@ -44,9 +44,16 @@ public class TestAgentSessionServiceTests
 
         Assert.False(McpServerHost.IsProfileEnabled(McpServerProfile.TestAgent, disabled));
         Assert.Empty(McpServerHost.GetToolInventory(McpServerProfile.TestAgent, disabled));
-        var error = await Assert.ThrowsAsync<InvalidOperationException>(
+        var error = await Assert.ThrowsAsync<McpProfileDisabledException>(
             () => McpServerHost.RunAsync(McpServerProfile.TestAgent, disabled));
-        Assert.Contains("agent-authoring", error.Message, StringComparison.Ordinal);
+        // The refusal has to name the exact variable a caller must set; "enable the effective
+        // agent-authoring preview flag" left the reader with nothing to act on.
+        Assert.Contains(
+            McpServerHost.PreviewAgentAuthoringVariable,
+            error.Message,
+            StringComparison.Ordinal);
+        Assert.Contains("DEVFLOW_PREVIEW_AGENT_AUTHORING", error.Message, StringComparison.Ordinal);
+        Assert.IsAssignableFrom<InvalidOperationException>(error);
     }
 
     [Fact]

@@ -618,6 +618,40 @@ public class TestingSchemaContractTests
         Assert.Equal(MauiFlowSideEffectPolicy.NonReplayable, parsed);
     }
 
+    [Theory]
+    // Regression: a plan whose optional list fields are omitted or explicitly null used to
+    // deserialize with null collections, which then reached ArgumentNullException.ThrowIfNull deep
+    // in platform-tag parsing and surfaced as `unexpected-execution-error` / class
+    // `infrastructure`. An absent optional field is a valid, unconstrained plan.
+    [InlineData("""{"planId":"p","revision":1}""")]
+    [InlineData("""{"planId":"p","revision":1,"requiredPlatforms":null}""")]
+    [InlineData("""{"planId":"p","revision":1,"requiredPlatforms":null,"acceptanceCriteria":null,"risks":null}""")]
+    public void MauiTestPlan_OmittedOrNullOptionalLists_DeserializeToEmptyNotNull(string json)
+    {
+        var plan = JsonSerializer.Deserialize(json, MauiTestingJsonContext.Default.MauiTestPlan);
+
+        Assert.NotNull(plan);
+        Assert.NotNull(plan.RequiredPlatforms);
+        Assert.Empty(plan.RequiredPlatforms);
+        Assert.NotNull(plan.AcceptanceCriteria);
+        Assert.NotNull(plan.Risks);
+        Assert.NotNull(plan.Scenarios);
+        Assert.NotNull(plan.Approvals);
+        Assert.NotNull(plan.Assumptions);
+        Assert.NotNull(plan.Preconditions);
+        Assert.NotNull(plan.IndependentBusinessOracles);
+    }
+
+    [Fact]
+    public void MauiTestPlan_ExplicitNullAssignedToAList_IsCoercedToEmpty()
+    {
+        // Object initializers are the other way user code reaches these fields.
+        var plan = new MauiTestPlan { RequiredPlatforms = null! };
+
+        Assert.NotNull(plan.RequiredPlatforms);
+        Assert.Empty(plan.RequiredPlatforms);
+    }
+
     private static void AssertExtensionRoundTrips(string json, string name)
     {
         using var document = JsonDocument.Parse(json);

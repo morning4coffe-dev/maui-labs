@@ -279,15 +279,22 @@ public static class MauiFlowTriageAnalyzer
             missing.Add("manifest-lifecycle-ended-at");
         if (report?.EndedAt is null)
             missing.Add("report-lifecycle-ended-at");
+        // The manifest lifecycle spans the whole invocation (build, install, launch, replay,
+        // cleanup); the flow-run report spans only the replay. Requiring the two windows to be
+        // equal was never satisfiable by a real run, so every genuine invocation was scored
+        // `insufficient` here. What the evidence actually has to show is that the replay happened
+        // inside the invocation that produced the manifest, which is containment. Identity is
+        // still proven separately by run id, flow digest, app/build fingerprints and the manifest
+        // artifact entry that commits to the report bytes.
         if (rawManifest?.Lifecycle?.StartedAt is { } manifestStarted &&
             report?.StartedAt is { } reportStarted &&
-            manifestStarted.ToUniversalTime() != reportStarted.ToUniversalTime())
+            reportStarted.ToUniversalTime() < manifestStarted.ToUniversalTime())
         {
             missing.Add("lifecycle-started-at-match");
         }
         if (rawManifest?.Lifecycle?.EndedAt is { } manifestEnded &&
             report?.EndedAt is { } reportEnded &&
-            manifestEnded.ToUniversalTime() != reportEnded.ToUniversalTime())
+            reportEnded.ToUniversalTime() > manifestEnded.ToUniversalTime())
         {
             missing.Add("lifecycle-ended-at-match");
         }

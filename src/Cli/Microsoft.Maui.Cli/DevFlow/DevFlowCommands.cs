@@ -3164,6 +3164,9 @@ public class DevFlowCommands
         ["approve"] = true,
         ["batch"] = true,
         ["extensions call"] = true,
+        // `flow reproduce` reads like a diagnostic verb but drives a full build, install, launch
+        // and replay on the device under test.
+        ["flow reproduce"] = true,
         ["init"] = true,
         ["ui navigate"] = true,
         ["ui resize"] = true,
@@ -3177,6 +3180,8 @@ public class DevFlowCommands
         ["diagnostics performance"] = false,
         ["evidence capture"] = false,
         ["evidence view"] = false,
+        // `flow commit` rewrites a local plan sidecar and never touches the app or device.
+        ["flow commit"] = false,
         ["flow qualify"] = false,
         ["mcp"] = false,
         ["recording status"] = false,

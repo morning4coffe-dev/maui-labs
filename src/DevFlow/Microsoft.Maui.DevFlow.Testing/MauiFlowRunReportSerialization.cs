@@ -868,14 +868,17 @@ public static class MauiFlowRunReportSerializer
         if (disclosure is null)
             return MauiFlowReportRedactor.DescribeValue(rawValue, allowPlain: allowSafeText, allowSafeText: allowSafeText);
 
-        // A producer that already redacted stays redacted; allowSafeText only widens what a
-        // disclosed value is permitted to be, it never re-opens something the producer closed.
+        // Import never widens what the producer decided. A producer that redacted or omitted a
+        // value withheld it deliberately (it saw the assertion target, which the wire format does
+        // not carry), so import has strictly less information than the producer did and must not
+        // second-guess it. allowSafeText only widens what an already-disclosed value is allowed to
+        // be; it never re-opens something the producer closed.
         var producerDisclosed = string.Equals(disclosure.State, "disclosed", StringComparison.Ordinal);
         var normalized = MauiFlowReportRedactor.DescribeValue(
-            disclosure.Value ?? rawValue,
-            allowPlain: producerDisclosed || (allowSafeText && disclosure.Value is null),
-            allowSafeText: allowSafeText);
-        if (disclosure.Value is null && rawValue is null)
+            producerDisclosed ? disclosure.Value ?? rawValue : null,
+            allowPlain: producerDisclosed,
+            allowSafeText: allowSafeText && producerDisclosed);
+        if (!producerDisclosed || (disclosure.Value is null && rawValue is null))
         {
             normalized.State = disclosure.State is "disclosed" or "redacted" or "omitted"
                 ? disclosure.State

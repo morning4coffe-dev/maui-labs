@@ -385,6 +385,78 @@ public sealed class MauiFlowRunReportTests : IDisposable
         Assert.Equal("disclosed", assertion.ActualDisclosure!.State);
     }
 
+    /// <summary>
+    /// The import path cannot see what the producer saw: <see cref="MauiFlowAssertionResult"/>
+    /// carries no assertion name and no selector, so it cannot tell that the value came from a
+    /// <c>PasswordEntry</c>. A producer that redacted therefore made the better-informed decision,
+    /// and import must never widen it — not even for a failed assertion, and not even when the raw
+    /// value happens to still be present alongside the redacted disclosure.
+    /// </summary>
+    [Theory]
+    [InlineData("redacted")]
+    [InlineData("omitted")]
+    public void ApplyLimits_ProducerWithheldValue_IsNotReopenedOnImport(string producerState)
+    {
+        var report = new MauiFlowRunReport
+        {
+            Steps =
+            {
+                new MauiFlowStepAttempt
+                {
+                    Assertions =
+                    {
+                        new MauiFlowAssertionResult
+                        {
+                            Kind = "propEquals",
+                            Passed = false,
+                            Skipped = false,
+                            Actual = "correct horse battery staple",
+                            ActualDisclosure = new MauiFlowValueDisclosure
+                            {
+                                State = producerState,
+                                Type = "string",
+                                Length = 27,
+                                Digest = "sha256:" + new string('a', 64),
+                            },
+                        },
+                    },
+                },
+            },
+        };
+
+        MauiFlowRunReportSerializer.ApplyLimits(report, new MauiFlowRunReportLimits());
+        var assertion = Assert.Single(Assert.Single(report.Steps).Assertions);
+
+        Assert.Equal(producerState, assertion.ActualDisclosure!.State);
+        Assert.Null(assertion.ActualDisclosure.Value);
+        Assert.Null(assertion.Actual);
+        Assert.Equal(27, assertion.ActualDisclosure.Length);
+    }
+
+    /// <summary>
+    /// A selector naming both a benign AutomationId and a sensitive type must still be screened as
+    /// sensitive; taking only the first non-null selector field let the type go untested.
+    /// </summary>
+    [Fact]
+    public async Task FailedAssertion_OnASelectorWhoseTypeIsSensitive_IsStillRedacted()
+    {
+        var driver = new FakeDriver { PropertyValue = "hunter2", ElementAutomationId = "LoginField" };
+        var flow = AssertTextFlow("Text", expected: "other", automationId: "LoginField");
+        flow.Steps[0].Asserts[0].Selector!.Type = "PasswordEntry";
+
+        var result = await new MauiFlowRunner(driver, new MauiFlowRunnerOptions
+        {
+            PollTries = 1,
+            PollGapMs = 0,
+        }).RunWithLegacyAsync(flow);
+
+        var assertion = Assert.Single(Assert.Single(result.Report.Steps).Assertions);
+        Assert.False(assertion.Passed);
+        Assert.Equal("redacted", assertion.ActualDisclosure!.State);
+        Assert.Null(assertion.ActualDisclosure.Value);
+        Assert.Null(assertion.Actual);
+    }
+
     private static MauiFlow AssertTextFlow(string name, string expected, string automationId = "submit")
         => new()
         {

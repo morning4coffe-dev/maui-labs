@@ -25,6 +25,9 @@ public sealed class FlowAssertResult
 
 /// <summary>
 /// Derives the short, non-identifying element hint recorded on <see cref="FlowAssertResult.TargetHint"/>.
+/// Every selector field is included rather than the first one present, because the sensitivity
+/// screen keys on this hint: a selector that names both <c>AutomationId="LoginField"</c> and
+/// <c>Type="PasswordEntry"</c> must still be recognised as sensitive.
 /// </summary>
 internal static class FlowAssertTargetHint
 {
@@ -32,10 +35,15 @@ internal static class FlowAssertTargetHint
     {
         if (selector is null)
             return null;
-        return selector.AutomationId
-            ?? selector.CollectionScope
-            ?? selector.TypeIndex?.Type
-            ?? selector.Type;
+        var parts = new[]
+        {
+            selector.AutomationId,
+            selector.CollectionScope,
+            selector.TypeIndex?.Type,
+            selector.Type,
+        }.Where(static part => !string.IsNullOrWhiteSpace(part));
+        var hint = string.Join(' ', parts);
+        return hint.Length == 0 ? null : hint;
     }
 }
 

@@ -261,6 +261,33 @@ public class CommandConstructionTests
 		}
 	}
 
+	/// <summary>
+	/// The inventory's <c>mutating</c> flag is what an agent gates on before touching a device, so
+	/// it is pinned explicitly rather than left to verb inference. <c>flow reproduce</c> is the
+	/// case that motivated this: its verb reads diagnostic, but it drives a full build, install,
+	/// launch and replay, and the old hand-maintained list hid the problem by omitting the command
+	/// entirely.
+	/// </summary>
+	[Theory]
+	[InlineData("flow run", true)]
+	[InlineData("flow replay", true)]
+	[InlineData("flow reproduce", true)]
+	[InlineData("flow commit", false)]
+	[InlineData("flow qualify", false)]
+	[InlineData("flow triage", false)]
+	[InlineData("flow validate", false)]
+	public void DevFlowCommandsInventory_ClassifiesEveryFlowVerbsDeviceImpact(string command, bool mutating)
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+
+		var entry = Assert.Single(
+			DevFlowCommands.GetCommandDescriptions(devflowCommand),
+			candidate => candidate.Command == command);
+
+		Assert.Equal(mutating, entry.Mutating);
+	}
+
 	[Fact]
 	public void DevFlowCommandsInventory_IncludesThePreviouslyMissingFamilies()
 	{

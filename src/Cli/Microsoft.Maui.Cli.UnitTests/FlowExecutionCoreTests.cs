@@ -2352,6 +2352,115 @@ public sealed class FlowExecutionCoreTests
         Assert.Empty(after["approvals"]?.AsArray() ?? []);
     }
 
+    /// <summary>
+    /// An approval that names no bytes cannot vouch for the new bytes either. Retaining it would
+    /// leave the sidecar asserting a review of content nobody looked at, which is the exact failure
+    /// the digest binding exists to prevent.
+    /// </summary>
+    [Fact]
+    public async Task FlowCommit_ApprovalWithNoBoundDigest_IsAlsoDropped()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var plan = JsonNode.Parse(await File.ReadAllTextAsync(bundle.Plan))!.AsObject();
+        plan["approvals"] = new JsonArray(
+            new JsonObject
+            {
+                ["approvedBy"] = "reviewer",
+                ["approvedAt"] = "2026-08-15T20:00:00.0000000+00:00",
+            });
+        await File.WriteAllTextAsync(bundle.Plan, plan.ToJsonString());
+
+        var parsed = FlowMarkdown.Parse(await File.ReadAllTextAsync(bundle.Flow)).Flow!;
+        parsed.Steps[0].Target = new FlowSelector { AutomationId = "RenamedByTheAuthor" };
+        await File.WriteAllTextAsync(bundle.Flow, FlowMarkdown.Serialize(parsed));
+
+        var result = await FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: false);
+
+        Assert.Equal(1, result.RemovedApprovals);
+        var after = JsonNode.Parse(await File.ReadAllTextAsync(bundle.Plan))!.AsObject();
+        Assert.Empty(after["approvals"]?.AsArray() ?? []);
+    }
+
+    /// <summary>
+    /// A sidecar is operator-authored text, so a wrongly typed member is an input to report, not a
+    /// crash. An unhandled cast here would print a stack trace with absolute source paths and break
+    /// the <c>--json</c> contract.
+    /// </summary>
+    [Theory]
+    [InlineData("digest", "12345")]
+    [InlineData("revision", "\"two\"")]
+    [InlineData("path", "17")]
+    public async Task FlowCommit_SidecarMemberOfTheWrongJsonType_IsReportedNotThrownRaw(
+        string member,
+        string rawJson)
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var plan = JsonNode.Parse(await File.ReadAllTextAsync(bundle.Plan))!.AsObject();
+        plan["flow"]!.AsObject()[member] = JsonNode.Parse(rawJson);
+        await File.WriteAllTextAsync(bundle.Plan, plan.ToJsonString());
+
+        // Neither call may escape as a raw cast failure: that would print a stack trace with
+        // absolute source paths and break the --json contract for the caller.
+        await FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: true);
+        var committed = await FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: false);
+
+        Assert.True(committed.Ok);
+        var after = JsonNode.Parse(await File.ReadAllTextAsync(bundle.Plan))!.AsObject();
+        Assert.Equal(committed.Digest, (string?)after["flow"]!["digest"]);
+    }
+
+    /// <summary>
+    /// Validation runs against the candidate bytes before they replace the operator's file, so a
+    /// rejected re-bind leaves the sidecar exactly as it was rather than destroying plan content
+    /// while reporting failure.
+    /// </summary>
+    [Fact]
+    public async Task FlowCommit_WhenTheRewrittenSidecarIsInvalid_LeavesTheOriginalOnDisk()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var plan = JsonNode.Parse(await File.ReadAllTextAsync(bundle.Plan))!.AsObject();
+        plan["sideEffectPolicy"] = "not-a-policy";
+        await File.WriteAllTextAsync(bundle.Plan, plan.ToJsonString());
+        var before = await File.ReadAllTextAsync(bundle.Plan);
+
+        var parsed = FlowMarkdown.Parse(await File.ReadAllTextAsync(bundle.Flow)).Flow!;
+        parsed.Steps[0].Target = new FlowSelector { AutomationId = "RenamedByTheAuthor" };
+        await File.WriteAllTextAsync(bundle.Flow, FlowMarkdown.Serialize(parsed));
+
+        var failure = await Assert.ThrowsAsync<FlowCommitException>(() =>
+            FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: false));
+
+        Assert.Equal("plan-invalid", failure.Code);
+        Assert.Equal(before, await File.ReadAllTextAsync(bundle.Plan));
+        Assert.Empty(Directory.GetFiles(Path.GetDirectoryName(bundle.Plan)!, "*.tmp-*"));
+    }
+
+    /// <summary>
+    /// Non-ASCII plan prose must survive a re-bind as itself rather than as escape sequences, so
+    /// re-blessing a flow does not churn unrelated lines of the operator's sidecar.
+    /// </summary>
+    [Fact]
+    public async Task FlowCommit_PreservesNonAsciiPlanTextWithoutEscaping()
+    {
+        const string goal = "Vérifier l'écran <Interactions> & le bouton";
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var plan = JsonNode.Parse(await File.ReadAllTextAsync(bundle.Plan))!.AsObject();
+        plan["goal"] = goal;
+        await File.WriteAllTextAsync(bundle.Plan, plan.ToJsonString());
+
+        var parsed = FlowMarkdown.Parse(await File.ReadAllTextAsync(bundle.Flow)).Flow!;
+        parsed.Steps[0].Target = new FlowSelector { AutomationId = "RenamedByTheAuthor" };
+        await File.WriteAllTextAsync(bundle.Flow, FlowMarkdown.Serialize(parsed));
+
+        await FlowCommitCommands.ExecuteAsync(bundle.Flow, bundle.Plan, checkOnly: false);
+
+        Assert.Contains(goal, await File.ReadAllTextAsync(bundle.Plan), StringComparison.Ordinal);
+    }
+
     private sealed class FakeArtifactResolver(ResolvedAppArtifact artifact) : IAppArtifactResolver
     {
         public int Calls { get; private set; }

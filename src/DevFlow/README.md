@@ -301,7 +301,9 @@ it, not the shipped analyzer. Each of the five gated rate metrics publishes what
 `tests/DevFlow/InspectorCorpus/baselines/README.md` explains it in full. `exercises: sample-supplied`
 means a submitting run asserted the observation and nothing verified which code made it. The
 `product-analyzer-coverage` gate has **no unqualified pass**: nothing here can watch code run, so
-every passing result carries `provenance-self-reported` and names whose word it is taking.
+every passing result carries `provenance-self-reported` and names whose word it is taking. The
+`observedFailureClassProducer` stamp behind `exercises: shipped-analyzer` is a disclosure, not a
+forgery guard — a `--results` file is deserialised verbatim.
 Closing that gap is worth more than any further corpus growth.
 
 | Metric | Recorded value today | Where |

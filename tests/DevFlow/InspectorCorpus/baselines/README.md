@@ -43,12 +43,13 @@ Gates that are `not-qualified` in the baseline and why:
 | `android-tier1-first-attempts` | No Tier-1 flow declared and no device runs. |
 | `product-analyzer-coverage` | The corpus scores repair and false heals with harness rules, not the shipped analyzer. See below. |
 
-**`abstention` has no gate of its own.** It is published as `316/316` and reads like a perfect score,
-but no threshold gate consumes it — `product-analyzer-coverage` reads only its provenance, and the
-baseline diff floors its numerator, denominator, independent count and provenance. Nothing fails if
-the *rate* degrades. It is a descriptive counter of how often the harness declined to propose a
-repair when none was expected, scored by the same harness-local rules as `falseHeals`. Do not quote
-it as a result.
+**`abstention` has no threshold gate of its own.** It is published as `316/316` and reads like a
+perfect score, but no *threshold* gate consumes it: `product-analyzer-coverage` reads its provenance
+and requires its denominator to be non-zero, and the baseline diff floors its numerator, denominator,
+independent count and provenance. Nothing fails if the *rate* degrades — a run that abstained half
+as often would still pass every gate. It is a descriptive counter of how often the harness declined
+to propose a repair when none was expected, scored by the same harness-local rules as `falseHeals`.
+Do not quote it as a result.
 
 ## The largest gap: the corpus does not exercise the shipped analyzer
 
@@ -78,10 +79,27 @@ This is stated in the report itself rather than only here:
   would read as verification. It also stays `not-qualified` while `repairPrecision`, `repairRecall`,
   `falseHeals` or `abstention` carry no evidence at all, because absence of the metrics this gate
   exists to disclose is not coverage of them.
-- `classificationAccuracy` is labelled `shipped-analyzer` only when every judged sample carries an
-  `observedFailureClassProducer` stamp written by whatever called the classifier. Without the stamp
-  the label degrades to `unknown` and the gate fails. `observedFailureClass` is caller-supplied, so
-  the source name alone cannot establish which code produced it.
+- `classificationAccuracy` is labelled `shipped-analyzer` only when **every** judged sample — curated
+  and device-backed alike — carries an `observedFailureClassProducer` stamp naming what called the
+  classifier. Without it the label degrades to `unknown` and the gate fails. Device-backed rows are
+  not exempt: a device is no better placed than a fixture to say which code produced a label, and
+  exempting them would let one stamped fixture speak for ninety-nine unstamped device rows.
+  **The stamp is not a forgery guard.** A `--results` file is deserialised verbatim, so an author who
+  writes `"observedFailureClassProducer": "MauiFlowFailureClassifier.Classify"` into a JSON file gets
+  the strong label. Against a determined author it is exactly as strong as the source-name inference
+  it replaced; what it removes is the *accidental* claim, where a hand-written or partial sample
+  earned the product's name merely for not being device-backed. This is why the coverage gate has no
+  unqualified pass.
+- A judged subset that **mixes** stamped static rows with rows a run submitted takes the weaker of
+  the two claims, the same minimum the accumulator applies across runs. "Any statically scored sample
+  wins" would be conservative only while the static kind is the weak one; for `classificationAccuracy`
+  it is the strongest kind in the model, so one corpus fixture could otherwise upgrade a subset of
+  run-supplied rows. The published component reads `... + submitting-run` and the note says it was
+  downgraded.
+- The label describes the **judged** subset, which is not always the whole denominator. When samples
+  are pooled in beyond the judged set, the note says how many, and which gates read which: the count
+  and lower-bound gates read the independent subset, while the false-heal gate and the baseline diff
+  compare the pooled numerator.
 - `MauiPreviewQualificationAccumulator` merges `exercises` conjunctively — the merged kind is the
   **weakest** any contributor declared, ranked `unknown` < `harness-local-rules` < `sample-supplied`
   < `shipped-analyzer`, so pooling can never upgrade what the merged number measures and the result
@@ -126,9 +144,11 @@ Its limits are real and stated rather than papered over. It only sees that file 
 analyzer in from a differently named file would leave it green; and it only sees that call shape, so
 an indirection through a delegate or reflection would too. Under an equality assert a **false
 negative** is the dangerous direction, because it makes the tripwire agree with a `false` declaration
-instead of tightening it — which is why the scan strips string literals as well as comments, and why
-`Tripwire_ReadsCodeRatherThanProseInEitherDirection` pins that behaviour on both a literal that
-contains a comment marker and a sentence that names the call.
+instead of tightening it — which is why the scan strips string literals as well as comments, why it
+deliberately leaves *interpolated* literals intact (their `{...}` holes are executable code, so
+blanking them would hide a real call), and why
+`Tripwire_ReadsCodeRatherThanProseInEitherDirection` pins that behaviour on a literal that
+contains a comment marker, a sentence that names the call, and all three interpolated forms.
 
 ## Statistical power of the generated share
 

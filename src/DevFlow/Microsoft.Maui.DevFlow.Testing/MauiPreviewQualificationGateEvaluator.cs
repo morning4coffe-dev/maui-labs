@@ -365,7 +365,11 @@ public static class MauiPreviewQualificationGateEvaluator
         var mixed = judged.Any(static sample => !ScoredHere(sample));
         if (staticKindAttested is not null)
         {
-            var unattested = judged.Where(ScoredHere).Count(sample => !staticKindAttested(sample));
+            // Every judged sample, not only the statically scored ones. A device-backed sample is
+            // no better placed to say which code produced its failure class than a curated one, so
+            // exempting it would let a single stamped fixture speak for ninety-nine unstamped
+            // device rows — exactly the shape this branch is here to refuse.
+            var unattested = judged.Count(sample => !staticKindAttested(sample));
             if (unattested > 0)
             {
                 // Refusing to name a component is the point: the label would otherwise assert which
@@ -380,13 +384,50 @@ public static class MauiPreviewQualificationGateEvaluator
                 };
             }
         }
+        // Mixed subsets take the weaker of the two claims, the same rule the accumulator applies
+        // when pooling runs. "Any statically scored sample takes the static kind" is only
+        // conservative while the static kind is the weak one; for classificationAccuracy it is the
+        // strongest kind in the model, and taking it would let one corpus fixture upgrade a subset
+        // of run-supplied rows.
+        if (mixed && MetricProvenanceStrength(MauiQualificationMetricProvenanceKinds.SampleSupplied)
+            < MetricProvenanceStrength(staticKind))
+        {
+            return new MauiQualificationMetricProvenance
+            {
+                Component = $"{staticComponent} + submitting-run",
+                Kind = MauiQualificationMetricProvenanceKinds.SampleSupplied,
+                Note = $"{staticNote} Downgraded from '{staticKind}': the judged subset also holds "
+                    + "run-supplied samples, and pooling must not raise what a number measures.",
+            };
+        }
+        // The label describes the judged subset the gates read, but it is published beside the
+        // pooled counts, so say how much of the denominator it does not speak for.
+        var pooledElsewhere = all.Count - judged.Count;
+        var pooledNote = pooledElsewhere > 0
+            ? $" Describes the {judged.Count} judged sample(s); {pooledElsewhere} further sample(s) sit in the "
+                + "pooled denominator that the false-heal gate and the baseline diff compare."
+            : string.Empty;
         return new MauiQualificationMetricProvenance
         {
             Component = staticComponent,
             Kind = staticKind,
-            Note = mixed ? $"{staticNote} Pooled with run-supplied samples." : staticNote,
+            Note = (mixed ? $"{staticNote} Pooled with run-supplied samples." : staticNote) + pooledNote,
         };
     }
+
+    /// <summary>
+    /// Orders provenance kinds weakest first, so a mixed subset can take a minimum instead of
+    /// letting whichever kind the code happened to check first decide. Mirrors the accumulator's
+    /// ranking; unrecognised sorts below every named kind.
+    /// </summary>
+    private static int MetricProvenanceStrength(string? kind) => kind switch
+    {
+        MauiQualificationMetricProvenanceKinds.Unknown => 0,
+        MauiQualificationMetricProvenanceKinds.HarnessLocalRules => 1,
+        MauiQualificationMetricProvenanceKinds.SampleSupplied => 2,
+        MauiQualificationMetricProvenanceKinds.ShippedAnalyzer => 3,
+        _ => 0,
+    };
 
     /// <summary>
     /// The corpus scores its diagnostic and repair decisions with rules re-implemented inside
@@ -396,7 +437,9 @@ public static class MauiPreviewQualificationGateEvaluator
     /// </summary>
     private const string HarnessRuleNote =
         "Harness rules scored against expectations authored beside them. Not evidence about "
-        + "MauiSelectorHealthAnalyzer, which the corpus never calls.";
+        + "MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code "
+        + "that scores corpus samples; a sample supplied from a results file under a static source "
+        + "is described the same way, because nothing here can tell them apart.";
 
     /// <summary>
     /// Builds a bounded expected-versus-observed failure-class confusion matrix. Labels are
@@ -884,9 +927,7 @@ public static class MauiPreviewQualificationGateEvaluator
     internal static MauiQualificationGateResult BuildProductAnalyzerCoverageGate(
         IEnumerable<(string Name, int Denominator, MauiQualificationMetricProvenance? Exercises)> metrics)
     {
-        var all = metrics.ToList();
-        var scored = all.Where(static entry => entry.Denominator > 0).ToList();
-        if (scored.Count == 0)
+        var scored = metrics.Where(static entry => entry.Denominator > 0).ToList();        if (scored.Count == 0)
         {
             // Absent evidence is not coverage. Every other gate in this file answers
             // "nothing was measured" with not-qualified, and so does this one.
@@ -917,7 +958,13 @@ public static class MauiPreviewQualificationGateEvaluator
         var undeclaredComponent = scored
             .Where(static entry => entry.Exercises is not null &&
                 !string.IsNullOrWhiteSpace(entry.Exercises.Kind) &&
-                string.IsNullOrWhiteSpace(entry.Exercises.Component))
+                (string.IsNullOrWhiteSpace(entry.Exercises.Component) ||
+                    // The contract's default. A provenance that never set a component reads as
+                    // "unknown", which is an absence, not a declaration.
+                    string.Equals(
+                        entry.Exercises.Component,
+                        MauiQualificationMetricProvenanceKinds.Unknown,
+                        StringComparison.Ordinal)))
             .Select(static entry => entry.Name)
             .ToList();
         var unknown = scored

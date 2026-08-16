@@ -511,8 +511,8 @@ public static class MauiPreviewQualificationAccumulator
     /// observed this" over evidence this harness scored — and accepts an understatement, because
     /// rejecting an understatement would discard honest evidence written by an earlier version of
     /// this tool, and a discarded run never reaches the gates at all. The harness-versus-shipped
-    /// axis is not checkable from sources; the coverage gate handles it by refusing to treat an
-    /// unverified <c>shipped-analyzer</c> string as verified coverage.
+    /// axis is not checkable from sources at all; the coverage gate handles it by reporting every
+    /// pass as <c>provenance-self-reported</c> and naming whose word it is taking.
     /// </para>
     /// </summary>
     private static bool ProvenanceMatchesSources(MauiQualificationRateMetric metric)
@@ -727,6 +727,7 @@ public static class MauiPreviewQualificationAccumulator
     /// </summary>
     private static int ProvenanceStrength(string? kind) => kind switch
     {
+        MauiQualificationMetricProvenanceKinds.Unknown => 0,
         MauiQualificationMetricProvenanceKinds.HarnessLocalRules => 1,
         MauiQualificationMetricProvenanceKinds.SampleSupplied => 2,
         MauiQualificationMetricProvenanceKinds.ShippedAnalyzer => 3,

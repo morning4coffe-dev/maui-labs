@@ -1676,9 +1676,17 @@ public sealed class PreviewQualificationTests
         // Merge order is wall-clock sort order, which is arbitrary with respect to evidence
         // quality. A first-match rule let whichever run happened to sort first decide between
         // shipped-analyzer and sample-supplied, so pooling could upgrade the published label.
-        var first = RunWith(MauiQualificationMetricProvenanceKinds.ShippedAnalyzer, "run-a", 1);
-        var second = RunWith(MauiQualificationMetricProvenanceKinds.SampleSupplied, "run-b", 2);
-        var reports = reversed ? new[] { second, first } : [first, second];
+        // Accumulate sorts by GeneratedAt, so varying the array order would change nothing —
+        // the timestamps have to be the thing that swaps.
+        var shipped = RunWith(
+            MauiQualificationMetricProvenanceKinds.ShippedAnalyzer,
+            "run-a",
+            reversed ? 2 : 1);
+        var sampleSupplied = RunWith(
+            MauiQualificationMetricProvenanceKinds.SampleSupplied,
+            "run-b",
+            reversed ? 1 : 2);
+        var reports = new[] { shipped, sampleSupplied };
 
         var accumulation = MauiPreviewQualificationAccumulator.Accumulate(reports, DateTimeOffset.UnixEpoch);
 
@@ -2483,6 +2491,56 @@ public sealed class PreviewQualificationTests
     }
 
     [Fact]
+    public void Classification_DowngradesAMixedSubsetInsteadOfUpgradingTheRunSuppliedRows()
+    {
+        // A judged subset that mixes stamped corpus rows with rows a run submitted is only as
+        // strong as its weakest member. Taking the static kind because *some* sample was scored
+        // here would let one fixture lend the shipped classifier's name to device rows this
+        // process never classified.
+        var input = new MauiPreviewQualificationInput { Platform = "android" };
+        input.Samples.Add(Classified("stamped-curated", MauiQualificationSampleSources.Curated, stamped: true));
+        input.Samples.Add(Classified("from-a-run", MauiQualificationSampleSources.DeviceBacked, stamped: true));
+
+        var report = MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch);
+
+        var exercises = report.Metrics.ClassificationAccuracy.Exercises;
+        Assert.Equal(MauiQualificationMetricProvenanceKinds.SampleSupplied, exercises?.Kind);
+        Assert.Contains("submitting-run", exercises!.Component);
+        Assert.Contains("Downgraded from", exercises.Note);
+    }
+
+    [Fact]
+    public void Classification_CountsDeviceBackedRowsWhenCheckingForAProducerStamp()
+    {
+        // The attestation check once exempted device-backed rows, so a single stamped fixture
+        // could speak for any number of unstamped device rows pooled beside it.
+        var input = new MauiPreviewQualificationInput { Platform = "android" };
+        input.Samples.Add(Classified("stamped-curated", MauiQualificationSampleSources.Curated, stamped: true));
+        input.Samples.Add(Classified("unstamped-device", MauiQualificationSampleSources.DeviceBacked, stamped: false));
+
+        var report = MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(
+            MauiQualificationMetricProvenanceKinds.Unknown,
+            report.Metrics.ClassificationAccuracy.Exercises?.Kind);
+        Assert.Contains("1 of 2 judged sample(s)", report.Metrics.ClassificationAccuracy.Exercises!.Note);
+    }
+
+    private static MauiQualificationExecutionSample Classified(string id, string source, bool stamped) =>
+        new()
+        {
+            SampleId = id,
+            Source = source,
+            Platform = "android",
+            ExpectedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
+            ObservedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
+            FailureClassInferred = true,
+            ObservedFailureClassProducer = stamped
+                ? MauiPreviewQualificationCorpusRunner.ClassifierEntryPoint
+                : null,
+        };
+
+    [Fact]
     public void CoverageGate_TreatsAbsentEvidenceAsUnknownRatherThanCoverage()
     {
         // Every other gate in the evaluator answers "nothing was measured" with not-qualified.
@@ -2634,17 +2692,22 @@ public sealed class PreviewQualificationTests
     }
 
     /// <summary>
-    /// Removes string literals first, then comments, so neither a sentence naming the call nor a
-    /// literal containing a comment marker can decide the tripwire. Literals go first because a
-    /// string such as <c>"//"</c> would otherwise blank the rest of a real line of code.
+    /// Removes string literals and comments so neither a sentence naming the call nor a literal
+    /// containing a comment marker can decide the tripwire. Literals go first because a string such
+    /// as <c>"//"</c> would otherwise blank the rest of a real line of code.
+    /// <para>
+    /// Interpolated literals are deliberately left intact. Their <c>{...}</c> holes are executable
+    /// code, so blanking them would hide a real call: a false negative, which under an equality
+    /// assert makes the tripwire agree with a <c>false</c> declaration instead of tightening it.
+    /// The cost is that prose inside an interpolated string can produce a false positive, which
+    /// fails loudly rather than silently.
+    /// </para>
     /// </summary>
     private static string StripCommentsAndLiterals(string source)
     {
-        // Verbatim and raw string literals collapse to an empty literal; interpolated holes go with
-        // them, which is fine — the tripwire only cares about executable call sites.
-        var withoutRaw = Regex.Replace(source, "\"\"\".*?\"\"\"", "\"\"", RegexOptions.Singleline);
-        var withoutVerbatim = Regex.Replace(withoutRaw, "@\"(?:[^\"]|\"\")*\"", "\"\"");
-        var withoutStrings = Regex.Replace(withoutVerbatim, @"(?<!')""(?:\\.|[^""\\])*""", "\"\"");
+        var withoutRaw = Regex.Replace(source, "(?<!\\$)\"\"\".*?\"\"\"", "\"\"", RegexOptions.Singleline);
+        var withoutVerbatim = Regex.Replace(withoutRaw, "(?<![$])@\"(?:[^\"]|\"\")*\"", "\"\"");
+        var withoutStrings = Regex.Replace(withoutVerbatim, @"(?<!['$@])""(?:\\.|[^""\\])*""", "\"\"");
         var withoutChars = Regex.Replace(withoutStrings, @"'(?:\\.|[^'\\])'", "' '");
         var withoutBlocks = Regex.Replace(withoutChars, @"/\*.*?\*/", " ", RegexOptions.Singleline);
         return string.Join(
@@ -2662,11 +2725,15 @@ public sealed class PreviewQualificationTests
     [InlineData("var doc = \"https://x\"; MauiSelectorHealthAnalyzer.Analyze(input);", true)]
     [InlineData("// MauiSelectorHealthAnalyzer.Analyze(input);", false)]
     [InlineData("MauiSelectorHealthAnalyzer . Analyze ( input );", true)]
+    [InlineData("var m = $\"k={MauiSelectorHealthAnalyzer.Analyze(input).Kind}\";", true)]
+    [InlineData("var m = $@\"k={MauiSelectorHealthAnalyzer.Analyze(input).Kind}\";", true)]
+    [InlineData("var m = $\"\"\"k={MauiSelectorHealthAnalyzer.Analyze(input).Kind}\"\"\";", true)]
     public void Tripwire_ReadsCodeRatherThanProseInEitherDirection(string source, bool expected)
     {
-        // Under an equality assert both mistakes matter: prose that looks like a call would force
-        // the disclosure to overstate, and a literal that swallows a real call would let it
-        // understate while the test stayed green.
+        // Under an equality assert both mistakes matter, but not equally: prose that looks like a
+        // call forces the disclosure to overstate and fails loudly, while a literal that swallows a
+        // real call lets it understate while the test stays green. An interpolation hole is a call
+        // site, so it has to survive the stripper.
         var actual = Regex.IsMatch(
             StripCommentsAndLiterals(source),
             @"MauiSelectorHealthAnalyzer\s*\.\s*Analyze\s*\(");

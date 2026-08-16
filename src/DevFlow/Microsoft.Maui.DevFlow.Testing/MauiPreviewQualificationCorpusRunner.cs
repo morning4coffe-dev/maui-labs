@@ -54,10 +54,14 @@ public static class MauiPreviewQualificationCorpusRunner
     private const int MaxCorpusFileBytes = 1_048_576;
 
     /// <summary>
-    /// Stamped onto every sample whose observed failure class this runner obtained by calling
-    /// <see cref="MauiFlowFailureClassifier.Classify"/> in-process. The gate evaluator refuses to
-    /// describe a classification sample as product evidence without it, so an input that fabricates
-    /// <c>observedFailureClass</c> cannot borrow the shipped classifier's name.
+    /// Stamped onto samples whose observed failure class this runner obtained by calling
+    /// <see cref="MauiFlowFailureClassifier.Classify"/>, on the line that owns the call. Its only
+    /// information content is "this label came from that call site". It is **not** a forgery guard:
+    /// samples merged from a <c>--results</c> file carry whatever string that file supplied, so
+    /// against a determined author it is exactly as strong as the source-name inference it
+    /// replaced. What it does buy is a fail-closed default — a stale writer, a partial rewiring, or
+    /// a new sample producer yields no stamp, and an unstamped label is reported as
+    /// <c>unknown</c> rather than credited to the product.
     /// </summary>
     internal const string ClassifierEntryPoint = "MauiFlowFailureClassifier.Classify";
 
@@ -195,7 +199,7 @@ public static class MauiPreviewQualificationCorpusRunner
                 FailureClassInferred = metadata.ExpectedFailureClass is null ? null : evaluation.FailureClassInferred,
                 ObservedFailureClassProducer = metadata.ExpectedFailureClass is null
                     ? null
-                    : ClassifierEntryPoint,
+                    : evaluation.ObservedFailureClassProducer,
             });
         }
 
@@ -620,7 +624,11 @@ public static class MauiPreviewQualificationCorpusRunner
             // means the class was read off a fixture field that already named it -- a stamped
             // failure class, a terminal outcome, or an otherFailures flag. Those are correct by
             // construction and must never be presented as evidence that classification works.
-            classification.Basis == MauiFlowClassificationBases.Inferred);
+            classification.Basis == MauiFlowClassificationBases.Inferred,
+            // Set here, on the line that owns the Classify call, rather than beside the sample.
+            // Two independent assignments in one object initializer would let a refactor move
+            // where the class comes from while the stamp kept naming the old origin.
+            ClassifierEntryPoint);
     }
 
     /// <summary>
@@ -1274,7 +1282,8 @@ public static class MauiPreviewQualificationCorpusRunner
         List<string> IneligibilityCodes,
         bool RepairEligible,
         string ObservedFailureClass,
-        bool FailureClassInferred);
+        bool FailureClassInferred,
+        string ObservedFailureClassProducer);
 
     private struct DeterministicRandom
     {

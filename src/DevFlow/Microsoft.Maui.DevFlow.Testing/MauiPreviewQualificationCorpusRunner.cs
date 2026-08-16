@@ -153,7 +153,7 @@ public static class MauiPreviewQualificationCorpusRunner
                 IneligibilityCodes = evaluation.IneligibilityCodes,
             };
             cases.Add(caseResult);
-            fixtureShapes.Add((metadata.Kind, metadata.ProvenanceMethod, FixtureShape(fixture)));
+            fixtureShapes.Add((metadata.Kind, metadata.ProvenanceMethod, CaseDocumentShape(fixture)));
             provenanceCounts[metadata.ProvenanceSourceKind] =
                 provenanceCounts.GetValueOrDefault(metadata.ProvenanceSourceKind) + 1;
             if (!passed)
@@ -243,13 +243,16 @@ public static class MauiPreviewQualificationCorpusRunner
             .Sum(static group => Math.Max(0, group.Count() - 1));
         // The projection above compares evaluation *outputs*, so a clone that perturbs an
         // evidence-neutral fixture value until its diagnostics differ escapes it. This second
-        // counter compares fixture *shape* — the set of key paths, values ignored — and counts a
-        // case whose shape contains another same-kind case's shape, so neither changing a value
-        // nor bolting on an extra key escapes it. Neither counter proves a case is original;
-        // together they make an undeclared restatement of an existing seed something a reviewer
-        // has to argue for rather than something that passes unremarked. A nonzero value is not by
-        // itself wrong — genuinely distinct cases can ask a strictly wider version of the same
-        // question — which is why this is a floor to hold, not a gate to pass.
+        // counter compares the *shape of the whole case document* — every key path in the root
+        // fields, provenance, fixture and expectations, values ignored — and counts a case whose
+        // shape contains, or is within two key paths of, another same-kind case's shape. Neither
+        // changing a value, nor bolting on an extra key, nor bolting one on while dropping
+        // another, escapes it. Neither counter proves a case is original; together they make an
+        // undeclared restatement of an existing seed something a reviewer has to argue for rather
+        // than something that passes unremarked. A nonzero value is not by itself wrong — the
+        // seven currently counted are five exact shape *equalities* plus two one-key-apart pairs,
+        // all of which are genuinely different questions asked in the same document shape — which
+        // is why this is a floor to hold, not a gate to pass.
         summary.UndeclaredShapeCollisions = CountShapeContainments(fixtureShapes);
         summary.ProvenanceComplete = cases.Count > 0 && cases.All(static item =>
             !string.IsNullOrEmpty(item.ProvenanceMethod) && !string.IsNullOrEmpty(item.ProvenanceSourceKind));
@@ -956,7 +959,10 @@ public static class MauiPreviewQualificationCorpusRunner
         path = string.Empty;
         if (string.IsNullOrWhiteSpace(relative) || Path.IsPathRooted(relative) ||
             relative.Contains("..", StringComparison.Ordinal) ||
-            !relative.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
+            // Ordinal, not OrdinalIgnoreCase: the corpus fingerprint enumerates the tree itself,
+            // and a case-insensitive accept here paired with a case-sensitive enumeration on Linux
+            // would let `cases/x.JSON` feed a published metric from outside the hash.
+            !relative.EndsWith(".json", StringComparison.Ordinal))
         {
             return false;
         }
@@ -1060,14 +1066,21 @@ public static class MauiPreviewQualificationCorpusRunner
             string.Join(',', item.IneligibilityCodes.OrderBy(static code => code, StringComparer.Ordinal)));
 
     /// <summary>
-    /// The set of key paths in a fixture, with all values discarded. Two cases with the same shape
-    /// ask the evaluator the same question with different numbers in it; a case whose shape
-    /// contains another's asks that same question plus something extra.
+    /// The set of key paths in a whole case document — root fields, provenance, the fixture, and
+    /// the expectations — with all values discarded. Two cases with the same shape ask the
+    /// evaluator the same question with different values in it; a case whose shape contains
+    /// another's asks that same question plus something extra.
+    /// <para>
+    /// The name matters: this is the *case*, not the <c>fixture</c> object inside it, so an
+    /// undeclared clone that varies only its provenance notes or its expected diagnostics is
+    /// caught too. Two reviews in a row reasoned about the wrong object because the old name said
+    /// "fixture".
+    /// </para>
     /// </summary>
-    private static SortedSet<string> FixtureShape(JsonElement fixture)
+    private static SortedSet<string> CaseDocumentShape(JsonElement caseDocument)
     {
         var paths = new SortedSet<string>(StringComparer.Ordinal);
-        Walk(fixture, string.Empty);
+        Walk(caseDocument, string.Empty);
         return paths;
 
         void Walk(JsonElement element, string prefix)
@@ -1125,13 +1138,25 @@ public static class MauiPreviewQualificationCorpusRunner
 
     private const int ShapeDistanceTolerance = 2;
 
+    /// <summary>
+    /// True when two same-kind cases ask so nearly the same question that counting them as two
+    /// cases overstates the corpus.
+    /// <para>
+    /// Containment alone was evadable in a single edit — add one ignored key *and* delete one
+    /// optional key and neither shape contains the other — so a near-miss counts too. The bound is
+    /// symmetric difference, and because the shape spans the whole case document (see
+    /// <see cref="CaseDocumentShape"/>) every case already shares the required root, provenance
+    /// and expect keys: with |A| ≤ |B|, a distance of at most 2 forces at least |A| - 1 shared key
+    /// paths, so "within 2" cannot describe two cases with nothing in common. Three-key edits
+    /// still escape, which is why this is a disclosure and not a proof.
+    /// </para>
+    /// </summary>
     private static bool IsNearRestatement(SortedSet<string> earlier, SortedSet<string> later)
     {
         if (earlier.IsSubsetOf(later))
             return true;
-        var distance = earlier.Except(later, StringComparer.Ordinal).Count()
-            + later.Except(earlier, StringComparer.Ordinal).Count();
-        return distance <= ShapeDistanceTolerance;
+        var shared = earlier.Intersect(later, StringComparer.Ordinal).Count();
+        return earlier.Count + later.Count - (2 * shared) <= ShapeDistanceTolerance;
     }
 
     /// <summary>
@@ -1157,8 +1182,14 @@ public static class MauiPreviewQualificationCorpusRunner
         if (!Directory.Exists(root))
             return "no-corpus";
         var builder = new StringBuilder();
-        foreach (var file in Directory.GetFiles(root, "*.json", SearchOption.AllDirectories)
+        // Enumerate everything and filter case-insensitively rather than globbing "*.json":
+        // Directory.GetFiles matches case-insensitively on Windows and case-sensitively on Linux,
+        // so a stray `cases/x.JSON` would be inside the fingerprint on one platform and outside it
+        // on the other. The manifest refuses to resolve such a file, and this makes the two
+        // decisions agree on every platform instead of on one.
+        foreach (var file in Directory.GetFiles(root, "*", SearchOption.AllDirectories)
             .Select(path => Path.GetRelativePath(root, path).Replace('\\', '/'))
+            .Where(static path => path.EndsWith(".json", StringComparison.OrdinalIgnoreCase))
             .Where(static path => !IsUnderBaselines(path))
             .OrderBy(static path => path, StringComparer.Ordinal))
         {
@@ -1189,14 +1220,16 @@ public static class MauiPreviewQualificationCorpusRunner
         relativePath.StartsWith("baselines/", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
-    /// Hashes file bytes with CRLF folded to LF, so a fingerprint describes what a file says
-    /// rather than which platform checked it out. Every site that hashes corpus bytes must use
-    /// this: one raw-byte hash is enough to make a committed baseline unreproducible on a clean
-    /// clone.
+    /// Hashes file bytes with a UTF-8 BOM stripped and CRLF folded to LF, so a fingerprint
+    /// describes what a file says rather than which platform checked it out or which editor last
+    /// saved it. Every site that hashes corpus bytes must use this: one raw-byte hash is enough to
+    /// make a committed baseline unreproducible on a clean clone.
     /// </summary>
-    private static string HashNormalized(byte[] bytes) =>
+    internal static string HashNormalized(byte[] bytes) =>
         Hash(Encoding.UTF8.GetBytes(
-            Encoding.UTF8.GetString(bytes).Replace("\r\n", "\n", StringComparison.Ordinal)));
+            Encoding.UTF8.GetString(bytes)
+                .TrimStart('\uFEFF')
+                .Replace("\r\n", "\n", StringComparison.Ordinal)));
 
     private static string Hash(ReadOnlySpan<byte> bytes) =>
         "sha256:" + Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();

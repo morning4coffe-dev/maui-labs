@@ -88,13 +88,11 @@ public static class MauiQualificationSecurityCorpusRunner
             }
 
             var bytes = File.ReadAllBytes(path);
-            // Fold CRLF to LF before hashing, exactly as the case-corpus fingerprint does. A
-            // raw-byte hash here made this published field — and therefore the committed baseline
-            // that pins it — depend on the checkout's line endings rather than on the corpus.
-            summary.ManifestFingerprint = "sha256:" + Convert.ToHexString(SHA256.HashData(
-                Encoding.UTF8.GetBytes(
-                    Encoding.UTF8.GetString(bytes).Replace("\r\n", "\n", StringComparison.Ordinal))))
-                .ToLowerInvariant();
+            // Share the case-corpus normalisation rather than restating it. A raw-byte hash here
+            // made this published field — and therefore the committed baseline that pins it —
+            // depend on the checkout's line endings rather than on the corpus, and a second
+            // hand-rolled copy of the rule is how the two drift apart again.
+            summary.ManifestFingerprint = MauiPreviewQualificationCorpusRunner.HashNormalized(bytes);
             using var document = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 32 });
             var rootElement = document.RootElement;
             if (rootElement.ValueKind != JsonValueKind.Object ||

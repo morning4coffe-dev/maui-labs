@@ -13,8 +13,21 @@ public enum McpServerProfile
 	TestAgent,
 }
 
+/// <summary>
+/// Raised when a preview MCP profile was requested without its enabling environment variable.
+/// It is a caller mistake with a documented remedy, not a fault, so the CLI reports the message
+/// and exits non-zero instead of printing a stack trace.
+/// </summary>
+public sealed class McpProfileDisabledException : InvalidOperationException
+{
+	public McpProfileDisabledException(string message) : base(message) { }
+}
+
 public static class McpServerHost
 {
+	/// <summary>Environment variable that enables the agent-authoring preview surface.</summary>
+	public const string PreviewAgentAuthoringVariable = "DEVFLOW_PREVIEW_AGENT_AUTHORING";
+
 	private static readonly string[] FullToolNames =
 	[
 		"maui_app_info", "maui_artifact_inspect", "maui_assert", "maui_back", "maui_batch", "maui_battery_info",
@@ -126,8 +139,12 @@ public static class McpServerHost
 			throw new ArgumentOutOfRangeException(nameof(profile));
 		if (!IsProfileEnabled(profile, previewFlags))
 		{
-			throw new InvalidOperationException(
-				"The test-agent MCP profile is disabled. Enable the effective agent-authoring preview flag before registering its tools.");
+			throw new McpProfileDisabledException(
+				"The test-agent MCP profile is a preview surface and is disabled by default. " +
+				"Set the environment variable " + PreviewAgentAuthoringVariable + "=true and run the command again. " +
+				"PowerShell: $env:" + PreviewAgentAuthoringVariable + " = 'true'; " +
+				"bash: export " + PreviewAgentAuthoringVariable + "=true. " +
+				"Use --profile full for the unrestricted profile, which needs no flag.");
 		}
 
 		var version = typeof(McpServerHost).Assembly.GetName().Version?.ToString(3) ?? "0.0.0";

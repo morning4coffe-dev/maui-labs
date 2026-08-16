@@ -78,13 +78,23 @@ The comparison fails (nonzero exit) when:
   or the gate has disappeared. Comparing only gates that were passing meant the transition that
   matters most here, `not-qualified -> fail`, produced no regression line: a flow that finally ran
   and *failed* looked the same to CI as a flow that still had not run;
+- a gate that is **absent from the baseline** reports `fail`. Adding a gate is how this branch made
+  metrics visible, so a new `pass` or `not-qualified` gate is not a regression — but iterating only
+  the baseline's gate list meant a newly added gate could report a measured failure and produce no
+  line at all;
 - with `--accumulate`, any accumulated metric regresses against its per-run baseline counterpart —
   including `accumulated.falseHeals` and `accumulated.abstention`, which are compared as counts.
 
 A metric with **no** baseline evidence (denominator 0) is not protected by the rate comparison — it
-has nothing to fall below. `selectorStability` and `flakeFirstAttemptStability` are in that state
-today, so the diff currently guards neither. That is a consequence of having no device evidence at
-all, not a design choice, and it stops being true the moment a real run is committed.
+has nothing to fall below. `selectorStability`, `flakeFirstAttemptStability` and `recordingValidity`
+are in that state today, so of the rate floors listed above only `repairPrecision`, `repairRecall`
+and `classificationAccuracy` are actually load-bearing right now. That is a consequence of having
+no device evidence at all, not a design choice, and it stops being true the moment a real run is
+committed.
+
+The merge is also bounded: at most 512 run files are read, and a larger directory reports
+`accumulate-directory-too-large` rather than silently spending minutes in the quadratic reference
+election.
 
 Improvements never fail. `.github/workflows/ci-devflow.yml` runs this on every DevFlow PR.
 
@@ -196,6 +206,17 @@ refuses to pool runs whose repository commit, testing package version, package i
 or tool version or fingerprint disagree. A stability number spanning a regression and its fix
 describes neither build — and without this check, varying the claimed commit minted "independent"
 runs just as effectively as varying `deviceFingerprint`, while looking like ordinary metadata.
+
+Only a **contradiction** rejects. Every one of those fields is written as the literal string
+`unknown` when the harness was never told the answer, so comparing raw strings read a plain static
+run and a device-evidence run built from an artifact manifest as two different builds — and then
+discarded whichever side the majority vote outnumbered, which for one device shard among static
+runs is the only evidence that carries first attempts at all. An unasserted fact cannot contradict
+anything, so it cannot reject. What it also cannot do is confirm that two runs describe one build,
+so `unverifiedProductIdentity` lists exactly which identity facts were taken on trust. An empty
+list means every accepted run named the same build. A non-empty list means the merge is pooling
+runs that never said whether they agree — the number is still published, but it is weaker evidence
+than the same number with an empty list, and CI that cares should assert on it.
 
 **Runs must be distinguishable to count.** `accumulate-duplicate-run` rejects any run whose
 evidence fingerprint — contract version, platform, status, identity fingerprints, corpus summary,

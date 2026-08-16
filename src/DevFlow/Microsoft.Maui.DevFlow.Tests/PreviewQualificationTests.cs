@@ -1432,11 +1432,13 @@ public sealed class PreviewQualificationTests
         }
 
         // Four mutually incompatible lookalikes (each its own static evidence) against three runs
-        // that agree with each other. The lookalikes are the larger group but admit only one run.
+        // that agree with each other. The lookalikes are the larger group *and* hold the newest
+        // run, so a rule that groups on a proxy key and breaks ties by recency elects one of them
+        // and admits only itself; electing by what a candidate actually admits keeps the trio.
         var accumulation = MauiPreviewQualificationAccumulator.Accumulate(
             [
-                Run(1, 100, 5), Run(2, 200, 5), Run(3, 250, 5), Run(4, 275, 5),
-                Run(5, 300, 20), Run(6, 300, 20), Run(7, 300, 20),
+                Run(1, 300, 20), Run(2, 300, 20), Run(3, 300, 20),
+                Run(4, 100, 5), Run(5, 200, 5), Run(6, 250, 5), Run(7, 275, 5),
             ],
             DateTimeOffset.UnixEpoch);
 
@@ -1487,12 +1489,61 @@ public sealed class PreviewQualificationTests
     }
 
     [Fact]
-    public void Accumulator_RefusesARunThatRelaxesAThresholdTheGatesDoNotRead()
+    public void Accumulator_PoolsAStaticRunWithADeviceRunAndSaysWhatItCouldNotVerify()
+    {
+        // "unknown" is what FingerprintOrUnknown writes when the harness was never told a commit,
+        // so comparing raw strings read a plain static run and a device-evidence run built from an
+        // artifact manifest as two different builds — and the majority vote then discarded the one
+        // device shard, which is the only run carrying first-attempt evidence at all. An
+        // unasserted fact cannot contradict anything; what it also cannot do is confirm a match,
+        // so the merge has to say which facts it took on trust.
+        static MauiPreviewQualificationReport Run(string? commit, int hours, int attempts)
+        {
+            var input = new MauiPreviewQualificationInput { Platform = "android" };
+            input.Tier1Flows.Add("checkout");
+            input.Profiles.Add(new MauiQualificationPlatformProfile
+            {
+                Platform = "android",
+                RealDevice = true,
+                DeviceFingerprint = $"device-{hours}",
+            });
+            var report = MauiPreviewQualificationGateEvaluator.Evaluate(
+                input,
+                DateTimeOffset.UnixEpoch.AddHours(hours));
+            if (commit is not null)
+                report.Fingerprints.RepositoryCommit = commit;
+            if (attempts > 0)
+            {
+                report.Metrics.FlakeFirstAttemptStability.Flows.Add(new MauiQualificationFlowAttemptSummary
+                {
+                    FlowId = "checkout",
+                    CleanFirstAttempts = attempts,
+                    PassedFirstAttempts = attempts,
+                    Stability = 1,
+                    RealDeviceEvidence = true,
+                });
+            }
+            return report;
+        }
+
+        var accumulation = MauiPreviewQualificationAccumulator.Accumulate(
+            [Run(null, 1, 0), Run("sha256:abc", 2, 100)],
+            DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(2, accumulation.AcceptedRuns);
+        Assert.Equal(
+            100,
+            accumulation.FirstAttemptFlows.Single(static flow => flow.FlowId == "checkout").CleanFirstAttempts);
+        Assert.Contains("repositoryCommit", accumulation.UnverifiedProductIdentity);
+    }
+
+    [Fact]
+    public void Accumulator_RefusesARunWhoseThresholdsDoNotMatchThePublishedPolicy()
     {
         var input = new MauiPreviewQualificationInput { Platform = "android" };
         var report = MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch);
-        // Not read by any accumulated gate comparison, but it declares a different policy than the
-        // one this run's evidence would be published under.
+        // ThresholdsMatch used to omit this field, so a run could declare a laxer stability bar
+        // than the one its merged evidence would be published under and still be pooled.
         report.Thresholds.MinimumCleanFirstAttemptsPerTier1Flow = 1;
 
         var accumulation = MauiPreviewQualificationAccumulator.Accumulate([report], DateTimeOffset.UnixEpoch);
@@ -1624,8 +1675,10 @@ public sealed class PreviewQualificationTests
             Assert.True(evaded.UndeclaredShapeCollisions > after.UndeclaredShapeCollisions);
 
             // Containment alone was evadable in one edit: add an ignored key *and* delete an
-            // optional one, and neither shape contains the other. The distance tolerance is what
-            // still sees that.
+            // optional one, and neither shape contains the other. The distance bound is what still
+            // sees that. The shape spans the whole case document, so the deleted key may live
+            // under `expect` — this clone is genuinely incomparable to both the seed and the
+            // evasive clone under containment, and is caught at distance 2 from the evasive one.
             var incomparable = JsonNode.Parse(File.ReadAllText(seedPath))!.AsObject();
             incomparable["id"] = "repair-positive-incomparable-clone";
             incomparable["provenance"]!.AsObject()["method"] = "hand-authored";
@@ -1776,6 +1829,118 @@ public sealed class PreviewQualificationTests
             try { Directory.Delete(scratch, recursive: true); }
             catch (IOException) { /* best effort */ }
         }
+    }
+
+    [Fact]
+    public void CorpusRunner_RefusesACaseWhoseExtensionOnlyResolvesOnACaseInsensitiveFileSystem()
+    {
+        // Directory.GetFiles matches case-insensitively on Windows and case-sensitively on Linux.
+        // Accepting `cases/x.JSON` from the manifest while the tree hash globbed "*.json" put that
+        // case inside the fingerprint on one platform and outside it on the other — the same
+        // "change a published number with the fingerprint frozen" hole as hiding under baselines/,
+        // reached by a different path. The manifest now refuses the file outright, and the hash
+        // enumerates everything so a stray copy still moves the fingerprint on both platforms.
+        var scratch = Path.Combine(
+            Path.GetDirectoryName(typeof(PreviewQualificationTests).Assembly.Location)!,
+            "corpus-case-extension-tests",
+            Guid.NewGuid().ToString("N"));
+        CopyDirectory(Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus"), scratch);
+        try
+        {
+            var manifestPath = Path.Combine(scratch, "corpus-manifest.json");
+            var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+            var renamed = manifest["cases"]!.AsArray()
+                .First(node => node!["kind"]!.GetValue<string>() == "no-repair")!.AsObject();
+            var sourceFile = renamed["file"]!.GetValue<string>();
+            var shoutedFile = sourceFile[..^5] + ".JSON";
+            File.Move(
+                Path.Combine(scratch, sourceFile.Replace('/', Path.DirectorySeparatorChar)),
+                Path.Combine(scratch, shoutedFile.Replace('/', Path.DirectorySeparatorChar)));
+            renamed["file"] = shoutedFile;
+            File.WriteAllText(manifestPath, manifest.ToJsonString());
+
+            var summary = RunCorpus(scratch).Summary;
+
+            Assert.Contains("corpus-case-path-invalid", summary.Errors);
+        }
+        finally
+        {
+            try { Directory.Delete(scratch, recursive: true); }
+            catch (IOException) { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void CorpusRunner_CountsTheWholeCaseDocumentAndStopsAtThreeKeyPaths()
+    {
+        // The counter's shape is the whole case document, not the `fixture` object — so a clone
+        // that varies only its provenance notes is caught, and two cases one key path apart are a
+        // restatement no matter how different the fixture values read. The bound is also real:
+        // three edits escape, which is a disclosed limit rather than a claim the counter does not
+        // meet. Both halves are asserted here because the name said "fixture" for long enough that
+        // two reviews reasoned about the wrong object.
+        //
+        // Each scenario gets a pristine corpus so the two clones are only ever measured against
+        // the committed cases, never against each other.
+        static int CollisionsWithClone(string cloneId, Action<JsonObject> mutate)
+        {
+            var scratch = Path.Combine(
+                Path.GetDirectoryName(typeof(PreviewQualificationTests).Assembly.Location)!,
+                "corpus-shape-scope-tests",
+                Guid.NewGuid().ToString("N"));
+            CopyDirectory(Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus"), scratch);
+            try
+            {
+                var manifestPath = Path.Combine(scratch, "corpus-manifest.json");
+                var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+                var seedEntry = manifest["cases"]!.AsArray()
+                    .First(node => node!["kind"]!.GetValue<string>() == "no-repair")!.AsObject();
+                var seedPath = Path.Combine(
+                    scratch,
+                    seedEntry["file"]!.GetValue<string>().Replace('/', Path.DirectorySeparatorChar));
+                var clone = JsonNode.Parse(File.ReadAllText(seedPath))!.AsObject();
+                clone["id"] = cloneId;
+                clone["provenance"]!.AsObject()["method"] = "hand-authored";
+                clone["provenance"]!.AsObject().Remove("derivedFrom");
+                mutate(clone);
+                File.WriteAllText(Path.Combine(scratch, "cases", cloneId + ".json"), clone.ToJsonString());
+                manifest["cases"]!.AsArray().Add(new JsonObject
+                {
+                    ["id"] = cloneId,
+                    ["file"] = "cases/" + cloneId + ".json",
+                    ["kind"] = seedEntry["kind"]!.GetValue<string>(),
+                    ["disposition"] = seedEntry["disposition"]!.GetValue<string>(),
+                });
+                File.WriteAllText(manifestPath, manifest.ToJsonString());
+                return RunCorpus(scratch).Summary.UndeclaredShapeCollisions;
+            }
+            finally
+            {
+                try { Directory.Delete(scratch, recursive: true); }
+                catch (IOException) { /* best effort */ }
+            }
+        }
+
+        var committed = RunCorpus().Summary.UndeclaredShapeCollisions;
+
+        // One key path apart, and the only added key is outside `fixture` entirely.
+        Assert.Equal(
+            committed + 1,
+            CollisionsWithClone("no-repair-provenance-only-clone", static clone =>
+                clone["provenance"]!.AsObject()["notes"] = "restated with a different note"));
+
+        // Three key paths from the seed *and* not a superset of it — adding keys alone never
+        // escapes, because containment catches any superset however much is bolted on. Escaping
+        // takes an add-and-remove wide enough to clear the bound, which is the disclosed limit.
+        Assert.Equal(
+            committed,
+            CollisionsWithClone("no-repair-three-key-edit", static clone =>
+            {
+                var fixture = clone["fixture"]!.AsObject();
+                fixture.Remove(fixture.Select(static pair => pair.Key).First());
+                fixture["firstNewKey"] = "a";
+                fixture["secondNewKey"] = "b";
+            }));
     }
 
     private static MauiPreviewQualificationReport Report(

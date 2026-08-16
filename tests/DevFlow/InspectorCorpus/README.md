@@ -119,10 +119,12 @@ independent trial. Two counters disclose that, and neither is a gate:
   **evaluation outputs** project identically onto another case's — same kind, disposition, repair
   eligibility, pass/fail, expected and observed class, classification basis, diagnostic ids,
   candidate kinds, and ineligibility codes.
-- `corpus.undeclaredShapeCollisions` (currently `7`) counts undeclared cases whose **fixture
-  shape** — the set of JSON key paths, all values discarded — is a superset of another same-kind
-  case's shape, or within two key paths of it. It catches restatements the projection counter
-  misses, because it ignores the values a clone would perturb to change its diagnostics.
+- `corpus.undeclaredShapeCollisions` (currently `7`) counts undeclared cases whose **case-document
+  shape** — every JSON key path in the case *file*, all values discarded — is a superset of another
+  same-kind case's shape, or within two key paths of it. The shape spans the whole document, not
+  just the `fixture` object: a clone that varies only its provenance notes or its expected
+  diagnostic ids is still counted. It catches restatements the projection counter misses, because
+  it ignores the values a clone would perturb to change its diagnostics.
 
 Read these honestly. The first counter catches naive duplication — a copied file with the
 provenance line deleted — which is exactly the mistake that produced the 30 derived cases in the
@@ -130,8 +132,9 @@ first place. It does **not** catch a determined clone: perturb an evidence-neutr
 until the ineligibility codes differ and the projection no longer matches. The second is harder to
 dodge, and neither is proof of anything. Containment alone was evadable in a single edit — add one
 ignored key *and* delete one optional key and the two shapes become incomparable, so neither
-contains the other — which is why the two-key tolerance exists. An author who adds and deletes
-three keys still gets past it. Both counters are floors in the baseline diff (they must not grow)
+contains the other — which is why the two-key tolerance exists. Adding keys alone never escapes,
+however many: a superset is still a containment. Escaping takes an add-and-remove of three or more
+key paths. Both counters are floors in the baseline diff (they must not grow)
 and both are **disclosures, not rejections**. Neither establishes that a case is original; they
 make an undeclared restatement something a reviewer has to argue for rather than something that
 passes unremarked. Only review catches deliberate cloning.

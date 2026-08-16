@@ -1388,6 +1388,122 @@ public sealed class PreviewQualificationTests
     }
 
     [Fact]
+    public void Accumulator_ElectsTheReferenceThatAdmitsTheMostRunsRatherThanTheLargestLookalikeGroup()
+    {
+        // Grouping on a subset of the compared fields elected a cohort whose members reject each
+        // other: three runs differing only in --generated-no-repair share contract, platform,
+        // policy and corpus fingerprint. Electing one of those discards the runs that agree.
+        static MauiPreviewQualificationReport Run(int hours, int generated, int attempts)
+        {
+            var input = new MauiPreviewQualificationInput { Platform = "android" };
+            input.Tier1Flows.Add("checkout");
+            input.Profiles.Add(new MauiQualificationPlatformProfile
+            {
+                Platform = "android",
+                RealDevice = true,
+                DeviceFingerprint = $"device-{hours}",
+            });
+            var report = MauiPreviewQualificationGateEvaluator.Evaluate(
+                input,
+                DateTimeOffset.UnixEpoch.AddHours(hours));
+            report.Fingerprints.CorpusFingerprint = "sha256:shared";
+            report.Metrics.FalseHeals.Numerator = 0;
+            report.Metrics.FalseHeals.Denominator = generated;
+            report.Metrics.FalseHeals.IndependentEvaluations = 0;
+            report.Metrics.FalseHeals.SourceCounts =
+            [
+                new MauiQualificationRateSourceCount
+                {
+                    Source = MauiQualificationSampleSources.Generated,
+                    Numerator = 0,
+                    Denominator = generated,
+                    IndependentEvaluations = 0,
+                },
+            ];
+            report.Metrics.FlakeFirstAttemptStability.Flows.Add(new MauiQualificationFlowAttemptSummary
+            {
+                FlowId = "checkout",
+                CleanFirstAttempts = attempts,
+                PassedFirstAttempts = attempts,
+                Stability = 1,
+                RealDeviceEvidence = true,
+            });
+            return report;
+        }
+
+        // Four mutually incompatible lookalikes (each its own static evidence) against three runs
+        // that agree with each other. The lookalikes are the larger group but admit only one run.
+        var accumulation = MauiPreviewQualificationAccumulator.Accumulate(
+            [
+                Run(1, 100, 5), Run(2, 200, 5), Run(3, 250, 5), Run(4, 275, 5),
+                Run(5, 300, 20), Run(6, 300, 20), Run(7, 300, 20),
+            ],
+            DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(3, accumulation.AcceptedRuns);
+        Assert.Equal(
+            60,
+            accumulation.FirstAttemptFlows.Single(static flow => flow.FlowId == "checkout").CleanFirstAttempts);
+    }
+
+    [Fact]
+    public void Accumulator_RefusesToPoolEvidenceGatheredAgainstDifferentBuilds()
+    {
+        // Varying the claimed commit minted independent-looking runs exactly as varying
+        // deviceFingerprint did, and reads as ordinary metadata rather than as a lever.
+        static MauiPreviewQualificationReport Run(string commit, int hours)
+        {
+            var input = new MauiPreviewQualificationInput { Platform = "android" };
+            input.Tier1Flows.Add("checkout");
+            input.Profiles.Add(new MauiQualificationPlatformProfile
+            {
+                Platform = "android",
+                RealDevice = true,
+                DeviceFingerprint = "one-device",
+            });
+            var report = MauiPreviewQualificationGateEvaluator.Evaluate(
+                input,
+                DateTimeOffset.UnixEpoch.AddHours(hours));
+            report.Fingerprints.RepositoryCommit = commit;
+            report.Metrics.FlakeFirstAttemptStability.Flows.Add(new MauiQualificationFlowAttemptSummary
+            {
+                FlowId = "checkout",
+                CleanFirstAttempts = 20,
+                PassedFirstAttempts = 20,
+                Stability = 1,
+                RealDeviceEvidence = true,
+            });
+            return report;
+        }
+
+        var accumulation = MauiPreviewQualificationAccumulator.Accumulate(
+            [Run("commit-a", 1), Run("commit-b", 2), Run("commit-c", 3)],
+            DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(1, accumulation.AcceptedRuns);
+        Assert.Contains(
+            accumulation.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-product-identity-mismatch"));
+    }
+
+    [Fact]
+    public void Accumulator_RefusesARunThatRelaxesAThresholdTheGatesDoNotRead()
+    {
+        var input = new MauiPreviewQualificationInput { Platform = "android" };
+        var report = MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch);
+        // Not read by any accumulated gate comparison, but it declares a different policy than the
+        // one this run's evidence would be published under.
+        report.Thresholds.MinimumCleanFirstAttemptsPerTier1Flow = 1;
+
+        var accumulation = MauiPreviewQualificationAccumulator.Accumulate([report], DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(0, accumulation.AcceptedRuns);
+        Assert.Contains(
+            accumulation.Runs,
+            static run => run.ReasonCodes.Contains("accumulate-threshold-not-policy-default"));
+    }
+
+    [Fact]
     public void GateEvaluator_FailsAMeasuredFlowEvenWhenAnotherFlowHasNotRun()
     {
         // Pooling the reason codes let one unexercised flow downgrade another flow's measured
@@ -1506,6 +1622,31 @@ public sealed class PreviewQualificationTests
             File.WriteAllText(manifestPath, manifest.ToJsonString());
             var evaded = RunCorpus(scratch).Summary;
             Assert.True(evaded.UndeclaredShapeCollisions > after.UndeclaredShapeCollisions);
+
+            // Containment alone was evadable in one edit: add an ignored key *and* delete an
+            // optional one, and neither shape contains the other. The distance tolerance is what
+            // still sees that.
+            var incomparable = JsonNode.Parse(File.ReadAllText(seedPath))!.AsObject();
+            incomparable["id"] = "repair-positive-incomparable-clone";
+            incomparable["provenance"]!.AsObject()["method"] = "hand-authored";
+            incomparable["provenance"]!.AsObject().Remove("derivedFrom");
+            incomparable["fixture"]!.AsObject()["checkpointMismatches"] = new JsonArray("locale");
+            incomparable["fixture"]!.AsObject()["note"] = "restated";
+            incomparable["expect"]!.AsObject().Remove("candidateKinds");
+            File.WriteAllText(
+                Path.Combine(scratch, "cases", "repair-positive-incomparable-clone.json"),
+                incomparable.ToJsonString());
+            manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+            manifest["cases"]!.AsArray().Add(new JsonObject
+            {
+                ["id"] = "repair-positive-incomparable-clone",
+                ["file"] = "cases/repair-positive-incomparable-clone.json",
+                ["kind"] = "repair-positive",
+                ["disposition"] = "repair-eligible",
+            });
+            File.WriteAllText(manifestPath, manifest.ToJsonString());
+            var incomparableSummary = RunCorpus(scratch).Summary;
+            Assert.True(incomparableSummary.UndeclaredShapeCollisions > evaded.UndeclaredShapeCollisions);
         }
         finally
         {
@@ -1555,6 +1696,80 @@ public sealed class PreviewQualificationTests
             Directory.CreateDirectory(baselineDirectory);
             File.WriteAllText(Path.Combine(baselineDirectory, "qualification.json"), "{\"status\":\"rewritten\"}");
             Assert.Equal(afterSecurityEdit.ManifestFingerprint, RunCorpus(scratch).Summary.ManifestFingerprint);
+        }
+        finally
+        {
+            try { Directory.Delete(scratch, recursive: true); }
+            catch (IOException) { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void CorpusRunner_ReadsTheSameCorpusTheSameWayWhateverTheCheckoutDidToLineEndings()
+    {
+        // Hashing raw bytes anywhere makes the committed baseline unreproducible: it would pass on
+        // the author's CRLF working tree and fail on a clean LF clone, or the reverse.
+        var scratch = Path.Combine(
+            Path.GetDirectoryName(typeof(PreviewQualificationTests).Assembly.Location)!,
+            "corpus-eol-tests",
+            Guid.NewGuid().ToString("N"));
+        CopyDirectory(Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus"), scratch);
+        try
+        {
+            static void Rewrite(string root, Func<string, string> convert)
+            {
+                foreach (var path in Directory.GetFiles(root, "*.json", SearchOption.AllDirectories))
+                    File.WriteAllText(path, convert(File.ReadAllText(path)));
+            }
+
+            Rewrite(scratch, static text => text.Replace("\r\n", "\n", StringComparison.Ordinal));
+            var lf = RunCorpus(scratch);
+            Rewrite(scratch, static text => text.Replace("\r\n", "\n", StringComparison.Ordinal)
+                .Replace("\n", "\r\n", StringComparison.Ordinal));
+            var crlf = RunCorpus(scratch);
+
+            Assert.Equal(lf.Summary.ManifestFingerprint, crlf.Summary.ManifestFingerprint);
+            Assert.Equal(
+                lf.Summary.SecurityCorpus?.ManifestFingerprint,
+                crlf.Summary.SecurityCorpus?.ManifestFingerprint);
+            Assert.NotNull(lf.Summary.SecurityCorpus?.ManifestFingerprint);
+        }
+        finally
+        {
+            try { Directory.Delete(scratch, recursive: true); }
+            catch (IOException) { /* best effort */ }
+        }
+    }
+
+    [Fact]
+    public void CorpusRunner_RefusesACaseThatHidesInTheUnhashedBaselinesDirectory()
+    {
+        // baselines/ is excluded from the fingerprint. A case evaluated from there would be
+        // evidence that can be rewritten without moving the fingerprint the accumulator and the
+        // baseline diff both rely on.
+        var scratch = Path.Combine(
+            Path.GetDirectoryName(typeof(PreviewQualificationTests).Assembly.Location)!,
+            "corpus-baseline-case-tests",
+            Guid.NewGuid().ToString("N"));
+        CopyDirectory(Path.Combine(FindRepositoryRoot(), "tests", "DevFlow", "InspectorCorpus"), scratch);
+        try
+        {
+            var manifestPath = Path.Combine(scratch, "corpus-manifest.json");
+            var manifest = JsonNode.Parse(File.ReadAllText(manifestPath))!.AsObject();
+            var moved = manifest["cases"]!.AsArray()
+                .First(node => node!["kind"]!.GetValue<string>() == "no-repair")!.AsObject();
+            var sourceFile = moved["file"]!.GetValue<string>();
+            Directory.CreateDirectory(Path.Combine(scratch, "baselines"));
+            var hiddenName = Path.GetFileName(sourceFile);
+            File.Move(
+                Path.Combine(scratch, sourceFile.Replace('/', Path.DirectorySeparatorChar)),
+                Path.Combine(scratch, "baselines", hiddenName));
+            moved["file"] = "baselines/" + hiddenName;
+            File.WriteAllText(manifestPath, manifest.ToJsonString());
+
+            var summary = RunCorpus(scratch).Summary;
+
+            Assert.Contains("corpus-case-path-invalid", summary.Errors);
         }
         finally
         {

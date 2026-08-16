@@ -184,7 +184,13 @@ internal static class FlowQualificationCommands
         var split = metric.SourceCounts.Count == 0
             ? string.Empty
             : " [" + string.Join(", ", metric.SourceCounts.Select(static item => $"{item.Source} {item.Numerator}/{item.Denominator}")) + "]";
-        return $"{metric.Numerator}/{metric.Denominator} (independent {metric.IndependentEvaluations}){split}";
+        // What produced the number belongs beside the number. A reader scanning console output
+        // should not have to open the JSON to find out that a clean rate was scored by the harness
+        // against its own expectations.
+        var exercises = string.IsNullOrWhiteSpace(metric.Exercises?.Kind)
+            ? string.Empty
+            : $" exercises={metric.Exercises!.Kind}";
+        return $"{metric.Numerator}/{metric.Denominator} (independent {metric.IndependentEvaluations}){split}{exercises}";
     }
 
     /// <summary>

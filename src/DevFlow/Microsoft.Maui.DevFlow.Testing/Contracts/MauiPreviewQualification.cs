@@ -532,14 +532,19 @@ public static class MauiQualificationMetricProvenanceKinds
     /// </summary>
     public const string HarnessLocalRules = "harness-local-rules";
 
-    /// <summary>The observation was supplied by the run that submitted the sample.</summary>
+    /// <summary>
+    /// The observation was supplied by the run that submitted the sample. Nothing in this report
+    /// checked which code the submitting run used, so this kind is a claim, not a verification.
+    /// </summary>
     public const string SampleSupplied = "sample-supplied";
 
     /// <summary>
-    /// True when the observation came from product code rather than from rules re-implemented in
-    /// the qualification harness. <see cref="SampleSupplied"/> qualifies because a submitting run
-    /// observed the product itself — subject to the standing caveat that a self-reported run file
-    /// is trusted as written. <c>unknown</c> and an absent declaration never qualify.
+    /// True when the observation is claimed to come from product code rather than from rules
+    /// re-implemented in the qualification harness. <see cref="SampleSupplied"/> qualifies because a
+    /// submitting run observed the product itself — subject to the standing caveat that a
+    /// self-reported run file is trusted as written, which is why the product-analyzer-coverage
+    /// gate reports it separately from <see cref="ShippedAnalyzer"/> instead of merging the two
+    /// into one pass. <c>unknown</c> and an absent declaration never qualify.
     /// </summary>
     public static bool IsProductEvidence(string? kind) =>
         string.Equals(kind, ShippedAnalyzer, StringComparison.Ordinal) ||

@@ -266,7 +266,7 @@
       "exercises": {
         "component": "MauiFlowFailureClassifier.Classify",
         "kind": "shipped-analyzer",
-        "note": "The same classifier entry point MauiFlowRunner and WorkflowRunCoordinator call at runtime. The expected label is corpus ground truth; the observed label is the product's answer."
+        "note": "The same classifier entry point MauiFlowRunner and WorkflowRunCoordinator call at runtime. The expected label is corpus ground truth; the observed label is the product's answer to replay facts the harness derived, so the harness still chooses the classifier's input. Most static cases reach the classifier through a legacy-kind constant table, which exercises far less of it than cases that require precedence resolution."
       }
     },
     "classificationMatrix": {
@@ -685,7 +685,7 @@
     {
       "gateId": "product-analyzer-coverage",
       "status": "not-qualified",
-      "message": "Metrics scored by harness-local rules instead of the shipped analyzer: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour.",
+      "message": "Scored by harness-local rules instead of the shipped analyzer: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour.",
       "reasonCodes": [
         "corpus-does-not-exercise-shipped-analyzer"
       ],
@@ -769,7 +769,7 @@
     {
       "code": "gate-product-analyzer-coverage-not-qualified",
       "severity": "warning",
-      "message": "Metrics scored by harness-local rules instead of the shipped analyzer: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour."
+      "message": "Scored by harness-local rules instead of the shipped analyzer: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour."
     },
     {
       "code": "gate-selector-stability-not-qualified",

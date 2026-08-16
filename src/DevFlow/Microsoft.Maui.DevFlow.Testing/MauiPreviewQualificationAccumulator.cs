@@ -358,6 +358,14 @@ public static class MauiPreviewQualificationAccumulator
                 reasons.Add("accumulate-incoherent-metric");
                 break;
             }
+            // A declared provenance is checkable against the sources the metric counted, so it is
+            // checked rather than trusted. Otherwise a hand-edited run file could keep an honest
+            // curated denominator and simply relabel what produced it.
+            if (!ProvenanceMatchesSources(metric))
+            {
+                reasons.Add("accumulate-provenance-mismatch");
+                break;
+            }
         }
         // Static evidence is a property of the corpus, and the corpus fingerprint already had to
         // match. A run whose static counts nevertheless differ is describing a different corpus
@@ -494,6 +502,35 @@ public static class MauiPreviewQualificationAccumulator
             .Select(static count => $"{count.Source}:{count.Numerator}/{count.Denominator}/{count.IndependentEvaluations}");
 
     /// <summary>
+    /// A metric's declared provenance is derivable from the sources it counted, so it is verified
+    /// rather than trusted. The rule mirrors how the per-run evaluator assigns it: the gates read
+    /// the independent subset when there is one, a subset that is entirely device-backed was scored
+    /// by the submitting run, and a subset holding any statically scored sample was scored here.
+    /// The exact static component is not asserted — that legitimately changes when the corpus is
+    /// rewired — but the two directions of the claim cannot be swapped.
+    /// </summary>
+    private static bool ProvenanceMatchesSources(MauiQualificationRateMetric metric)
+    {
+        var declared = metric.Exercises?.Kind;
+        if (metric.Denominator <= 0 || string.IsNullOrWhiteSpace(declared))
+            return true;
+        var counts = (metric.SourceCounts ?? []).Where(static count => count.Denominator > 0).ToList();
+        if (counts.Count == 0)
+            return true;
+        var judged = counts.Where(static count => count.IndependentEvaluations > 0).ToList();
+        if (judged.Count == 0)
+            judged = counts;
+        var deviceOnly = judged.All(static count => !MauiQualificationSampleSources.IsStatic(count.Source));
+        var selfReported = string.Equals(
+            declared,
+            MauiQualificationMetricProvenanceKinds.SampleSupplied,
+            StringComparison.Ordinal);
+        // Device-only evidence cannot have been scored by this harness, and evidence that includes
+        // statically scored samples cannot have been observed entirely by a submitting run.
+        return deviceOnly == selfReported;
+    }
+
+    /// <summary>
     /// Compares every threshold the contract carries, not the subset the gates happen to read
     /// today. A run shipping <c>minimumCleanFirstAttemptsPerTier1Flow: 1</c> is describing a
     /// different policy than the one being enforced, and merging it would mean publishing its
@@ -622,8 +659,9 @@ public static class MauiPreviewQualificationAccumulator
     /// <summary>
     /// Merges what the contributing runs actually exercised. Conjunctive, like independence: if any
     /// contributor scored a sample with harness-local rules, the merged number did too, and pooling
-    /// must not launder it into product evidence. Disagreement about the component itself is
-    /// reported rather than resolved.
+    /// must not launder it into product evidence. A contributor that carried evidence but declared
+    /// no component is treated as <c>unknown</c> for the same reason — silence is not a claim of
+    /// product provenance. Disagreement about the component itself is reported rather than resolved.
     /// </summary>
     private static MauiQualificationMetricProvenance? MergeExercises(
         IReadOnlyList<MauiQualificationRateMetric> contributing)
@@ -636,21 +674,34 @@ public static class MauiPreviewQualificationAccumulator
         if (declared.Count == 0)
             return null;
 
+        // A contributor with an empty denominator legitimately has nothing to declare. One that
+        // counted samples and still declared nothing is the case this guards.
+        var undeclared = contributing.Count(static metric => metric.Exercises is null && metric.Denominator > 0);
         var components = declared
             .Select(static exercises => exercises.Component ?? "unknown")
             .Distinct(StringComparer.Ordinal)
             .OrderBy(static component => component, StringComparer.Ordinal)
             .ToList();
+        if (undeclared > 0)
+        {
+            components.Add("undeclared");
+            components = components.Distinct(StringComparer.Ordinal).OrderBy(static c => c, StringComparer.Ordinal).ToList();
+            return new MauiQualificationMetricProvenance
+            {
+                Component = string.Join(" + ", components),
+                Kind = "unknown",
+                Note = $"{undeclared} contributing run(s) counted samples without declaring what produced them, "
+                    + "so the merged total cannot claim any provenance.",
+            };
+        }
+
         var weakest = declared.FirstOrDefault(static exercises =>
             !MauiQualificationMetricProvenanceKinds.IsProductEvidence(exercises.Kind)) ?? declared[0];
-        var undeclared = contributing.Count - declared.Count;
         return new MauiQualificationMetricProvenance
         {
             Component = components.Count == 1 ? components[0] : string.Join(" + ", components),
             Kind = weakest.Kind,
-            Note = undeclared > 0
-                ? $"{weakest.Note} {undeclared} contributing run(s) declared no component."
-                : weakest.Note,
+            Note = weakest.Note,
         };
     }
 
@@ -749,6 +800,17 @@ public static class MauiPreviewQualificationAccumulator
                     ? ["no-repair-evaluation-count-insufficient"]
                     : ["false-heal-observed"],
         });
+
+        // The same disclosure the per-run report carries. Without it, --accumulate --fail-on-non-pass
+        // — which is what CI reads — would return pass on a merged total whose every observation was
+        // scored by the harness against its own expectations.
+        accumulation.Gates.Add(MauiPreviewQualificationGateEvaluator.BuildProductAnalyzerCoverageGate(
+            new[] { "repairPrecision", "repairRecall", "falseHeals", "abstention", "classificationAccuracy" }
+                .Select(name =>
+                {
+                    var metric = accumulation.Metrics.GetValueOrDefault(name);
+                    return (Name: name, Denominator: metric?.Denominator ?? 0, Exercises: metric?.Exercises);
+                })));
 
         var flows = accumulation.FirstAttemptFlows;
         var firstAttemptReasons = new List<string>();

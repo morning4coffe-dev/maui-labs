@@ -132,6 +132,17 @@ public static class MauiPreviewQualificationGateEvaluator
                 sample.ObservedFailureClass is not null)
             .ToList();
 
+        // The corpus already publishes whether its runner calls the shipped analyzer. Reading that
+        // fact here, instead of repeating a literal, means rewiring the runner moves the gate — and
+        // that the two disclosures cannot drift into contradicting each other.
+        var corpusScoresWithProduct = input.Corpus?.ExercisesShippedAnalyzer == true;
+        var corpusKind = corpusScoresWithProduct
+            ? MauiQualificationMetricProvenanceKinds.ShippedAnalyzer
+            : MauiQualificationMetricProvenanceKinds.HarnessLocalRules;
+        var corpusNote = corpusScoresWithProduct
+            ? "Scored by the shipped selector-health analyzer, as declared by the corpus summary."
+            : HarnessRuleNote;
+
         return new MauiQualificationMetrics
         {
             RecordingValidity = BuildRate(
@@ -145,32 +156,32 @@ public static class MauiPreviewQualificationGateEvaluator
                 independentDeviceRuns: repair.Count > 0 && repair.All(IsRealDeviceSample),
                 thresholds.ConfidenceLevel,
                 staticComponent: "MauiPreviewQualificationCorpusRunner.EvaluateRepairFixture",
-                staticKind: MauiQualificationMetricProvenanceKinds.HarnessLocalRules,
-                staticNote: HarnessRuleNote),
+                staticKind: corpusKind,
+                staticNote: corpusNote),
             RepairRecall = BuildRate(
                 repairExpected,
                 static sample => sample.RepairProposed == true && sample.RepairCorrect == true,
                 independentDeviceRuns: repairExpected.Count > 0 && repairExpected.All(IsRealDeviceSample),
                 thresholds.ConfidenceLevel,
                 staticComponent: "MauiPreviewQualificationCorpusRunner.EvaluateRepairFixture",
-                staticKind: MauiQualificationMetricProvenanceKinds.HarnessLocalRules,
-                staticNote: HarnessRuleNote),
+                staticKind: corpusKind,
+                staticNote: corpusNote),
             FalseHeals = BuildRate(
                 noRepair,
                 static sample => sample.FalseHeal == true,
                 independentDeviceRuns: noRepair.Count > 0 && noRepair.All(IsRealDeviceSample),
                 thresholds.ConfidenceLevel,
                 staticComponent: "MauiPreviewQualificationCorpusRunner.EvaluateFixture",
-                staticKind: MauiQualificationMetricProvenanceKinds.HarnessLocalRules,
-                staticNote: HarnessRuleNote),
+                staticKind: corpusKind,
+                staticNote: corpusNote),
             Abstention = BuildRate(
                 abstention,
                 static sample => sample.Abstained == true,
                 independentDeviceRuns: noRepair.Count > 0 && noRepair.All(IsRealDeviceSample),
                 thresholds.ConfidenceLevel,
                 staticComponent: "MauiPreviewQualificationCorpusRunner.EvaluateFixture",
-                staticKind: MauiQualificationMetricProvenanceKinds.HarnessLocalRules,
-                staticNote: HarnessRuleNote),
+                staticKind: corpusKind,
+                staticNote: corpusNote),
             SelectorStability = BuildRate(
                 deviceSelector,
                 static sample => sample.SelectorStable == true,
@@ -193,8 +204,11 @@ public static class MauiPreviewQualificationGateEvaluator
                 staticComponent: "MauiFlowFailureClassifier.Classify",
                 staticKind: MauiQualificationMetricProvenanceKinds.ShippedAnalyzer,
                 staticNote: "The same classifier entry point MauiFlowRunner and WorkflowRunCoordinator "
-                    + "call at runtime. The expected label is corpus ground truth; the observed "
-                    + "label is the product's answer."),
+                    + "call at runtime. The expected label is corpus ground truth; the observed label "
+                    + "is the product's answer to replay facts the harness derived, so the harness "
+                    + "still chooses the classifier's input. Most static cases reach the classifier "
+                    + "through a legacy-kind constant table, which exercises far less of it than "
+                    + "cases that require precedence resolution."),
             ClassificationMatrix = BuildClassificationMatrix(classification),
             Calibration = calibration,
             TimeToDiagnosis = diagnosis,
@@ -266,6 +280,7 @@ public static class MauiPreviewQualificationGateEvaluator
                 ? null
                 : Exercised(
                     independentSamples.Count > 0 ? independentSamples : samples,
+                    samples,
                     staticComponent,
                     staticKind,
                     staticNote ?? string.Empty),
@@ -279,30 +294,55 @@ public static class MauiPreviewQualificationGateEvaluator
     /// statically scored sample takes the static kind, because pooling must not upgrade what a
     /// number measures.
     /// </summary>
+    /// <param name="judged">
+    /// The subset the gates read, which is what the kind describes.
+    /// </param>
+    /// <param name="all">
+    /// Every sample in the denominator, so the note can disclose statically scored samples that the
+    /// judged subset excluded rather than implying the report scored nothing.
+    /// </param>
     private static MauiQualificationMetricProvenance? Exercised(
-        IReadOnlyList<MauiQualificationExecutionSample> samples,
+        IReadOnlyList<MauiQualificationExecutionSample> judged,
+        IReadOnlyList<MauiQualificationExecutionSample> all,
         string staticComponent,
         string staticKind,
         string staticNote)
     {
-        if (samples.Count == 0)
+        if (judged.Count == 0)
             return null;
-        var deviceOnly = samples.All(IsRealDeviceSample);
+        // The question here is "which code decided this observation", not "is this attested
+        // real-device evidence". Only static sources are read from corpus files and scored by the
+        // runner; everything else arrived with the run. Using the stricter real-device test would
+        // attribute an under-attested sample to a corpus evaluator that never saw it, and would
+        // put this label out of step with the source counts published beside it.
+        static bool ScoredHere(MauiQualificationExecutionSample sample) =>
+            MauiQualificationSampleSources.IsStatic(NormalizeSource(sample.Source));
+        var deviceOnly = !judged.Any(ScoredHere);
         if (deviceOnly)
         {
+            // Symmetry with the static branch below: a metric whose gate-carrying subset came from
+            // the run can still have statically scored samples pooled into its published
+            // denominator, and "this report did not score it" would misdescribe those.
+            var scoredHere = all.Count(ScoredHere);
+            var note = "Observed by the run that submitted the sample. This report did not score it.";
+            if (scoredHere > 0)
+            {
+                note += $" Pooled with {scoredHere} sample(s) scored by {staticComponent}, "
+                    + "which the gates exclude but the published denominator includes.";
+            }
             return new MauiQualificationMetricProvenance
             {
                 Component = "submitting-run",
                 Kind = MauiQualificationMetricProvenanceKinds.SampleSupplied,
-                Note = "Observed by the run that submitted the sample. This report did not score it.",
+                Note = note,
             };
         }
-        var mixed = samples.Any(IsRealDeviceSample);
+        var mixed = judged.Any(static sample => !ScoredHere(sample));
         return new MauiQualificationMetricProvenance
         {
             Component = staticComponent,
             Kind = staticKind,
-            Note = mixed ? $"{staticNote} Pooled with device-supplied samples." : staticNote,
+            Note = mixed ? $"{staticNote} Pooled with run-supplied samples." : staticNote,
         };
     }
 
@@ -764,7 +804,12 @@ public static class MauiPreviewQualificationGateEvaluator
     /// it. This gate exists so that fact is carried in the report and the committed baseline
     /// permanently, rather than living only in a comment: a large clean denominator produced by
     /// harness rules must never be mistaken for evidence that the product behaves correctly.
-    /// It cannot reach <c>pass</c> until the corpus calls the shipped analyzer.
+    /// <para>
+    /// The gate never claims coverage it did not observe. <c>shipped-analyzer</c> is the only kind
+    /// this report verified by calling the product itself; <c>sample-supplied</c> means a submitting
+    /// run asserted the observation and nothing here checked which code made it, so a pass carries
+    /// <c>provenance-self-reported</c> and says so in the message.
+    /// </para>
     /// </summary>
     private static void AddProductAnalyzerCoverageGate(MauiPreviewQualificationReport report)
     {
@@ -776,28 +821,103 @@ public static class MauiPreviewQualificationGateEvaluator
             ("abstention", report.Metrics.Abstention),
             ("classificationAccuracy", report.Metrics.ClassificationAccuracy),
         };
-        var harnessScored = metrics
-            .Where(static entry => entry.Metric.Denominator > 0 &&
-                !MauiQualificationMetricProvenanceKinds.IsProductEvidence(entry.Metric.Exercises?.Kind))
+        report.Gates.Add(BuildProductAnalyzerCoverageGate(
+            metrics.Select(static entry => (entry.Name, entry.Metric.Denominator, entry.Metric.Exercises))));
+    }
+
+    /// <summary>
+    /// Shared by the per-run report and the accumulated verdict so a merged result cannot report
+    /// coverage the runs it merged never had.
+    /// </summary>
+    internal static MauiQualificationGateResult BuildProductAnalyzerCoverageGate(
+        IEnumerable<(string Name, int Denominator, MauiQualificationMetricProvenance? Exercises)> metrics)
+    {
+        var scored = metrics.Where(static entry => entry.Denominator > 0).ToList();
+        if (scored.Count == 0)
+        {
+            // Absent evidence is not coverage. Every other gate in this file answers
+            // "nothing was measured" with not-qualified, and so does this one.
+            return new MauiQualificationGateResult
+            {
+                GateId = "product-analyzer-coverage",
+                Status = MauiPreviewQualificationStates.NotQualified,
+                Message = "No gated metric carried any evidence, so nothing is known about what produced it.",
+                ReasonCodes = ["product-analyzer-coverage-evidence-missing"],
+            };
+        }
+
+        static string Describe(IEnumerable<string> names) => string.Join(", ", names.OrderBy(static name => name, StringComparer.Ordinal));
+        var harnessScored = scored
+            .Where(static entry => string.Equals(
+                entry.Exercises?.Kind,
+                MauiQualificationMetricProvenanceKinds.HarnessLocalRules,
+                StringComparison.Ordinal))
             .Select(static entry => entry.Name)
-            .OrderBy(static name => name, StringComparer.Ordinal)
             .ToList();
-        var status = harnessScored.Count == 0
-            ? MauiPreviewQualificationStates.Pass
-            : MauiPreviewQualificationStates.NotQualified;
-        report.Gates.Add(new MauiQualificationGateResult
+        var undeclared = scored
+            .Where(static entry => !MauiQualificationMetricProvenanceKinds.IsProductEvidence(entry.Exercises?.Kind) &&
+                !string.Equals(
+                    entry.Exercises?.Kind,
+                    MauiQualificationMetricProvenanceKinds.HarnessLocalRules,
+                    StringComparison.Ordinal))
+            .Select(static entry => entry.Name)
+            .ToList();
+        var selfReported = scored
+            .Where(static entry => string.Equals(
+                entry.Exercises?.Kind,
+                MauiQualificationMetricProvenanceKinds.SampleSupplied,
+                StringComparison.Ordinal))
+            .Select(static entry => entry.Name)
+            .ToList();
+
+        if (harnessScored.Count > 0 || undeclared.Count > 0)
+        {
+            var reasons = new List<string>();
+            var parts = new List<string>();
+            if (harnessScored.Count > 0)
+            {
+                reasons.Add("corpus-does-not-exercise-shipped-analyzer");
+                parts.Add($"Scored by harness-local rules instead of the shipped analyzer: {Describe(harnessScored)}. "
+                    + "These measure agreement between the harness and its own expectations, not product behaviour.");
+            }
+            if (undeclared.Count > 0)
+            {
+                reasons.Add("provenance-undeclared");
+                parts.Add($"Declared no component: {Describe(undeclared)}. An undeclared metric is not coverage.");
+            }
+            return new MauiQualificationGateResult
+            {
+                GateId = "product-analyzer-coverage",
+                Status = MauiPreviewQualificationStates.NotQualified,
+                Message = string.Join(" ", parts),
+                ReasonCodes = reasons,
+            };
+        }
+
+        // Nothing was harness-scored. Say which part of that this report verified and which part it
+        // is taking on the submitting run's word — never "produced by the shipped analyzer" when the
+        // only basis is a sample source string.
+        var verified = scored
+            .Where(static entry => string.Equals(
+                entry.Exercises?.Kind,
+                MauiQualificationMetricProvenanceKinds.ShippedAnalyzer,
+                StringComparison.Ordinal))
+            .Select(static entry => entry.Name)
+            .ToList();
+        var message = verified.Count > 0
+            ? $"Produced by the shipped analyzer: {Describe(verified)}."
+            : "No gated metric was scored by harness-local rules.";
+        if (selfReported.Count > 0)
+        {
+            message += $" Self-reported by the submitting run, not verified here: {Describe(selfReported)}.";
+        }
+        return new MauiQualificationGateResult
         {
             GateId = "product-analyzer-coverage",
-            Status = status,
-            Message = status == MauiPreviewQualificationStates.Pass
-                ? "Every scored metric was produced by the shipped analyzer."
-                : "Metrics scored by harness-local rules instead of the shipped analyzer: "
-                    + string.Join(", ", harnessScored)
-                    + ". These measure agreement between the harness and its own expectations, not product behaviour.",
-            ReasonCodes = status == MauiPreviewQualificationStates.Pass
-                ? []
-                : ["corpus-does-not-exercise-shipped-analyzer"],
-        });
+            Status = MauiPreviewQualificationStates.Pass,
+            Message = message,
+            ReasonCodes = selfReported.Count > 0 ? ["provenance-self-reported"] : [],
+        };
     }
 
     private static void AddSelectorStabilityGate(MauiPreviewQualificationReport report, MauiQualificationGateThresholds thresholds)

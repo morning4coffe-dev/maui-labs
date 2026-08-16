@@ -63,22 +63,43 @@ This is stated in the report itself rather than only here:
 - Every rate metric carries `exercises: { component, kind }`. `kind` is `harness-local-rules` for
   the four metrics above and `shipped-analyzer` for `classificationAccuracy`.
 - The `product-analyzer-coverage` gate is `not-qualified` and lists exactly which metrics are
-  harness-scored. It cannot reach `pass` until the corpus calls the shipped analyzer.
+  harness-scored. It is evaluated both per-run and over an accumulated verdict, so
+  `--accumulate --fail-on-non-pass` sees it too. The gate reaches `pass` only when nothing was
+  harness-scored, and when the basis is a run's own assertion rather than an analyzer call it
+  passes with the reason code `provenance-self-reported` and says so in its message — it never
+  reports coverage it did not verify.
 - `MauiPreviewQualificationAccumulator` merges `exercises` conjunctively, so pooling a
   harness-scored run with a device-backed one does not upgrade what the merged number measures.
+  A contributing run that counted samples without declaring a component makes the merged kind
+  `unknown`, and a run whose declared kind contradicts its own `sourceCounts` is rejected with
+  `accumulate-provenance-mismatch`.
 
-`classificationAccuracy` is the exception: the observed label comes from
+`classificationAccuracy` is the exception, with a caveat. The observed label does come from
 `MauiFlowFailureClassifier.Classify`, the same entry point `MauiFlowRunner`, `WorkflowRunCoordinator`
-and `MauiFlowTriage` call at runtime. Its 8 independent evaluations are small, but they are real
-product observations.
+and `MauiFlowTriage` call at runtime — that part is not theatre. But the harness still chooses the
+classifier's **input**: `BuildFailureFacts` derives a `LegacyFailureKind` using its own
+`InferLegacyFailureKind`, and for most static cases `Classify` then resolves that through the
+`FromLegacyFailureKind` constant table, which is closer to a rename than to a decision. Only the
+cases that force precedence resolution (currently the route-drift case) exercise the classifier's
+real logic. Read the 8 independent evaluations as "the classifier is reachable and its constant
+mapping is correct", not as "the classifier was tested".
 
-**Fixing this is worth more than any further corpus growth.** It requires expressing each fixture as
-a `MauiFlow` plus `LiveElements` so `MauiSelectorHealthAnalysisInput` can be built, which is a
-corpus format change, not a runner tweak — the current fixtures are ad-hoc JSON shapes
-(`recordedRoute`/`observedRoute`, `androidCandidateKinds`, `hardAssertion`) with no flow structure.
-`Corpus_KeepsTheAnalyzerCoverageDisclosureHonestWhenTheRunnerChanges` fails if the runner starts
-calling the analyzer without this disclosure being updated, and also if the disclosure is flipped
-without the wiring.
+**Fixing this is worth more than any further corpus growth.** Two parts, with different costs:
+
+- **Repair *eligibility* is closeable today.** `Classify` already returns `RepairEligible` from the
+  same facts `EvaluateRepairFixture` builds, so the runner could defer to it instead of deciding
+  eligibility itself. This is a runner change, not a format change.
+- **Selector-health *diagnostics* need the format redesign.** Calling
+  `MauiSelectorHealthAnalyzer.Analyze` requires building a `MauiSelectorHealthAnalysisInput` from a
+  `MauiFlow` plus `LiveElements` and a plan, and the current fixtures are ad-hoc JSON shapes
+  (`recordedRoute`/`observedRoute`, `androidCandidateKinds`, `hardAssertion`) with no flow
+  structure. That is a corpus format change.
+
+`Corpus_KeepsTheAnalyzerCoverageDisclosureHonestWhenTheRunnerChanges` fails if the disclosure ever
+claims more than the code does — it scans the whole `Microsoft.Maui.DevFlow.Testing` directory for a
+real (non-comment) analyzer call and asserts the summary never declares coverage without one. It is
+deliberately one-directional: a test that demanded equality could end up *insisting* on an
+overstatement.
 
 ## Statistical power of the generated share
 

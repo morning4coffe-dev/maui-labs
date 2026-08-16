@@ -1,4 +1,5 @@
 using System.CommandLine;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Testing = Microsoft.Maui.DevFlow.Testing;
@@ -168,9 +169,9 @@ internal static class FlowCommitCommands
             document["flow"] = reference;
         }
 
-        var previousDigest = (string?)reference["digest"];
+        var previousDigest = ReadString(reference, "digest");
         var current =
-            string.Equals((string?)reference["path"], flowFileName, StringComparison.Ordinal) &&
+            string.Equals(ReadString(reference, "path"), flowFileName, StringComparison.Ordinal) &&
             string.Equals(previousDigest, digest, StringComparison.OrdinalIgnoreCase) &&
             IdentityMatches(reference, flowId, flowRevision);
 
@@ -214,18 +215,26 @@ internal static class FlowCommitCommands
         // and the count is reported rather than silently absorbed.
         var removedApprovals = DropSupersededApprovals(document, digest);
 
-        var serialized = document.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
-        await File.WriteAllTextAsync(fullPlanPath, serialized + Environment.NewLine, cancellationToken)
-            .ConfigureAwait(false);
+        var serialized = document.ToJsonString(new JsonSerializerOptions
+        {
+            WriteIndented = true,
+            Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        });
 
-        // Prove the written sidecar is one `flow run` will now accept rather than trusting the edit.
+        // Prove the rewritten sidecar is one `flow run` will accept *before* it replaces the
+        // author's file. Validating after the write would leave a rejected sidecar on disk while
+        // reporting failure, destroying plan content the operator still believes they have.
         var verification = Testing.MauiTestPlanValidator.ValidateJson(serialized, out var plan);
         if (!verification.IsValid || plan is null)
         {
             throw new FlowCommitException(
                 "plan-invalid",
-                "The re-bound plan sidecar is not valid: " + string.Join("; ", verification.Errors));
+                "The re-bound plan sidecar is not valid, so the existing sidecar was left untouched: "
+                    + string.Join("; ", verification.Errors));
         }
+
+        await WriteAtomicAsync(fullPlanPath, serialized + Environment.NewLine, cancellationToken)
+            .ConfigureAwait(false);
 
         return new FlowCommitCliResult
         {
@@ -242,13 +251,56 @@ internal static class FlowCommitCommands
 
     private static bool IdentityMatches(JsonObject reference, string? flowId, int? flowRevision)
     {
-        if (flowId is not null && !string.Equals((string?)reference["flowId"], flowId, StringComparison.Ordinal))
+        if (flowId is not null && !string.Equals(ReadString(reference, "flowId"), flowId, StringComparison.Ordinal))
             return false;
-        if (flowRevision is not null && (int?)reference["revision"] != flowRevision)
+        if (flowRevision is not null && ReadInt(reference, "revision") != flowRevision)
             return false;
         return true;
     }
 
+    /// <summary>
+    /// Reads a JSON string member without throwing on a wrong type. A sidecar is operator-authored
+    /// text, so a numeric <c>"digest"</c> is an input the command has to report, not crash on.
+    /// </summary>
+    private static string? ReadString(JsonObject owner, string name)
+        => owner[name] is JsonValue value && value.GetValueKind() == JsonValueKind.String
+            ? value.GetValue<string>()
+            : null;
+
+    private static int? ReadInt(JsonObject owner, string name)
+        => owner[name] is JsonValue value &&
+           value.GetValueKind() == JsonValueKind.Number &&
+           value.TryGetValue<int>(out var parsed)
+            ? parsed
+            : null;
+
+    private static async Task WriteAtomicAsync(string path, string contents, CancellationToken cancellationToken)
+    {
+        var temporary = path + ".tmp-" + Guid.NewGuid().ToString("n");
+        try
+        {
+            await File.WriteAllTextAsync(temporary, contents, cancellationToken).ConfigureAwait(false);
+            File.Move(temporary, path, overwrite: true);
+        }
+        catch
+        {
+            try
+            {
+                File.Delete(temporary);
+            }
+            catch (IOException)
+            {
+            }
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Retains an approval only when it names the new flow bytes. An approval with no digest, a
+    /// blank digest, or a non-object entry cannot vouch for any particular bytes, so carrying it
+    /// forward would assert a review that never happened; it is dropped and counted like any other
+    /// superseded approval.
+    /// </summary>
     private static int DropSupersededApprovals(JsonObject document, string digest)
     {
         if (document["approvals"] is not JsonArray approvals)
@@ -259,8 +311,8 @@ internal static class FlowCommitCommands
         foreach (var entry in approvals.ToArray())
         {
             approvals.Remove(entry);
-            var bound = entry is JsonObject approval ? (string?)approval["digest"] : null;
-            if (!string.IsNullOrWhiteSpace(bound) &&
+            var bound = entry is JsonObject approval ? ReadString(approval, "digest") : null;
+            if (string.IsNullOrWhiteSpace(bound) ||
                 !string.Equals(bound, digest, StringComparison.OrdinalIgnoreCase))
             {
                 removed++;

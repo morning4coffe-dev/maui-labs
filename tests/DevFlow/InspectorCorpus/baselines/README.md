@@ -53,8 +53,8 @@ maui devflow flow qualify `
 
 The comparison fails (nonzero exit) when:
 
-- `repairPrecision`, `selectorStability`, `classificationAccuracy`, or
-  `flakeFirstAttemptStability` **rate** drops below the baseline rate;
+- `repairPrecision`, `repairRecall`, `recordingValidity`, `selectorStability`,
+  `classificationAccuracy`, or `flakeFirstAttemptStability` **rate** drops below the baseline rate;
 - any of those metrics' **denominator** or **independentEvaluations** falls below the baseline;
 - the `falseHeals` **numerator** rises above the baseline (any escape is a regression);
 - the `falseHeals` **denominator** or **independentEvaluations** falls below the baseline — otherwise
@@ -74,7 +74,10 @@ The comparison fails (nonzero exit) when:
 - `abstention`'s **numerator** falls below the baseline — it counts *correct* abstentions, so
   unlike `falseHeals` it must not shrink;
 - a metric that had evidence in the baseline has none in the current run;
-- a gate that was `pass` in the baseline is no longer `pass`, or has disappeared;
+- any gate's status gets **worse** — ranked `pass` better than `not-qualified` better than `fail` —
+  or the gate has disappeared. Comparing only gates that were passing meant the transition that
+  matters most here, `not-qualified -> fail`, produced no regression line: a flow that finally ran
+  and *failed* looked the same to CI as a flow that still had not run;
 - with `--accumulate`, any accumulated metric regresses against its per-run baseline counterpart —
   including `accumulated.falseHeals` and `accumulated.abstention`, which are compared as counts.
 
@@ -136,18 +139,22 @@ the contract does not model (`accumulate-unmodelled-evidence`); when a rate metr
 do not add up to its totals (`accumulate-incoherent-metric`); or when its static evidence disagrees
 with the reference under a matching corpus fingerprint (`accumulate-static-evidence-mismatch`).
 
-The reference run is the newest member of the **largest self-valid cohort** — runs grouped by
-contract version, platform, policy version, and corpus fingerprint, excluding any run that would
-reject itself. Picking the oldest file instead meant one leftover run from a superseded corpus
-rejected every current run as a fingerprint mismatch, and the merge reported a near-empty result
-with exit 0. Cohort voting is not a defence against forged input — enough forged runs would win the
-vote — but a stale file is an accident that happens, and forgery is already outside what any
-self-reported file can be checked for.
+The reference run is elected by the **actual acceptance predicate**: the run that admits the most
+others wins, ties broken by recency. Grouping on a subset of the compared fields is not enough —
+three ordinary runs differing only in `--generated-no-repair` share contract, platform, policy and
+corpus fingerprint yet reject one another on static evidence, so such a group could win a vote and
+then admit only one of its own members. Picking the oldest file was worse still: one leftover run
+from a superseded corpus rejected every current run and the merge reported a near-empty result with
+exit 0. Losing a run is never harmless — a discarded run never reaches the gates, so a flow that
+measured a real stability failure disappears instead of failing. Election by majority is not a
+proof: enough forged runs would out-vote the genuine ones. Forgery is already outside what a
+self-reported file can be checked for; a stale file is an accident that happens.
 
 **Static evidence is counted once, not summed.** Every accumulated run must share a corpus
 fingerprint — which covers the *contents* of every evaluated `.json` file under the corpus root,
-not just the manifest, and excludes only `baselines/` (generated from the fingerprint, so hashing
-it would never converge) and markdown — so its curated,
+line endings normalised, and excludes only `baselines/` (generated from the fingerprint, so hashing
+it would never converge) and markdown. The manifest is forbidden from resolving a case into
+`baselines/`, so nothing evaluated is outside the hash. So its curated,
 curated-derived, and generated counts are re-reads of the same files. Only `device-backed` counts
 are summed across runs; an unrecognised source name is refused outright
 (`accumulate-unknown-sample-source`) rather than quietly treated as one or the other. Running the
@@ -179,7 +186,16 @@ Because that sum is the only place new evidence enters, it carries the tightest 
 - a flow claiming `realDeviceEvidence` in a run that names no real device is refused
   (`accumulate-unattributed-device-evidence`);
 - each merged flow publishes `contributingRuns` and `contributingDevices`, so 100 attempts arriving
-  as 5 runs on 5 devices is legible as such — and 100 arriving as 5 runs on 1 device is too.
+  as 5 runs on 5 devices is legible as such — and 100 arriving as 5 runs on 1 device is too. Read
+  `contributingDevices` precisely: it is the number of distinct real devices declared by the runs
+  that contributed to that flow, not a claim that the flow executed on each of them. One run
+  declaring five profiles reports five, on twenty attempts.
+
+Runs must also agree on **what was tested**, not just how: `accumulate-product-identity-mismatch`
+refuses to pool runs whose repository commit, testing package version, package id or fingerprint,
+or tool version or fingerprint disagree. A stability number spanning a regression and its fix
+describes neither build — and without this check, varying the claimed commit minted "independent"
+runs just as effectively as varying `deviceFingerprint`, while looking like ordinary metadata.
 
 **Runs must be distinguishable to count.** `accumulate-duplicate-run` rejects any run whose
 evidence fingerprint — contract version, platform, status, identity fingerprints, corpus summary,
@@ -201,4 +217,8 @@ generate run files from CI, never by hand — not a property the merge can enfor
 judge each flow on its own evidence and take the worst verdict. A flow with a sufficient sample
 that misses the stability threshold is a `fail` even when a sibling flow has not run yet; pooling
 the reason codes used to downgrade that to `not-qualified`, which reports exit 0 on a measured
-regression.
+regression. One consequence worth stating: a *merged* flow that reached the attempt threshold while
+some contributing run declined to call it real-device evidence reports `fail`, not
+`not-qualified` — "we have attempts we cannot attribute to a device" is treated as a failure of the
+measurement rather than an absence of it. The direction is deliberate; the wording of the reason
+code is what tells the two apart.

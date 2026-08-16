@@ -76,7 +76,7 @@ corpus summary:
 | `generatedNoRepairCases` | 300 |
 | `curatedClassificationLabeledCases` | 45 |
 | `undeclaredProjectionCollisions` | 0 |
-| `undeclaredShapeCollisions` | 5 |
+| `undeclaredShapeCollisions` | 7 |
 
 Read `curatedCases` **with** `curatedDerivedCases`: 58 files are 28 original cases plus 30
 restatements of one of them.
@@ -107,8 +107,9 @@ Rather than leave that to be discovered, the artifact records it:
   before the 30 cases were added.
 - `maui devflow flow qualify --accumulate` counts static evidence **once** no matter how many runs
   report it, because every accumulated run must share a corpus fingerprint — which covers the
-  contents of every evaluated `.json` file under this directory, not just the manifest — and
-  therefore re-reads the same files. Only `device-backed` counts are summed across runs.
+  contents of every evaluated `.json` file under this directory (line endings normalised, and the
+  manifest may not point a case into the unhashed `baselines/`) — and therefore re-reads the same
+  files. Only `device-backed` counts are summed across runs.
 
 **The split is still self-declared.** Nothing forces a case that copies a seed to say so. A clone
 that simply omits `provenance.derivedFrom` and claims `hand-authored` would be counted as a 31st
@@ -118,20 +119,33 @@ independent trial. Two counters disclose that, and neither is a gate:
   **evaluation outputs** project identically onto another case's — same kind, disposition, repair
   eligibility, pass/fail, expected and observed class, classification basis, diagnostic ids,
   candidate kinds, and ineligibility codes.
-- `corpus.undeclaredShapeCollisions` (currently `5`) counts undeclared cases whose **fixture
-  shape** — the set of JSON key paths, all values discarded — contains another same-kind case's
-  shape. This is the one that survives evasion: a clone can perturb `checkpointMismatches` until
-  its diagnostics differ, or bolt on an extra key, and still be counted here.
+- `corpus.undeclaredShapeCollisions` (currently `7`) counts undeclared cases whose **fixture
+  shape** — the set of JSON key paths, all values discarded — is a superset of another same-kind
+  case's shape, or within two key paths of it. It catches restatements the projection counter
+  misses, because it ignores the values a clone would perturb to change its diagnostics.
 
 Read these honestly. The first counter catches naive duplication — a copied file with the
 provenance line deleted — which is exactly the mistake that produced the 30 derived cases in the
 first place. It does **not** catch a determined clone: perturb an evidence-neutral fixture value
-until the ineligibility codes differ and the projection no longer matches. The second counter is
-harder to dodge but is not proof of anything either: `5` today is five genuinely distinct curated
-cases that happen to ask a strictly wider version of another case's question. Both are floors in
-the baseline diff — they must not grow — and both are **disclosures, not rejections**. Neither
-establishes that a case is original; they make an undeclared restatement something a reviewer has
-to argue for rather than something that passes unremarked.
+until the ineligibility codes differ and the projection no longer matches. The second is harder to
+dodge, and neither is proof of anything. Containment alone was evadable in a single edit — add one
+ignored key *and* delete one optional key and the two shapes become incomparable, so neither
+contains the other — which is why the two-key tolerance exists. An author who adds and deletes
+three keys still gets past it. Both counters are floors in the baseline diff (they must not grow)
+and both are **disclosures, not rejections**. Neither establishes that a case is original; they
+make an undeclared restatement something a reviewer has to argue for rather than something that
+passes unremarked. Only review catches deliberate cloning.
+
+Do not read the current `7` as a reassurance. Five of the seven are exact shape *equality*, not a
+wider question — `xaml-advisory-duplicate/template-automation-id` against
+`xaml-advisory-missing-automation-id`, `csharp-advisory-duplicate-automation-id` and
+`csharp-no-proposal-template-factory` against `csharp-advisory-missing-automation-id`, and
+`repair-no-orientation-seed-display` against `repair-no-login-modal-locale-theme` — the strongest
+signal this counter emits. The remaining two (`repair-no-unknown-completion-infrastructure`,
+`repair-no-imported-untrusted-attested`) sit two key paths from that same seed. Reading those seven
+files shows they are genuinely different evidence, asking the same structural question with
+different content. That is a judgement made by reading them, not a fact the number establishes —
+which is the whole point of publishing it.
 
 Closing the repair-precision gate honestly needs ~100 *materially different* repair scenarios —
 different failure shapes, different candidate sets, different checkpoint outcomes — or real

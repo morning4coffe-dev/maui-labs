@@ -685,7 +685,7 @@ public static class MauiPreviewQualificationAccumulator
         // genuine omission rather than "nothing to declare".
         var undeclared = contributing.Count(static metric => metric.Exercises is null);
         var components = declared
-            .Select(static exercises => exercises.Component ?? MauiQualificationMetricProvenanceKinds.Unknown)
+            .Select(static exercises => exercises.Component ?? MauiQualificationMetricProvenance.UndeclaredComponent)
             .Distinct(StringComparer.Ordinal)
             .OrderBy(static component => component, StringComparer.Ordinal)
             .ToList();

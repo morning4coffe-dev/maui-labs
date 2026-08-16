@@ -1,6 +1,8 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using Microsoft.CodeAnalysis.CSharp;
+using Microsoft.CodeAnalysis.CSharp.Syntax;
 using Microsoft.Maui.DevFlow.Driver;
 using Microsoft.Maui.DevFlow.Testing;
 using YamlDotNet.RepresentationModel;
@@ -2565,10 +2567,23 @@ public sealed class PreviewQualificationTests
         Assert.Equal(0, MauiQualificationMetricProvenanceKinds.Strength("some-future-kind"));
         Assert.Equal(0, MauiQualificationMetricProvenanceKinds.Strength(null));
 
-        // The coverage gate recognises an undeclared component by comparing against this default.
-        var fresh = new MauiQualificationMetricProvenance();
-        Assert.Equal(MauiQualificationMetricProvenance.UndeclaredComponent, fresh.Component);
-        Assert.Equal(MauiQualificationMetricProvenanceKinds.Unknown, fresh.Kind);
+        // The coverage gate recognises an undeclared component by comparing against this default,
+        // so drive the gate rather than asserting the constant against itself — a tautology would
+        // stay green if the gate stopped using it, which is the fail-open direction.
+        var undeclared = MauiPreviewQualificationGateEvaluator.BuildProductAnalyzerCoverageGate(
+        [
+            ("repairPrecision", 10, new MauiQualificationMetricProvenance
+            {
+                Kind = MauiQualificationMetricProvenanceKinds.ShippedAnalyzer,
+            }),
+            ("repairRecall", 10, null),
+            ("falseHeals", 10, null),
+            ("abstention", 10, null),
+        ]);
+
+        Assert.Contains("provenance-component-missing", undeclared.ReasonCodes);
+        Assert.Equal(MauiPreviewQualificationStates.NotQualified, undeclared.Status);
+        Assert.Equal(MauiQualificationMetricProvenanceKinds.Unknown, new MauiQualificationMetricProvenance().Kind);
     }
 
     [Fact]
@@ -2619,7 +2634,7 @@ public sealed class PreviewQualificationTests
         // different failures, and neither message may be said about the other.
         Assert.Contains("Declared nothing about what produced them: falseHeals", gate.Message);
         Assert.Contains("Named a kind but no component: classificationAccuracy", gate.Message);
-        Assert.Contains("disagreed about what produced them: abstention", gate.Message);
+        Assert.Contains("Could not be credited to any one component: abstention", gate.Message);
     }
 
     [Fact]
@@ -2645,7 +2660,18 @@ public sealed class PreviewQualificationTests
         Assert.Equal(301, falseHeals.SourceCounts.Single(
             static count => count.Source == MauiQualificationSampleSources.Generated).Denominator);
         Assert.Contains("Pooled with 301 sample(s) scored by", falseHeals.Exercises!.Note);
-        Assert.Contains("included in the pooled numerator that the baseline diff compares", falseHeals.Exercises.Note);
+        // falseHeals is the one metric whose pooled numerator a gate reads (AddFalseHealGate
+        // compares Numerator, not IndependentNumerator), so its note must name that gate.
+        Assert.Contains(
+            "A false heal among them would fail the zero-false-heals gate, which reads the pooled numerator.",
+            falseHeals.Exercises.Note);
+
+        // ...and the metrics whose pooled share only the diff reads must not claim otherwise, or
+        // the disclosure would overstate which numbers are actually enforced.
+        var abstention = report.Metrics.Abstention;
+        Assert.Contains("Pooled with 301 sample(s) scored by", abstention.Exercises!.Note);
+        Assert.Contains("included in the pooled numerator the baseline diff compares", abstention.Exercises.Note);
+        Assert.DoesNotContain("zero-false-heals", abstention.Exercises.Note);
     }
 
     [Fact]
@@ -2701,42 +2727,80 @@ public sealed class PreviewQualificationTests
         // the analyzer elsewhere permanently disarm it. It asserts equality so both directions
         // fail — an overstatement, and a rewiring that forgets to flip the flag.
         //
-        // Two limits are real and worth stating rather than papering over. It only sees this file
+        // It parses rather than greps. Deciding "is this text a call or a mention" with regexes
+        // over stripped source is a losing game: every attempt to blank literals has to get quote
+        // parity exactly right across verbatim, raw and interpolated forms, and one mistake in the
+        // false-negative direction makes the tripwire agree with a `false` declaration instead of
+        // tightening it. A syntax tree answers the question by construction — comments and literal
+        // text are trivia and never invocations, while an interpolation hole is real syntax and is
+        // therefore still seen.
+        //
+        // Two limits remain and are worth stating rather than papering over. It only sees this file
         // glob, so wiring the analyzer in from a differently named file would leave it green; and
-        // it only sees this call shape, so an indirection through a delegate or reflection would
-        // too. Under an equality assert a false negative is the dangerous direction, because it
-        // makes the tripwire agree with a `false` declaration instead of tightening it. Stripping
-        // comments *and* string literals is what keeps prose on either side from deciding it.
-        var callsAnalyzer = ScannedHarnessSources()
-            .Select(File.ReadAllText)
-            .Select(StripCommentsAndLiterals)
-            .Any(static text => Regex.IsMatch(text, @"MauiSelectorHealthAnalyzer\s*\.\s*Analyze\s*\("));
+        // it only matches on the name, so an indirection through a delegate, an alias or reflection
+        // would too.
+        var callsAnalyzer = ScannedHarnessSources().Any(static path => CountsAnalyzerCalls(File.ReadAllText(path)) > 0);
         var declared = Report(RunCorpus(), DateTimeOffset.UnixEpoch).Corpus.ExercisesShippedAnalyzer;
 
         Assert.Equal(callsAnalyzer, declared);
     }
 
     [Fact]
-    public void Tripwire_StillSeesAWiredCallInEveryFileItScans()
+    public void Tripwire_SeesEveryWiredCallInEveryFileItScans()
     {
-        // The single-line theory rows below cannot catch a stripper that breaks quote parity: they
-        // have no later quote for a runaway match to swallow. Injecting the call into the real
-        // files is what pins the property at the scale the tripwire actually runs at.
+        // Counting, not "at least one": an existential assert would stay green while a scanner lost
+        // 48 of 49 call sites, and at 1 site left the tripwire above is effectively blind. This is
+        // the property that keeps `exercisesShippedAnalyzer: false` from being self-certifying.
         foreach (var path in ScannedHarnessSources())
         {
-            var injected = File.ReadAllText(path).Replace(
+            var original = File.ReadAllText(path);
+            var injected = original.Replace(
                 "\n    private static",
                 "\n    private static void Wired(MauiSelectorHealthAnalysisInput i) =>"
                     + " MauiSelectorHealthAnalyzer.Analyze(i);\n    private static",
                 StringComparison.Ordinal);
+            var expected = Regex.Matches(injected, @"MauiSelectorHealthAnalyzer\.Analyze\(").Count;
 
-            Assert.True(
-                Regex.IsMatch(
-                    StripCommentsAndLiterals(injected),
-                    @"MauiSelectorHealthAnalyzer\s*\.\s*Analyze\s*\("),
-                path);
+            Assert.True(expected > 0, path);
+            Assert.Equal(expected, CountsAnalyzerCalls(injected));
         }
     }
+
+    [Theory]
+    [InlineData("class C { void M() { var help = \"call MauiSelectorHealthAnalyzer.Analyze(i) here\"; } }", 0)]
+    [InlineData("class C { void M() { /* MauiSelectorHealthAnalyzer.Analyze(i); */ } }", 0)]
+    [InlineData("class C { void M() { // MauiSelectorHealthAnalyzer.Analyze(i);\n } }", 0)]
+    [InlineData("class C { void M() { var s = $\"docs {{MauiSelectorHealthAnalyzer.Analyze(i)}} no\"; } }", 0)]
+    [InlineData("class C { void M() { MauiSelectorHealthAnalyzer . Analyze ( i ); } }", 1)]
+    [InlineData("class C { void M() { var m = $\"{MauiSelectorHealthAnalyzer.Analyze(i).Kind}\"; } }", 1)]
+    [InlineData("class C { void M() { var m = $@\"{MauiSelectorHealthAnalyzer.Analyze(i).Kind}\"; } }", 1)]
+    [InlineData("class C { void M() { var m = $\"\"\"{MauiSelectorHealthAnalyzer.Analyze(i).Kind}\"\"\"; } }", 1)]
+    [InlineData("class C { void M() { var m = $\"{MauiSelectorHealthAnalyzer.Analyze(new X { A = 1 })}\"; } }", 1)]
+    [InlineData("class C { void M() { var s = \"cost: $\"; MauiSelectorHealthAnalyzer.Analyze(i); var t = \"x\"; } }", 1)]
+    [InlineData("class C { void M() { var p = $@\"{d}\\\"; MauiSelectorHealthAnalyzer.Analyze(i); var t = \"x\"; } }", 1)]
+    public void Tripwire_ReadsCodeRatherThanProseInEitherDirection(string source, int expected)
+    {
+        // Under an equality assert both mistakes matter, but not equally: prose that looks like a
+        // call forces the disclosure to overstate and fails loudly, while a literal that swallows a
+        // real call lets it understate while the test stays green. The last four rows are shapes a
+        // regex stripper got wrong — a nested-brace hole, a literal ending in '$', and a verbatim
+        // literal ending in a backslash, all of which broke quote parity for the rest of the file.
+        Assert.Equal(expected, CountsAnalyzerCalls(source));
+    }
+
+    /// <summary>
+    /// Counts real <c>MauiSelectorHealthAnalyzer.Analyze(...)</c> invocations in a compilation unit.
+    /// Parsing means comments and literal text cannot be mistaken for calls, and equally that a
+    /// call inside an interpolation hole cannot be lost — the hole is syntax, not literal text.
+    /// </summary>
+    private static int CountsAnalyzerCalls(string source) => CSharpSyntaxTree
+        .ParseText(source)
+        .GetRoot()
+        .DescendantNodes()
+        .OfType<InvocationExpressionSyntax>()
+        .Count(static invocation => invocation.Expression is MemberAccessExpressionSyntax member &&
+            member.Name.Identifier.ValueText == "Analyze" &&
+            member.Expression is IdentifierNameSyntax { Identifier.ValueText: "MauiSelectorHealthAnalyzer" });
 
     private static IEnumerable<string> ScannedHarnessSources()
     {
@@ -2747,66 +2811,6 @@ public sealed class PreviewQualificationTests
             .Where(static path =>
                 !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
                 !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal));
-    }
-
-    /// <summary>
-    /// Removes string literals and comments so neither a sentence naming the call nor a literal
-    /// containing a comment marker can decide the tripwire. Literals go first because a string such
-    /// as <c>"//"</c> would otherwise blank the rest of a real line of code.
-    /// <para>
-    /// Interpolated literals collapse to just their <c>{...}</c> holes, which are executable code.
-    /// Blanking them whole would hide a real call, and skipping only their opening quote would
-    /// leave the closing quote to open a spurious match that swallows every line after it, so both
-    /// quotes are consumed and quote parity survives for the rest of the file. Either mistake is a
-    /// false negative, which under an equality assert makes the tripwire agree with a
-    /// <c>false</c> declaration instead of tightening it.
-    /// </para>
-    /// </summary>
-    private static string StripCommentsAndLiterals(string source)
-    {
-        var withoutInterpolatedRaw = Regex.Replace(source, "\\$+\"\"\".*?\"\"\"", Holes, RegexOptions.Singleline);
-        var withoutInterpolated = Regex.Replace(withoutInterpolatedRaw, "\\$@?\"(?:\\\\.|\"\"|[^\"\\\\])*\"", Holes);
-        var withoutRaw = Regex.Replace(withoutInterpolated, "\"\"\".*?\"\"\"", "\"\"", RegexOptions.Singleline);
-        var withoutVerbatim = Regex.Replace(withoutRaw, "@\"(?:[^\"]|\"\")*\"", "\"\"");
-        var withoutStrings = Regex.Replace(withoutVerbatim, @"(?<!')""(?:\\.|[^""\\])*""", "\"\"");
-        var withoutChars = Regex.Replace(withoutStrings, @"'(?:\\.|[^'\\])'", "' '");
-        var withoutBlocks = Regex.Replace(withoutChars, @"/\*.*?\*/", " ", RegexOptions.Singleline);
-        return string.Join(
-            "\n",
-            withoutBlocks.Split('\n').Select(static line =>
-            {
-                var index = line.IndexOf("//", StringComparison.Ordinal);
-                return index >= 0 ? line[..index] : line;
-            }));
-
-        static string Holes(Match match) => string.Concat(
-            Regex.Matches(match.Value, @"\{([^{}]*)\}").Select(static hole => hole.Groups[1].Value + ";"));
-    }
-
-    [Theory]
-    [InlineData("var help = \"call MauiSelectorHealthAnalyzer.Analyze(input) here\";", false)]
-    [InlineData("var marker = \"/*\"; MauiSelectorHealthAnalyzer.Analyze(input); var end = \"*/\";", true)]
-    [InlineData("var doc = \"https://x\"; MauiSelectorHealthAnalyzer.Analyze(input);", true)]
-    [InlineData("// MauiSelectorHealthAnalyzer.Analyze(input);", false)]
-    [InlineData("MauiSelectorHealthAnalyzer . Analyze ( input );", true)]
-    [InlineData("var m = $\"k={MauiSelectorHealthAnalyzer.Analyze(input).Kind}\";", true)]
-    [InlineData("var m = $@\"k={MauiSelectorHealthAnalyzer.Analyze(input).Kind}\";", true)]
-    [InlineData("var m = $\"\"\"k={MauiSelectorHealthAnalyzer.Analyze(input).Kind}\"\"\";", true)]
-    [InlineData("var m = $\"x{y}\"; MauiSelectorHealthAnalyzer.Analyze(input); var s = \"done\";", true)]
-    [InlineData("var url = $\"https://{host}\"; MauiSelectorHealthAnalyzer.Analyze(input);", true)]
-    [InlineData("var m = $\"no {holes} here\"; var s = \"plain\";", false)]
-    public void Tripwire_ReadsCodeRatherThanProseInEitherDirection(string source, bool expected)
-    {
-        // Under an equality assert both mistakes matter, but not equally: prose that looks like a
-        // call forces the disclosure to overstate and fails loudly, while a literal that swallows a
-        // real call lets it understate while the test stays green. These rows pin isolated shapes
-        // only; Tripwire_StillSeesAWiredCallInEveryFileItScans pins the file-scale property, which
-        // a single line cannot — it has no later quote for a runaway match to swallow.
-        var actual = Regex.IsMatch(
-            StripCommentsAndLiterals(source),
-            @"MauiSelectorHealthAnalyzer\s*\.\s*Analyze\s*\(");
-
-        Assert.Equal(expected, actual);
     }
 
     private static MauiPreviewQualificationCorpusRunResult RunCorpus(string? corpusRoot = null) =>

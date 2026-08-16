@@ -173,7 +173,10 @@ public static class MauiPreviewQualificationGateEvaluator
                 thresholds.ConfidenceLevel,
                 staticComponent: "MauiPreviewQualificationCorpusRunner.EvaluateFixture",
                 staticKind: corpusKind,
-                staticNote: corpusNote),
+                staticNote: corpusNote,
+                // AddFalseHealGate compares Numerator, not IndependentNumerator, so this is the one
+                // metric whose pooled share is read by a gate rather than only by the baseline diff.
+                pooledNumeratorIsGated: true),
             Abstention = BuildRate(
                 abstention,
                 static sample => sample.Abstained == true,
@@ -236,7 +239,8 @@ public static class MauiPreviewQualificationGateEvaluator
         string? staticComponent = null,
         string? staticKind = null,
         string? staticNote = null,
-        Func<MauiQualificationExecutionSample, bool>? staticKindAttested = null)
+        Func<MauiQualificationExecutionSample, bool>? staticKindAttested = null,
+        bool pooledNumeratorIsGated = false)
     {
         var denominator = samples.Count;
         var numerator = samples.Count(success);
@@ -292,7 +296,8 @@ public static class MauiPreviewQualificationGateEvaluator
                     staticComponent,
                     staticKind,
                     staticNote ?? string.Empty,
-                    staticKindAttested),
+                    staticKindAttested,
+                    pooledNumeratorIsGated),
         };
     }
 
@@ -300,8 +305,8 @@ public static class MauiPreviewQualificationGateEvaluator
     /// Describes what actually decided a metric's observations, from the samples it counted.
     /// Static corpus samples are scored by <see cref="MauiPreviewQualificationCorpusRunner"/>;
     /// device-backed samples were observed by the run that submitted them. A judged subset holding
-    /// both takes the weaker of the two claims, because pooling must not upgrade what a number
-    /// measures.
+    /// both publishes <c>unknown</c> — weaker than either — because no single component produced
+    /// it, and because pooling must not upgrade what a number measures.
     /// </summary>
     /// <param name="judged">
     /// The subset the gates read, which is what the kind describes.
@@ -320,13 +325,19 @@ public static class MauiPreviewQualificationGateEvaluator
     /// the shipped classifier's name simply by not being device-backed. An unattested sample yields
     /// <c>unknown</c>, which the coverage gate treats as a failure rather than as evidence.
     /// </param>
+    /// <param name="pooledNumeratorIsGated">
+    /// True when a gate reads this metric's <em>pooled</em> numerator rather than only its
+    /// independent subset. Only <c>falseHeals</c> does — <c>AddFalseHealGate</c> compares
+    /// <c>Numerator</c> — so only its note may say a gate reads the pooled share.
+    /// </param>
     private static MauiQualificationMetricProvenance? Exercised(
         IReadOnlyList<MauiQualificationExecutionSample> judged,
         IReadOnlyList<MauiQualificationExecutionSample> all,
         string staticComponent,
         string staticKind,
         string staticNote,
-        Func<MauiQualificationExecutionSample, bool>? staticKindAttested = null)
+        Func<MauiQualificationExecutionSample, bool>? staticKindAttested = null,
+        bool pooledNumeratorIsGated = false)
     {
         if (judged.Count == 0)
             return null;
@@ -341,6 +352,15 @@ public static class MauiPreviewQualificationGateEvaluator
                 NormalizeSource(sample.Source),
                 MauiQualificationSampleSources.DeviceBacked,
                 StringComparison.Ordinal);
+        // AddFalseHealGate compares Numerator, not IndependentNumerator, so falseHeals is the only
+        // metric whose pooled share is read by a gate rather than only by the baseline diff. The
+        // clause is additive so the base sentence stays true for all five rates; saying it of the
+        // other four would overstate which numbers are actually enforced. Note it names the pooled
+        // numerator specifically — the pooled denominator is read by no gate, since the count check
+        // in the same gate reads IndependentEvaluations.
+        var pooledGateClause = pooledNumeratorIsGated
+            ? " A false heal among them would fail the zero-false-heals gate, which reads the pooled numerator."
+            : string.Empty;
         var deviceOnly = !judged.Any(ScoredHere);
         if (deviceOnly)
         {
@@ -348,14 +368,14 @@ public static class MauiPreviewQualificationGateEvaluator
             // the run can still have statically scored samples pooled into its published
             // denominator, and "this report did not score it" would misdescribe those. Naming
             // which gates see them matters: the count and interval gates read the independent
-            // subset, but zero-false-heals and the baseline diff read the pooled numerator.
+            // subset, and only the false-heal gate reads a pooled numerator.
             var scoredHere = all.Count(ScoredHere);
             var note = "Observed by the run that submitted the sample. This report did not score it.";
             if (scoredHere > 0)
             {
                 note += $" Pooled with {scoredHere} sample(s) scored by {staticComponent}: excluded from the "
                     + "independent subset the count and lower-bound gates read, but included in the pooled "
-                    + "numerator that the baseline diff compares.";
+                    + "numerator the baseline diff compares." + pooledGateClause;
             }
             return new MauiQualificationMetricProvenance
             {
@@ -391,7 +411,7 @@ public static class MauiPreviewQualificationGateEvaluator
         var pooledElsewhere = all.Count - judged.Count;
         var pooledNote = pooledElsewhere > 0
             ? $" Describes the {judged.Count} judged sample(s); {pooledElsewhere} further sample(s) sit in the "
-                + "pooled denominator that the baseline diff compares."
+                + "pooled denominator the baseline diff compares." + pooledGateClause
             : string.Empty;
         // Mixed subsets take the weaker of the two claims, the same rule the accumulator applies
         // when pooling runs. "Any statically scored sample takes the static kind" is only
@@ -1014,8 +1034,9 @@ public static class MauiPreviewQualificationGateEvaluator
             if (unknown.Count > 0)
             {
                 reasons.Add("provenance-unknown");
-                parts.Add($"Declared a kind this gate does not recognise, or merged from contributors that "
-                    + $"disagreed about what produced them: {Describe(unknown)}.");
+                parts.Add($"Could not be credited to any one component: {Describe(unknown)}. A judged "
+                    + "subset that mixes sources, one holding samples with no producer stamp, a kind "
+                    + "this gate does not recognise, or contributors that disagreed all land here.");
             }
             if (missingScope.Count > 0)
             {

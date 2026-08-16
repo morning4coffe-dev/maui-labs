@@ -570,7 +570,8 @@ public static class MauiQualificationMetricProvenanceKinds
     /// kind they happened to check first decide. Both merging across runs and mixing within a run
     /// must take the weaker claim, so the ranking lives here rather than being restated at each
     /// site: two copies that drift would make the within-run and across-run answers disagree
-    /// silently. Unrecognised sorts below every named kind, so an unknown string can never win.
+    /// silently. An unrecognised kind ranks level with <see cref="Unknown"/> rather than above any
+    /// named kind, so a label this build does not model can never win a minimum.
     /// </summary>
     public static int Strength(string? kind) => kind switch
     {

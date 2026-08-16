@@ -83,7 +83,10 @@ This is stated in the report itself rather than only here:
   and device-backed alike — carries an `observedFailureClassProducer` stamp naming what called the
   classifier. Without it the label degrades to `unknown` and the gate fails. Device-backed rows are
   not exempt: a device is no better placed than a fixture to say which code produced a label, and
-  exempting them would let one stamped fixture speak for ninety-nine unstamped device rows.
+  exempting them would let one stamped fixture speak for ninety-nine unstamped device rows. An
+  **all**-device judged subset is a different claim and takes a different path — it publishes
+  `sample-supplied` without a stamp check, because `sample-supplied` asserts only *who observed*
+  the sample, never *which code classified it*.
   **The stamp is not a forgery guard.** A `--results` file is deserialised verbatim, so an author who
   writes `"observedFailureClassProducer": "MauiFlowFailureClassifier.Classify"` into a JSON file gets
   the strong label. Against a determined author it is exactly as strong as the source-name inference
@@ -100,9 +103,11 @@ This is stated in the report itself rather than only here:
   honest understatement delete its stability and device evidence along with the label. The published
   component reads `... + submitting-run` and the note says it was downgraded.
 - The label describes the **judged** subset, which is not always the whole denominator. When samples
-  are pooled in beyond the judged set, the note says how many, and which gates read which: the count
-  and lower-bound gates read the independent subset, while the baseline diff compares the pooled
-  numerator and denominator of every rate.
+  are pooled in beyond the judged set, the note says how many, and which reader sees them: the count
+  and lower-bound gates read only the independent subset, and the baseline diff compares the pooled
+  numerator and denominator of every rate. `falseHeals` adds a clause the other four do not, because
+  it is the only rate whose **pooled numerator** is also read by a *gate* — `zero-false-heals`
+  compares `numerator`, not `independentNumerator`. No gate reads any pooled *denominator*.
 - `MauiPreviewQualificationAccumulator` merges `exercises` conjunctively — the merged kind is the
   **weakest** any contributor declared, ranked `unknown` < `harness-local-rules` < `sample-supplied`
   < `shipped-analyzer`, so pooling can never upgrade what the merged number measures and the result
@@ -147,14 +152,15 @@ Its limits are real and stated rather than papered over. It only sees that file 
 analyzer in from a differently named file would leave it green; and it only sees that call shape, so
 an indirection through a delegate or reflection would too. Under an equality assert a **false
 negative** is the dangerous direction, because it makes the tripwire agree with a `false` declaration
-instead of tightening it — which is why the scan strips string literals as well as comments, and why
-interpolated literals collapse to just their `{...}` holes rather than being blanked whole or being
-skipped: their holes are executable code, and skipping only their opening quote would leave the
-closing quote to open a runaway match that swallows every line after it. Single-line snippets cannot
-catch that class of bug — they have no later quote to swallow — so
-`Tripwire_StillSeesAWiredCallInEveryFileItScans` injects a real call into each scanned file and
-asserts the stripper still shows it, alongside
-`Tripwire_ReadsCodeRatherThanProseInEitherDirection` for the isolated shapes.
+instead of tightening it — which is why it **parses rather than greps**. Deciding "is this text a
+call or a mention" by blanking string literals with regexes turned out to be a losing game: quote
+parity has to be exactly right across verbatim, raw and interpolated forms, and three separate
+attempts each left a shape (`"…$"`, `$@"…\"`, a hole containing braces) that swallowed the rest of
+the file and hid a real call. A `CSharpSyntaxTree` answers the question by construction — comments
+and literal text are trivia and can never be invocations, while an interpolation hole is syntax and
+is therefore still seen. `Tripwire_SeesEveryWiredCallInEveryFileItScans` injects a call at every
+`private static` in each scanned file and asserts the **count** matches, not merely that one
+survived; an existential assert stayed green while a scanner lost 48 of 49 sites.
 
 ## Statistical power of the generated share
 

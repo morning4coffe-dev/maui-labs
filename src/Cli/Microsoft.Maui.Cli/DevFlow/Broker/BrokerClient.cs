@@ -645,51 +645,19 @@ public static class BrokerClient
                 arguments = "devflow broker start --foreground";
             }
 
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = fileName,
-                Arguments = arguments,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                RedirectStandardInput = true,
-            };
-
-            var process = Process.Start(startInfo);
+            // The daemon must not inherit this invocation's stdout/stderr: a shell pipeline such as
+            // `maui devflow flow run ... | Tee-Object` stays open for as long as any process holds
+            // the pipe, so an inherited handle keeps the caller's pipeline blocked long after the
+            // CLI has exited.
+            var process = DetachedDaemonProcess.Start(fileName, arguments);
             if (process == null)
             {
-                Console.Error.WriteLine("[DevFlow Broker] Process.Start returned null — failed to launch daemon");
+                Console.Error.WriteLine("[DevFlow Broker] The daemon process could not be launched");
                 return null;
             }
 
-            var stderr = new StringBuilder();
-            process.ErrorDataReceived += (_, e) =>
-            {
-                if (string.IsNullOrWhiteSpace(e.Data))
-                    return;
-
-                lock (stderr)
-                {
-                    if (stderr.Length > 0)
-                        stderr.AppendLine();
-                    stderr.Append(e.Data);
-                }
-            };
-            process.BeginErrorReadLine();
-
-            // Close stdout and stdin — the daemon is fully detached and stderr is captured above.
-            process.StandardOutput.Close();
-            process.StandardInput.Close();
-
             try
             {
-                string GetCapturedStderr()
-                {
-                    lock (stderr)
-                        return stderr.ToString().Trim();
-                }
-
                 // Poll until broker is ready
                 var port = BrokerServer.DefaultPort;
                 for (int i = 0; i < 25; i++) // 25 * 200ms = 5s
@@ -699,11 +667,7 @@ public static class BrokerClient
                     // Check if the child process has crashed during startup
                     if (process.HasExited)
                     {
-                        var exitCode = process.ExitCode;
-                        var stderrText = GetCapturedStderr();
-                        Console.Error.WriteLine($"[DevFlow Broker] Daemon process exited prematurely with code {exitCode}");
-                        if (!string.IsNullOrWhiteSpace(stderrText))
-                            Console.Error.WriteLine($"[DevFlow Broker] stderr: {stderrText}");
+                        ReportDaemonExit(process, "exited prematurely");
                         return null;
                     }
 
@@ -718,21 +682,17 @@ public static class BrokerClient
                 // Timeout — check if the child is still running or crashed
                 if (process.HasExited)
                 {
-                    var stderrText = GetCapturedStderr();
-                    Console.Error.WriteLine($"[DevFlow Broker] Daemon exited with code {process.ExitCode} before becoming ready");
-                    if (!string.IsNullOrWhiteSpace(stderrText))
-                        Console.Error.WriteLine($"[DevFlow Broker] stderr: {stderrText}");
+                    ReportDaemonExit(process, "exited before becoming ready");
                 }
                 else
                 {
-                    Console.Error.WriteLine($"[DevFlow Broker] Daemon process started (PID {process.Id}) but TCP listener not reachable after 5s");
+                    Console.Error.WriteLine($"[DevFlow Broker] Daemon process started (PID {process.ProcessId}) but TCP listener not reachable after 5s");
                 }
 
                 return null;
             }
             finally
             {
-                try { process.CancelErrorRead(); } catch { /* process may already be gone */ }
                 process.Dispose();
             }
         }
@@ -741,6 +701,19 @@ public static class BrokerClient
             Console.Error.WriteLine($"[DevFlow Broker] Failed to start daemon: {ex.Message}");
             return null;
         }
+    }
+
+    private static void ReportDaemonExit(DetachedDaemonProcess process, string what)
+    {
+        var exitCode = process.ExitCode;
+        Console.Error.WriteLine(exitCode.HasValue
+            ? $"[DevFlow Broker] Daemon process {what} with code {exitCode.Value}"
+            : $"[DevFlow Broker] Daemon process {what}");
+
+        var stderrText = process.CapturedStandardError;
+        Console.Error.WriteLine(string.IsNullOrWhiteSpace(stderrText)
+            ? "[DevFlow Broker] Run 'maui devflow broker start --foreground' to see the daemon's own diagnostics"
+            : $"[DevFlow Broker] stderr: {stderrText}");
     }
 
     private static string? ResolveManagedEntryAssemblyPath()

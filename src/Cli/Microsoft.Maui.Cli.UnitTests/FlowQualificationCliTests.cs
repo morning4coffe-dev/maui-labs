@@ -195,6 +195,40 @@ public sealed class FlowQualificationCliTests : IDisposable
     }
 
     [Fact]
+    public async Task FlowQualify_BaselineDiffCatchesARelabelThatLeavesEveryNumberUnchanged()
+    {
+        // What a number measures can regress without the number moving. A baseline that recorded
+        // repair scoring as the shipped analyzer, against a run that scores it with harness rules,
+        // is a silent loss of meaning that no count comparison would notice.
+        var repositoryRoot = FindRepositoryRoot();
+        var corpus = Path.Combine(repositoryRoot, "tests", "DevFlow", "InspectorCorpus");
+        var baseline = Path.Combine(corpus, "baselines", "qualification.json");
+        var cli = new CliTestHarness(mockAgentPort: 1);
+
+        var relabelled = Path.Combine(_root, "relabelled-baseline.json");
+        var document = JsonNode.Parse(await File.ReadAllTextAsync(baseline))!;
+        document["metrics"]!["falseHeals"]!["exercises"]!["kind"] = "shipped-analyzer";
+        document["metrics"]!["repairPrecision"]!["exercises"]!["component"] = "MauiSelectorHealthAnalyzer.Analyze";
+        document["corpus"]!["exercisesShippedAnalyzer"] = true;
+        await File.WriteAllTextAsync(relabelled, document.ToJsonString());
+
+        var result = await cli.InvokeRawAsync(
+            "devflow", "flow", "qualify",
+            "--platform", "android",
+            "--corpus", corpus,
+            "--baseline", relabelled,
+            "--json");
+
+        Assert.NotEqual(0, result.ExitCode);
+        var regressions = result.ParseJsonOutput().GetProperty("baselineRegressions").EnumerateArray()
+            .Select(value => value.GetString()!)
+            .ToArray();
+        Assert.Contains(regressions, value => value.Contains("falseHeals exercises.kind", StringComparison.Ordinal));
+        Assert.Contains(regressions, value => value.Contains("repairPrecision exercises.component", StringComparison.Ordinal));
+        Assert.Contains(regressions, value => value.Contains("corpus.exercisesShippedAnalyzer", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public async Task FlowQualify_BaselineDiffFailsWhenCuratedEvidenceIsDeleted()
     {
         var repositoryRoot = FindRepositoryRoot();

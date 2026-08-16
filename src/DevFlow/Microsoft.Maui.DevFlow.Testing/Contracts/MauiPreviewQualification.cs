@@ -410,6 +410,15 @@ public sealed class MauiQualificationExecutionSample
     /// reported in its own bucket rather than pooled into a single accuracy headline.
     /// </summary>
     [JsonPropertyName("failureClassInferred")] public bool? FailureClassInferred { get; set; }
+    /// <summary>
+    /// The product entry point that produced <see cref="ObservedFailureClass"/>, stamped by
+    /// whatever actually called it. A sample without this stamp carries a label nothing in this
+    /// process was told the origin of, so the gate evaluator refuses to describe it as product
+    /// evidence. The stamp is still only as trustworthy as the writer of the sample — it moves the
+    /// claim from "inferred from the source name" to "asserted by the component that ran", which is
+    /// weaker than an observation and stronger than a guess.
+    /// </summary>
+    [JsonPropertyName("observedFailureClassProducer")] public string? ObservedFailureClassProducer { get; set; }
     [JsonPropertyName("falseHeal")] public bool? FalseHeal { get; set; }
     [JsonPropertyName("abstained")] public bool? Abstained { get; set; }
     [JsonPropertyName("humanDecision")] public string? HumanDecision { get; set; }

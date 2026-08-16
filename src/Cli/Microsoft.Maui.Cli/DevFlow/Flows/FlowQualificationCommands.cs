@@ -450,7 +450,9 @@ internal static class FlowQualificationCommands
 
     /// <summary>
     /// Freezes what produced a metric alongside the metric itself. A relabel is not a number
-    /// change, so nothing else in this comparison would notice one.
+    /// change, so nothing else in this comparison would notice one. The component is frozen with
+    /// the kind because it names the code being credited, and swapping it silently would move a
+    /// number's meaning without moving the number.
     /// </summary>
     private static void CompareProvenance(
         MauiQualificationBaselineComparison comparison,
@@ -458,10 +460,16 @@ internal static class FlowQualificationCommands
         MauiQualificationRateMetric baseline,
         MauiQualificationRateMetric current)
     {
-        var before = baseline.Exercises?.Kind ?? "absent";
-        var after = current.Exercises?.Kind ?? "absent";
-        if (!string.Equals(before, after, StringComparison.Ordinal))
-            comparison.Regressions.Add($"{name} exercises.kind {before} -> {after}");
+        Compare("kind", baseline.Exercises?.Kind, current.Exercises?.Kind);
+        Compare("component", baseline.Exercises?.Component, current.Exercises?.Component);
+
+        void Compare(string field, string? baselineValue, string? currentValue)
+        {
+            var before = string.IsNullOrWhiteSpace(baselineValue) ? "absent" : baselineValue;
+            var after = string.IsNullOrWhiteSpace(currentValue) ? "absent" : currentValue;
+            if (!string.Equals(before, after, StringComparison.Ordinal))
+                comparison.Regressions.Add($"{name} exercises.{field} {before} -> {after}");
+        }
     }
 
     /// <summary>

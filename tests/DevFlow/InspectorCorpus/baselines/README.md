@@ -43,11 +43,12 @@ Gates that are `not-qualified` in the baseline and why:
 | `android-tier1-first-attempts` | No Tier-1 flow declared and no device runs. |
 | `product-analyzer-coverage` | The corpus scores repair and false heals with harness rules, not the shipped analyzer. See below. |
 
-**`abstention` has no gate.** It is published as `316/316` and reads like a perfect score, but no
-gate consumes it, so nothing fails if it degrades — only the baseline diff notices, and only in the
-numerator direction (see *Regression diffing*). It is a descriptive counter of how often the harness
-declined to propose a repair when none was expected, scored by the same harness-local rules as
-`falseHeals`. Do not quote it as a result.
+**`abstention` has no gate of its own.** It is published as `316/316` and reads like a perfect score,
+but no threshold gate consumes it — `product-analyzer-coverage` reads only its provenance, and the
+baseline diff floors its numerator, denominator, independent count and provenance. Nothing fails if
+the *rate* degrades. It is a descriptive counter of how often the harness declined to propose a
+repair when none was expected, scored by the same harness-local rules as `falseHeals`. Do not quote
+it as a result.
 
 ## The largest gap: the corpus does not exercise the shipped analyzer
 
@@ -70,17 +71,29 @@ This is stated in the report itself rather than only here:
   the four metrics above and `shipped-analyzer` for `classificationAccuracy`.
 - The `product-analyzer-coverage` gate is `not-qualified` and lists exactly which metrics are
   harness-scored. It is evaluated both per-run and over an accumulated verdict, so
-  `--accumulate --fail-on-non-pass` sees it too. It reaches `pass` only when no judged metric was
-  harness-scored, none is undeclared, and none has an unrecognised provenance kind. When the basis
-  is a label read out of a run file rather than one this process computed, it passes with the
-  reason code `provenance-self-reported` and says so in its message. That distinction is the whole
-  point: a kind this process derived from its own constants is an observation, the same string read
-  back from JSON is only a claim.
-- `MauiPreviewQualificationAccumulator` merges `exercises` conjunctively, so pooling a
-  harness-scored run with a device-backed one does not upgrade what the merged number measures.
-  A contributing run that counted samples without declaring a component makes the merged kind
-  `unknown`, and a run whose declared kind contradicts its own `sourceCounts` is rejected with
-  `accumulate-provenance-mismatch`.
+  `--accumulate --fail-on-non-pass` sees it too. **It has no unqualified pass.** Nothing in the
+  report can watch code run, so every kind other than `harness-local-rules` — a compile-time literal
+  in the evaluator — ultimately rests on a label in the submitted data. A passing result therefore
+  always carries `provenance-self-reported` and names whose word it is taking; an empty reason list
+  would read as verification. It also stays `not-qualified` while `repairPrecision`, `repairRecall`,
+  `falseHeals` or `abstention` carry no evidence at all, because absence of the metrics this gate
+  exists to disclose is not coverage of them.
+- `classificationAccuracy` is labelled `shipped-analyzer` only when every judged sample carries an
+  `observedFailureClassProducer` stamp written by whatever called the classifier. Without the stamp
+  the label degrades to `unknown` and the gate fails. `observedFailureClass` is caller-supplied, so
+  the source name alone cannot establish which code produced it.
+- `MauiPreviewQualificationAccumulator` merges `exercises` conjunctively — the merged kind is the
+  **weakest** any contributor declared, ranked `unknown` < `harness-local-rules` < `sample-supplied`
+  < `shipped-analyzer`, so pooling can never upgrade what the merged number measures and the result
+  does not depend on the order the runs happened to sort in. A contributing run that counted samples
+  without declaring anything makes the merged kind `unknown`.
+- The accumulator's provenance check is **one-directional**, and only on the axis it can actually
+  decide. It refuses a run declaring `sample-supplied` — "a device observed this" — over judged
+  sources that are not `device-backed` (`accumulate-provenance-mismatch`). It does **not** police
+  the harness-versus-shipped axis, because nothing in a `sourceCounts` block can establish which
+  code scored a sample; that is what the coverage gate reports instead. Understatements are accepted
+  deliberately: a rejected run never reaches the gates at all, so refusing an honest under-claim
+  during a mixed-version rollout would delete evidence rather than fail on it.
 
 `classificationAccuracy` is the exception, with a caveat. The observed label does come from
 `MauiFlowFailureClassifier.Classify`, the same entry point `MauiFlowRunner`, `WorkflowRunCoordinator`
@@ -104,12 +117,18 @@ mapping is correct", not as "the classifier was tested".
   structure. That is a corpus format change.
 
 `Corpus_KeepsTheAnalyzerCoverageDisclosureHonestWhenTheRunnerChanges` ties the disclosure to the
-code — it scans the `MauiPreviewQualification*.cs` sources for a real (non-comment) call to
+code — it scans the `MauiPreviewQualification*.cs` sources for a real call to
 `MauiSelectorHealthAnalyzer.Analyze` and asserts `corpus.exercisesShippedAnalyzer` equals whether
 one exists. Equality catches both directions: wiring the analyzer up without flipping the flag
-fails, and flipping the flag without wiring it up fails. The cost of equality is that the check is
-only as good as its own pattern, so it deliberately excludes `obj`/`bin` and matches the call shape
-rather than a bare identifier that a string literal could satisfy.
+fails, and flipping the flag without wiring it up fails.
+
+Its limits are real and stated rather than papered over. It only sees that file glob, so wiring the
+analyzer in from a differently named file would leave it green; and it only sees that call shape, so
+an indirection through a delegate or reflection would too. Under an equality assert a **false
+negative** is the dangerous direction, because it makes the tripwire agree with a `false` declaration
+instead of tightening it — which is why the scan strips string literals as well as comments, and why
+`Tripwire_ReadsCodeRatherThanProseInEitherDirection` pins that behaviour on both a literal that
+contains a comment marker and a sentence that names the call.
 
 ## Statistical power of the generated share
 

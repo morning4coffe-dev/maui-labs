@@ -53,6 +53,14 @@ public static class MauiPreviewQualificationCorpusRunner
     public const string GeneratorVersion = "qualification-no-repair-generator-v1";
     private const int MaxCorpusFileBytes = 1_048_576;
 
+    /// <summary>
+    /// Stamped onto every sample whose observed failure class this runner obtained by calling
+    /// <see cref="MauiFlowFailureClassifier.Classify"/> in-process. The gate evaluator refuses to
+    /// describe a classification sample as product evidence without it, so an input that fabricates
+    /// <c>observedFailureClass</c> cannot borrow the shipped classifier's name.
+    /// </summary>
+    internal const string ClassifierEntryPoint = "MauiFlowFailureClassifier.Classify";
+
     /// <summary>Case-root keys the schema permits; anything else fails the corpus.</summary>
     private static readonly HashSet<string> KnownCaseRootProperties = new(StringComparer.Ordinal)
     {
@@ -185,6 +193,9 @@ public static class MauiPreviewQualificationCorpusRunner
                 ExpectedFailureClass = metadata.ExpectedFailureClass,
                 ObservedFailureClass = metadata.ExpectedFailureClass is null ? null : evaluation.ObservedFailureClass,
                 FailureClassInferred = metadata.ExpectedFailureClass is null ? null : evaluation.FailureClassInferred,
+                ObservedFailureClassProducer = metadata.ExpectedFailureClass is null
+                    ? null
+                    : ClassifierEntryPoint,
             });
         }
 

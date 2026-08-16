@@ -663,11 +663,12 @@ public static class MauiPreviewQualificationAccumulator
     }
 
     /// <summary>
-    /// Merges what the contributing runs actually exercised. Conjunctive, like independence: if any
-    /// contributor scored a sample with harness-local rules, the merged number did too, and pooling
-    /// must not launder it into product evidence. A contributor that carried evidence but declared
-    /// no component is treated as <c>unknown</c> for the same reason — silence is not a claim of
-    /// product provenance. Disagreement about the component itself is reported rather than resolved.
+    /// Merges what the contributing runs actually exercised. Conjunctive, like independence: the
+    /// merged kind is the weakest any contributor declared, so pooling can never launder a
+    /// harness-scored number into product evidence, and it cannot be decided by the order the runs
+    /// happened to be sorted in. A contributor that carried evidence but declared nothing is treated
+    /// as <c>unknown</c> for the same reason — silence is not a claim of product provenance.
+    /// Disagreement about the component itself is reported rather than resolved.
     /// </summary>
     private static MauiQualificationMetricProvenance? MergeExercises(
         IReadOnlyList<MauiQualificationRateMetric> contributing)
@@ -688,8 +689,13 @@ public static class MauiPreviewQualificationAccumulator
             .Distinct(StringComparer.Ordinal)
             .OrderBy(static component => component, StringComparer.Ordinal)
             .ToList();
-        var weakest = declared.FirstOrDefault(static exercises =>
-            !MauiQualificationMetricProvenanceKinds.IsProductEvidence(exercises.Kind)) ?? declared[0];
+        // Ranked rather than first-match: with every contributor claiming product evidence, a
+        // first-match rule would let run order decide between shipped-analyzer and sample-supplied,
+        // and merge order here is wall-clock sort order.
+        var weakest = declared
+            .OrderBy(static exercises => ProvenanceStrength(exercises.Kind))
+            .ThenBy(static exercises => exercises.Kind, StringComparer.Ordinal)
+            .First();
         if (undeclared > 0)
         {
             // The merged kind drops to unknown, but the specific disclosure the declared
@@ -701,8 +707,8 @@ public static class MauiPreviewQualificationAccumulator
                 Component = string.Join(" + ", components.Append("undeclared")),
                 Kind = MauiQualificationMetricProvenanceKinds.Unknown,
                 Note = $"{undeclared} contributing run(s) counted samples without declaring what produced them, "
-                    + $"so the merged total cannot claim any provenance. The runs that did declare reported "
-                    + $"'{weakest.Kind}'.",
+                    + $"so the merged total cannot claim any provenance. The weakest kind the runs that did "
+                    + $"declare reported was '{weakest.Kind}'.",
             };
         }
 
@@ -713,6 +719,19 @@ public static class MauiPreviewQualificationAccumulator
             Note = weakest.Note,
         };
     }
+
+    /// <summary>
+    /// Orders provenance kinds weakest first so merging can take a minimum. Anything unrecognised
+    /// sorts below every named kind, because a kind this build does not model is not a claim it can
+    /// weigh — a newer writer's stronger label must not win by being unknown here.
+    /// </summary>
+    private static int ProvenanceStrength(string? kind) => kind switch
+    {
+        MauiQualificationMetricProvenanceKinds.HarnessLocalRules => 1,
+        MauiQualificationMetricProvenanceKinds.SampleSupplied => 2,
+        MauiQualificationMetricProvenanceKinds.ShippedAnalyzer => 3,
+        _ => 0,
+    };
 
     /// <summary>
     /// Sums clean first attempts per Tier-1 flow across runs. This is the whole reason
@@ -819,10 +838,7 @@ public static class MauiPreviewQualificationAccumulator
                 {
                     var metric = accumulation.Metrics.GetValueOrDefault(name);
                     return (Name: name, Denominator: metric?.Denominator ?? 0, Exercises: metric?.Exercises);
-                }),
-            // These labels were read from run files. A shipped-analyzer string in a file is a
-            // claim, so the merged verdict reports it as self-reported rather than as verified.
-            verifiedInProcess: false));
+                })));
 
         var flows = accumulation.FirstAttemptFlows;
         var firstAttemptReasons = new List<string>();

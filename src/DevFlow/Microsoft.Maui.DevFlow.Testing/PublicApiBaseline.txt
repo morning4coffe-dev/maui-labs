@@ -2248,6 +2248,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.FlowId[]:Syste
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.HumanDecision[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.InfrastructureExclusionReason[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.NoRepairExpected[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.ObservedFailureClassProducer[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.ObservedFailureClass[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.Outcome[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.Platform[]:System.String{get:public;set:public}

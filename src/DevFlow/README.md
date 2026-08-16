@@ -299,9 +299,9 @@ so the repair and false-heal numbers measure the harness agreeing with expectati
 it, not the shipped analyzer. Each of the five gated rate metrics publishes what produced it, the
 `product-analyzer-coverage` gate reports the gap per-run and across an accumulated verdict, and
 `tests/DevFlow/InspectorCorpus/baselines/README.md` explains it in full. `exercises: sample-supplied`
-means a submitting run asserted the observation and nothing verified which code made it — the gate
-passes such a report only with the reason code `provenance-self-reported`, because a kind this
-process computed is an observation while the same string read back from a run file is only a claim.
+means a submitting run asserted the observation and nothing verified which code made it. The
+`product-analyzer-coverage` gate has **no unqualified pass**: nothing here can watch code run, so
+every passing result carries `provenance-self-reported` and names whose word it is taking.
 Closing that gap is worth more than any further corpus growth.
 
 | Metric | Recorded value today | Where |

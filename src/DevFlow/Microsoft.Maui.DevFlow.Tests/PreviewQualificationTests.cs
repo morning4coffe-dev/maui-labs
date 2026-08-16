@@ -1668,6 +1668,59 @@ public sealed class PreviewQualificationTests
             Gate(accumulation, "product-analyzer-coverage").Status);
     }
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public void Accumulator_MergesProvenanceToTheWeakestClaimRegardlessOfRunOrder(bool reversed)
+    {
+        // Merge order is wall-clock sort order, which is arbitrary with respect to evidence
+        // quality. A first-match rule let whichever run happened to sort first decide between
+        // shipped-analyzer and sample-supplied, so pooling could upgrade the published label.
+        var first = RunWith(MauiQualificationMetricProvenanceKinds.ShippedAnalyzer, "run-a", 1);
+        var second = RunWith(MauiQualificationMetricProvenanceKinds.SampleSupplied, "run-b", 2);
+        var reports = reversed ? new[] { second, first } : [first, second];
+
+        var accumulation = MauiPreviewQualificationAccumulator.Accumulate(reports, DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(2, accumulation.AcceptedRuns);
+        Assert.Equal(
+            MauiQualificationMetricProvenanceKinds.SampleSupplied,
+            accumulation.Metrics["falseHeals"].Exercises?.Kind);
+
+        static MauiPreviewQualificationReport RunWith(string kind, string device, int hours)
+        {
+            var input = new MauiPreviewQualificationInput { Platform = "android" };
+            input.Profiles.Add(new MauiQualificationPlatformProfile
+            {
+                Platform = "android",
+                RealDevice = true,
+                DeviceFingerprint = device,
+            });
+            var report = MauiPreviewQualificationGateEvaluator.Evaluate(
+                input,
+                DateTimeOffset.UnixEpoch.AddHours(hours));
+            report.Metrics.FalseHeals.State = "measured";
+            report.Metrics.FalseHeals.Denominator = 10;
+            report.Metrics.FalseHeals.IndependentEvaluations = 10;
+            report.Metrics.FalseHeals.SourceCounts =
+            [
+                new MauiQualificationRateSourceCount
+                {
+                    Source = MauiQualificationSampleSources.DeviceBacked,
+                    Numerator = 0,
+                    Denominator = 10,
+                    IndependentEvaluations = 10,
+                },
+            ];
+            report.Metrics.FalseHeals.Exercises = new MauiQualificationMetricProvenance
+            {
+                Component = device,
+                Kind = kind,
+            };
+            return report;
+        }
+    }
+
     [Fact]
     public void Accumulator_RefusesARunWhoseDeclaredProvenanceContradictsItsOwnSources()
     {
@@ -2301,8 +2354,9 @@ public sealed class PreviewQualificationTests
         var gate = report.Gates.Single(entry => entry.GateId == "product-analyzer-coverage");
         Assert.Equal(MauiPreviewQualificationStates.Pass, gate.Status);
         Assert.Contains("provenance-self-reported", gate.ReasonCodes);
-        Assert.Contains("Self-reported by the submitting run, not verified here", gate.Message);
-        Assert.DoesNotContain("Every scored metric was produced by the shipped analyzer", gate.Message);
+        Assert.Contains("claiming the submitting run observed them", gate.Message);
+        Assert.Contains("read rather than observed", gate.Message);
+        Assert.DoesNotContain("verified", gate.Message);
         foreach (var name in new[] { "repairPrecision", "repairRecall", "falseHeals", "abstention" })
             Assert.Contains(name, gate.Message);
     }
@@ -2337,30 +2391,95 @@ public sealed class PreviewQualificationTests
     }
 
     [Fact]
-    public void CoverageGate_TreatsAMergedAnalyzerClaimAsSelfReportedRatherThanVerified()
+    public void CoverageGate_NeverPassesWithoutSayingWhoseWordItIsTaking()
     {
-        // In-process the label is computed here from constants, so shipped-analyzer is an
-        // observation. Read back from a run file it is a string someone wrote, and the accumulated
-        // verdict must not upgrade it to verified coverage.
+        // Nothing in this gate can watch code run: shipped-analyzer and sample-supplied are both
+        // labels it read. An unqualified pass — pass with no reason codes — would be indistinguishable
+        // from verification, so there is no such branch, in-process or merged.
         var metrics = new (string, int, MauiQualificationMetricProvenance?)[]
         {
-            ("classificationAccuracy", 10, new MauiQualificationMetricProvenance
+            ("repairPrecision", 10, Claim(MauiQualificationMetricProvenanceKinds.ShippedAnalyzer)),
+            ("repairRecall", 10, Claim(MauiQualificationMetricProvenanceKinds.ShippedAnalyzer)),
+            ("falseHeals", 10, Claim(MauiQualificationMetricProvenanceKinds.ShippedAnalyzer)),
+            ("abstention", 10, Claim(MauiQualificationMetricProvenanceKinds.ShippedAnalyzer)),
+            ("classificationAccuracy", 10, Claim(MauiQualificationMetricProvenanceKinds.ShippedAnalyzer)),
+        };
+
+        var gate = MauiPreviewQualificationGateEvaluator.BuildProductAnalyzerCoverageGate(metrics);
+
+        Assert.Equal(MauiPreviewQualificationStates.Pass, gate.Status);
+        Assert.Contains("provenance-self-reported", gate.ReasonCodes);
+        Assert.Contains("read rather than observed", gate.Message);
+        Assert.DoesNotContain("verified", gate.Message);
+
+        static MauiQualificationMetricProvenance Claim(string kind) => new()
+        {
+            Component = "MauiFlowFailureClassifier.Classify",
+            Kind = kind,
+        };
+    }
+
+    [Fact]
+    public void CoverageGate_WillNotLetOneMetricSpeakForTheOnesItExistsToDisclose()
+    {
+        // The gate exists because repair scoring does not reach the product. An input carrying only
+        // classificationAccuracy says nothing about that, and absence is not coverage — this is the
+        // shape that previously reached pass with an empty reason list.
+        var gate = MauiPreviewQualificationGateEvaluator.BuildProductAnalyzerCoverageGate(
+        [
+            ("repairPrecision", 0, null),
+            ("repairRecall", 0, null),
+            ("falseHeals", 0, null),
+            ("abstention", 0, null),
+            ("classificationAccuracy", 1, new MauiQualificationMetricProvenance
             {
                 Component = "MauiFlowFailureClassifier.Classify",
                 Kind = MauiQualificationMetricProvenanceKinds.ShippedAnalyzer,
             }),
-        };
+        ]);
 
-        var verified = MauiPreviewQualificationGateEvaluator.BuildProductAnalyzerCoverageGate(metrics, verifiedInProcess: true);
-        var merged = MauiPreviewQualificationGateEvaluator.BuildProductAnalyzerCoverageGate(metrics, verifiedInProcess: false);
+        Assert.Equal(MauiPreviewQualificationStates.NotQualified, gate.Status);
+        Assert.Contains("product-analyzer-coverage-scope-missing", gate.ReasonCodes);
+    }
 
-        Assert.Equal(MauiPreviewQualificationStates.Pass, verified.Status);
-        Assert.Empty(verified.ReasonCodes);
-        Assert.Contains("verified in this process", verified.Message);
+    [Fact]
+    public void Classification_WillNotBorrowTheShippedClassifiersNameForAnUnstampedLabel()
+    {
+        // observedFailureClass is caller-supplied. Before the producer stamp, a hand-written sample
+        // was labelled shipped-analyzer purely for not being device-backed, which let a fabricated
+        // input claim the strongest provenance the report can carry.
+        var input = new MauiPreviewQualificationInput { Platform = "android" };
+        input.Samples.Add(new MauiQualificationExecutionSample
+        {
+            SampleId = "fabricated",
+            Source = MauiQualificationSampleSources.Curated,
+            Platform = "android",
+            ExpectedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
+            ObservedFailureClass = MauiFlowFailureClasses.LocatorNotFound,
+            FailureClassInferred = true,
+        });
 
-        Assert.Equal(MauiPreviewQualificationStates.Pass, merged.Status);
-        Assert.Contains("provenance-self-reported", merged.ReasonCodes);
-        Assert.DoesNotContain("Produced by the shipped analyzer", merged.Message);
+        var report = MauiPreviewQualificationGateEvaluator.Evaluate(input, DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(
+            MauiQualificationMetricProvenanceKinds.Unknown,
+            report.Metrics.ClassificationAccuracy.Exercises?.Kind);
+        Assert.Contains("no producer stamp", report.Metrics.ClassificationAccuracy.Exercises!.Note);
+        var gate = report.Gates.Single(entry => entry.GateId == "product-analyzer-coverage");
+        Assert.Equal(MauiPreviewQualificationStates.NotQualified, gate.Status);
+        Assert.Contains("provenance-unknown", gate.ReasonCodes);
+    }
+
+    [Fact]
+    public void Classification_KeepsTheShippedClassifierLabelWhenTheRunnerStampedIt()
+    {
+        // The corpus runner does call MauiFlowFailureClassifier.Classify, so the honest corpus run
+        // must keep its label — the stamp is what separates it from the fabricated case above.
+        var report = Report(RunCorpus(), DateTimeOffset.UnixEpoch);
+
+        Assert.Equal(
+            MauiQualificationMetricProvenanceKinds.ShippedAnalyzer,
+            report.Metrics.ClassificationAccuracy.Exercises?.Kind);
     }
 
     [Fact]
@@ -2369,8 +2488,7 @@ public sealed class PreviewQualificationTests
         // Every other gate in the evaluator answers "nothing was measured" with not-qualified.
         // A pass here would let an empty report advertise analyzer coverage it never had.
         var gate = MauiPreviewQualificationGateEvaluator.BuildProductAnalyzerCoverageGate(
-            [("repairPrecision", 0, null), ("falseHeals", 0, null)],
-            verifiedInProcess: true);
+            [("repairPrecision", 0, null), ("falseHeals", 0, null)]);
 
         Assert.Equal(MauiPreviewQualificationStates.NotQualified, gate.Status);
         Assert.Contains("product-analyzer-coverage-evidence-missing", gate.ReasonCodes);
@@ -2386,21 +2504,33 @@ public sealed class PreviewQualificationTests
                 Component = "submitting-run",
                 Kind = MauiQualificationMetricProvenanceKinds.SampleSupplied,
             }),
+            ("repairRecall", 10, new MauiQualificationMetricProvenance
+            {
+                Component = "submitting-run",
+                Kind = MauiQualificationMetricProvenanceKinds.SampleSupplied,
+            }),
             ("falseHeals", 10, null),
             ("abstention", 10, new MauiQualificationMetricProvenance
             {
                 Component = "a + undeclared",
                 Kind = MauiQualificationMetricProvenanceKinds.Unknown,
             }),
-        ],
-            verifiedInProcess: true);
+            ("classificationAccuracy", 10, new MauiQualificationMetricProvenance
+            {
+                Component = "   ",
+                Kind = MauiQualificationMetricProvenanceKinds.ShippedAnalyzer,
+            }),
+        ]);
 
         Assert.Equal(MauiPreviewQualificationStates.NotQualified, gate.Status);
         Assert.Contains("provenance-undeclared", gate.ReasonCodes);
         Assert.Contains("provenance-unknown", gate.ReasonCodes);
-        // "Declared no component" must not be said about a metric that declared one.
-        Assert.Contains("Declared no component: falseHeals", gate.Message);
-        Assert.Contains("did not declare, what produced them: abstention", gate.Message);
+        Assert.Contains("provenance-component-missing", gate.ReasonCodes);
+        // A metric that declared nothing and a metric that declared a kind but no component are
+        // different failures, and neither message may be said about the other.
+        Assert.Contains("Declared nothing about what produced them: falseHeals", gate.Message);
+        Assert.Contains("Named a kind but no component: classificationAccuracy", gate.Message);
+        Assert.Contains("disagreed about what produced them: abstention", gate.Message);
     }
 
     [Fact]
@@ -2479,9 +2609,15 @@ public sealed class PreviewQualificationTests
     {
         // A tripwire, not a style rule. Scoped to the qualification harness files the disclosure is
         // actually about: scanning the whole assembly would let an unrelated, legitimate call to
-        // the analyzer elsewhere permanently disarm it. It matches a call shape rather than a bare
-        // mention, so a sentence in a string literal cannot satisfy it either, and it asserts
-        // equality so both directions fail — an overstatement and a silent rewiring.
+        // the analyzer elsewhere permanently disarm it. It asserts equality so both directions
+        // fail — an overstatement, and a rewiring that forgets to flip the flag.
+        //
+        // Two limits are real and worth stating rather than papering over. It only sees this file
+        // glob, so wiring the analyzer in from a differently named file would leave it green; and
+        // it only sees this call shape, so an indirection through a delegate or reflection would
+        // too. Under an equality assert a false negative is the dangerous direction, because it
+        // makes the tripwire agree with a `false` declaration instead of tightening it. Stripping
+        // comments *and* string literals is what keeps prose on either side from deciding it.
         var testingRoot = Path.Combine(
             FindRepositoryRoot(), "src", "DevFlow", "Microsoft.Maui.DevFlow.Testing");
         var callsAnalyzer = Directory
@@ -2490,7 +2626,7 @@ public sealed class PreviewQualificationTests
                 !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
                 !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
             .Select(File.ReadAllText)
-            .Select(StripComments)
+            .Select(StripCommentsAndLiterals)
             .Any(static text => Regex.IsMatch(text, @"MauiSelectorHealthAnalyzer\s*\.\s*Analyze\s*\("));
         var declared = Report(RunCorpus(), DateTimeOffset.UnixEpoch).Corpus.ExercisesShippedAnalyzer;
 
@@ -2498,13 +2634,19 @@ public sealed class PreviewQualificationTests
     }
 
     /// <summary>
-    /// Removes line and block comments so a tripwire searching for a call cannot be satisfied by
-    /// prose that merely names it. Deliberately crude: it does not understand string literals, so
-    /// the tripwire pairs it with a call-shape pattern rather than a bare symbol mention.
+    /// Removes string literals first, then comments, so neither a sentence naming the call nor a
+    /// literal containing a comment marker can decide the tripwire. Literals go first because a
+    /// string such as <c>"//"</c> would otherwise blank the rest of a real line of code.
     /// </summary>
-    private static string StripComments(string source)
+    private static string StripCommentsAndLiterals(string source)
     {
-        var withoutBlocks = Regex.Replace(source, @"/\*.*?\*/", " ", RegexOptions.Singleline);
+        // Verbatim and raw string literals collapse to an empty literal; interpolated holes go with
+        // them, which is fine — the tripwire only cares about executable call sites.
+        var withoutRaw = Regex.Replace(source, "\"\"\".*?\"\"\"", "\"\"", RegexOptions.Singleline);
+        var withoutVerbatim = Regex.Replace(withoutRaw, "@\"(?:[^\"]|\"\")*\"", "\"\"");
+        var withoutStrings = Regex.Replace(withoutVerbatim, @"(?<!')""(?:\\.|[^""\\])*""", "\"\"");
+        var withoutChars = Regex.Replace(withoutStrings, @"'(?:\\.|[^'\\])'", "' '");
+        var withoutBlocks = Regex.Replace(withoutChars, @"/\*.*?\*/", " ", RegexOptions.Singleline);
         return string.Join(
             "\n",
             withoutBlocks.Split('\n').Select(static line =>
@@ -2512,6 +2654,24 @@ public sealed class PreviewQualificationTests
                 var index = line.IndexOf("//", StringComparison.Ordinal);
                 return index >= 0 ? line[..index] : line;
             }));
+    }
+
+    [Theory]
+    [InlineData("var help = \"call MauiSelectorHealthAnalyzer.Analyze(input) here\";", false)]
+    [InlineData("var marker = \"/*\"; MauiSelectorHealthAnalyzer.Analyze(input); var end = \"*/\";", true)]
+    [InlineData("var doc = \"https://x\"; MauiSelectorHealthAnalyzer.Analyze(input);", true)]
+    [InlineData("// MauiSelectorHealthAnalyzer.Analyze(input);", false)]
+    [InlineData("MauiSelectorHealthAnalyzer . Analyze ( input );", true)]
+    public void Tripwire_ReadsCodeRatherThanProseInEitherDirection(string source, bool expected)
+    {
+        // Under an equality assert both mistakes matter: prose that looks like a call would force
+        // the disclosure to overstate, and a literal that swallows a real call would let it
+        // understate while the test stayed green.
+        var actual = Regex.IsMatch(
+            StripCommentsAndLiterals(source),
+            @"MauiSelectorHealthAnalyzer\s*\.\s*Analyze\s*\(");
+
+        Assert.Equal(expected, actual);
     }
 
     private static MauiPreviewQualificationCorpusRunResult RunCorpus(string? corpusRoot = null) =>

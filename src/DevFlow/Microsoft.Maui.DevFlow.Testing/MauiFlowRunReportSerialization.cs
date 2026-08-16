@@ -493,8 +493,12 @@ public static class MauiFlowRunReportSerializer
             foreach (var assertion in step.Assertions)
             {
                 assertion.Kind = MauiFlowReportRedactor.SafeIdentifier(assertion.Kind);
-                assertion.ExpectedDisclosure = NormalizeDisclosure(assertion.ExpectedDisclosure, assertion.Expected);
-                assertion.ActualDisclosure = NormalizeDisclosure(assertion.ActualDisclosure, assertion.Actual);
+                // A failed assertion is the one place where the observed value is the whole point
+                // of the report. Withholding it leaves the author a length and a digest, which is
+                // unusable. Disclosure still has to clear IsSafeText.
+                var failed = assertion.Passed == false && assertion.Skipped != true;
+                assertion.ExpectedDisclosure = NormalizeDisclosure(assertion.ExpectedDisclosure, assertion.Expected, failed);
+                assertion.ActualDisclosure = NormalizeDisclosure(assertion.ActualDisclosure, assertion.Actual, failed);
                 assertion.Expected = assertion.ExpectedDisclosure.Value;
                 assertion.Actual = assertion.ActualDisclosure.Value;
             }
@@ -858,14 +862,19 @@ public static class MauiFlowRunReportSerializer
 
     private static MauiFlowValueDisclosure NormalizeDisclosure(
         MauiFlowValueDisclosure? disclosure,
-        string? rawValue)
+        string? rawValue,
+        bool allowSafeText = false)
     {
         if (disclosure is null)
-            return MauiFlowReportRedactor.DescribeValue(rawValue);
+            return MauiFlowReportRedactor.DescribeValue(rawValue, allowPlain: allowSafeText, allowSafeText: allowSafeText);
 
+        // A producer that already redacted stays redacted; allowSafeText only widens what a
+        // disclosed value is permitted to be, it never re-opens something the producer closed.
+        var producerDisclosed = string.Equals(disclosure.State, "disclosed", StringComparison.Ordinal);
         var normalized = MauiFlowReportRedactor.DescribeValue(
             disclosure.Value ?? rawValue,
-            allowPlain: string.Equals(disclosure.State, "disclosed", StringComparison.Ordinal));
+            allowPlain: producerDisclosed || (allowSafeText && disclosure.Value is null),
+            allowSafeText: allowSafeText);
         if (disclosure.Value is null && rawValue is null)
         {
             normalized.State = disclosure.State is "disclosed" or "redacted" or "omitted"
@@ -1103,13 +1112,28 @@ public static class MauiFlowReportRedactor
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
     public static MauiFlowValueDisclosure DescribeValue(string? value, bool allowPlain = false)
+        => DescribeValue(value, allowPlain, allowSafeText: false);
+
+    /// <summary>
+    /// Describes an assertion or step value for the report, disclosing it in the clear only when
+    /// that is demonstrably safe.
+    /// </summary>
+    /// <param name="allowSafeText">
+    /// When <see langword="true"/>, non-scalar text is disclosed provided it survives
+    /// <see cref="IsSafeText"/>. Callers pass this only for a <em>failed</em> assertion, where the
+    /// observed value is the single fact the author needs and where withholding it protects
+    /// nobody: the author already committed the expectation to the flow file.
+    /// </param>
+    public static MauiFlowValueDisclosure DescribeValue(string? value, bool allowPlain, bool allowSafeText)
     {
         if (value is null)
             return new MauiFlowValueDisclosure { State = "omitted" };
 
         var normalized = RemoveControls(value);
         var scalar = IsSafeScalar(normalized);
-        var disclose = allowPlain && scalar && !FlowSecretReference.LooksSensitive(normalized);
+        var disclose = allowPlain &&
+            (scalar || (allowSafeText && IsSafeText(normalized))) &&
+            !FlowSecretReference.LooksSensitive(normalized);
         return new MauiFlowValueDisclosure
         {
             State = disclose ? "disclosed" : "redacted",
@@ -1304,6 +1328,31 @@ public static class MauiFlowReportRedactor
            decimal.TryParse(value, System.Globalization.NumberStyles.Float,
                System.Globalization.CultureInfo.InvariantCulture, out _) ||
            (value.StartsWith('#') && value.Length is 7 or 9 && value[1..].All(Uri.IsHexDigit));
+
+    /// <summary>Longest assertion text disclosed in the clear. UI labels are short; a long value is a payload.</summary>
+    internal const int SafeTextDisclosureLimit = 256;
+
+    /// <summary>
+    /// Decides whether a piece of observed UI text may be written into the report in the clear.
+    /// </summary>
+    /// <remarks>
+    /// The test is deliberately conservative and, crucially, <em>reuses the redaction pipeline as
+    /// its own oracle</em>: a value qualifies only when <see cref="SafeMessage(string?, int)"/>
+    /// returns it unchanged. Any string that contains an email address, an absolute Windows or
+    /// POSIX path, a bearer token, a JWT, a <c>secret=</c>-style assignment, or that is long
+    /// enough to be truncated, is rewritten by that pass and so is rejected here. On top of that
+    /// the value must not look like an opaque credential and must be short. Because disclosure is
+    /// byte-identical to the value that was hashed, the reported <c>length</c> and <c>digest</c>
+    /// stay honest descriptions of the disclosed text.
+    /// </remarks>
+    private static bool IsSafeText(string value)
+    {
+        if (value.Length is 0 or > SafeTextDisclosureLimit)
+            return false;
+        if (LooksOpaqueSecret(value))
+            return false;
+        return string.Equals(SafeMessage(value, SafeTextDisclosureLimit), value, StringComparison.Ordinal);
+    }
 
     private static bool LooksOpaqueSecret(string value)
     {

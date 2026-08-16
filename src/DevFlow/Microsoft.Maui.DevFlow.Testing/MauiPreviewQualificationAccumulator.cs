@@ -97,34 +97,36 @@ public static class MauiPreviewQualificationAccumulator
             return accumulation;
         }
 
-        // The reference run defines what "the same evidence" means, so choosing the wrong one is a
-        // denial-of-evidence footgun: with the oldest run as reference, a single stale file from a
-        // superseded corpus would reject every current run as a fingerprint mismatch and the merge
-        // would report almost no evidence — a silent undercount dressed up as a clean result.
-        // Pick the largest coherent cohort instead, newest run first within it. This is not a
-        // defence against forged input (a flood of forged runs would win the vote), but forging is
-        // already outside what a self-reported file can be checked for; an accidental stale file
-        // is not, and it is the failure that actually happens in CI.
+        // The reference run defines what "the same evidence" means, so choosing the wrong one loses
+        // evidence: with the oldest run as reference, one leftover file from a superseded corpus
+        // rejected every current run as a fingerprint mismatch and the merge reported almost
+        // nothing — a silent undercount dressed up as a clean result. Losing a run is not
+        // harmless, because a run discarded here never reaches the gates, so a flow that actually
+        // measured a stability failure disappears instead of failing.
+        //
+        // Elect the run that admits the most others, under the *real* acceptance predicate rather
+        // than a proxy for it. Grouping on a subset of the compared fields is not good enough:
+        // three ordinary runs differing only in --generated-no-repair share contract, platform,
+        // policy and corpus fingerprint yet reject each other on static evidence, so a group of
+        // them can win the vote and then admit only one of its own members. The cohort is one file
+        // per CI shard, so the quadratic scan costs nothing.
         //
         // A run that rejects *itself* — relaxed thresholds, unmodelled evidence, counts that do
         // not add up — can never be accepted, so it must never be the run everything else is
         // measured against. Fall back to the whole set only when nothing is self-valid, so that
         // the rejection reasons still get reported rather than the merge silently emptying.
+        //
+        // This is a majority rule, not a proof: enough forged runs would out-vote the genuine
+        // ones. Forgery is already outside what a self-reported file can be checked for; a stale
+        // file is an accident that happens, and that is the failure this addresses.
         var eligible = ordered
             .Where(static report => Incompatibilities(report, report).Count == 0)
             .ToList();
-        var reference = (eligible.Count > 0 ? eligible : ordered)
-            .GroupBy(static report => string.Join(
-                '|',
-                report.ContractVersion,
-                report.Platform,
-                report.Thresholds.PolicyVersion,
-                report.Fingerprints.CorpusFingerprint), StringComparer.Ordinal)
-            .OrderByDescending(static group => group.Count())
-            .ThenByDescending(static group => group.Max(static report => report.GeneratedAt))
-            .ThenBy(static group => group.Key, StringComparer.Ordinal)
-            .First()
-            .OrderByDescending(static report => report.GeneratedAt)
+        var candidates = eligible.Count > 0 ? eligible : ordered;
+        var reference = candidates
+            .OrderByDescending(candidate => candidates.Count(other => Incompatibilities(candidate, other).Count == 0))
+            .ThenByDescending(static candidate => candidate.GeneratedAt)
+            .ThenBy(static candidate => ComputeEvidenceFingerprint(candidate), StringComparer.Ordinal)
             .First();
         accumulation.Platform = reference.Platform;
         // Thresholds are anchored to the compiled policy defaults, never adopted from a run file.
@@ -285,6 +287,21 @@ public static class MauiPreviewQualificationAccumulator
             reasons.Add("accumulate-policy-version-mismatch");
         if (!string.Equals(reference.Fingerprints.CorpusFingerprint, candidate.Fingerprints.CorpusFingerprint, StringComparison.Ordinal))
             reasons.Add("accumulate-corpus-fingerprint-mismatch");
+        // Evidence about one build is not evidence about another. Without this, the *only*
+        // documented way to distinguish two shards was `deviceFingerprint` — and a run file could
+        // just as easily mint independence by varying the commit it claims to have tested, which
+        // reads as ordinary metadata rather than as the lever it is. Pooling across builds is also
+        // wrong on its own terms: a stability number that spans a fix and its regression describes
+        // neither build.
+        if (!string.Equals(reference.Fingerprints.RepositoryCommit, candidate.Fingerprints.RepositoryCommit, StringComparison.Ordinal) ||
+            !string.Equals(reference.Fingerprints.TestingPackageVersion, candidate.Fingerprints.TestingPackageVersion, StringComparison.Ordinal) ||
+            !string.Equals(reference.Fingerprints.PackageId, candidate.Fingerprints.PackageId, StringComparison.Ordinal) ||
+            !string.Equals(reference.Fingerprints.PackageFingerprint, candidate.Fingerprints.PackageFingerprint, StringComparison.Ordinal) ||
+            !string.Equals(reference.Fingerprints.ToolVersion, candidate.Fingerprints.ToolVersion, StringComparison.Ordinal) ||
+            !string.Equals(reference.Fingerprints.ToolFingerprint, candidate.Fingerprints.ToolFingerprint, StringComparison.Ordinal))
+        {
+            reasons.Add("accumulate-product-identity-mismatch");
+        }
         if (!ThresholdsMatch(reference.Thresholds, candidate.Thresholds))
             reasons.Add("accumulate-threshold-mismatch");
         // A run whose own thresholds were relaxed relative to policy cannot contribute evidence to
@@ -415,6 +432,13 @@ public static class MauiPreviewQualificationAccumulator
             .OrderBy(static count => count.Source, StringComparer.Ordinal)
             .Select(static count => $"{count.Source}:{count.Numerator}/{count.Denominator}/{count.IndependentEvaluations}");
 
+    /// <summary>
+    /// Compares every threshold the contract carries, not the subset the gates happen to read
+    /// today. A run shipping <c>minimumCleanFirstAttemptsPerTier1Flow: 1</c> is describing a
+    /// different policy than the one being enforced, and merging it would mean publishing its
+    /// evidence under a claim it was never held to — even though the merge re-evaluates against
+    /// the compiled defaults and so would not adopt the relaxed number itself.
+    /// </summary>
     private static bool ThresholdsMatch(MauiQualificationGateThresholds left, MauiQualificationGateThresholds right) =>
         left.ConfidenceLevel.Equals(right.ConfidenceLevel) &&
         left.MinimumRepairPrecision.Equals(right.MinimumRepairPrecision) &&
@@ -424,7 +448,13 @@ public static class MauiPreviewQualificationAccumulator
         left.MinimumSelectorStability.Equals(right.MinimumSelectorStability) &&
         left.MinimumSelectorObservations == right.MinimumSelectorObservations &&
         left.MinimumClassificationAccuracy.Equals(right.MinimumClassificationAccuracy) &&
-        left.MinimumClassificationEvaluations == right.MinimumClassificationEvaluations;
+        left.MinimumClassificationEvaluations == right.MinimumClassificationEvaluations &&
+        left.MaximumCalibrationEce.Equals(right.MaximumCalibrationEce) &&
+        left.MinimumCleanFirstAttemptsPerTier1Flow == right.MinimumCleanFirstAttemptsPerTier1Flow &&
+        left.MinimumFirstAttemptStability.Equals(right.MinimumFirstAttemptStability) &&
+        left.HostOperationP95BudgetMs.Equals(right.HostOperationP95BudgetMs) &&
+        left.RequireRealAndroidDeviceEvidence == right.RequireRealAndroidDeviceEvidence &&
+        left.RequireRecordedReviews == right.RequireRecordedReviews;
 
     private static MauiQualificationRateMetric Select(MauiQualificationMetrics metrics, string name) => name switch
     {

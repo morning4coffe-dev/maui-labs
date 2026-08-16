@@ -265,6 +265,8 @@ internal static class FlowQualificationCommands
         }
 
         CompareRate(comparison, "repairPrecision", baseline.Metrics.RepairPrecision, report.Metrics.RepairPrecision);
+        CompareRate(comparison, "repairRecall", baseline.Metrics.RepairRecall, report.Metrics.RepairRecall);
+        CompareRate(comparison, "recordingValidity", baseline.Metrics.RecordingValidity, report.Metrics.RecordingValidity);
         CompareRate(comparison, "selectorStability", baseline.Metrics.SelectorStability, report.Metrics.SelectorStability);
         CompareRate(comparison, "classificationAccuracy", baseline.Metrics.ClassificationAccuracy, report.Metrics.ClassificationAccuracy);
         CompareRate(
@@ -320,13 +322,17 @@ internal static class FlowQualificationCommands
         CompareCount(comparison, "corpus.securityCorpus.passedCount", baseline.Corpus.SecurityCorpus?.PassedCount ?? 0, report.Corpus.SecurityCorpus?.PassedCount ?? 0);
         CompareCount(comparison, "metrics.privacySecurityEscapes.testCount", baseline.Metrics.PrivacySecurityEscapes.TestCount, report.Metrics.PrivacySecurityEscapes.TestCount);
 
-        foreach (var baselineGate in baseline.Gates.Where(static gate => gate.Status == MauiPreviewQualificationStates.Pass))
+        // Every gate is compared, not just the ones that were passing. A gate moving
+        // not-qualified -> fail is a *measured* failure replacing an absence of evidence, which is
+        // the regression this diff exists to catch; ranking only pass -> anything meant CI stayed
+        // green through exactly that transition.
+        foreach (var baselineGate in baseline.Gates)
         {
             var current = report.Gates.FirstOrDefault(gate => gate.GateId == baselineGate.GateId);
             if (current is null)
                 comparison.Regressions.Add($"gate {baselineGate.GateId} missing");
-            else if (current.Status != MauiPreviewQualificationStates.Pass)
-                comparison.Regressions.Add($"gate {baselineGate.GateId} pass -> {current.Status}");
+            else if (GateRank(current.Status) > GateRank(baselineGate.Status))
+                comparison.Regressions.Add($"gate {baselineGate.GateId} {baselineGate.Status} -> {current.Status}");
         }
 
         if (accumulation is not null)
@@ -402,6 +408,19 @@ internal static class FlowQualificationCommands
         if (current < baseline)
             comparison.Regressions.Add($"{name} {baseline} -> {current}");
     }
+
+    /// <summary>
+    /// Orders gate statuses worst-first so the diff can tell a regression from an improvement.
+    /// A measured failure is worse than an absence of evidence, which is worse than a pass; an
+    /// unrecognised status is treated as the worst case rather than silently ignored.
+    /// </summary>
+    private static int GateRank(string? status) => status switch
+    {
+        MauiPreviewQualificationStates.Pass => 0,
+        MauiPreviewQualificationStates.NotQualified => 1,
+        MauiPreviewQualificationStates.Fail => 2,
+        _ => 3,
+    };
 
     private sealed class MauiQualificationBaselineComparison
     {

@@ -67,7 +67,7 @@
     "curatedRepairPositiveCases": 31,
     "curatedDerivedCases": 30,
     "undeclaredProjectionCollisions": 0,
-    "undeclaredShapeCollisions": 5,
+    "undeclaredShapeCollisions": 7,
     "curatedNoRepairCases": 16,
     "generatedNoRepairCases": 300,
     "curatedClassificationLabeledCases": 45,
@@ -83,7 +83,7 @@
     "errors": [],
     "securityCorpus": {
       "version": "sha256:7420b08a19ac73c2ad94a07f52442bd1a5f28936e9db61fa67f68c36cdea844a",
-      "manifestFingerprint": "sha256:e5a89d607aac0c8e5806f1433ae1a742d1a492f1c63b3dfcb643f5862f1dc0cc",
+      "manifestFingerprint": "sha256:922c0b88ee1761a1cffd0c16d567317bcd17bb4bd27024bf154fa838c9a9a82f",
       "valid": true,
       "caseCount": 18,
       "passedCount": 18,
@@ -467,57 +467,57 @@
           "state": "measured",
           "operation": "flow-markdown-parse",
           "sampleCount": 10,
-          "p50Ms": 0.1069,
-          "p95Ms": 0.14514499999999994,
-          "maxMs": 0.1703
+          "p50Ms": 0.1089,
+          "p95Ms": 0.14260999999999996,
+          "maxMs": 0.167
         },
         {
           "state": "measured",
           "operation": "flow-validate",
           "sampleCount": 10,
-          "p50Ms": 0.00115,
-          "p95Ms": 0.00684999999999999,
-          "maxMs": 0.0109
+          "p50Ms": 0.0021000000000000003,
+          "p95Ms": 0.013244999999999998,
+          "maxMs": 0.0141
         },
         {
           "state": "measured",
           "operation": "report-serialize-redaction",
           "sampleCount": 10,
-          "p50Ms": 0.0926,
-          "p95Ms": 0.17527499999999985,
-          "maxMs": 0.2349
+          "p50Ms": 0.09440000000000001,
+          "p95Ms": 0.1663499999999999,
+          "maxMs": 0.2172
         },
         {
           "state": "measured",
           "operation": "fingerprint",
           "sampleCount": 10,
-          "p50Ms": 0.0125,
-          "p95Ms": 0.018299999999999997,
-          "maxMs": 0.0201
+          "p50Ms": 0.0127,
+          "p95Ms": 0.017304999999999997,
+          "maxMs": 0.0178
         },
         {
           "state": "measured",
           "operation": "candidate-generation",
           "sampleCount": 10,
-          "p50Ms": 0.0336,
-          "p95Ms": 0.06893499999999998,
-          "maxMs": 0.076
+          "p50Ms": 0.02995,
+          "p95Ms": 0.04273499999999999,
+          "maxMs": 0.048
         },
         {
           "state": "measured",
           "operation": "candidate-ranking",
           "sampleCount": 10,
           "p50Ms": 0.0091,
-          "p95Ms": 0.016745,
-          "maxMs": 0.0176
+          "p95Ms": 0.03386499999999996,
+          "maxMs": 0.0511
         },
         {
           "state": "measured",
           "operation": "qualification-gate",
           "sampleCount": 10,
-          "p50Ms": 0.05895,
-          "p95Ms": 0.15438499999999983,
-          "maxMs": 0.2204
+          "p50Ms": 0.1414,
+          "p95Ms": 0.24659999999999993,
+          "maxMs": 0.2691
         }
       ],
       "deviceOverhead": {

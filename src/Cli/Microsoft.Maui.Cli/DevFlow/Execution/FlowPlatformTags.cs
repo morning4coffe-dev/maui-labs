@@ -28,10 +28,14 @@ internal static class FlowPlatformTags
         return Parse(value).Any(normalizedAliases.Contains);
     }
 
-    public static IReadOnlyList<string> Parse(IEnumerable<string> values)
+    public static IReadOnlyList<string> Parse(IEnumerable<string>? values)
     {
-        ArgumentNullException.ThrowIfNull(values);
+        // A plan may declare no platforms at all. That is a valid, unconstrained plan, not a
+        // programming error, so it must not throw its way out as an infrastructure failure.
+        if (values is null)
+            return [];
         return values
+            .Where(static value => value is not null)
             .SelectMany(Parse)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();

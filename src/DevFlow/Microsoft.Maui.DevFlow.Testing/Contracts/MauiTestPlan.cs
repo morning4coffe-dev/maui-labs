@@ -15,23 +15,30 @@ public sealed class MauiTestPlan
     [JsonPropertyName("flow")] public MauiFlowReference? Flow { get; init; }
     [JsonPropertyName("title")] public string? Title { get; init; }
     [JsonPropertyName("goal")] public string? Goal { get; init; }
-    [JsonPropertyName("scenarios")] public List<MauiTestScenario> Scenarios { get; init; } = [];
-    [JsonPropertyName("assumptions")] public List<string> Assumptions { get; init; } = [];
-    [JsonPropertyName("risks")] public List<string> Risks { get; init; } = [];
-    [JsonPropertyName("preconditions")] public List<MauiTestPrecondition> Preconditions { get; init; } = [];
+
+    // Every list below coalesces null on assignment. A hand-authored plan may spell an optional
+    // list as an explicit JSON null, which System.Text.Json writes straight over the initializer;
+    // consumers then dereference a null List and the operator sees an unhandled
+    // ArgumentNullException reported as an infrastructure error rather than a plan they can fix.
+    // An absent list and a null list mean the same thing - nothing declared - so they are stored
+    // the same way.
+    [JsonPropertyName("scenarios")] public List<MauiTestScenario> Scenarios { get => field; init => field = value ?? []; } = [];
+    [JsonPropertyName("assumptions")] public List<string> Assumptions { get => field; init => field = value ?? []; } = [];
+    [JsonPropertyName("risks")] public List<string> Risks { get => field; init => field = value ?? []; } = [];
+    [JsonPropertyName("preconditions")] public List<MauiTestPrecondition> Preconditions { get => field; init => field = value ?? []; } = [];
     [JsonPropertyName("reset")] public MauiTestResetRequirement? Reset { get; init; }
-    [JsonPropertyName("acceptanceCriteria")] public List<MauiAcceptanceCriterion> AcceptanceCriteria { get; init; } = [];
-    [JsonPropertyName("requiredPlatforms")] public List<string> RequiredPlatforms { get; init; } = [];
+    [JsonPropertyName("acceptanceCriteria")] public List<MauiAcceptanceCriterion> AcceptanceCriteria { get => field; init => field = value ?? []; } = [];
+    [JsonPropertyName("requiredPlatforms")] public List<string> RequiredPlatforms { get => field; init => field = value ?? []; } = [];
     [JsonPropertyName("requirements")] public MauiFlowRequirements? Requirements { get; init; }
     [JsonPropertyName("explorationBudget")] public MauiExplorationBudget? ExplorationBudget { get; init; }
-    [JsonPropertyName("prohibitedActionClasses")] public List<string> ProhibitedActionClasses { get; init; } = [];
+    [JsonPropertyName("prohibitedActionClasses")] public List<string> ProhibitedActionClasses { get => field; init => field = value ?? []; } = [];
     [JsonPropertyName("provenance")] public MauiActorProvenance? Provenance { get; init; }
-    [JsonPropertyName("reviews")] public List<MauiPlanReview> Reviews { get; init; } = [];
-    [JsonPropertyName("approvals")] public List<MauiPlanApproval> Approvals { get; init; } = [];
+    [JsonPropertyName("reviews")] public List<MauiPlanReview> Reviews { get => field; init => field = value ?? []; } = [];
+    [JsonPropertyName("approvals")] public List<MauiPlanApproval> Approvals { get => field; init => field = value ?? []; } = [];
     [JsonPropertyName("sideEffectPolicy")] public string? SideEffectPolicy { get; init; }
     [JsonPropertyName("repairPolicy")] public MauiFlowRepairPolicy? RepairPolicy { get; init; }
-    [JsonPropertyName("businessOracles")] public List<MauiBusinessOracleRequirement> BusinessOracles { get; init; } = [];
-    [JsonPropertyName("independentBusinessOracles")] public List<MauiIndependentBusinessOracleDeclaration> IndependentBusinessOracles { get; init; } = [];
+    [JsonPropertyName("businessOracles")] public List<MauiBusinessOracleRequirement> BusinessOracles { get => field; init => field = value ?? []; } = [];
+    [JsonPropertyName("independentBusinessOracles")] public List<MauiIndependentBusinessOracleDeclaration> IndependentBusinessOracles { get => field; init => field = value ?? []; } = [];
     [JsonPropertyName("compensator")] public MauiFlowCompensatorReference? Compensator { get; set; }
     [JsonPropertyName("checkpoint")] public MauiFlowCheckpointRequirements? Checkpoint { get; init; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
@@ -47,8 +54,8 @@ public sealed class MauiTestPlan
 /// </summary>
 public sealed class MauiFlowRepairPolicy
 {
-    [JsonPropertyName("allowedCandidateKinds")] public List<string> AllowedCandidateKinds { get; init; } = [];
-    [JsonPropertyName("allowedRiskFlags")] public List<string> AllowedRiskFlags { get; init; } = [];
+    [JsonPropertyName("allowedCandidateKinds")] public List<string> AllowedCandidateKinds { get => field; init => field = value ?? []; } = [];
+    [JsonPropertyName("allowedRiskFlags")] public List<string> AllowedRiskFlags { get => field; init => field = value ?? []; } = [];
     [JsonPropertyName("maxCandidates")] public int? MaxCandidates { get; init; }
     [JsonPropertyName("minimumScore")] public double? MinimumScore { get; init; }
     [JsonPropertyName("minimumScoreGap")] public double? MinimumScoreGap { get; init; }
@@ -70,8 +77,8 @@ public sealed class MauiTestScenario
 {
     [JsonPropertyName("scenarioId")] public string? ScenarioId { get; init; }
     [JsonPropertyName("description")] public string? Description { get; init; }
-    [JsonPropertyName("acceptanceCriterionIds")] public List<string> AcceptanceCriterionIds { get; init; } = [];
-    [JsonPropertyName("risks")] public List<string> Risks { get; init; } = [];
+    [JsonPropertyName("acceptanceCriterionIds")] public List<string> AcceptanceCriterionIds { get => field; init => field = value ?? []; } = [];
+    [JsonPropertyName("risks")] public List<string> Risks { get => field; init => field = value ?? []; } = [];
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
@@ -114,8 +121,8 @@ public sealed class MauiAcceptanceCriterion
 /// <summary>Declares capabilities and semantics that must be available before execution.</summary>
 public sealed class MauiFlowRequirements
 {
-    [JsonPropertyName("requiredCapabilities")] public List<MauiCapabilityRequirement> RequiredCapabilities { get; init; } = [];
-    [JsonPropertyName("requiredSemantics")] public List<MauiRequiredSemantic> RequiredSemantics { get; init; } = [];
+    [JsonPropertyName("requiredCapabilities")] public List<MauiCapabilityRequirement> RequiredCapabilities { get => field; init => field = value ?? []; } = [];
+    [JsonPropertyName("requiredSemantics")] public List<MauiRequiredSemantic> RequiredSemantics { get => field; init => field = value ?? []; } = [];
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
@@ -124,7 +131,7 @@ public sealed class MauiCapabilityRequirement
 {
     [JsonPropertyName("name")] public string? Name { get; init; }
     [JsonPropertyName("minimumVersion")] public int? MinimumVersion { get; init; }
-    [JsonPropertyName("features")] public List<string> Features { get; init; } = [];
+    [JsonPropertyName("features")] public List<string> Features { get => field; init => field = value ?? []; } = [];
     [JsonPropertyName("required")] public bool Required { get; init; } = true;
     [JsonPropertyName("reason")] public string? Reason { get; init; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
@@ -143,8 +150,8 @@ public sealed class MauiRequiredSemantic
 /// <summary>The capabilities and semantics that a host or driver reports as available.</summary>
 public sealed class MauiFlowCapabilitySet
 {
-    [JsonPropertyName("capabilities")] public List<MauiFlowCapability> Capabilities { get; init; } = [];
-    [JsonPropertyName("semantics")] public List<MauiSupportedSemantic> Semantics { get; init; } = [];
+    [JsonPropertyName("capabilities")] public List<MauiFlowCapability> Capabilities { get => field; init => field = value ?? []; } = [];
+    [JsonPropertyName("semantics")] public List<MauiSupportedSemantic> Semantics { get => field; init => field = value ?? []; } = [];
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
@@ -153,7 +160,7 @@ public sealed class MauiFlowCapability
 {
     [JsonPropertyName("name")] public string? Name { get; init; }
     [JsonPropertyName("version")] public int? Version { get; init; }
-    [JsonPropertyName("features")] public List<string> Features { get; init; } = [];
+    [JsonPropertyName("features")] public List<string> Features { get => field; init => field = value ?? []; } = [];
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
@@ -312,7 +319,7 @@ public sealed class MauiExplorationBudget
 {
     [JsonPropertyName("maxActions")] public int? MaxActions { get; init; }
     [JsonPropertyName("maxDurationSeconds")] public int? MaxDurationSeconds { get; init; }
-    [JsonPropertyName("allowedScopes")] public List<string> AllowedScopes { get; init; } = [];
+    [JsonPropertyName("allowedScopes")] public List<string> AllowedScopes { get => field; init => field = value ?? []; } = [];
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 

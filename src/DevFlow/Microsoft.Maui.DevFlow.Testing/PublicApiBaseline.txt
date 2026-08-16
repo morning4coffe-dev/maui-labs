@@ -462,6 +462,7 @@ F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.ReviewSelectorRepair:
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowTriageNextActions.SelectSupportedTarget:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiImportedArtifactIdentity.OpaqueIdPrefix:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionReportSerializer.FileName:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiPreviewQualificationAccumulator.MaximumRunFiles:System.Int32
 F:Microsoft.Maui.DevFlow.Testing.MauiPreviewQualificationAccumulator.MergedMetricNames:System.String[]
 F:Microsoft.Maui.DevFlow.Testing.MauiPreviewQualificationCorpusRunner.GeneratorVersion:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiPreviewQualificationStates.Fail:System.String
@@ -2098,6 +2099,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.Runs[]:System.Col
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.Schema[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.Status[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.Thresholds[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationGateThresholds{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAccumulation.UnverifiedProductIdentity[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAppleQaEvidence.AppProject[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAppleQaEvidence.AppSourceDigest[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationAppleQaEvidence.ArtifactCount[]:System.Int32{get:public;set:public}

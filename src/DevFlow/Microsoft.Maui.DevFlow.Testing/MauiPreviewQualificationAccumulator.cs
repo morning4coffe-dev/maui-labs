@@ -37,6 +37,14 @@ public sealed class MauiQualificationAccumulation
     [JsonPropertyName("acceptedRuns")] public int AcceptedRuns { get; set; }
     [JsonPropertyName("rejectedRuns")] public int RejectedRuns { get; set; }
     [JsonPropertyName("distinctEvidenceRuns")] public int DistinctEvidenceRuns { get; set; }
+
+    /// <summary>
+    /// Product identity facts (repository commit, package and tool fingerprints) that at least one
+    /// merged run did not assert. Merging cannot contradict a fact nobody stated, so these runs
+    /// were pooled on trust rather than on a verified match. An empty list means every accepted
+    /// run named the same build; a non-empty list names exactly what was taken on faith.
+    /// </summary>
+    [JsonPropertyName("unverifiedProductIdentity")] public List<string> UnverifiedProductIdentity { get; set; } = [];
     [JsonPropertyName("runs")] public List<MauiQualificationAccumulatedRun> Runs { get; set; } = [];
     [JsonPropertyName("metrics")] public Dictionary<string, MauiQualificationRateMetric> Metrics { get; set; } = [];
 
@@ -166,6 +174,11 @@ public static class MauiPreviewQualificationAccumulator
             .Select(static run => run.RunFingerprint)
             .Distinct(StringComparer.Ordinal)
             .Count();
+        accumulation.UnverifiedProductIdentity = accepted
+            .SelectMany(report => UnverifiedIdentityFields(reference.Fingerprints, report.Fingerprints))
+            .Distinct(StringComparer.Ordinal)
+            .OrderBy(static name => name, StringComparer.Ordinal)
+            .ToList();
 
         foreach (var name in MergedMetricNames)
             accumulation.Metrics[name] = MergeRate(accepted.Select(report => Select(report.Metrics, name)));
@@ -180,6 +193,14 @@ public static class MauiPreviewQualificationAccumulator
         return accumulation;
     }
 
+    /// <summary>
+    /// Upper bound on run files considered in one merge. The reference election compares every
+    /// candidate against every other, so an unbounded directory turns into a quadratic scan: 2,000
+    /// files measured at ~29s. A CI matrix contributes one file per shard, so this is far above any
+    /// real cohort, and exceeding it is reported rather than silently truncated.
+    /// </summary>
+    public const int MaximumRunFiles = 512;
+
     /// <summary>Reads every qualification report in a directory, newest last.</summary>
     public static List<MauiPreviewQualificationReport> ReadDirectory(string directory, out List<string> errors)
     {
@@ -188,7 +209,13 @@ public static class MauiPreviewQualificationAccumulator
         var reports = new List<MauiPreviewQualificationReport>();
         if (!Directory.Exists(directory))
             return reports;
-        foreach (var file in Directory.GetFiles(directory, "run-*.json").OrderBy(static path => path, StringComparer.Ordinal))
+        var files = Directory.GetFiles(directory, "run-*.json").OrderBy(static path => path, StringComparer.Ordinal).ToList();
+        if (files.Count > MaximumRunFiles)
+        {
+            errors.Add("accumulate-directory-too-large");
+            files = files.Take(MaximumRunFiles).ToList();
+        }
+        foreach (var file in files)
         {
             try
             {
@@ -293,15 +320,19 @@ public static class MauiPreviewQualificationAccumulator
         // reads as ordinary metadata rather than as the lever it is. Pooling across builds is also
         // wrong on its own terms: a stability number that spans a fix and its regression describes
         // neither build.
-        if (!string.Equals(reference.Fingerprints.RepositoryCommit, candidate.Fingerprints.RepositoryCommit, StringComparison.Ordinal) ||
-            !string.Equals(reference.Fingerprints.TestingPackageVersion, candidate.Fingerprints.TestingPackageVersion, StringComparison.Ordinal) ||
-            !string.Equals(reference.Fingerprints.PackageId, candidate.Fingerprints.PackageId, StringComparison.Ordinal) ||
-            !string.Equals(reference.Fingerprints.PackageFingerprint, candidate.Fingerprints.PackageFingerprint, StringComparison.Ordinal) ||
-            !string.Equals(reference.Fingerprints.ToolVersion, candidate.Fingerprints.ToolVersion, StringComparison.Ordinal) ||
-            !string.Equals(reference.Fingerprints.ToolFingerprint, candidate.Fingerprints.ToolFingerprint, StringComparison.Ordinal))
-        {
+        //
+        // Only a *contradiction* rejects. Every one of these fields is written by
+        // FingerprintOrUnknown, which turns "the harness was never told" into the literal string
+        // "unknown", so comparing raw strings read a static run (commit "unknown") and a
+        // device-evidence run built from an artifact manifest (commit sha256:...) as two different
+        // builds — and the majority vote then threw away whichever side was outnumbered, which for
+        // one device shard among static runs is the device evidence. That is the same harm as
+        // electing the wrong reference, arrived at from the other direction. An unasserted field
+        // cannot contradict anything, so it cannot reject; what it also cannot do is confirm that
+        // the runs describe one build, so UnverifiedProductIdentity publishes which fields were
+        // taken on trust rather than pretending the check covered them.
+        if (IdentityConflicts(reference.Fingerprints, candidate.Fingerprints).Count > 0)
             reasons.Add("accumulate-product-identity-mismatch");
-        }
         if (!ThresholdsMatch(reference.Thresholds, candidate.Thresholds))
             reasons.Add("accumulate-threshold-mismatch");
         // A run whose own thresholds were relaxed relative to policy cannot contribute evidence to
@@ -352,9 +383,39 @@ public static class MauiPreviewQualificationAccumulator
         return reasons;
     }
 
+    /// <summary>The identity facts that must not contradict each other for two runs to be merged.</summary>
+    private static readonly (string Name, Func<MauiQualificationFingerprints, string?> Read)[] ProductIdentityFields =
+    [
+        ("repositoryCommit", static f => f.RepositoryCommit),
+        ("testingPackageVersion", static f => f.TestingPackageVersion),
+        ("packageId", static f => f.PackageId),
+        ("packageFingerprint", static f => f.PackageFingerprint),
+        ("toolVersion", static f => f.ToolVersion),
+        ("toolFingerprint", static f => f.ToolFingerprint),
+    ];
+
+    /// <summary>A fingerprint field is asserted when it is present and is not the "unknown" placeholder.</summary>
+    private static bool IsAsserted(string? value) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        !string.Equals(value, "unknown", StringComparison.Ordinal);
+
+    /// <summary>Product identity fields that both runs assert and disagree about.</summary>
+    private static List<string> IdentityConflicts(MauiQualificationFingerprints reference, MauiQualificationFingerprints candidate) =>
+        ProductIdentityFields
+            .Where(field => IsAsserted(field.Read(reference)) && IsAsserted(field.Read(candidate)) &&
+                            !string.Equals(field.Read(reference), field.Read(candidate), StringComparison.Ordinal))
+            .Select(static field => field.Name)
+            .ToList();
+
+    /// <summary>Product identity fields at least one of the two runs left unasserted.</summary>
+    private static List<string> UnverifiedIdentityFields(MauiQualificationFingerprints reference, MauiQualificationFingerprints candidate) =>
+        ProductIdentityFields
+            .Where(field => !IsAsserted(field.Read(reference)) || !IsAsserted(field.Read(candidate)))
+            .Select(static field => field.Name)
+            .ToList();
+
     private static bool FlowEvidenceIsCoherent(MauiPreviewQualificationReport report)
-    {
-        var seen = new HashSet<string>(StringComparer.Ordinal);
+    {        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var flow in report.Metrics.FlakeFirstAttemptStability.Flows)
         {
             if (string.IsNullOrWhiteSpace(flow.FlowId))

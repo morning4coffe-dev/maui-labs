@@ -2,12 +2,23 @@
 
 Static fixtures for the DevFlow repair/advisory evaluator. `MauiPreviewQualificationCorpusRunner`
 loads `corpus-manifest.json`, validates every case against
-`schemas/selector-health-corpus-v1.json`, replays the fixture through the shipping evaluation
-logic, and emits qualification samples.
+`schemas/selector-health-corpus-v1.json`, evaluates the fixture, and emits qualification samples.
 
 **This corpus is static. Nothing in it is a device run.** Every number derived from it should be
 read as "the evaluator behaves this way on hand-written fixtures", never as "the product behaves
 this way on real applications".
+
+**Most of it does not run the shipped analyzer either.** `EvaluateFixture` re-implements the
+selector-health and repair-eligibility rules against the fixture JSON; it uses the diagnostic id
+constants from `MauiSelectorHealthDiagnosticIds` but never calls `MauiSelectorHealthAnalyzer.Analyze`,
+and `MatchesExpectations` compares those harness rules against `expect.diagnosticIds` authored beside
+them. So `falseHeals`, `repairPrecision`, `repairRecall` and `abstention` are **self-consistency
+checks**: they say the harness agrees with itself, not that the product is correct. Adding cases
+raises their denominators without changing what they measure. The report says so directly —
+`corpus.exercisesShippedAnalyzer` is `false`, each metric carries an `exercises` block, and the
+`product-analyzer-coverage` gate stays `not-qualified`. The one exception is
+`expectedFailureClass`: the observed label comes from the shipped `MauiFlowFailureClassifier.Classify`.
+See `baselines/README.md` for what closing this gap would take.
 
 ## Case anatomy
 

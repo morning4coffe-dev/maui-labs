@@ -41,6 +41,145 @@ Gates that are `not-qualified` in the baseline and why:
 | `selector-stability` | No device evidence. |
 | `android-device-overhead` | No device evidence. |
 | `android-tier1-first-attempts` | No Tier-1 flow declared and no device runs. |
+| `product-analyzer-coverage` | The corpus scores repair and false heals with harness rules, not the shipped analyzer. See below. |
+
+**`abstention` has no threshold gate of its own.** It is published as `316/316` and reads like a
+perfect score, but no *threshold* gate consumes it: `product-analyzer-coverage` reads its provenance
+and requires its denominator to be non-zero, and the baseline diff floors its numerator, denominator,
+independent count and provenance. Nothing fails if the *rate* degrades — a run that abstained half
+as often would still pass every gate. It is a descriptive counter of how often the harness declined
+to propose a repair when none was expected, scored by the same harness-local rules as `falseHeals`.
+Do not quote it as a result.
+
+## The largest gap: the corpus does not exercise the shipped analyzer
+
+`MauiPreviewQualificationCorpusRunner.EvaluateFixture` **re-implements** the selector-health and
+repair-eligibility rules against the fixture JSON. It borrows the diagnostic id constants from
+`MauiSelectorHealthDiagnosticIds` but never calls `MauiSelectorHealthAnalyzer.Analyze`, which is the
+entry point the product actually uses. `MatchesExpectations` then compares those harness rules
+against `expect.diagnosticIds` values that were hand-authored beside them.
+
+**Consequence: `falseHeals`, `repairPrecision`, `repairRecall` and `abstention` are self-consistency
+checks, not product tests.** A false-heal rate of `0/316` says the harness agrees with its own
+expectations. It says nothing about whether the shipped analyzer would have proposed that repair.
+Growing the corpus makes such a number look more authoritative while measuring the same thing, so
+the size of the denominator must not be read as confidence in the product.
+
+This is stated in the report itself rather than only here:
+
+- `corpus.exercisesShippedAnalyzer` is `false`.
+- Every rate metric carries `exercises: { component, kind }`. `kind` is `harness-local-rules` for
+  the four metrics above and `shipped-analyzer` for `classificationAccuracy`.
+- The `product-analyzer-coverage` gate is `not-qualified` and lists exactly which metrics are
+  harness-scored. It is evaluated both per-run and over an accumulated verdict, so
+  `--accumulate --fail-on-non-pass` sees it too. **It has no unqualified pass.** Nothing in the
+  report can watch code run, so every kind other than `harness-local-rules` — a compile-time literal
+  in the evaluator — ultimately rests on a label in the submitted data. A passing result therefore
+  always carries `provenance-self-reported` and names whose word it is taking; an empty reason list
+  would read as verification. It also stays `not-qualified` while `repairPrecision`, `repairRecall`,
+  `falseHeals` or `abstention` carry no evidence at all, because absence of the metrics this gate
+  exists to disclose is not coverage of them.
+- `classificationAccuracy` is labelled `shipped-analyzer` only when **every** judged sample — curated
+  and device-backed alike — carries an `observedFailureClassProducer` stamp naming what called the
+  classifier. Without it the label degrades to `unknown` and the gate fails. Device-backed rows are
+  not exempt: a device is no better placed than a fixture to say which code produced a label, and
+  exempting them would let one stamped fixture speak for ninety-nine unstamped device rows. An
+  **all**-device judged subset is a different claim and takes a different path — it publishes
+  `sample-supplied` without a stamp check, because `sample-supplied` asserts only *who observed*
+  the sample, never *which code classified it*.
+  **The stamp is not a forgery guard.** A `--results` file is deserialised verbatim, so an author who
+  writes `"observedFailureClassProducer": "MauiFlowFailureClassifier.Classify"` into a JSON file gets
+  the strong label. Against a determined author it is exactly as strong as the source-name inference
+  it replaced; what it removes is the *accidental* claim, where a hand-written or partial sample
+  earned the product's name merely for not being device-backed. This is why the coverage gate has no
+  unqualified pass.
+- A judged subset that **mixes** stamped static rows with rows a run submitted publishes `unknown`.
+  "Any statically scored sample wins" would be conservative only while the static kind is the weak
+  one; for `classificationAccuracy` it is the strongest kind in the model, so one corpus fixture
+  could otherwise upgrade a subset of run-supplied rows. `unknown` rather than `sample-supplied`
+  because that is the honest answer — no single component produced the subset — and because the
+  accumulator refuses a declared `sample-supplied` whose judged sources are not all `device-backed`,
+  and it refuses the **whole report**. Publishing `sample-supplied` here would make a run's own
+  honest understatement delete its stability and device evidence along with the label. The published
+  component reads `... + submitting-run` and the note says it was downgraded.
+- The label describes the **judged** subset, which is not always the whole denominator. When samples
+  are pooled in beyond the judged set, the note says how many, and which reader sees them: the count
+  and lower-bound gates read only the independent subset, and the baseline diff compares the pooled
+  numerator and denominator of every rate. `falseHeals` adds a clause the other four do not, because
+  it is the only rate whose **pooled numerator** is compared against a threshold by a *gate* —
+  `zero-false-heals` compares `numerator`, not `independentNumerator`. That gate checks the
+  independent count first and returns `not-qualified` without ever reading the numerator, which is
+  the state this baseline is in, so the clause states the condition rather than implying the `0/316`
+  headline is currently enforced by a gate. No gate compares a pooled *denominator* against a
+  threshold; `product-analyzer-coverage` does read the pooled denominators, but only as "is there
+  any evidence here at all", which can only widen the set of metrics it inspects.
+- `MauiPreviewQualificationAccumulator` merges `exercises` conjunctively — the merged kind is the
+  **weakest** any contributor declared, ranked `unknown` < `harness-local-rules` < `sample-supplied`
+  < `shipped-analyzer`, so pooling can never upgrade what the merged number measures and the result
+  does not depend on the order the runs happened to sort in. A contributing run that counted samples
+  without declaring anything makes the merged kind `unknown`.
+- The accumulator's provenance check is **one-directional**, and only on the axis it can actually
+  decide. It refuses a run declaring `sample-supplied` — "a device observed this" — over judged
+  sources that are not `device-backed` (`accumulate-provenance-mismatch`). It does **not** police
+  the harness-versus-shipped axis, because nothing in a `sourceCounts` block can establish which
+  code scored a sample; that is what the coverage gate reports instead. Understatements are accepted
+  deliberately: a rejected run never reaches the gates at all, so refusing an honest under-claim
+  during a mixed-version rollout would delete evidence rather than fail on it.
+
+`classificationAccuracy` is the exception, with a caveat. The observed label does come from
+`MauiFlowFailureClassifier.Classify`, the same entry point `MauiFlowRunner`, `WorkflowRunCoordinator`
+and `MauiFlowTriage` call at runtime — that part is not theatre. But the harness still chooses the
+classifier's **input**: `BuildFailureFacts` derives a `LegacyFailureKind` using its own
+`InferLegacyFailureKind`, and for most static cases `Classify` then resolves that through the
+`FromLegacyFailureKind` constant table, which is closer to a rename than to a decision. Only the
+cases that force precedence resolution (currently the route-drift case) exercise the classifier's
+real logic. Read the 8 independent evaluations as "the classifier is reachable and its constant
+mapping is correct", not as "the classifier was tested".
+
+**Fixing this is worth more than any further corpus growth.** Two parts, with different costs:
+
+- **Repair *eligibility* is closeable today.** `Classify` already returns `RepairEligible` from the
+  same facts `EvaluateRepairFixture` builds, so the runner could defer to it instead of deciding
+  eligibility itself. This is a runner change, not a format change.
+- **Selector-health *diagnostics* need the format redesign.** Calling
+  `MauiSelectorHealthAnalyzer.Analyze` requires building a `MauiSelectorHealthAnalysisInput` from a
+  `MauiFlow` plus `LiveElements` and a plan, and the current fixtures are ad-hoc JSON shapes
+  (`recordedRoute`/`observedRoute`, `androidCandidateKinds`, `hardAssertion`) with no flow
+  structure. That is a corpus format change.
+
+`Corpus_KeepsTheAnalyzerCoverageDisclosureHonestWhenTheRunnerChanges` ties the disclosure to the
+code — it scans the `MauiPreviewQualification*.cs` sources for a real call to
+`MauiSelectorHealthAnalyzer.Analyze` and asserts `corpus.exercisesShippedAnalyzer` equals whether
+one exists. Equality catches both directions: wiring the analyzer up without flipping the flag
+fails, and flipping the flag without wiring it up fails.
+
+Its limits are real and stated rather than papered over. It only sees that file glob, so wiring the
+analyzer in from a differently named file would leave it green; and it matches the type by name —
+bare, namespace-qualified or alias-qualified — so an indirection through a delegate, a `using
+static`, a type alias or reflection would too. Matching by name cuts the other way as well: a field
+or property that merely *carries* the name is counted, which can only make the disclosure overstate
+and fail loudly. Under an equality assert a
+**false negative** is the dangerous direction, because it makes the tripwire agree with a `false`
+declaration instead of tightening it — which is why it **parses rather than greps**. Deciding "is
+this text a call or a mention" by blanking string literals with regexes turned out to be a losing
+game: quote parity has to be exactly right across verbatim, raw and interpolated forms, and three
+separate attempts each left a shape (`"…$"`, `$@"…\"`, a hole containing braces) that swallowed the
+rest of the file and hid a real call. A `CSharpSyntaxTree` settles that class of question by
+construction — comments and literal text are trivia and can never be invocations, while an
+interpolation hole is syntax and is therefore still seen. Two things a parse can still be blind to
+are refused rather than guessed at: a file that does not parse, and a file carrying an `#if`, whose
+inactive branch is trivia with no diagnostic at all. Both fail the test loudly instead of counting
+zero calls and quietly agreeing with the declaration.
+`Tripwire_SeesEveryWiredCallInEveryFileItScans` injects a call at every
+`private static` in each scanned file and asserts the **count** matches, not merely that one
+survived; an existential assert stayed green while a scanner lost 48 of 49 sites.
+
+## Statistical power of the generated share
+
+The 300 generated mutants are drawn from `generatedBaseFixtures` originals — currently **16** — under
+`generatedSeedCount` seeds, currently **1**. They are one deterministic resampling of the curated
+no-repair cases, repeatable but not repeated, and they contribute **0** independent evaluations.
+Both numbers are published in `corpus` so the generated denominator cannot be quoted as 300 trials.
 
 ## Regression diffing
 

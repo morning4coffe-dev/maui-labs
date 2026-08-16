@@ -189,6 +189,7 @@ C:Microsoft.Maui.DevFlow.Testing.MauiQualificationGateResult()
 C:Microsoft.Maui.DevFlow.Testing.MauiQualificationGateThresholds()
 C:Microsoft.Maui.DevFlow.Testing.MauiQualificationHashChainEntry()
 C:Microsoft.Maui.DevFlow.Testing.MauiQualificationHumanDecisionOutcomes()
+C:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenance()
 C:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetrics()
 C:Microsoft.Maui.DevFlow.Testing.MauiQualificationPlatformProfile()
 C:Microsoft.Maui.DevFlow.Testing.MauiQualificationPrivacySecurityMetric()
@@ -483,6 +484,11 @@ F:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceSourceKinds.Ob
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceSourceKinds.ReportedIssue:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceSourceKinds.Synthetic:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceSourceKinds.Unknown:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenance.UndeclaredComponent:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.HarnessLocalRules:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.SampleSupplied:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.ShippedAnalyzer:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.Unknown:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationSampleSources.Curated:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationSampleSources.CuratedDerived:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiQualificationSampleSources.DeviceBacked:System.String
@@ -777,6 +783,8 @@ M:Microsoft.Maui.DevFlow.Testing.MauiQualificationFuzz.Run(options:Microsoft.Mau
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationFuzzOptions.FromEnvironment():Microsoft.Maui.DevFlow.Testing.MauiQualificationFuzzOptions
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationHashChain.CreateDigest(previousDigest:System.String,payloadDigest:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationHashChain.IsValid(entries:System.Collections.Generic.IEnumerable`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationHashChainEntry]):System.Boolean
+M:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.IsProductEvidence(kind:System.String):System.Boolean
+M:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds.Strength(kind:System.String):System.Int32
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationPrivacyScanner.RedactUntrusted(value:System.String):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationPrivacyScanner.Scan(projection:System.Collections.Generic.IEnumerable`1[System.Collections.Generic.KeyValuePair`2[System.String,System.String]],canaries:System.Collections.Generic.IEnumerable`1[System.String]):Microsoft.Maui.DevFlow.Testing.MauiQualificationCanaryScanResult
 M:Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransitionPolicy.Evaluate(transition:Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransition):Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransitionResult
@@ -2206,9 +2214,12 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.CuratedNoRepairC
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.CuratedRepairPositiveCases[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.DeviceBackedCases[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.Errors[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.ExercisesShippedAnalyzer[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.GeneratedBaseFixtures[]:System.Nullable`1[System.Int32]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.GeneratedCases[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.GeneratedNoRepairCases[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.GeneratedSeedCount[]:System.Nullable`1[System.Int32]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.GeneratorVersion[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.ManifestFingerprint[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusSummary.ManifestValid[]:System.Nullable`1[System.Boolean]{get:public;set:public}
@@ -2247,6 +2258,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.FlowId[]:Syste
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.HumanDecision[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.InfrastructureExclusionReason[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.NoRepairExpected[]:System.Nullable`1[System.Boolean]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.ObservedFailureClassProducer[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.ObservedFailureClass[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.Outcome[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationExecutionSample.Platform[]:System.String{get:public;set:public}
@@ -2330,6 +2342,9 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationHumanDecisionOutcomes.Approved
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationHumanDecisionOutcomes.Expired[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationHumanDecisionOutcomes.Rejected[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationHumanDecisionOutcomes.Unresolved[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenance.Component[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenance.Kind[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenance.Note[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetrics.Abstention[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetrics.Calibration[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationCalibrationMetric{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetrics.ClassificationAccuracy[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric{get:public;set:public}
@@ -2373,6 +2388,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransitionResult.Reaso
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.ConfidenceInterval[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationConfidenceInterval{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.Denominator[]:System.Int32{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.Exclusions[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationExclusion]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.Exercises[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenance{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.IndependentConfidenceInterval[]:Microsoft.Maui.DevFlow.Testing.MauiQualificationConfidenceInterval{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.IndependentDeviceRuns[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiQualificationRateMetric.IndependentEvaluations[]:System.Int32{get:public;set:public}
@@ -3190,6 +3206,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiQualificationFlowAtt
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiQualificationGateResult[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationGateResult]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiQualificationGateThresholds[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationGateThresholds]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiQualificationHumanDecisionOutcomes[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationHumanDecisionOutcomes]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiQualificationMetricProvenance[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenance]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiQualificationMetrics[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationMetrics]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiQualificationPlatformProfile[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationPlatformProfile]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiQualificationPrivacySecurityMetric[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiQualificationPrivacySecurityMetric]{get:public}
@@ -3602,6 +3619,7 @@ T:class sealed Microsoft.Maui.DevFlow.Testing.MauiQualificationGateResult
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiQualificationGateThresholds
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiQualificationHashChainEntry
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiQualificationHumanDecisionOutcomes
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenance
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiQualificationMetrics
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiQualificationPlatformProfile
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiQualificationPrivacySecurityMetric
@@ -3763,6 +3781,7 @@ T:class static Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceM
 T:class static Microsoft.Maui.DevFlow.Testing.MauiQualificationCorpusProvenanceSourceKinds
 T:class static Microsoft.Maui.DevFlow.Testing.MauiQualificationFuzz
 T:class static Microsoft.Maui.DevFlow.Testing.MauiQualificationHashChain
+T:class static Microsoft.Maui.DevFlow.Testing.MauiQualificationMetricProvenanceKinds
 T:class static Microsoft.Maui.DevFlow.Testing.MauiQualificationPrivacyScanner
 T:class static Microsoft.Maui.DevFlow.Testing.MauiQualificationProposalTransitionPolicy
 T:class static Microsoft.Maui.DevFlow.Testing.MauiQualificationSampleSources

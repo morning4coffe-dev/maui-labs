@@ -305,6 +305,26 @@ public sealed class MauiQualificationCorpusSummary
     [JsonPropertyName("provenanceSourceCounts")] public List<MauiQualificationCorpusProvenanceCount> ProvenanceSourceCounts { get; set; } = [];
     [JsonPropertyName("mutationSeed")] public int? MutationSeed { get; set; }
     [JsonPropertyName("generatorVersion")] public string? GeneratorVersion { get; set; }
+
+    /// <summary>
+    /// How many distinct curated fixtures the generated mutants were actually drawn from. The
+    /// generated denominator is a resampling of this many originals, so this — not the mutant
+    /// count — bounds the statistical power the generated share can contribute.
+    /// </summary>
+    [JsonPropertyName("generatedBaseFixtures")] public int? GeneratedBaseFixtures { get; set; }
+
+    /// <summary>
+    /// How many distinct mutation seeds produced the generated share. One seed means the whole
+    /// generated denominator is a single deterministic draw, repeatable but not repeated.
+    /// </summary>
+    [JsonPropertyName("generatedSeedCount")] public int? GeneratedSeedCount { get; set; }
+
+    /// <summary>
+    /// Whether every diagnostic and repair decision the corpus scored came from the shipped
+    /// analyzer. False means the harness re-implements those rules and the corpus is scoring
+    /// itself; see <see cref="MauiQualificationRateMetric.Exercises"/> for which metrics.
+    /// </summary>
+    [JsonPropertyName("exercisesShippedAnalyzer")] public bool? ExercisesShippedAnalyzer { get; set; }
     [JsonPropertyName("errors")] public List<string> Errors { get; set; } = [];
     [JsonPropertyName("securityCorpus")] public MauiQualificationSecurityCorpusSummary? SecurityCorpus { get; set; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
@@ -390,6 +410,15 @@ public sealed class MauiQualificationExecutionSample
     /// reported in its own bucket rather than pooled into a single accuracy headline.
     /// </summary>
     [JsonPropertyName("failureClassInferred")] public bool? FailureClassInferred { get; set; }
+    /// <summary>
+    /// The product entry point that produced <see cref="ObservedFailureClass"/>, stamped by
+    /// whatever actually called it. A sample without this stamp carries a label nothing in this
+    /// process was told the origin of, so the gate evaluator refuses to describe it as product
+    /// evidence. The stamp is still only as trustworthy as the writer of the sample — it moves the
+    /// claim from "inferred from the source name" to "asserted by the component that ran", which is
+    /// weaker than an observation and stronger than a guess.
+    /// </summary>
+    [JsonPropertyName("observedFailureClassProducer")] public string? ObservedFailureClassProducer { get; set; }
     [JsonPropertyName("falseHeal")] public bool? FalseHeal { get; set; }
     [JsonPropertyName("abstained")] public bool? Abstained { get; set; }
     [JsonPropertyName("humanDecision")] public string? HumanDecision { get; set; }
@@ -490,6 +519,90 @@ public sealed class MauiQualificationRateMetric
 
     [JsonPropertyName("independentDeviceRuns")] public bool? IndependentDeviceRuns { get; set; }
     [JsonPropertyName("exclusions")] public List<MauiQualificationExclusion> Exclusions { get; set; } = [];
+
+    /// <summary>
+    /// Which code decided each observation this metric counted. A large denominator says nothing
+    /// about the product if the harness produced the observation itself, so the component and the
+    /// kind are published next to the number rather than left to be inferred from the metric name.
+    /// </summary>
+    [JsonPropertyName("exercises")] public MauiQualificationMetricProvenance? Exercises { get; set; }
+}
+
+/// <summary>Names the code that produced a metric's observations.</summary>
+public static class MauiQualificationMetricProvenanceKinds
+{
+    /// <summary>The metric called the same entry point the product calls at runtime.</summary>
+    public const string ShippedAnalyzer = "shipped-analyzer";
+
+    /// <summary>
+    /// The metric called rules re-implemented inside the qualification harness. The number is a
+    /// self-consistency check between those rules and the expectations authored beside them, and
+    /// it is not evidence about the shipped analyzer's behaviour.
+    /// </summary>
+    public const string HarnessLocalRules = "harness-local-rules";
+
+    /// <summary>
+    /// The observation was supplied by the run that submitted the sample. Nothing in this report
+    /// checked which code the submitting run used, so this kind is a claim, not a verification.
+    /// </summary>
+    public const string SampleSupplied = "sample-supplied";
+
+    /// <summary>
+    /// Nothing can be said about what produced the observation — typically a merged total whose
+    /// contributors disagreed or did not all declare. Never product evidence.
+    /// </summary>
+    public const string Unknown = "unknown";
+
+    /// <summary>
+    /// True when the observation is claimed to come from product code rather than from rules
+    /// re-implemented in the qualification harness. <see cref="SampleSupplied"/> qualifies because a
+    /// submitting run observed the product itself — subject to the standing caveat that a
+    /// self-reported run file is trusted as written, which is why the product-analyzer-coverage
+    /// gate reports it separately from <see cref="ShippedAnalyzer"/> instead of merging the two
+    /// into one pass. <c>unknown</c> and an absent declaration never qualify.
+    /// </summary>
+    public static bool IsProductEvidence(string? kind) =>
+        string.Equals(kind, ShippedAnalyzer, StringComparison.Ordinal) ||
+        string.Equals(kind, SampleSupplied, StringComparison.Ordinal);
+
+    /// <summary>
+    /// Orders the kinds weakest first so callers can take a minimum rather than letting whichever
+    /// kind they happened to check first decide. Both merging across runs and mixing within a run
+    /// must take the weaker claim, so the ranking lives here rather than being restated at each
+    /// site: two copies that drift would make the within-run and across-run answers disagree
+    /// silently. An unrecognised kind ranks level with <see cref="Unknown"/> rather than above any
+    /// named kind, so a label this build does not model can never win a minimum.
+    /// </summary>
+    public static int Strength(string? kind) => kind switch
+    {
+        Unknown => 0,
+        HarnessLocalRules => 1,
+        SampleSupplied => 2,
+        ShippedAnalyzer => 3,
+        _ => 0,
+    };
+}
+
+/// <summary>
+/// Which component produced a metric's observations, and whether that component is the shipped one.
+/// </summary>
+public sealed class MauiQualificationMetricProvenance
+{
+    /// <summary>
+    /// The value <see cref="Component"/> holds when nothing set it. Named so the coverage gate can
+    /// recognise the contract default without coupling a component to a kind constant that merely
+    /// happens to share its spelling.
+    /// </summary>
+    public const string UndeclaredComponent = "unknown";
+
+    /// <summary>The type and member that decided the observation.</summary>
+    [JsonPropertyName("component")] public string Component { get; set; } = UndeclaredComponent;
+
+    /// <summary>One of <see cref="MauiQualificationMetricProvenanceKinds"/>.</summary>
+    [JsonPropertyName("kind")] public string Kind { get; set; } = MauiQualificationMetricProvenanceKinds.Unknown;
+
+    /// <summary>What a reader must not conclude from this metric.</summary>
+    [JsonPropertyName("note")] public string? Note { get; set; }
 }
 
 /// <summary>

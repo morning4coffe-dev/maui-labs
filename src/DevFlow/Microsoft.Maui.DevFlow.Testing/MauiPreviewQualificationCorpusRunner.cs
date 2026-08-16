@@ -53,6 +53,18 @@ public static class MauiPreviewQualificationCorpusRunner
     public const string GeneratorVersion = "qualification-no-repair-generator-v1";
     private const int MaxCorpusFileBytes = 1_048_576;
 
+    /// <summary>
+    /// Stamped onto samples whose observed failure class this runner obtained by calling
+    /// <see cref="MauiFlowFailureClassifier.Classify"/>, on the line that owns the call. Its only
+    /// information content is "this label came from that call site". It is **not** a forgery guard:
+    /// samples merged from a <c>--results</c> file carry whatever string that file supplied, so
+    /// against a determined author it is exactly as strong as the source-name inference it
+    /// replaced. What it does buy is a fail-closed default — a stale writer, a partial rewiring, or
+    /// a new sample producer yields no stamp, and an unstamped label is reported as
+    /// <c>unknown</c> rather than credited to the product.
+    /// </summary>
+    internal const string ClassifierEntryPoint = "MauiFlowFailureClassifier.Classify";
+
     /// <summary>Case-root keys the schema permits; anything else fails the corpus.</summary>
     private static readonly HashSet<string> KnownCaseRootProperties = new(StringComparer.Ordinal)
     {
@@ -75,6 +87,13 @@ public static class MauiPreviewQualificationCorpusRunner
             StaticOnly = true,
             MutationSeed = request.MutationSeed,
             GeneratorVersion = GeneratorVersion,
+            // EvaluateFixture re-implements the selector-health and repair-eligibility rules against
+            // the fixture JSON; it borrows MauiSelectorHealthDiagnosticIds but never calls
+            // MauiSelectorHealthAnalyzer.Analyze. Every diagnostic, false-heal and repair number the
+            // corpus produces is therefore harness rules scored against expectations authored beside
+            // them. Only the failure class comes from shipped code. Stated here so the report says so
+            // without a reader having to read this file.
+            ExercisesShippedAnalyzer = false,
         };
 
         string root;
@@ -178,6 +197,9 @@ public static class MauiPreviewQualificationCorpusRunner
                 ExpectedFailureClass = metadata.ExpectedFailureClass,
                 ObservedFailureClass = metadata.ExpectedFailureClass is null ? null : evaluation.ObservedFailureClass,
                 FailureClassInferred = metadata.ExpectedFailureClass is null ? null : evaluation.FailureClassInferred,
+                ObservedFailureClassProducer = metadata.ExpectedFailureClass is null
+                    ? null
+                    : evaluation.ObservedFailureClassProducer,
             });
         }
 
@@ -189,9 +211,11 @@ public static class MauiPreviewQualificationCorpusRunner
         {
             var count = Math.Max(0, request.GeneratedNoRepairEvaluations);
             var random = new DeterministicRandom((uint)request.MutationSeed);
+            var basisIds = new HashSet<string>(StringComparer.Ordinal);
             for (var index = 0; index < count; index++)
             {
                 var basis = noRepairFixtures[(int)(random.Next() % (uint)noRepairFixtures.Count)];
+                basisIds.Add(basis.Id);
                 var generatedId = $"generated:{basis.Id}:{index}:{request.MutationSeed}";
                 using var generated = GenerateNoRepairFixture(
                     basis.Fixture,
@@ -215,6 +239,12 @@ public static class MauiPreviewQualificationCorpusRunner
                     Abstained = !evaluation.RepairEligible,
                 });
             }
+
+            // The generated denominator is a resampling of these originals with one seed. Publishing
+            // both bounds the power the mutants can add: 300 draws from a handful of fixtures under a
+            // single deterministic draw are not 300 independent trials.
+            summary.GeneratedBaseFixtures = basisIds.Count;
+            summary.GeneratedSeedCount = count > 0 ? 1 : 0;
         }
 
         var security = MauiQualificationSecurityCorpusRunner.Run(root);
@@ -594,7 +624,11 @@ public static class MauiPreviewQualificationCorpusRunner
             // means the class was read off a fixture field that already named it -- a stamped
             // failure class, a terminal outcome, or an otherFailures flag. Those are correct by
             // construction and must never be presented as evidence that classification works.
-            classification.Basis == MauiFlowClassificationBases.Inferred);
+            classification.Basis == MauiFlowClassificationBases.Inferred,
+            // Set here, on the line that owns the Classify call, rather than beside the sample.
+            // Two independent assignments in one object initializer would let a refactor move
+            // where the class comes from while the stamp kept naming the old origin.
+            ClassifierEntryPoint);
     }
 
     /// <summary>
@@ -1248,7 +1282,8 @@ public static class MauiPreviewQualificationCorpusRunner
         List<string> IneligibilityCodes,
         bool RepairEligible,
         string ObservedFailureClass,
-        bool FailureClassInferred);
+        bool FailureClassInferred,
+        string ObservedFailureClassProducer);
 
     private struct DeterministicRandom
     {

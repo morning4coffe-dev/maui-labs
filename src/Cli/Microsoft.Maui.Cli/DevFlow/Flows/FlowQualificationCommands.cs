@@ -184,7 +184,12 @@ internal static class FlowQualificationCommands
         var split = metric.SourceCounts.Count == 0
             ? string.Empty
             : " [" + string.Join(", ", metric.SourceCounts.Select(static item => $"{item.Source} {item.Numerator}/{item.Denominator}")) + "]";
-        return $"{metric.Numerator}/{metric.Denominator} (independent {metric.IndependentEvaluations}){split}";
+        // What produced the number belongs beside the number, including which component — a bare
+        // kind is the most misleading short string this system can print.
+        var exercises = string.IsNullOrWhiteSpace(metric.Exercises?.Kind)
+            ? string.Empty
+            : $" exercises={metric.Exercises!.Kind}@{metric.Exercises.Component}";
+        return $"{metric.Numerator}/{metric.Denominator} (independent {metric.IndependentEvaluations}){split}{exercises}";
     }
 
     /// <summary>
@@ -288,6 +293,22 @@ internal static class FlowQualificationCommands
         // shrink. Flooring only its denominator would let correct abstentions turn into false heals
         // one for one with no regression line.
         CompareCount(comparison, "abstention numerator", baseline.Metrics.Abstention.Numerator, report.Metrics.Abstention.Numerator);
+
+        // What produced a number is as freezable as the number. A metric relabelled from
+        // harness-local-rules to shipped-analyzer moves product-analyzer-coverage from
+        // not-qualified to pass, which the gate ranking scores as an improvement and would
+        // otherwise pass silently. Any change is reported, including a legitimate rewiring —
+        // that is a baseline update a human should have to make deliberately.
+        CompareProvenance(comparison, "repairPrecision", baseline.Metrics.RepairPrecision, report.Metrics.RepairPrecision);
+        CompareProvenance(comparison, "repairRecall", baseline.Metrics.RepairRecall, report.Metrics.RepairRecall);
+        CompareProvenance(comparison, "falseHeals", baseline.Metrics.FalseHeals, report.Metrics.FalseHeals);
+        CompareProvenance(comparison, "abstention", baseline.Metrics.Abstention, report.Metrics.Abstention);
+        CompareProvenance(comparison, "classificationAccuracy", baseline.Metrics.ClassificationAccuracy, report.Metrics.ClassificationAccuracy);
+        if (baseline.Corpus.ExercisesShippedAnalyzer != report.Corpus.ExercisesShippedAnalyzer)
+        {
+            comparison.Regressions.Add(
+                $"corpus.exercisesShippedAnalyzer {Show(baseline.Corpus.ExercisesShippedAnalyzer)} -> {Show(report.Corpus.ExercisesShippedAnalyzer)}");
+        }
 
         // Evidence may grow or improve, never shrink. Without this, deleting the cases that fail
         // is reported as a rate improvement and CI goes green.
@@ -418,6 +439,37 @@ internal static class FlowQualificationCommands
     {
         if (current < baseline)
             comparison.Regressions.Add($"{name} {baseline} -> {current}");
+    }
+
+    private static string Show(bool? value) => value switch
+    {
+        true => "true",
+        false => "false",
+        _ => "absent",
+    };
+
+    /// <summary>
+    /// Freezes what produced a metric alongside the metric itself. A relabel is not a number
+    /// change, so nothing else in this comparison would notice one. The component is frozen with
+    /// the kind because it names the code being credited, and swapping it silently would move a
+    /// number's meaning without moving the number.
+    /// </summary>
+    private static void CompareProvenance(
+        MauiQualificationBaselineComparison comparison,
+        string name,
+        MauiQualificationRateMetric baseline,
+        MauiQualificationRateMetric current)
+    {
+        Compare("kind", baseline.Exercises?.Kind, current.Exercises?.Kind);
+        Compare("component", baseline.Exercises?.Component, current.Exercises?.Component);
+
+        void Compare(string field, string? baselineValue, string? currentValue)
+        {
+            var before = string.IsNullOrWhiteSpace(baselineValue) ? "absent" : baselineValue;
+            var after = string.IsNullOrWhiteSpace(currentValue) ? "absent" : currentValue;
+            if (!string.Equals(before, after, StringComparison.Ordinal))
+                comparison.Regressions.Add($"{name} exercises.{field} {before} -> {after}");
+        }
     }
 
     /// <summary>

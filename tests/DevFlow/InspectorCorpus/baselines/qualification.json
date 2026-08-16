@@ -80,6 +80,9 @@
     ],
     "mutationSeed": 20260802,
     "generatorVersion": "sha256:39b35a7028472dc4f4400b6ffe9e1b3e3e7b5e65a64008f98a0a5396cb9e540e",
+    "generatedBaseFixtures": 16,
+    "generatedSeedCount": 1,
+    "exercisesShippedAnalyzer": false,
     "errors": [],
     "securityCorpus": {
       "version": "sha256:7420b08a19ac73c2ad94a07f52442bd1a5f28936e9db61fa67f68c36cdea844a",
@@ -169,7 +172,12 @@
         "upper": 1
       },
       "independentDeviceRuns": false,
-      "exclusions": []
+      "exclusions": [],
+      "exercises": {
+        "component": "MauiPreviewQualificationCorpusRunner.EvaluateRepairFixture",
+        "kind": "harness-local-rules",
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 1 judged sample(s); 30 further sample(s) sit in the pooled denominator the baseline diff compares."
+      }
     },
     "repairRecall": {
       "state": "measured",
@@ -209,7 +217,12 @@
         "upper": 1
       },
       "independentDeviceRuns": false,
-      "exclusions": []
+      "exclusions": [],
+      "exercises": {
+        "component": "MauiPreviewQualificationCorpusRunner.EvaluateRepairFixture",
+        "kind": "harness-local-rules",
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 1 judged sample(s); 30 further sample(s) sit in the pooled denominator the baseline diff compares."
+      }
     },
     "classificationAccuracy": {
       "state": "measured",
@@ -249,7 +262,12 @@
         "upper": 1
       },
       "independentDeviceRuns": false,
-      "exclusions": []
+      "exclusions": [],
+      "exercises": {
+        "component": "MauiFlowFailureClassifier.Classify",
+        "kind": "shipped-analyzer",
+        "note": "The same classifier entry point MauiFlowRunner and WorkflowRunCoordinator call at runtime. The expected label is corpus ground truth; the observed label is the product's answer to replay facts the harness derived, so the harness still chooses the classifier's input. Most static cases reach the classifier through a legacy-kind constant table, which exercises far less of it than cases that require precedence resolution. Describes the 8 judged sample(s); 37 further sample(s) sit in the pooled denominator the baseline diff compares."
+      }
     },
     "classificationMatrix": {
       "state": "measured",
@@ -391,7 +409,12 @@
         "upper": 0.1936076805344365
       },
       "independentDeviceRuns": false,
-      "exclusions": []
+      "exclusions": [],
+      "exercises": {
+        "component": "MauiPreviewQualificationCorpusRunner.EvaluateFixture",
+        "kind": "harness-local-rules",
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 16 judged sample(s); 300 further sample(s) sit in the pooled denominator the baseline diff compares. The zero-false-heals gate (accumulated-zero-false-heals in a merged report) compares this metric's whole pooled numerator, judged and pooled alike, but only once independentEvaluations reaches the no-repair minimum; below it the gate is not-qualified on the count alone and the pooled numerator is enforced only by the baseline diff."
+      }
     },
     "abstention": {
       "state": "measured",
@@ -431,7 +454,12 @@
         "upper": 1
       },
       "independentDeviceRuns": false,
-      "exclusions": []
+      "exclusions": [],
+      "exercises": {
+        "component": "MauiPreviewQualificationCorpusRunner.EvaluateFixture",
+        "kind": "harness-local-rules",
+        "note": "Harness rules scored against expectations authored beside them. Not evidence about MauiSelectorHealthAnalyzer, which the corpus never calls. The component names the code that scores corpus samples; a sample supplied from a results file under a static source is described the same way, because nothing here can tell them apart. Describes the 16 judged sample(s); 300 further sample(s) sit in the pooled denominator the baseline diff compares."
+      }
     },
     "humanDecisionOutcomes": {
       "approved": 0,
@@ -655,6 +683,15 @@
       "artifactRefs": []
     },
     {
+      "gateId": "product-analyzer-coverage",
+      "status": "not-qualified",
+      "message": "Not produced by the shipped analyzer — scored by harness-local rules: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour.",
+      "reasonCodes": [
+        "corpus-does-not-exercise-shipped-analyzer"
+      ],
+      "artifactRefs": []
+    },
+    {
       "gateId": "selector-stability",
       "status": "not-qualified",
       "message": "Declared-platform real-device selector-stability evidence is insufficient or below threshold.",
@@ -728,6 +765,11 @@
       "code": "gate-zero-false-heals-not-qualified",
       "severity": "warning",
       "message": "No-repair evidence is insufficient or includes a false heal."
+    },
+    {
+      "code": "gate-product-analyzer-coverage-not-qualified",
+      "severity": "warning",
+      "message": "Not produced by the shipped analyzer — scored by harness-local rules: abstention, falseHeals, repairPrecision, repairRecall. These measure agreement between the harness and its own expectations, not product behaviour."
     },
     {
       "code": "gate-selector-stability-not-qualified",

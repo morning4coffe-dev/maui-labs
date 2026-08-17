@@ -174,6 +174,10 @@
         "packageDigest": {
           "type": "string"
         },
+        "normalizedPayloadDigest": {
+          "type": "string",
+          "description": "Optional signing-insensitive digest of the deployed package payload. The signed packageDigest identifies a single occurrence of a build because the package is re-signed on every deployment and carries DevFlow's per-invocation agent session id; this digest identifies the payload two occurrences of the same build share. Producers that cannot compute one omit the field, and consumers that require it keep refusing."
+        },
         "agentId": {
           "type": "string"
         },

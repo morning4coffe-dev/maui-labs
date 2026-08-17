@@ -277,6 +277,17 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
                 },
                 cancellationToken).ConfigureAwait(false);
 
+            currentStage = "verify-preconditions";
+            await StageAsync(
+                lifecycle,
+                currentStage,
+                () =>
+                {
+                    VerifyDeclaredPreconditions(bundle, runContext, liveStatus);
+                    return Task.FromResult(true);
+                },
+                cancellationToken).ConfigureAwait(false);
+
             if (request.CaptureFailureEvidence)
             {
                 evidence = new FlowReplayEvidenceCapture(
@@ -758,6 +769,61 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             failure.Message);
     }
 
+    /// <summary>
+    /// Enforces the plan's declared checkpoint preconditions against the app's clean state.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Admission runs before anything is deployed, so it cannot observe the app; a state evidence
+    /// provider evaluating at that point can only declare the observation deferred, which is why a
+    /// declared checkpoint used to be unsatisfiable and every plan therefore left it out. The first
+    /// moment a clean-state checkpoint exists is immediately after the exact agent binding is
+    /// validated and before the flow has taken a single action, which is where this runs.
+    /// </para>
+    /// <para>
+    /// Both halves come from separate sources: expected from the committed plan, observed from the
+    /// live agent. Nothing here derives one from the other, so the resulting
+    /// <c>expectedCheckpoint</c> recorded on each step is a declaration the run was held to rather
+    /// than a copy of what the run happened to see.
+    /// </para>
+    /// </remarks>
+    private void VerifyDeclaredPreconditions(
+        CommittedFlowBundle bundle,
+        MauiFlowRunContext runContext,
+        AgentStatus? liveStatus)
+    {
+        if (liveStatus is null)
+            return;
+
+        FlowStateEvidenceProviderRegistry.ApplyDeclaredCheckpoint(runContext, bundle.Plan.Checkpoint);
+        var preconditions = runContext.Preconditions;
+        if (preconditions is null)
+            return;
+
+        preconditions.Observed = MauiFlowRunner.CreateCheckpoint(liveStatus);
+        preconditions.ObservationDeferredUntilLaunch = null;
+        preconditions.CheckedAt = _clock.GetUtcNow();
+
+        var decision = MauiFlowReplaySafetyEvaluator.EvaluateWithFlow(
+            new MauiFlowRunRequest
+            {
+                Plan = bundle.Plan,
+                Context = runContext,
+            },
+            bundle.Flow);
+        if (decision.OrdinaryReplayAllowed)
+            return;
+
+        var blocking = decision.Reasons.FirstOrDefault(static reason =>
+            reason.Blocking == true &&
+            reason.Code is not null &&
+            reason.Code.StartsWith("precondition", StringComparison.Ordinal));
+        throw FlowExecutionException.Invalid(
+            blocking?.Code ?? "precondition-checkpoint-unsatisfied",
+            blocking?.Message ??
+                "The app's observed clean state does not satisfy the plan's declared checkpoint preconditions.");
+    }
+
     private static MauiFlowRunTarget CreateRunTarget(
         FlowExecutionPlatformSession session,
         AgentRegistration registration,
@@ -774,6 +840,7 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             AppBuildFingerprint = Hash("app-build", artifact.PackageDigest + "\u001f" + (status?.App?.Build ?? "")),
             AppSourceFingerprint = appSourceIdentity.AppSourceFingerprint,
             PackageDigest = artifact.PackageDigest,
+            NormalizedPayloadDigest = artifact.NormalizedPayloadDigest,
             AgentId = registration.Id,
             AgentInstanceId = registration.InstanceId,
             Locale = status?.Locale,
@@ -979,6 +1046,7 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
                     : Hash("app-build", artifact.PackageDigest + "\u001f"),
                 AppSourceFingerprint = appSourceIdentity.AppSourceFingerprint,
                 PackageDigest = artifact?.PackageDigest,
+                NormalizedPayloadDigest = artifact?.NormalizedPayloadDigest,
             },
             SideEffectPolicy = bundle?.Plan.SideEffectPolicy,
             StartedAt = startedAt,

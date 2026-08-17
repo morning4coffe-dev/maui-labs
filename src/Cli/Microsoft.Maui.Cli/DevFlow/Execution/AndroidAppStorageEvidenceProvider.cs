@@ -88,8 +88,7 @@ internal sealed partial class AndroidAppStorageEvidenceProvider : IFlowStateEvid
                 Preconditions = new MauiFlowReplayPreconditions
                 {
                     Expected = new MauiFlowCheckpoint(),
-                    Observed = new MauiFlowCheckpoint(),
-                    CheckedAt = _clock.GetUtcNow(),
+                    ObservationDeferredUntilLaunch = true,
                 },
                 BusinessOracles = [],
                 PriorMutationCompletionCertain = true,

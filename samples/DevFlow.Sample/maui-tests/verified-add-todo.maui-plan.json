@@ -20,6 +20,10 @@
   "assumptions": [],
   "risks": [],
   "preconditions": [],
+  "checkpoint": {
+    "route": "//native",
+    "window": "window-0"
+  },
   "reset": {
     "required": false
   },

@@ -734,6 +734,7 @@ public static class MauiFlowRunReportSerializer
         target.AppBuildFingerprint = MauiFlowReportRedactor.SafeIdentifier(target.AppBuildFingerprint);
         target.AppSourceFingerprint = MauiFlowReportRedactor.SafeIdentifier(target.AppSourceFingerprint);
         target.PackageDigest = MauiFlowReportRedactor.SafeIdentifier(target.PackageDigest);
+        target.NormalizedPayloadDigest = MauiFlowReportRedactor.SafeIdentifier(target.NormalizedPayloadDigest);
         target.AgentId = MauiFlowReportRedactor.SafeIdentifier(target.AgentId);
         target.AgentInstanceId = MauiFlowReportRedactor.SafeIdentifier(target.AgentInstanceId);
         target.Locale = MauiFlowReportRedactor.SafeIdentifier(target.Locale);

@@ -8,6 +8,73 @@ namespace Microsoft.Maui.DevFlow.Tests;
 public sealed class MauiFlowReplaySafetyEvaluatorTests
 {
     [Fact]
+    public void Evaluate_ObservationDeferredUntilLaunch_AdmitsReplayButClosesEveryTrustClaim()
+    {
+        var context = Context(includeReset: false, includeOracle: true);
+        context.Preconditions!.Observed = null;
+        context.Preconditions.ObservationDeferredUntilLaunch = true;
+
+        var decision = MauiFlowReplaySafetyEvaluator.Evaluate(Request(
+            Plan(MauiFlowSideEffectPolicies.None),
+            context));
+
+        Assert.True(decision.OrdinaryReplayAllowed);
+        Assert.False(decision.RepairValidationAllowed);
+        Assert.False(decision.RepairEligibility);
+        Assert.False(decision.RunVerificationAllowed);
+        var reason = Assert.Single(
+            decision.Reasons,
+            candidate => candidate.Code == "preconditions-observation-deferred");
+        Assert.False(reason.Blocking);
+    }
+
+    [Fact]
+    public void Evaluate_ObservationMissingWithoutDeferral_StillRefuses()
+    {
+        var context = Context(includeReset: false, includeOracle: true);
+        context.Preconditions!.Observed = null;
+
+        var decision = MauiFlowReplaySafetyEvaluator.Evaluate(Request(
+            Plan(MauiFlowSideEffectPolicies.None),
+            context));
+
+        Assert.False(decision.OrdinaryReplayAllowed);
+        Assert.Contains(decision.Reasons, reason => reason.Code == "preconditions-observation-missing");
+        Assert.DoesNotContain(decision.Reasons, reason => reason.Code == "preconditions-observation-deferred");
+    }
+
+    [Fact]
+    public void Evaluate_DeferralFlagWithSuppliedObservation_StillComparesCheckpointFields()
+    {
+        var context = Context(includeReset: false, includeOracle: true);
+        context.Preconditions!.ObservationDeferredUntilLaunch = true;
+        context.Preconditions.Observed!.Route = "/settings";
+
+        var decision = MauiFlowReplaySafetyEvaluator.Evaluate(Request(
+            Plan(MauiFlowSideEffectPolicies.None),
+            context));
+
+        Assert.False(decision.OrdinaryReplayAllowed);
+        Assert.Contains(decision.Reasons, reason => reason.Code == "precondition-route-mismatch");
+        Assert.DoesNotContain(decision.Reasons, reason => reason.Code == "preconditions-observation-deferred");
+    }
+
+    [Fact]
+    public void Evaluate_DeferralFlagDoesNotSuppressAnUnsatisfiableDeclaration()
+    {
+        var context = Context(includeReset: false, includeOracle: true);
+        context.Preconditions!.ObservationDeferredUntilLaunch = true;
+        context.Preconditions.Observed!.Route = null;
+
+        var decision = MauiFlowReplaySafetyEvaluator.Evaluate(Request(
+            Plan(MauiFlowSideEffectPolicies.None),
+            context));
+
+        Assert.False(decision.OrdinaryReplayAllowed);
+        Assert.Contains(decision.Reasons, reason => reason.Code == "precondition-route-missing");
+    }
+
+    [Fact]
     public void PublicApi_UsesDistinctFlowAwareNameAndRetainsCompatibilityOverload()
     {
         var type = typeof(MauiFlowReplaySafetyEvaluator);

@@ -51,6 +51,13 @@ public sealed class MauiFlowRunTarget
     [JsonPropertyName("appBuildFingerprint")] public string? AppBuildFingerprint { get; set; }
     [JsonPropertyName("appSourceFingerprint")] public string? AppSourceFingerprint { get; set; }
     [JsonPropertyName("packageDigest")] public string? PackageDigest { get; set; }
+
+    /// <summary>
+    /// A signing-insensitive digest of the deployed package payload. The signed package digest
+    /// identifies one occurrence of a build; this identifies the payload two occurrences share.
+    /// Optional: a producer that cannot compute one omits it and consumers keep refusing.
+    /// </summary>
+    [JsonPropertyName("normalizedPayloadDigest")] public string? NormalizedPayloadDigest { get; set; }
     [JsonPropertyName("agentId")] public string? AgentId { get; set; }
     [JsonPropertyName("agentInstanceId")] public string? AgentInstanceId { get; set; }
     [JsonPropertyName("locale")] public string? Locale { get; set; }

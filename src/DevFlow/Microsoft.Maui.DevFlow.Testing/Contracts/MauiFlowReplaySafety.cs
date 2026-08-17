@@ -109,6 +109,20 @@ public sealed class MauiFlowReplayPreconditions
 {
     [JsonPropertyName("expected")] public MauiFlowCheckpoint? Expected { get; set; }
     [JsonPropertyName("observed")] public MauiFlowCheckpoint? Observed { get; set; }
+
+    /// <summary>
+    /// Set by a host that cannot read the app's clean state until the app is launched, to declare
+    /// that the observation is owed rather than absent.
+    /// </summary>
+    /// <remarks>
+    /// Admission runs before the app is deployed, so a host evaluating at that point has nothing to
+    /// observe. Fabricating an all-blank observed checkpoint would be a false attestation, and
+    /// omitting it silently would be indistinguishable from a host that simply never checked. This
+    /// flag makes the gap explicit: admission proceeds, but every downstream trust claim
+    /// (verification and repair eligibility) stays closed until a real observation is supplied and
+    /// the evaluation is repeated.
+    /// </remarks>
+    [JsonPropertyName("observationDeferredUntilLaunch")] public bool? ObservationDeferredUntilLaunch { get; set; }
     [JsonPropertyName("checkedAt")] public DateTimeOffset? CheckedAt { get; set; }
     [JsonPropertyName("evidenceReference")] public string? EvidenceReference { get; set; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
@@ -316,7 +330,7 @@ public static class MauiFlowReplaySafetyEvaluator
             return decision;
         }
 
-        var preconditionsMatch = EvaluatePreconditions(plan, context, hasDeclaredPolicy, decision);
+        var preconditionsMatch = EvaluatePreconditions(plan, context, hasDeclaredPolicy, decision, out var preconditionsDeferred);
         if (!hasDeclaredPolicy)
         {
             AddReason(
@@ -402,6 +416,13 @@ public static class MauiFlowReplaySafetyEvaluator
             oracle.AllRequiredSucceeded &&
             coverage.AllRequiredCovered;
 
+        if (preconditionsDeferred)
+        {
+            decision.RepairValidationAllowed = false;
+            decision.RepairEligibility = false;
+            decision.RunVerificationAllowed = false;
+        }
+
         if (policy == MauiFlowSideEffectPolicy.NonReplayable)
         {
             decision.RepairValidationAllowed = false;
@@ -447,8 +468,10 @@ public static class MauiFlowReplaySafetyEvaluator
         MauiTestPlan? plan,
         MauiFlowRunContext? context,
         bool required,
-        MauiFlowReplayEligibilityDecision decision)
+        MauiFlowReplayEligibilityDecision decision,
+        out bool observationDeferred)
     {
+        observationDeferred = false;
         var before = decision.Reasons.Count;
         var declared = ToCheckpoint(plan?.Checkpoint);
         var supplied = context?.Preconditions?.Expected;
@@ -475,6 +498,18 @@ public static class MauiFlowReplaySafetyEvaluator
 
         if (observed is null)
         {
+            if (context?.Preconditions?.ObservationDeferredUntilLaunch == true)
+            {
+                observationDeferred = true;
+                AddReason(
+                    decision,
+                    "preconditions-observation-deferred",
+                    "The host cannot observe clean state before launch and owes the observation. Replay is admitted provisionally; verification and repair stay ineligible until the observation is supplied.",
+                    blocking: false,
+                    scope: "admission");
+                return true;
+            }
+
             AddReason(
                 decision,
                 "preconditions-observation-missing",

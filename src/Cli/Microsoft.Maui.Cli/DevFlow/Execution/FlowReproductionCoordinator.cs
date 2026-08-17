@@ -154,6 +154,7 @@ internal sealed class FlowReproductionCoordinator : IFlowReproductionCoordinator
             AppBuildFingerprint = localFacts.AppBuildFingerprint,
             AppSourceFingerprint = localFacts.AppSourceFingerprint,
             PackageDigest = localFacts.PackageDigest,
+            NormalizedPayloadDigest = localFacts.NormalizedPayloadDigest,
             Platform = localFacts.Platform,
             DeviceProfile = localFacts.DeviceProfile,
             RuntimeProfileFingerprint = localFacts.RuntimeProfileFingerprint,
@@ -390,6 +391,7 @@ internal sealed class FlowReproductionCoordinator : IFlowReproductionCoordinator
             AppBuildFingerprint = report.Target?.AppBuildFingerprint ?? manifest.Build?.AppBuildFingerprint,
             AppSourceFingerprint = report.Target?.AppSourceFingerprint ?? manifest.Build?.AppSourceFingerprint,
             PackageDigest = report.Target?.PackageDigest ?? manifest.Build?.PackageDigest,
+            NormalizedPayloadDigest = report.Target?.NormalizedPayloadDigest,
             Platform = report.Target?.Platform ?? manifest.Device?.Platform,
             DeviceProfile = report.Target?.DeviceProfile ?? manifest.Device?.Profile,
             RuntimeProfileFingerprint = MauiTestExecutionRuntimeProfile.CreateFingerprint(

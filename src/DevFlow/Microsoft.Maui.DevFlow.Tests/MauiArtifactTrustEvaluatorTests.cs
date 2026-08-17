@@ -4,6 +4,8 @@ namespace Microsoft.Maui.DevFlow.Tests;
 
 public class MauiArtifactTrustEvaluatorTests
 {
+    private const string NormalizedPayload = "sha256:" + "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
     [Fact]
     public void EvaluateImport_InternalHashesAndEmbeddedIds_DoNotUpgradeDefaultTrust()
     {
@@ -128,6 +130,128 @@ public class MauiArtifactTrustEvaluatorTests
         Assert.True(evaluation.Binding.Matched);
         Assert.Equal(imported.Identity!.Id, evaluation.Binding.ImportedArtifact!.Id);
         Assert.Equal(local.LocalRunId, evaluation.Binding.LocalRunId);
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_SignedOccurrenceDiffers_MatchesOnNormalizedPayload()
+    {
+        var imported = CreateImportedFailure();
+        imported.Projection!.PackageFingerprint = MauiArtifactTrustRedactor.Fingerprint("package-occurrence-a");
+        imported.Projection.NormalizedPayloadFingerprint = MauiArtifactTrustRedactor.Fingerprint(NormalizedPayload);
+        var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
+        local.NormalizedPayloadDigest = NormalizedPayload;
+        var expected = CreateExpectation();
+        expected.NormalizedPayloadDigest = NormalizedPayload;
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(imported, local, expected);
+
+        Assert.Equal(MauiArtifactTrustStates.LocallyReproduced, evaluation.Verification.State);
+        Assert.True(evaluation.Binding.Matched);
+        Assert.Contains(evaluation.Verification.Reasons, reason => reason.Code == "normalized-payload-identity-matched");
+        Assert.Contains(evaluation.Verification.Reasons, reason => reason.Code == "signed-occurrence-artifact-differs");
+        Assert.DoesNotContain(evaluation.Verification.Reasons, reason => reason.Code == "packageDigest-mismatch");
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_SignedOccurrenceDiffers_WithoutNormalizedPayload_StillRefuses()
+    {
+        var imported = CreateImportedFailure();
+        imported.Projection!.PackageFingerprint = MauiArtifactTrustRedactor.Fingerprint("package-occurrence-a");
+        var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
+        var expected = CreateExpectation();
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(imported, local, expected);
+
+        Assert.NotEqual(MauiArtifactTrustStates.LocallyReproduced, evaluation.Verification.State);
+        Assert.False(evaluation.Binding.Matched);
+        Assert.DoesNotContain(evaluation.Verification.Reasons, reason => reason.Code == "normalized-payload-identity-matched");
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_NormalizedPayloadMismatch_IsNotRescuedByTheFallback()
+    {
+        var imported = CreateImportedFailure();
+        imported.Projection!.PackageFingerprint = MauiArtifactTrustRedactor.Fingerprint("package-occurrence-a");
+        imported.Projection.NormalizedPayloadFingerprint = MauiArtifactTrustRedactor.Fingerprint(NormalizedPayload);
+        var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
+        local.NormalizedPayloadDigest = "sha256:" + new string('b', 64);
+        var expected = CreateExpectation();
+        expected.NormalizedPayloadDigest = "sha256:" + new string('b', 64);
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(imported, local, expected);
+
+        Assert.False(evaluation.Binding.Matched);
+        Assert.DoesNotContain(evaluation.Verification.Reasons, reason => reason.Code == "normalized-payload-identity-matched");
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_NormalizedPayloadFallback_RequiresAValidatedPlatform()
+    {
+        var imported = CreateImportedFailure();
+        imported.Projection!.PlatformFingerprint = MauiArtifactTrustRedactor.Fingerprint("windows");
+        imported.Projection.PackageFingerprint = MauiArtifactTrustRedactor.Fingerprint("package-occurrence-a");
+        imported.Projection.NormalizedPayloadFingerprint = MauiArtifactTrustRedactor.Fingerprint(NormalizedPayload);
+        var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
+        local.Platform = "windows";
+        local.NormalizedPayloadDigest = NormalizedPayload;
+        var expected = CreateExpectation();
+        expected.Platform = "windows";
+        expected.NormalizedPayloadDigest = NormalizedPayload;
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(imported, local, expected);
+
+        Assert.False(evaluation.Binding.Matched);
+        Assert.DoesNotContain(evaluation.Verification.Reasons, reason => reason.Code == "normalized-payload-identity-matched");
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_NormalizedPayloadFallback_RequiresTheLocalRunToMatchTheCurrentWorkspace()
+    {
+        var imported = CreateImportedFailure();
+        imported.Projection!.PackageFingerprint = MauiArtifactTrustRedactor.Fingerprint("package-occurrence-a");
+        imported.Projection.NormalizedPayloadFingerprint = MauiArtifactTrustRedactor.Fingerprint(NormalizedPayload);
+        var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
+        local.NormalizedPayloadDigest = NormalizedPayload;
+        var expected = CreateExpectation();
+        expected.NormalizedPayloadDigest = NormalizedPayload;
+        // The workspace no longer holds the package the local run actually deployed.
+        expected.PackageDigest = "package-elsewhere";
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(imported, local, expected);
+
+        Assert.False(evaluation.Binding.Matched);
+        Assert.DoesNotContain(evaluation.Verification.Reasons, reason => reason.Code == "normalized-payload-identity-matched");
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_NormalizedPayloadFallback_DoesNotRescueANonPackageMismatch()
+    {
+        var imported = CreateImportedFailure();
+        imported.Projection!.PackageFingerprint = MauiArtifactTrustRedactor.Fingerprint("package-occurrence-a");
+        imported.Projection.NormalizedPayloadFingerprint = MauiArtifactTrustRedactor.Fingerprint(NormalizedPayload);
+        imported.Projection.FlowFingerprint = MauiArtifactTrustRedactor.Fingerprint("flow-other");
+        var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
+        local.NormalizedPayloadDigest = NormalizedPayload;
+        var expected = CreateExpectation();
+        expected.NormalizedPayloadDigest = NormalizedPayload;
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(imported, local, expected);
+
+        Assert.False(evaluation.Binding.Matched);
+        Assert.Contains(evaluation.Verification.Reasons, reason => reason.Code == "flowDigest-mismatch");
+    }
+
+    [Fact]
+    public void EvaluateLocalReproduction_MalformedNormalizedPayloadFingerprint_IsRejected()
+    {
+        var imported = CreateImportedFailure();
+        imported.Projection!.NormalizedPayloadFingerprint = "not-a-fingerprint";
+        var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
+        var expected = CreateExpectation();
+
+        var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(imported, local, expected);
+
+        Assert.False(evaluation.Binding.Matched);
     }
 
     [Theory]

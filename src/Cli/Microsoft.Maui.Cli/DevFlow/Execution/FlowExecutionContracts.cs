@@ -191,6 +191,13 @@ internal sealed record ResolvedAppArtifact
     public bool Installable { get; init; }
     public bool Launchable { get; init; }
     public required string PackageDigest { get; init; }
+
+    /// <summary>
+    /// A signing-insensitive digest of the package payload, or <see langword="null"/> when the
+    /// artifact shape does not support one. See <see cref="NormalizedPayloadDigest"/>.
+    /// </summary>
+    public string? NormalizedPayloadDigest { get; init; }
+
     public string? OwnedOutputRoot { get; init; }
 }
 

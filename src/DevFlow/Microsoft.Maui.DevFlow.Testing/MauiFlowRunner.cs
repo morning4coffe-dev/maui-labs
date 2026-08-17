@@ -1344,20 +1344,7 @@ public sealed class MauiFlowRunner
         try
         {
             var status = await _driver.GetStatusAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
-            if (status is null)
-                return null;
-            return new MauiFlowCheckpoint
-            {
-                AppBuildFingerprint = BuildFingerprint(status),
-                AgentInstanceId = MauiFlowReportRedactor.SafeIdentifier(status.Agent?.InstanceId),
-                Route = MauiFlowReportRedactor.SafeRoute(status.Route),
-                Window = MauiFlowReportRedactor.SafeIdentifier(status.Window),
-                Modal = MauiFlowReportRedactor.SafeIdentifier(status.Modal),
-                Locale = MauiFlowReportRedactor.SafeIdentifier(status.Locale),
-                Theme = MauiFlowReportRedactor.SafeIdentifier(status.Theme),
-                Orientation = MauiFlowReportRedactor.SafeIdentifier(status.Orientation),
-                DisplayProfile = MauiFlowReportRedactor.SafeIdentifier(status.DisplayProfile),
-            };
+            return status is null ? null : CreateCheckpoint(status);
         }
         catch (OperationCanceledException)
         {
@@ -1367,6 +1354,28 @@ public sealed class MauiFlowRunner
         {
             return null;
         }
+    }
+
+    /// <summary>
+    /// Projects a live agent status into the checkpoint facts a run records and compares. Callers
+    /// that observe a clean-state checkpoint outside the runner use this so both observations are
+    /// produced by exactly the same projection.
+    /// </summary>
+    public static MauiFlowCheckpoint CreateCheckpoint(AgentStatus status)
+    {
+        ArgumentNullException.ThrowIfNull(status);
+        return new MauiFlowCheckpoint
+        {
+            AppBuildFingerprint = BuildFingerprint(status),
+            AgentInstanceId = MauiFlowReportRedactor.SafeIdentifier(status.Agent?.InstanceId),
+            Route = MauiFlowReportRedactor.SafeRoute(status.Route),
+            Window = MauiFlowReportRedactor.SafeIdentifier(status.Window),
+            Modal = MauiFlowReportRedactor.SafeIdentifier(status.Modal),
+            Locale = MauiFlowReportRedactor.SafeIdentifier(status.Locale),
+            Theme = MauiFlowReportRedactor.SafeIdentifier(status.Theme),
+            Orientation = MauiFlowReportRedactor.SafeIdentifier(status.Orientation),
+            DisplayProfile = MauiFlowReportRedactor.SafeIdentifier(status.DisplayProfile),
+        };
     }
 
     private static int AddActionabilityAttempt(
@@ -1516,6 +1525,7 @@ public sealed class MauiFlowRunner
             AppBuildFingerprint = target.AppBuildFingerprint,
             AppSourceFingerprint = target.AppSourceFingerprint,
             PackageDigest = target.PackageDigest,
+            NormalizedPayloadDigest = target.NormalizedPayloadDigest,
             AgentId = target.AgentId,
             AgentInstanceId = target.AgentInstanceId,
             Locale = target.Locale,

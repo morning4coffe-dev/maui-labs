@@ -159,6 +159,8 @@ internal sealed class ArtifactTrustImportService : IArtifactTrustImporter
             projection.AppBuildFingerprint = MauiArtifactTrustRedactor.Fingerprint(GetString(target, "appBuildFingerprint"));
             projection.AppSourceFingerprint = MauiArtifactTrustRedactor.Fingerprint(GetString(target, "appSourceFingerprint"));
             projection.PackageFingerprint = MauiArtifactTrustRedactor.Fingerprint(GetString(target, "packageDigest"));
+            projection.NormalizedPayloadFingerprint = MauiArtifactTrustRedactor.Fingerprint(
+                GetString(target, "normalizedPayloadDigest"));
             projection.PlatformFingerprint = MauiArtifactTrustRedactor.Fingerprint(GetString(target, "platform"));
             projection.DeviceProfileFingerprint = MauiArtifactTrustRedactor.Fingerprint(GetString(target, "deviceProfile"));
             projection.RuntimeProfileFingerprint = MauiArtifactTrustRedactor.NormalizeFingerprint(

@@ -33,6 +33,18 @@ internal sealed record FlowPostRunOracleEvaluationRequest
     public required string DeviceIdentityFingerprint { get; init; }
     public required string AppBuildFingerprint { get; init; }
     public required string PackageDigest { get; init; }
+
+    /// <summary>The platform the run was executed on, as reported by the platform adapter.</summary>
+    public required string Platform { get; init; }
+
+    /// <summary>
+    /// The exact device the run executed against. A provider needs it to reach the same device
+    /// out-of-band; it is never copied into the report, which carries only the hashed identity.
+    /// </summary>
+    public required string DeviceSerial { get; init; }
+
+    /// <summary>The launch identity the platform adapter deployed and launched.</summary>
+    public required string PackageId { get; init; }
     public required DateTimeOffset StartedAt { get; init; }
     public required DateTimeOffset EndedAt { get; init; }
     public required DateTimeOffset EvaluationDeadline { get; init; }

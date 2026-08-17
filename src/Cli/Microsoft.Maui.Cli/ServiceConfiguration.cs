@@ -150,6 +150,9 @@ public static class ServiceConfiguration
 			static provider => provider.GetRequiredService<MacCatalystFlowExecutionAdapter>());
 		services.AddSingleton<IFlowExecutionPlatformAdapter>(
 			static provider => provider.GetRequiredService<AppKitFlowExecutionAdapter>());
+		services.AddSingleton<AndroidAppStorageEvidenceProvider>();
+		services.AddSingleton<IFlowStateEvidenceProvider>(
+			static provider => provider.GetRequiredService<AndroidAppStorageEvidenceProvider>());
 		services.AddSingleton<IFlowStateEvidenceProviderRegistry>(
 			static provider => new FlowStateEvidenceProviderRegistry(
 				provider.GetServices<IFlowStateEvidenceProvider>()));

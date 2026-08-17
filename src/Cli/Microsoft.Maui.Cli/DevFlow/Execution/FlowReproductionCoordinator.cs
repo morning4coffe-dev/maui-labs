@@ -390,6 +390,7 @@ internal sealed class FlowReproductionCoordinator : IFlowReproductionCoordinator
             AppBuildFingerprint = report.Target?.AppBuildFingerprint ?? manifest.Build?.AppBuildFingerprint,
             AppSourceFingerprint = report.Target?.AppSourceFingerprint ?? manifest.Build?.AppSourceFingerprint,
             PackageDigest = report.Target?.PackageDigest ?? manifest.Build?.PackageDigest,
+            NormalizedPayloadDigest = report.Target?.NormalizedPayloadDigest,
             Platform = report.Target?.Platform ?? manifest.Device?.Platform,
             DeviceProfile = report.Target?.DeviceProfile ?? manifest.Device?.Profile,
             RuntimeProfileFingerprint = MauiTestExecutionRuntimeProfile.CreateFingerprint(
@@ -606,27 +607,73 @@ internal sealed class FlowReproductionCoordinator : IFlowReproductionCoordinator
                 Blocking = false,
             });
         }
-        if (evaluation.Verification.Omissions.All(omission =>
-                !string.Equals(omission.Field, "normalizedPayloadDigest", StringComparison.Ordinal)))
+        var importedNormalizedPayload = imported.Projection?.NormalizedPayloadFingerprint;
+        var localNormalizedPayload = localFacts.NormalizedPayloadDigest;
+        // The refusal has to name which of the two situations actually holds. Reporting an absent
+        // identity while both sides published one would misdescribe a real payload difference as a
+        // gap in DevFlow's own evidence, and send a reader looking for the wrong defect.
+        if (string.IsNullOrWhiteSpace(importedNormalizedPayload) ||
+            string.IsNullOrWhiteSpace(localNormalizedPayload))
         {
-            evaluation.Verification.Omissions.Add(new MauiArtifactTrustOmission
+            if (evaluation.Verification.Omissions.All(omission =>
+                    !string.Equals(omission.Field, "normalizedPayloadDigest", StringComparison.Ordinal)))
             {
-                Field = "normalizedPayloadDigest",
-                Reason = "A signing-insensitive normalized payload digest is not available for this occurrence artifact.",
-            });
+                evaluation.Verification.Omissions.Add(new MauiArtifactTrustOmission
+                {
+                    Field = "normalizedPayloadDigest",
+                    Reason = "A signing-insensitive normalized payload digest is not available for this occurrence artifact.",
+                });
+            }
+            if (reasons.All(reason =>
+                    !string.Equals(
+                        reason.Code,
+                        "normalized-payload-identity-unavailable",
+                        StringComparison.Ordinal)))
+            {
+                reasons.Add(new MauiArtifactTrustReason
+                {
+                    Code = "normalized-payload-identity-unavailable",
+                    Message = "Source identity and target profile matched, but signed occurrence artifacts differed and no signing-insensitive normalized payload identity is available.",
+                    Blocking = true,
+                });
+            }
         }
-        if (reasons.All(reason =>
-                !string.Equals(
-                    reason.Code,
-                    "normalized-payload-identity-unavailable",
-                    StringComparison.Ordinal)))
+        else if (!ImportedFingerprintMatches(importedNormalizedPayload, localNormalizedPayload))
         {
-            reasons.Add(new MauiArtifactTrustReason
+            if (reasons.All(reason =>
+                    !string.Equals(
+                        reason.Code,
+                        "normalized-payload-identity-differs",
+                        StringComparison.Ordinal)))
             {
-                Code = "normalized-payload-identity-unavailable",
-                Message = "Source identity and target profile matched, but signed occurrence artifacts differed and no signing-insensitive normalized payload identity is available.",
-                Blocking = true,
-            });
+                reasons.Add(new MauiArtifactTrustReason
+                {
+                    Code = "normalized-payload-identity-differs",
+                    // The normalization excludes JAR/APK v1 signature material only, so on a target
+                    // whose signing artefacts take another shape this states the digests differ and
+                    // says nothing about where.
+                    Message = "Source identity and target profile matched, but the two occurrences carry different normalized payload digests.",
+                    Blocking = true,
+                });
+            }
+        }
+        else
+        {
+            if (reasons.All(reason =>
+                    !string.Equals(
+                        reason.Code,
+                        "normalized-payload-identity-unproven",
+                        StringComparison.Ordinal)))
+            {
+                // Two occurrences agreeing here is not yet evidence that this platform can produce a
+                // stable payload identity, so it is recorded as an observation and still refuses.
+                reasons.Add(new MauiArtifactTrustReason
+                {
+                    Code = "normalized-payload-identity-unproven",
+                    Message = "The two occurrences carry the same normalized payload digest, but a normalized payload digest has not been established as a cross-occurrence identity on this platform.",
+                    Blocking = true,
+                });
+            }
         }
         evaluation.Binding.Matched = false;
         evaluation.Binding.Verification = evaluation.Verification;

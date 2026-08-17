@@ -268,6 +268,13 @@ public sealed class MauiImportedArtifactSafeProjection
     [JsonPropertyName("packageFingerprint")]
     public string? PackageFingerprint { get; set; }
 
+    /// <summary>
+    /// A one-way fingerprint of the imported occurrence's signing-insensitive normalized payload
+    /// digest, when the producer published one.
+    /// </summary>
+    [JsonPropertyName("normalizedPayloadFingerprint")]
+    public string? NormalizedPayloadFingerprint { get; set; }
+
     [JsonPropertyName("platformFingerprint")]
     public string? PlatformFingerprint { get; set; }
 
@@ -406,6 +413,23 @@ public sealed class MauiLocalReproductionFacts
 
     [JsonPropertyName("packageDigest")]
     public string? PackageDigest { get; set; }
+
+    /// <summary>
+    /// The local run's signing-insensitive normalized payload digest, when available.
+    /// </summary>
+    /// <remarks>
+    /// This is published as a diagnostic fact. It is deliberately not used to rescue a
+    /// <c>packageDigest</c> mismatch between two occurrences, because no platform has yet been
+    /// shown to produce a byte-stable normalized payload across two builds. Two <c>flow run</c>
+    /// invocations of one flow, run back to back on one Android device against one clean commit
+    /// with no edit in between, produced two distinct normalized payload digests. The
+    /// normalization already excludes signature material and neutralizes DevFlow's injected agent
+    /// session id, so by construction those differences are in payload bytes that are neither.
+    /// Treating this digest as a cross-occurrence identity would therefore assert something
+    /// untrue.
+    /// </remarks>
+    [JsonPropertyName("normalizedPayloadDigest")]
+    public string? NormalizedPayloadDigest { get; set; }
 
     [JsonPropertyName("platform")]
     public string? Platform { get; set; }
@@ -843,6 +867,7 @@ public static class MauiArtifactTrustEvaluator
             projection.AppBuildFingerprint,
             projection.AppSourceFingerprint,
             projection.PackageFingerprint,
+            projection.NormalizedPayloadFingerprint,
             projection.PlatformFingerprint,
             projection.DeviceProfileFingerprint,
             projection.RuntimeProfileFingerprint,

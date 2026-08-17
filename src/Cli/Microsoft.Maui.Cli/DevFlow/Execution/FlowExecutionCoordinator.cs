@@ -278,6 +278,17 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
                 },
                 cancellationToken).ConfigureAwait(false);
 
+            currentStage = "verify-preconditions";
+            await StageAsync(
+                lifecycle,
+                currentStage,
+                () =>
+                {
+                    VerifyDeclaredPreconditions(bundle, runContext, liveStatus);
+                    return Task.FromResult(true);
+                },
+                cancellationToken).ConfigureAwait(false);
+
             if (request.CaptureFailureEvidence)
             {
                 evidence = new FlowReplayEvidenceCapture(
@@ -807,6 +818,77 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             failure.Message);
     }
 
+    /// <summary>
+    /// Enforces the plan's declared checkpoint preconditions against the app's clean state.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Admission runs before anything is deployed, so it cannot observe the app; a state evidence
+    /// provider evaluating at that point can only declare the observation deferred, which is why a
+    /// declared checkpoint used to be unsatisfiable and every plan therefore left it out. The first
+    /// moment a clean-state checkpoint exists is immediately after the exact agent binding is
+    /// validated and before the flow has taken a single action, which is where this runs.
+    /// </para>
+    /// <para>
+    /// Both halves come from separate sources: expected from the committed plan, observed from the
+    /// live agent. Nothing here derives one from the other, so the resulting
+    /// <c>expectedCheckpoint</c> recorded on each step is a declaration the run was held to rather
+    /// than a copy of what the run happened to see.
+    /// </para>
+    /// </remarks>
+    private void VerifyDeclaredPreconditions(
+        CommittedFlowBundle bundle,
+        MauiFlowRunContext runContext,
+        AgentStatus liveStatus)
+    {
+        ArgumentNullException.ThrowIfNull(liveStatus);
+        FlowStateEvidenceProviderRegistry.ApplyDeclaredCheckpoint(runContext, bundle.Plan.Checkpoint);
+        var preconditions = runContext.Preconditions;
+        if (preconditions is null)
+        {
+            throw FlowExecutionException.Invalid(
+                "precondition-context-missing",
+                "The run context carries no preconditions to verify, so the declared checkpoint cannot be enforced.");
+        }
+
+        // The live reading only fills fields the agent can actually see. A provider that attested a
+        // seed or a backend state at preflight owns those fields, so they are kept rather than
+        // overwritten with the nulls CreateCheckpoint produces for them.
+        var live = MauiFlowRunner.CreateCheckpoint(liveStatus);
+        var observed = preconditions.Observed ?? new MauiFlowCheckpoint();
+        observed.AppBuildFingerprint ??= live.AppBuildFingerprint;
+        observed.AgentInstanceId ??= live.AgentInstanceId;
+        observed.Route ??= live.Route;
+        observed.Window ??= live.Window;
+        observed.Modal ??= live.Modal;
+        observed.Locale ??= live.Locale;
+        observed.Theme ??= live.Theme;
+        observed.Orientation ??= live.Orientation;
+        observed.DisplayProfile ??= live.DisplayProfile;
+        preconditions.Observed = observed;
+        preconditions.ObservationDeferredUntilLaunch = null;
+        preconditions.CheckedAt = _clock.GetUtcNow();
+
+        var decision = MauiFlowReplaySafetyEvaluator.EvaluateWithFlow(
+            new MauiFlowRunRequest
+            {
+                Plan = bundle.Plan,
+                Context = runContext,
+            },
+            bundle.Flow);
+        if (decision.OrdinaryReplayAllowed)
+            return;
+
+        // The first blocking reason is the diagnosis, whatever it is named. Preferring a
+        // "precondition"-prefixed code would report a checkpoint problem for refusals that are not
+        // one, such as an unauthorized one-shot or an uncertain prior mutation.
+        var blocking = decision.Reasons.FirstOrDefault(static reason => reason.Blocking == true);
+        throw FlowExecutionException.Invalid(
+            blocking?.Code ?? "precondition-checkpoint-unsatisfied",
+            blocking?.Message ??
+                "The app's observed clean state does not satisfy the plan's declared checkpoint preconditions.");
+    }
+
     private static MauiFlowRunTarget CreateRunTarget(
         FlowExecutionPlatformSession session,
         AgentRegistration registration,
@@ -823,6 +905,7 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             AppBuildFingerprint = Hash("app-build", artifact.PackageDigest + "\u001f" + (status?.App?.Build ?? "")),
             AppSourceFingerprint = appSourceIdentity.AppSourceFingerprint,
             PackageDigest = artifact.PackageDigest,
+            NormalizedPayloadDigest = artifact.NormalizedPayloadDigest,
             AgentId = registration.Id,
             AgentInstanceId = registration.InstanceId,
             Locale = status?.Locale,
@@ -1028,6 +1111,7 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
                     : Hash("app-build", artifact.PackageDigest + "\u001f"),
                 AppSourceFingerprint = appSourceIdentity.AppSourceFingerprint,
                 PackageDigest = artifact?.PackageDigest,
+                NormalizedPayloadDigest = artifact?.NormalizedPayloadDigest,
             },
             SideEffectPolicy = bundle?.Plan.SideEffectPolicy,
             StartedAt = startedAt,

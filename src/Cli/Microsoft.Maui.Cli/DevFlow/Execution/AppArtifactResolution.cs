@@ -298,9 +298,14 @@ internal sealed class MsBuildAppArtifactResolver : IAppArtifactResolver
                 outputRoot,
                 selected.Path,
                 cancellationToken).ConfigureAwait(false);
+            var normalizedPayloadDigest = await NormalizedPayloadDigest.TryComputeAsync(
+                selected.Path,
+                request.AgentSessionId,
+                cancellationToken).ConfigureAwait(false);
             return selected with
             {
                 PackageDigest = digest,
+                NormalizedPayloadDigest = normalizedPayloadDigest,
                 OwnedOutputRoot = resolutionRoot,
             };
         }

@@ -13,3 +13,11 @@ The initial corpus excludes permission prompts, native dialogs, dynamic per-item
 and picker selection because those need additional authoritative selector/identity coverage. They
 are covered by the Windows capability contract, which reports `capability-missing` rather than
 silently substituting a weaker selector when a native or WebView surface is unavailable.
+
+`drifted-add-todo.md` is the one deliberate exception to the "stable AutomationId" rule above. It
+is a copy of `verified-add-todo.md` whose add button is addressed as `AddButtonRenamed`, an
+AutomationId the sample does not expose, so the run is expected to end `locator-not-found`. It
+exists as a fixture for selector-drift triage and the self-repair pipeline. Do not add it to a QA
+lane that expects passing flows, and note that because the tap never lands its independent business
+oracle also fails: the run is correctly not repair-eligible, since repair eligibility requires the
+business outcome to have verified independently.

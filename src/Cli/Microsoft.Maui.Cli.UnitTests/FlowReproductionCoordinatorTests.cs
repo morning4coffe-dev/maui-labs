@@ -112,6 +112,60 @@ public sealed class FlowReproductionCoordinatorTests
     }
 
     [Fact]
+    public async Task Reproduce_NormalizedPayloadDigestDiffers_NamesADifferenceNotAnAbsence()
+    {
+        using var workspace = new ReproductionWorkspace();
+        var bundle = workspace.WriteBundle();
+        var imported = CreateImported(bundle.FlowDigest);
+        imported.Projection!.AppBuildFingerprint =
+            MauiArtifactTrustRedactor.Fingerprint("signed-build-occurrence-a");
+        imported.Projection.PackageFingerprint =
+            MauiArtifactTrustRedactor.Fingerprint("signed-package-occurrence-a");
+        imported.Projection.NormalizedPayloadFingerprint =
+            MauiArtifactTrustRedactor.Fingerprint("sha256:" + new string('a', 64));
+        var coordinator = CreateCoordinator(
+            imported,
+            new FakeExecutionCoordinator(bundle.FlowDigest)
+            {
+                NormalizedPayloadDigest = "sha256:" + new string('b', 64),
+            });
+
+        var result = await coordinator.ReproduceAsync(Request(workspace, bundle));
+
+        Assert.False(result.Ok);
+        Assert.Contains("signed-occurrence-artifact-differs", result.Report.ReasonCodes);
+        Assert.Contains("normalized-payload-identity-differs", result.Report.ReasonCodes);
+        Assert.DoesNotContain("normalized-payload-identity-unavailable", result.Report.ReasonCodes);
+        Assert.DoesNotContain("normalizedPayloadDigest", result.Report.MissingFacts);
+    }
+
+    [Fact]
+    public async Task Reproduce_NormalizedPayloadDigestAgrees_StillRefusesBecauseItIsNotAnIdentity()
+    {
+        using var workspace = new ReproductionWorkspace();
+        var bundle = workspace.WriteBundle();
+        var payload = "sha256:" + new string('a', 64);
+        var imported = CreateImported(bundle.FlowDigest);
+        imported.Projection!.AppBuildFingerprint =
+            MauiArtifactTrustRedactor.Fingerprint("signed-build-occurrence-a");
+        imported.Projection.PackageFingerprint =
+            MauiArtifactTrustRedactor.Fingerprint("signed-package-occurrence-a");
+        imported.Projection.NormalizedPayloadFingerprint =
+            MauiArtifactTrustRedactor.Fingerprint(payload);
+        var coordinator = CreateCoordinator(
+            imported,
+            new FakeExecutionCoordinator(bundle.FlowDigest) { NormalizedPayloadDigest = payload });
+
+        var result = await coordinator.ReproduceAsync(Request(workspace, bundle));
+
+        Assert.False(result.Ok);
+        Assert.False(result.Report.Matched);
+        Assert.Contains("normalized-payload-identity-unproven", result.Report.ReasonCodes);
+        Assert.DoesNotContain("normalized-payload-identity-unavailable", result.Report.ReasonCodes);
+        Assert.DoesNotContain("normalized-payload-identity-differs", result.Report.ReasonCodes);
+    }
+
+    [Fact]
     public async Task Reproduce_MissingImportedFact_IsInsufficientNotMismatch()
     {
         using var workspace = new ReproductionWorkspace();
@@ -856,6 +910,7 @@ public sealed class FlowReproductionCoordinatorTests
         public string? LifecycleDetailCode { get; init; }
         public string RuntimeKind { get; init; } = "emulator";
         public string AgentInstanceId { get; init; } = "agent-current";
+        public string? NormalizedPayloadDigest { get; init; }
 
         public async Task<FlowExecutionResult> RunAsync(
             FlowExecutionRequest request,
@@ -893,6 +948,7 @@ public sealed class FlowReproductionCoordinatorTests
                     AppBuildFingerprint = "build-current",
                     AppSourceFingerprint = "source-current",
                     PackageDigest = "package-current",
+                    NormalizedPayloadDigest = NormalizedPayloadDigest,
                 },
                 Outcome = new MauiFlowRunOutcome
                 {

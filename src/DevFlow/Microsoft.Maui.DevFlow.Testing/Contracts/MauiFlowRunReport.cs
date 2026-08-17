@@ -53,6 +53,14 @@ public sealed class MauiFlowRunTarget
     [JsonPropertyName("appBuildFingerprint")] public string? AppBuildFingerprint { get; set; }
     [JsonPropertyName("appSourceFingerprint")] public string? AppSourceFingerprint { get; set; }
     [JsonPropertyName("packageDigest")] public string? PackageDigest { get; set; }
+
+    /// <summary>
+    /// A signing-insensitive digest of the deployed package payload, published as a diagnostic
+    /// fact. It has not been established as a cross-occurrence identity on any platform and does
+    /// not rescue a <c>packageDigest</c> mismatch. Optional: a producer that cannot compute one
+    /// omits it and consumers keep refusing.
+    /// </summary>
+    [JsonPropertyName("normalizedPayloadDigest")] public string? NormalizedPayloadDigest { get; set; }
     [JsonPropertyName("agentId")] public string? AgentId { get; set; }
     [JsonPropertyName("agentInstanceId")] public string? AgentInstanceId { get; set; }
     [JsonPropertyName("locale")] public string? Locale { get; set; }

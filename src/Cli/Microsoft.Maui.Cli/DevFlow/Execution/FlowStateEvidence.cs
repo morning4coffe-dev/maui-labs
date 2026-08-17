@@ -202,21 +202,17 @@ internal sealed class FlowStateEvidenceProviderRegistry : IFlowStateEvidenceProv
     }
 
     private static MauiFlowRunContext CreateSideEffectFreeContext()
-    {
-        var empty = new MauiFlowCheckpoint();
-        return new MauiFlowRunContext
+        => new()
         {
             Intent = MauiFlowReplayIntents.OrdinaryReplay,
             Preconditions = new MauiFlowReplayPreconditions
             {
-                Expected = empty,
-                Observed = new MauiFlowCheckpoint(),
-                CheckedAt = DateTimeOffset.UtcNow,
+                Expected = new MauiFlowCheckpoint(),
+                ObservationDeferredUntilLaunch = true,
             },
             BusinessOracles = [],
             PriorMutationCompletionCertain = true,
         };
-    }
 
     private static bool HasCheckpointRequirements(MauiFlowCheckpointRequirements? checkpoint)
     {
@@ -239,6 +235,62 @@ internal sealed class FlowStateEvidenceProviderRegistry : IFlowStateEvidenceProv
             checkpoint.DisplayProfile,
         }.Any(static value => !string.IsNullOrWhiteSpace(value));
     }
+
+    /// <summary>
+    /// Copies the plan's declared checkpoint requirements into the run context's expected
+    /// checkpoint, so the runner enforces them and the report records what the run required.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Only the fields a live agent actually reports are projected. The runner compares expected
+    /// against observed field by field and treats a blank expected field as "no constraint", so
+    /// projecting a field DevFlow cannot observe (a seed or backend-state fingerprint, or a
+    /// collection item key) would turn every run into a checkpoint mismatch rather than enforcing
+    /// anything. Those declarations stay the responsibility of a state evidence provider that can
+    /// actually attest them.
+    /// </para>
+    /// <para>
+    /// The expected checkpoint is a declaration, never an observation: it comes from the committed
+    /// plan and is fixed before the run starts. Deriving it from the same step's live reading would
+    /// make <c>checkpointMatches</c> self-fulfilling and destroy the locator-drift-versus-state-drift
+    /// distinction it exists to draw.
+    /// </para>
+    /// <para>
+    /// Because the runner compares this checkpoint at <em>every</em> step, a declared or supplied
+    /// <c>route</c>, <c>window</c> or <c>modal</c> is an invariant of the whole run and not merely
+    /// its entry state. A flow that deliberately navigates away from the declared route will report
+    /// <c>routeMatches: false</c> from that point on, and a failure there classifies as
+    /// <c>route-state-drift</c> rather than <c>locator-not-found</c>. Declare these fields only
+    /// where they hold for the entire flow.
+    /// </para>
+    /// </remarks>
+    internal static void ApplyDeclaredCheckpoint(
+        MauiFlowRunContext context,
+        MauiFlowCheckpointRequirements? declared)
+    {
+        ArgumentNullException.ThrowIfNull(context);
+        if (declared is null)
+            return;
+        var preconditions = context.Preconditions;
+        if (preconditions is null)
+            return;
+        var expected = preconditions.Expected ?? new MauiFlowCheckpoint();
+        expected.AppBuildFingerprint = Coalesce(expected.AppBuildFingerprint, declared.AppBuildFingerprint);
+        expected.Route = Coalesce(expected.Route, declared.Route);
+        expected.Window = Coalesce(expected.Window, declared.Window);
+        expected.Modal = Coalesce(expected.Modal, declared.Modal);
+        expected.Locale = Coalesce(expected.Locale, declared.Locale);
+        expected.Theme = Coalesce(expected.Theme, declared.Theme);
+        expected.Orientation = Coalesce(expected.Orientation, declared.Orientation);
+        expected.DisplayProfile = Coalesce(expected.DisplayProfile, declared.DisplayProfile);
+        preconditions.Expected = expected;
+    }
+
+    private static string? Coalesce(string? current, string? declared)
+        => string.IsNullOrWhiteSpace(current) ? Trim(declared) : current;
+
+    private static string? Trim(string? value)
+        => string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private static void ValidatePostRunBinding(
         FlowPostRunOracleEvidenceResult result,

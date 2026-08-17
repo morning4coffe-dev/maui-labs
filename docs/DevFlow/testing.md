@@ -156,6 +156,107 @@ JSON uses the versioned flow-triage contract. Markdown is generated only from th
 neither format copies logs, exception text, app text, prompts, secrets, absolute paths, or device
 serials.
 
+### Independent business oracles: how a run becomes verified
+
+A clean replay is not a verified test. `flow run` reports `exitCategory: "unverified"` when the
+steps all passed but nothing outside the app's own UI confirmed that the business result actually
+happened:
+
+```json
+{ "ok": false, "exitCategory": "unverified",
+  "message": "The execution passed, but independent verification requirements were not satisfied: independent-oracle-absent, required-scenario-uncovered. (Flow replay passed.)" }
+```
+
+This is deliberate. The flow drives the app through the DevFlow agent and asserts on what the UI
+reports about itself, so a screenshot, a label, a toast, a spinner that stops, or a navigation to a
+confirmation page are all **self-attestation**: an app that renders "Saved" without saving anything
+satisfies every one of them. An independent business oracle is evidence gathered through a
+different channel than the one the flow drove — an API query, a database row, a server-side audit
+record, or, for a purely local app, a durable artefact the app committed and no page reads back.
+
+Three things must line up, and all three are refused if you only supply some of them:
+
+1. **A required, independent oracle** in the plan's `independentBusinessOracles`, whose
+   `evidenceKind` matches a registered state-evidence provider. Without one you get
+   `independent-oracle-absent`; if the provider evaluates it as false you get
+   `independent-oracle-failed`.
+2. **An acceptance criterion** that names that oracle in `businessOracleId`.
+3. **A scenario** whose `acceptanceCriterionIds` are all covered by flow steps that carry the same
+   `acceptanceCriterionIds` *and* a hard assertion (`"verify": true`). An uncovered scenario is
+   `required-scenario-uncovered`.
+
+`android-app-storage` is the built-in provider. It reads a file from the app's private Android
+storage over `adb shell run-as`, outside the agent channel, after the run and inside the bounded
+post-run evaluation window. The declared `reference` is a relative path under `files`, `cache`,
+`databases`, `shared_prefs`, or `no_backup`; `expect.contains` entries must all be present in the
+file and `expect.absent` entries must all be missing. Predicates are single-line, unrecognised keys
+under `expect` are refused rather than ignored, and reports never echo the file's contents, only the
+index of the predicate that failed.
+
+Two enforced preconditions make it sound, and both come from `flow run` rather than the provider:
+the run must be a Debug build, so `run-as` can reach app storage at all; and the Android adapter
+refuses a device that already has the package installed (`android-preexisting-app-unsafe`), so app
+storage is necessarily empty when the run starts and anything read afterwards was written by this
+run.
+
+The worked example lives in `samples/DevFlow.Sample/maui-tests/verified-add-todo.md` and its
+sidecar. The app writes a `todo-ledger.jsonl` from its domain layer, which no page reads, and the
+plan declares:
+
+```json
+"acceptanceCriteria": [
+  {
+    "criterionId": "todo-committed",
+    "description": "The added todo is committed to the app's durable ledger, not merely rendered in the list.",
+    "required": true,
+    "businessOracleId": "todo-ledger-record"
+  }
+],
+"independentBusinessOracles": [
+  {
+    "oracleId": "todo-ledger-record",
+    "description": "Read the app's private todo ledger over adb and confirm it holds the exact record for the todo the flow added, and no removal.",
+    "required": true,
+    "independent": true,
+    "evidenceKind": "android-app-storage",
+    "reference": "files/todo-ledger.jsonl",
+    "expect": {
+      "contains": ["{\"event\":\"todo-added\",\"id\":\"todo-0001\",\"title\":\"Ledger verified item\",\"completed\":false}"],
+      "absent": ["{\"event\":\"todo-removed\""]
+    }
+  }
+]
+```
+
+The matching flow step carries both halves of the coverage contract:
+
+```json
+{
+  "seq": 2,
+  "action": "tap",
+  "args": { "selector": { "automationId": "AddButton" } },
+  "acceptanceCriterionIds": ["todo-committed"],
+  "asserts": [
+    { "kind": "propEquals", "selector": { "automationId": "CountLabel" },
+      "name": "Text", "expected": "4 items, 0 completed", "verify": true }
+  ]
+}
+```
+
+A satisfied run reports `exitCategory: "pass"`, `outcome.verified: true`, and JUnit
+`skipped="0"`. Point `expect.contains` at a record the app never writes and the same UI assertions
+still pass, but the run returns `unverified` with `independent-oracle-failed` — that is the gate
+working, not a bug.
+
+Be honest about scope. `android-app-storage` is independent of the UI and of the automation
+channel, not of the app process: it proves the app committed the record, not that a server accepted
+it, and it asserts what the file holds when it is read rather than tracking each write. For an app
+with a backend, query the backend instead and register a provider for it. The provider interface is
+`IFlowStateEvidenceProvider`; a provider supplies post-run evidence bound to the exact run, device,
+build, flow, and time window, and can never make a run verified on its own — the plan's coverage
+requirements still have to be met. Only one provider may claim a given run, so a plan cannot yet mix
+`android-app-storage` with an oracle of another kind.
+
 ### Local reproduction handoff
 
 `flow reproduce` imports one `flow-run.json` or `.mauitrace` through

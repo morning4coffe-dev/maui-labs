@@ -247,6 +247,54 @@ must not. Also wrong: a policy enum in `reset.strategy`, which names a mechanism
 tenant. With no oracle, say so — an empty `independentBusinessOracles` means
 **none — not independently verified**, and every result must carry that phrase.
 
+### Independent Business Oracles
+
+An independent oracle is evidence read through a **different channel than the
+one the flow drove**. The flow talks to the in-app agent and asserts on what the
+UI says about itself, so a label, a screenshot, a toast, a stopped spinner, or a
+confirmation route are self-attestation: an app that renders "Saved" without
+saving satisfies all of them. Independent evidence is a backend query, a
+database row, an audit record, or a durable artefact the app committed that no
+page reads back.
+
+`evidenceKind` must name a **registered** provider or the run reports
+`independent-oracle-absent`. Do not invent one. Today the only registered kind
+is `android-app-storage`, which reads a file from app-private storage over
+`adb shell run-as` after the run. Naming any other kind, including the
+`http-json` shape above, yields `unverified` until a provider for it exists.
+
+Verification needs all three, and refuses partial sets: a required + independent
+oracle; an acceptance criterion naming it in `businessOracleId`; and a scenario
+whose `acceptanceCriterionIds` are covered by flow steps carrying the same IDs
+**and** a hard assertion (`"verify": true`). Otherwise the codes are
+`independent-oracle-absent`, `independent-oracle-failed`, or
+`required-scenario-uncovered`.
+
+```json
+"independentBusinessOracles": [{
+  "oracleId": "todo-ledger-record", "required": true, "independent": true,
+  "evidenceKind": "android-app-storage", "reference": "files/todo-ledger.jsonl",
+  "description": "Read the app's private ledger over adb; it holds the record the flow added.",
+  "expect": {
+    "contains": ["{\"event\":\"todo-added\",\"id\":\"todo-0001\"}"],
+    "absent": ["{\"event\":\"todo-removed\""]
+  }
+}]
+```
+
+`reference` is a relative path under `files`, `cache`, `databases`, `shared_prefs`,
+or `no_backup`; every `expect.contains` must be present and every
+`expect.absent` missing. Predicates are single-line and unknown keys under
+`expect` are refused, so a plan can never read stricter than it checks. Reports
+carry only the failing predicate index, never file content. Two preconditions
+`flow run` already enforces make it sound: a Debug build, since `run-as` needs a
+debuggable app, and the Android adapter's refusal to run against a device that
+already has the package installed, which guarantees storage starts empty. Say
+the scope plainly: this proves the app committed the record, not that a server
+accepted it. Only one provider may claim a run, so an `android-app-storage`
+oracle cannot yet be combined with one of another kind. The worked green example
+is `samples/DevFlow.Sample/maui-tests/verified-add-todo.md`.
+
 Rules: edit the prose freely, it is never replay input; never hand-edit the
 fence without `maui devflow flow validate`, which checks the fence only, not
 the sidecar; and a stale `flow.digest` invalidates every grant bound to it, so

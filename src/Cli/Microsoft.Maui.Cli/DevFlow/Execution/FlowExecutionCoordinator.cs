@@ -25,7 +25,7 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
     private readonly Func<string, int, AgentClient> _agentClientFactory;
     private readonly TimeProvider _clock;
     private readonly IAppSourceIdentityProvider _appSourceIdentityProvider;
-    private readonly Func<string> _agentSessionIdFactory;
+    private readonly Func<string>? _agentSessionIdFactory;
 
     public FlowExecutionCoordinator(
         CommittedFlowBundleLoader bundleLoader,
@@ -56,8 +56,7 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         _agentClientFactory = agentClientFactory ?? ((host, port) => new AgentClient(host, port));
         _clock = clock ?? TimeProvider.System;
         _appSourceIdentityProvider = appSourceIdentityProvider ?? new NullAppSourceIdentityProvider();
-        _agentSessionIdFactory = agentSessionIdFactory ??
-            (static () => "flow" + Guid.NewGuid().ToString("N"));
+        _agentSessionIdFactory = agentSessionIdFactory;
     }
 
     public async Task<FlowExecutionResult> RunAsync(
@@ -66,7 +65,9 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
     {
         ArgumentNullException.ThrowIfNull(request);
         var runId = CreateRunId();
-        var agentSessionId = _agentSessionIdFactory();
+        var agentSessionId = _agentSessionIdFactory is null
+            ? CreateBuildScopedAgentSessionId(request)
+            : _agentSessionIdFactory();
         if (string.IsNullOrWhiteSpace(agentSessionId) ||
             agentSessionId.Length > 64 ||
             agentSessionId.Any(static character => !char.IsAsciiLetterOrDigit(character)))
@@ -1457,6 +1458,61 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
     private static string CreateRunId()
         => "run-" + DateTimeOffset.UtcNow.ToString("yyyyMMddHHmmssfff", System.Globalization.CultureInfo.InvariantCulture)
             + "-" + Guid.NewGuid().ToString("N")[..8];
+
+    /// <summary>
+    /// Derives the opaque agent session identity from the build inputs that select the app binary
+    /// rather than from a per-invocation random value.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// The session identity is compiled into the app: <c>Microsoft.Maui.DevFlow.Agent.targets</c>
+    /// emits it as an <see cref="System.Reflection.AssemblyMetadataAttribute"/> and, on Android, as
+    /// an <c>AndroidManifest.xml</c> <c>meta-data</c> overlay. A per-invocation random value therefore
+    /// forced the app assembly to be recompiled on every <c>flow run</c>, and — because Roslyn's
+    /// deterministic compilation hashes its inputs — changed the assembly MVID, the deterministic PE
+    /// timestamp and the debug directory content id in addition to the embedded literal. Two runs of
+    /// the same flow against the same commit could never produce the same app binary.
+    /// </para>
+    /// <para>
+    /// The identity stays scoped to the build environment: it is derived from the full project path
+    /// (so separate worktrees, CI agents and developer machines still produce distinct identities, as
+    /// <c>Microsoft.Maui.DevFlow.Agent.targets</c> intends) together with the target framework,
+    /// configuration and platform that select the artifact. Nothing about agent binding exactness is
+    /// relaxed: <see cref="ExactAgentBindingResolver"/> admits only agents that appear after launch
+    /// relative to its pre-launch snapshot and additionally matches package id, target framework,
+    /// platform, process id and device identity, and refuses ambiguous candidates.
+    /// </para>
+    /// <para>
+    /// The result keeps the 36-character shape of the previous <c>"flow" + Guid("N")</c> value so the
+    /// length-preserving session-id neutralisation in <see cref="NormalizedPayloadDigest"/> continues
+    /// to apply, and is ASCII alphanumeric so it satisfies the agent session identity validation.
+    /// </para>
+    /// </remarks>
+    internal static string CreateBuildScopedAgentSessionId(FlowExecutionRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var projectPath = request.ProjectPath ?? string.Empty;
+        try
+        {
+            projectPath = Path.GetFullPath(projectPath);
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            // Fall back to the caller-supplied spelling; resolution failures surface later with a
+            // precise diagnostic and must not change the session identity shape here.
+        }
+        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
+            projectPath = projectPath.ToLowerInvariant();
+
+        var material = string.Join(
+            '\u001f',
+            projectPath,
+            request.TargetFramework ?? string.Empty,
+            request.Configuration ?? string.Empty,
+            request.Platform ?? string.Empty);
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(material));
+        return "flow" + Convert.ToHexStringLower(hash)[..32];
+    }
 
     private static string BoundMessage(string message)
         => message.Length <= 512 ? message : message[..512];

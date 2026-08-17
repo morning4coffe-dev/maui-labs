@@ -414,7 +414,19 @@ public sealed class MauiLocalReproductionFacts
     [JsonPropertyName("packageDigest")]
     public string? PackageDigest { get; set; }
 
-    /// <summary>The local run's signing-insensitive normalized payload digest, when available.</summary>
+    /// <summary>
+    /// The local run's signing-insensitive normalized payload digest, when available.
+    /// </summary>
+    /// <remarks>
+    /// This is published as a diagnostic fact. It is deliberately not used to rescue a
+    /// <c>packageDigest</c> mismatch between two occurrences, because no platform has yet been
+    /// shown to produce a byte-stable normalized payload across two builds. Thirteen consecutive
+    /// <c>flow run</c> invocations of one flow, on one commit, on one Android device produced
+    /// thirteen distinct normalized payload digests. The normalization already excludes signature
+    /// material and neutralizes DevFlow's injected agent session id, so by construction those
+    /// differences are in payload bytes that are neither. Treating this digest as a
+    /// cross-occurrence identity would therefore assert something untrue.
+    /// </remarks>
     [JsonPropertyName("normalizedPayloadDigest")]
     public string? NormalizedPayloadDigest { get; set; }
 
@@ -795,8 +807,9 @@ public static class MauiArtifactTrustEvaluator
         var importedPackage = isMauiTrace ? null : projection.PackageFingerprint;
         var matched = true;
         matched &= MatchesFingerprint("flowDigest", projection.FlowFingerprint, current!.FlowDigest, localRun.FlowDigest, result);
+        matched &= MatchesFingerprint("appBuildFingerprint", importedAppBuild, current.AppBuildFingerprint, localRun.AppBuildFingerprint, result);
         matched &= MatchesFingerprint("appSourceFingerprint", importedAppSource, current.AppSourceFingerprint, localRun.AppSourceFingerprint, result);
-        matched &= MatchesPackageIdentity(projection, current, localRun, importedAppBuild, importedPackage, result);
+        matched &= MatchesFingerprint("packageDigest", importedPackage, current.PackageDigest, localRun.PackageDigest, result);
         matched &= MatchesFingerprint("platform", projection.PlatformFingerprint, current.Platform, localRun.Platform, result);
         matched &= MatchesPrecomputedFingerprint(
             "runtimeProfile",
@@ -812,16 +825,11 @@ public static class MauiArtifactTrustEvaluator
         }
 
         result.State = MauiArtifactTrustStates.LocallyReproduced;
-        // Only mismatch diagnostics are noise once the match succeeds. Non-blocking reasons record
-        // how the match was reached — notably whether it relied on the normalized payload identity
-        // rather than an exact signed-digest match — so they stay on the trust record.
-        var provenance = result.Reasons.Where(static reason => reason.Blocking != true).ToList();
         result.Reasons.Clear();
         result.Reasons.Add(Reason(
             "locally-reproduced",
             "A newly executed local run matched the current flow, app fingerprints, target, and failure checkpoints.",
             blocking: false));
-        result.Reasons.AddRange(provenance);
         binding.Matched = true;
         binding.Verification = result;
         return new MauiLocalReproductionEvaluation { Verification = result, Binding = binding };
@@ -986,111 +994,14 @@ public static class MauiArtifactTrustEvaluator
         MauiArtifactTrustVerificationResult result)
         => string.IsNullOrWhiteSpace(expected) || Matches(field, expected, actual, result);
 
-    /// <summary>
-    /// Matches the imported and local app package identity, falling back to a signing-insensitive
-    /// normalized payload identity when the signed package digests identify occurrences rather
-    /// than payloads.
-    /// </summary>
-    /// <remarks>
-    /// <para>
-    /// On every platform DevFlow drives, an app package is re-signed on each deployment and carries
-    /// DevFlow's own per-invocation agent session id, so two occurrences of one build never share a
-    /// signed package digest. That is a property of how the artifact is produced, not evidence that
-    /// the payload changed, and it is why a reproduction of an imported failure could never match.
-    /// </para>
-    /// <para>
-    /// The fallback is deliberately narrow. It applies only when the signed digests are all present
-    /// and merely differ, only on a platform whose package normalization has been proven at the
-    /// byte level, and only when all three sides publish a normalized payload digest and those
-    /// agree. The local run's own signed package digest must still equal the current workspace's,
-    /// so an occurrence is still pinned to the artifact this workspace actually built; only the
-    /// cross-occurrence comparison is answered by the normalized payload identity. If any of that
-    /// is unavailable, the original mismatch stands and the caller keeps refusing.
-    /// </para>
-    /// </remarks>
-    private static bool MatchesPackageIdentity(
-        MauiImportedArtifactSafeProjection projection,
-        MauiLocalReproductionExpectation current,
-        MauiLocalReproductionFacts localRun,
-        string? importedAppBuild,
-        string? importedPackage,
-        MauiArtifactTrustVerificationResult result)
-    {
-        var appBuildMatched = MatchesFingerprint(
-            "appBuildFingerprint",
-            importedAppBuild,
-            current.AppBuildFingerprint,
-            localRun.AppBuildFingerprint,
-            result);
-        var packageMatched = MatchesFingerprint(
-            "packageDigest",
-            importedPackage,
-            current.PackageDigest,
-            localRun.PackageDigest,
-            result);
-        if (packageMatched && appBuildMatched)
-            return true;
-        if (!HasMismatchReason(result, "packageDigest") ||
-            !IsNormalizedPayloadValidatedTarget(current.Platform) ||
-            !ValuesEqual("packageDigest", current.PackageDigest, localRun.PackageDigest))
-        {
-            return false;
-        }
-        if (!MatchesFingerprint(
-                "normalizedPayloadDigest",
-                projection.NormalizedPayloadFingerprint,
-                current.NormalizedPayloadDigest,
-                localRun.NormalizedPayloadDigest,
-                result))
-        {
-            return false;
-        }
-        if (!appBuildMatched &&
-            (!HasMismatchReason(result, "appBuildFingerprint") ||
-             !ValuesEqual("appBuildFingerprint", current.AppBuildFingerprint, localRun.AppBuildFingerprint)))
-        {
-            return false;
-        }
-
-        result.Reasons.RemoveAll(static reason =>
-            reason.Code is "packageDigest-mismatch" or "appBuildFingerprint-mismatch");
-        result.Reasons.Add(Reason(
-            "signed-occurrence-artifact-differs",
-            "The signed package digest identifies this occurrence artifact and differs from the imported occurrence.",
-            blocking: false));
-        result.Reasons.Add(Reason(
-            "normalized-payload-identity-matched",
-            "The imported, current, and local occurrences carry the same signing-insensitive normalized payload.",
-            blocking: false));
-        return true;
-    }
-
-    private static bool HasMismatchReason(MauiArtifactTrustVerificationResult result, string field)
-        => result.Reasons.Any(reason =>
-            string.Equals(reason.Code, field + "-mismatch", StringComparison.Ordinal));
-
-    /// <summary>
-    /// Returns whether the normalized payload digest has been proven, at the byte level, to differ
-    /// between two occurrences of one build on this platform only in signature material and in
-    /// DevFlow's own injected agent session id.
-    /// </summary>
-    /// <remarks>
-    /// Android is listed because two clean builds of the same sources differing only in the
-    /// injected session id were compared entry by entry: of 1249 package entries exactly four
-    /// differed, and all four were either v1 signature material or the manifest entry carrying the
-    /// injected id. Adding a platform here requires the same evidence, not an assumption that its
-    /// packaging behaves similarly; until then the digests simply keep refusing, which is correct.
-    /// </remarks>
-    private static bool IsNormalizedPayloadValidatedTarget(string? platform)
-        => string.Equals(platform?.Trim(), "android", StringComparison.OrdinalIgnoreCase);
-
     private static bool MatchesFingerprint(
         string field,
         string? imported,
         string? current,
         string? local,
         MauiArtifactTrustVerificationResult result)
-    {        if (string.IsNullOrWhiteSpace(imported))
+    {
+        if (string.IsNullOrWhiteSpace(imported))
         {
             AddOmission(
                 result,

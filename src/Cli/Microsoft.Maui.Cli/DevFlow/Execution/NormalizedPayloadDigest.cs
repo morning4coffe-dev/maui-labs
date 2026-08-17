@@ -11,7 +11,7 @@ namespace Microsoft.Maui.Cli.DevFlow.Execution;
 /// <remarks>
 /// <para>
 /// The signed package digest identifies an <em>occurrence</em> of a build, not the build itself.
-/// Two deployments of the same sources produce different signed packages for two reasons that have
+/// Two deployments of the same sources produce different signed packages for reasons that have
 /// nothing to do with what the app will do at runtime: the package is re-signed with fresh
 /// signature blocks, and DevFlow injects its own per-invocation agent session id into the package
 /// so the CLI can bind to exactly the agent it launched. Comparing signed digests across two
@@ -38,11 +38,18 @@ namespace Microsoft.Maui.Cli.DevFlow.Execution;
 /// </item>
 /// </list>
 /// <para>
-/// The digest is deliberately not a substitute for the signed package digest in contexts that care
-/// about the exact deployed bytes. It answers one narrower question: do two occurrence artifacts
-/// carry the same payload? A caller that cannot compute one gets <see langword="null"/> and the
-/// consuming gate keeps refusing, which is the correct fail-closed default for artifact shapes this
-/// normalization has not been proven against.
+/// The digest is a diagnostic fact, not a cross-occurrence identity. It answers "did anything
+/// outside signature material and DevFlow's own injected session id change?", and it is published
+/// on the run report so a reproduction can report that question's answer. It is deliberately not
+/// wired to rescue a signed-digest mismatch: thirteen consecutive <c>flow run</c> invocations of
+/// one flow, on one commit, on one Android device produced thirteen distinct digests. Because the
+/// normalization already excludes signature material and neutralizes the session id, those
+/// differences are by construction in payload bytes that are neither, and excluding them would
+/// mean excluding real payload. This normalization therefore stops where the evidence stops.
+/// </para>
+/// <para>
+/// A caller that cannot compute a digest gets <see langword="null"/>, and every consuming gate
+/// keeps refusing, which is the correct fail-closed default.
 /// </para>
 /// </remarks>
 internal static class NormalizedPayloadDigest

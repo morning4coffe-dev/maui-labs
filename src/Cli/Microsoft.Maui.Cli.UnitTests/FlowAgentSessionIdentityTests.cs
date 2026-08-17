@@ -1,3 +1,4 @@
+using System.Text.RegularExpressions;
 using Microsoft.Maui.Cli.DevFlow.Execution;
 using Xunit;
 
@@ -62,8 +63,11 @@ public sealed class FlowAgentSessionIdentityTests
     [InlineData("net10.0-ios", "Debug", "android")]
     [InlineData("net10.0-android", "Release", "android")]
     [InlineData("net10.0-android", "Debug", "ios")]
-    public void CreateBuildScopedAgentSessionId_DifferentArtifactSelector_Differs(
-        string targetFramework,
+    [InlineData("net10.0-ANDROID", "debug", "Android")]
+    [InlineData(null, "Debug", "android")]
+    [InlineData("net10.0-android", "Debug", "ios-simulator")]
+    public void CreateBuildScopedAgentSessionId_DifferentArtifactSelector_StillMatches(
+        string? targetFramework,
         string configuration,
         string platform)
     {
@@ -72,7 +76,30 @@ public sealed class FlowAgentSessionIdentityTests
         var variant = FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(
             Request(Path.Combine("C:", "repo", "App.csproj"), targetFramework, configuration, platform));
 
-        Assert.NotEqual(baseline, variant);
+        Assert.Equal(baseline, variant);
+    }
+
+    [Fact]
+    public void CreateBuildScopedAgentSessionId_SurvivesAgentTargetsSanitisationUnchanged()
+    {
+        var sessionId = FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(
+            Request(Path.Combine("C:", "repo", "App.csproj")));
+
+        var sanitised = Regex.Replace(sessionId.ToLowerInvariant(), "[^a-z0-9]+", "");
+
+        Assert.Equal(sessionId, sanitised);
+    }
+
+    [Fact]
+    public void CreateBuildScopedAgentSessionId_MatchesGoldenConstant()
+    {
+        if (!OperatingSystem.IsWindows())
+            return; // The golden constant pins a Windows-rooted project path.
+
+        var sessionId = FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(
+            Request(@"C:\repo\app\App.csproj"));
+
+        Assert.Equal("flow624136b09085ab89ca18375cc9631d24", sessionId);
     }
 
     [Fact]
@@ -81,9 +108,11 @@ public sealed class FlowAgentSessionIdentityTests
         var directory = Path.Combine(Path.GetTempPath(), "devflow-session-id");
         var direct = Path.Combine(directory, "App.csproj");
         var indirect = Path.Combine(directory, "nested", "..", "App.csproj");
+        var cased = Path.Combine(directory.ToUpperInvariant(), "APP.CSPROJ");
 
-        Assert.Equal(
-            FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(direct)),
-            FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(indirect)));
+        var expected = FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(direct));
+
+        Assert.Equal(expected, FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(indirect)));
+        Assert.Equal(expected, FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(cased)));
     }
 }

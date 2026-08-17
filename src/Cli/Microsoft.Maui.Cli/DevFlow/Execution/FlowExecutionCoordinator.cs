@@ -1474,18 +1474,30 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
     /// the same flow against the same commit could never produce the same app binary.
     /// </para>
     /// <para>
-    /// The identity stays scoped to the build environment: it is derived from the full project path
-    /// (so separate worktrees, CI agents and developer machines still produce distinct identities, as
-    /// <c>Microsoft.Maui.DevFlow.Agent.targets</c> intends) together with the target framework,
-    /// configuration and platform that select the artifact. Nothing about agent binding exactness is
-    /// relaxed: <see cref="ExactAgentBindingResolver"/> admits only agents that appear after launch
-    /// relative to its pre-launch snapshot and additionally matches package id, target framework,
-    /// platform, process id and device identity, and refuses ambiguous candidates.
+    /// The identity is derived from the full project path and nothing else, which is deliberately the
+    /// same input <c>Microsoft.Maui.DevFlow.Agent.targets</c> uses for its own default session id
+    /// (<c>dw</c> followed by the sanitised tail of <c>$(MSBuildProjectFullPath)</c>). Separate
+    /// worktrees, CI agents and developer machines therefore still produce distinct identities, while
+    /// every spelling of one build — <c>Debug</c> versus <c>debug</c>, <c>android</c> versus
+    /// <c>Android</c>, <c>ios</c> versus <c>ios-simulator</c>, an omitted versus an explicit
+    /// <c>-f</c> — produces the same identity. Folding the artifact selectors into the hash instead
+    /// would make an imported run and its local reproduction disagree whenever the two were spelled
+    /// differently, which is the exact failure this method exists to remove. The path is lowercased
+    /// unconditionally to match the sanitisation the targets apply on every platform.
+    /// </para>
+    /// <para>
+    /// Nothing about agent binding exactness is relaxed. The selectors dropped here are still matched
+    /// independently and more precisely elsewhere: <see cref="ExactAgentBindingResolver"/> admits only
+    /// agents that appear after launch relative to its pre-launch snapshot, requires the package id,
+    /// target framework and platform to match, compares the process id whenever the expectation
+    /// carries one, compares device identity when device identity matching is required, and refuses
+    /// ambiguous candidates outright.
     /// </para>
     /// <para>
     /// The result keeps the 36-character shape of the previous <c>"flow" + Guid("N")</c> value so the
     /// length-preserving session-id neutralisation in <see cref="NormalizedPayloadDigest"/> continues
-    /// to apply, and is ASCII alphanumeric so it satisfies the agent session identity validation.
+    /// to apply, and is ASCII alphanumeric so it satisfies the agent session identity validation and
+    /// survives the targets' <c>[^a-z0-9]+</c> sanitisation unchanged.
     /// </para>
     /// </remarks>
     internal static string CreateBuildScopedAgentSessionId(FlowExecutionRequest request)
@@ -1501,16 +1513,8 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             // Fall back to the caller-supplied spelling; resolution failures surface later with a
             // precise diagnostic and must not change the session identity shape here.
         }
-        if (OperatingSystem.IsWindows() || OperatingSystem.IsMacOS())
-            projectPath = projectPath.ToLowerInvariant();
 
-        var material = string.Join(
-            '\u001f',
-            projectPath,
-            request.TargetFramework ?? string.Empty,
-            request.Configuration ?? string.Empty,
-            request.Platform ?? string.Empty);
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(material));
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(projectPath.ToLowerInvariant()));
         return "flow" + Convert.ToHexStringLower(hash)[..32];
     }
 

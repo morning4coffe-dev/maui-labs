@@ -182,7 +182,7 @@
         },
         "normalizedPayloadDigest": {
           "type": "string",
-          "description": "Optional signing-insensitive digest of the deployed package payload, published as a diagnostic fact. The signed packageDigest identifies a single occurrence of a build because the package is re-signed on every deployment and carries DevFlow's per-invocation agent session id. This digest has not been established as a cross-occurrence identity on any platform and does not rescue a packageDigest mismatch. Producers that cannot compute one omit the field, and consumers that require it keep refusing."
+          "description": "Optional signing-insensitive digest of the deployed package payload, published as a diagnostic fact. The signed packageDigest identifies a single occurrence of a build because the package is re-signed on every deployment and its ZIP entries carry per-repack timestamps. This digest has not been established as a cross-occurrence identity on any platform — .NET Android packaging rewrites entry timestamps on every repack, so two packages with byte-identical entries still differ — and it does not rescue a packageDigest mismatch. Producers that cannot compute one omit the field, and consumers that require it keep refusing."
         },
         "agentId": {
           "type": "string"

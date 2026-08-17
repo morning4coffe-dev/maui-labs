@@ -418,10 +418,19 @@ reproduction reports one of three refusals:
 All three are blocking. The third is the honest state of the art: two `flow run` invocations of one
 flow, run back to back on one Android device against one clean commit with no edit in between,
 produced two distinct normalized payload digests, so agreement has never been observed and cannot
-be treated as proof of sameness. Two ordinary incremental `dotnet build` invocations of the same
-project were byte-identical across all 879 non-signature entries, so the instability lives in the
-isolated per-invocation build `flow run` performs rather than in Android packaging as such. The
-digest ships as a diagnostic fact only; it does not rescue a `packageDigest` mismatch today.
+be treated as proof of sameness. The instability is a property of .NET Android packaging rather than
+of `flow run`'s build isolation: three consecutive no-op `dotnet build` invocations of the same
+project at its natural output path — no DevFlow host project, no redirected `OutputPath`, a fixed
+session id — produced three distinct embedded-assembly packages. Two contributors were measured.
+Every repack rewrites the ZIP local-header DOS timestamps and the Unix `UT` extra fields of the
+`lib/<abi>/lib_*.dll.so` entries, so two packages whose entries are all byte-identical and
+identically ordered still differ. Separately, 354 Kotlin metadata entries
+(`commonMain/default/linkdata/**.knm`) appear or disappear depending on whether the referenced
+Android class libraries re-run `_ResolveLibraryProjectImports`. An earlier claim that two ordinary
+`dotnet build` invocations were byte-identical across all 879 non-signature entries is retracted: it
+compared the 24 MB FastDev package, which does not contain the app assemblies at all, rather than
+the 95 MB embedded-assembly package `flow run` deploys. The digest ships as a diagnostic fact only;
+it does not rescue a `packageDigest` mismatch today.
 
 The command stops immediately after evaluation. It cannot create, approve, apply, validate, or
 rollback a selector or source proposal. Even an exact CLI match is diagnostic-only: its

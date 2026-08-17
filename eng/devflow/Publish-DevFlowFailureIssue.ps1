@@ -968,7 +968,13 @@ function New-IssueBody {
         "pwsh ./eng/devflow/Publish-DevFlowFailureIssue.ps1 -VerifyOnly -ArchivePath ./devflow-failure-handoff.zip -Repository '$Repository' -WorkflowName '$WorkflowName' -WorkflowPath '$WorkflowPath' -SourceEvent '$SourceEvent' -HeadRepository '$HeadRepository' -HeadRef '$HeadRef' -DefaultBranch '$DefaultBranch' -WorkflowConclusion '$WorkflowConclusion' -RunId $RunId -RunAttempt $RunAttempt -CommitSha '$CommitSha' -PullRequestNumber $PullRequestNumber",
         '```',
         '',
-        'After verification, map the test-identity digest to trusted local test metadata and reproduce the platform lane manually. This issue is a handoff, not repair authority.'
+        'After verification, map the test-identity digest to the committed flow that produced it:',
+        '',
+        '```powershell',
+        "maui devflow flow identity --resolve $($Handoff['testIdentitySha256']) --platform $($Handoff['platform'])",
+        '```',
+        '',
+        'Run it from a trusted checkout of the commit above; `matched-superseded` means the flow was edited since this run. To have an agent triage this issue, assign it to Copilot and select the `devflow-ci-repair` agent. That agent proposes a reviewable repair and cannot run the test itself, so validate on a real device before closing. This issue is a handoff, not repair authority.'
     )
 
     $payload = $payloadLines -join "`n"

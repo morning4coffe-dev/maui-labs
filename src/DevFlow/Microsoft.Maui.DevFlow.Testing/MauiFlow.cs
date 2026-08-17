@@ -110,6 +110,41 @@ public sealed class FlowStepArgs
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 
+/// <summary>
+/// An artifact category a committed flow declares its run is expected to produce.
+/// <para>
+/// This is a declaration about <em>collection</em>, not about content. The runner records whether
+/// the run produced the category and reports it; it never captures extra evidence because a flow
+/// asked for it, and it never compares an artifact against a stored baseline. Nothing here is a
+/// golden-image or pixel comparison.
+/// </para>
+/// </summary>
+public sealed class FlowExpectedEvidence
+{
+    /// <summary>Optional stable identity for this expectation, used to correlate it in the report.</summary>
+    [JsonPropertyName("id")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Id { get; set; }
+
+    /// <summary>One of <see cref="MauiFlowEvidenceKinds"/>.</summary>
+    [JsonPropertyName("kind")] public string Kind { get; set; } = "";
+
+    /// <summary>
+    /// The named target for kinds that need one. Required for
+    /// <see cref="MauiFlowEvidenceKinds.BusinessOracle"/>, where it is the oracle id.
+    /// </summary>
+    [JsonPropertyName("reference")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Reference { get; set; }
+
+    /// <summary>Why the author expects this evidence. The runner does not interpret this field.</summary>
+    [JsonPropertyName("note")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? Note { get; set; }
+
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
 public sealed class FlowStep
 {
     [JsonPropertyName("seq")] public int Seq { get; set; }
@@ -140,7 +175,20 @@ public sealed class FlowStep
     [JsonPropertyName("page")] public string? Page { get; set; }
     [JsonPropertyName("navigated")] public bool Navigated { get; set; }
     [JsonPropertyName("fragile")] public bool Fragile { get; set; }
+    /// <summary>
+    /// Legacy shorthand for a step-scoped screenshot expectation. Any non-empty value declares
+    /// that the run is expected to produce a screenshot; the value itself names the capture for
+    /// review and is never compared against a stored image. Prefer
+    /// <see cref="ExpectedEvidence"/> in new flows.
+    /// </summary>
     [JsonPropertyName("screenshot")] public string? Screenshot { get; set; }
+    /// <summary>
+    /// Evidence this step declares the run is expected to produce. Additive: flows without it stay
+    /// valid and behave exactly as before.
+    /// </summary>
+    [JsonPropertyName("expectedEvidence")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<FlowExpectedEvidence>? ExpectedEvidence { get; set; }
     [JsonPropertyName("asserts")] public List<FlowAssert>? Asserts { get; set; }
     /// <summary>
     /// Additive recording evidence for selector-health diagnostics. The active selector remains in
@@ -164,6 +212,13 @@ public sealed class MauiFlow
     [JsonPropertyName("platform")] public string? Platform { get; set; }
     [JsonPropertyName("recordedAt")] public string? RecordedAt { get; set; }
     [JsonPropertyName("preconditions")] public string? Preconditions { get; set; }
+    /// <summary>
+    /// Evidence this flow declares every run is expected to produce. Additive: flows without it
+    /// stay valid and behave exactly as before.
+    /// </summary>
+    [JsonPropertyName("expectedEvidence")]
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public List<FlowExpectedEvidence>? ExpectedEvidence { get; set; }
     [JsonPropertyName("steps")] public List<FlowStep> Steps { get; set; } = new();
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }

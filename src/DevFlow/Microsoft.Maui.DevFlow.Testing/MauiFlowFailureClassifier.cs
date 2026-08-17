@@ -18,6 +18,22 @@ public sealed class MauiFlowFailureFacts
     /// selector drift.
     /// </summary>
     public string? AssertionTargetResolution { get; set; }
+
+    /// <summary>
+    /// Whether the application process under test was observed to be gone. Null means the host did
+    /// not look or could not tell.
+    /// </summary>
+    public bool? AppProcessExited { get; set; }
+
+    /// <summary>The application process exit code, when the host owned the process handle.</summary>
+    public int? AppExitCode { get; set; }
+
+    /// <summary>One of <see cref="MauiFlowAppExitReasons"/>, when the platform named one.</summary>
+    public string? AppExitReason { get; set; }
+
+    /// <summary>Whether the platform held a crash record for the application under test.</summary>
+    public bool? CrashLogPresent { get; set; }
+
     public bool? FlowInvalid { get; set; }
     public bool? SchemaUnsupported { get; set; }
     public bool? CapabilityMissing { get; set; }
@@ -81,6 +97,15 @@ public static class MauiFlowFailureClassifier
         facts ??= new MauiFlowFailureFacts();
 
         var terminal = ClassFromOutcome(facts.TerminalOutcome);
+        var declared = terminal ?? DeclaredClass(facts);
+
+        // A proven abnormal death of the application under test outranks the symptoms it causes.
+        // Without this the same run reads as agent-disconnected, transport, drive-failed, or a
+        // selector miss, and the owner is told their test drifted when the app died. The bar is
+        // ProvesAppCrash, never a bare disconnect.
+        if (ProvesAppCrash(facts) && CrashOutranks(facts, declared))
+            return Describe(MauiFlowFailureClasses.AppCrash, facts, MauiFlowClassificationBases.Inferred);
+
         if (terminal is not null)
             return Describe(terminal, facts, MauiFlowClassificationBases.Outcome);
 
@@ -123,6 +148,58 @@ public static class MauiFlowFailureClassifier
     }
 
     /// <summary>
+    /// Whether the supplied facts prove the application under test died abnormally.
+    /// <para>
+    /// The rule is deliberately narrow. The process must have been observed gone, and the platform
+    /// must independently have named an abnormal reason or held a crash record. An agent that
+    /// stopped answering, a process that is simply missing, and a non-zero exit code are each
+    /// insufficient on their own, because none of them distinguishes an application fault from a
+    /// harness teardown, a device reboot, or an operator kill. Uncertainty stays uncertainty.
+    /// </para>
+    /// </summary>
+    public static bool ProvesAppCrash(MauiFlowFailureFacts? facts)
+    {
+        if (facts is null || facts.AppProcessExited != true)
+            return false;
+        if (facts.CrashLogPresent == true)
+            return true;
+        return NormalizeExitReason(facts.AppExitReason) is
+            MauiFlowAppExitReasons.Crash or
+            MauiFlowAppExitReasons.CrashNative or
+            MauiFlowAppExitReasons.Anr;
+    }
+
+    /// <summary>
+    /// Whether a proven crash replaces the class the run would otherwise report. It does not
+    /// replace a class the host owns or a refusal to run at all: an invalid flow is still invalid,
+    /// a cancelled run was still cancelled, and an unconfirmed command completion is still
+    /// unconfirmed, whatever the application did afterwards.
+    /// </summary>
+    private static bool CrashOutranks(MauiFlowFailureFacts facts, string? declared)
+    {
+        if (facts.CompletionCertain == false ||
+            facts.FlowInvalid == true ||
+            facts.SchemaUnsupported == true ||
+            facts.CapabilityMissing == true ||
+            facts.ResetFailed == true)
+        {
+            return false;
+        }
+        return declared is null || !CrashInsensitiveClasses.Contains(declared);
+    }
+
+    private static string? DeclaredClass(MauiFlowFailureFacts facts)
+        => IsKnownClass(facts.FailureClass)
+            ? NormalizeClass(facts.FailureClass!)
+            : FromLegacyFailureKind(facts.LegacyFailureKind);
+
+    private static string? NormalizeExitReason(string? value)
+    {
+        var reason = value?.Trim().ToLowerInvariant();
+        return string.IsNullOrEmpty(reason) ? null : reason;
+    }
+
+    /// <summary>
     /// A zero-match selector is never locator drift if the recorded run preconditions or route
     /// state disagree. Absence of checkpoint evidence is diagnostic-only, not repair eligible, but
     /// preserves the legacy locator result for compatibility.
@@ -153,7 +230,8 @@ public static class MauiFlowFailureClassifier
         MauiFlowFailureClasses.AssertionFailed or
         MauiFlowFailureClasses.NotVisible or
         MauiFlowFailureClasses.Disabled or
-        MauiFlowFailureClasses.ActionRejected
+        MauiFlowFailureClasses.ActionRejected or
+        MauiFlowFailureClasses.AppCrash
             => MauiFlowTriageDispositions.AppRegression,
 
         // The committed flow no longer describes the app it was recorded against.
@@ -178,9 +256,9 @@ public static class MauiFlowFailureClassifier
         MauiFlowFailureClasses.Infrastructure
             => MauiFlowTriageDispositions.Infrastructure,
 
-        // Nothing recorded separates an app fault from a harness or environment fault. There is no
-        // app exit code, no crash log, and no device log in this path, so agent-disconnected in
-        // particular cannot be read as a crash.
+        // Nothing recorded separates an app fault from a harness or environment fault. Reaching
+        // agent-disconnected here means the app-process probe either did not run or did not prove
+        // an abnormal exit; a disconnect on its own is still not a crash.
         MauiFlowFailureClasses.Cancelled or
         MauiFlowFailureClasses.Timeout or
         MauiFlowFailureClasses.UnstableBounds or
@@ -201,9 +279,7 @@ public static class MauiFlowFailureClassifier
     {
         if (!AssertionSelectorDrifted(facts))
             return null;
-        var declared = IsKnownClass(facts.FailureClass)
-            ? NormalizeClass(facts.FailureClass!)
-            : FromLegacyFailureKind(facts.LegacyFailureKind);
+        var declared = DeclaredClass(facts);
         if (!string.Equals(declared, MauiFlowFailureClasses.AssertionFailed, StringComparison.Ordinal))
             return null;
         return NormalizeAssertionTargetResolution(facts) == FlowFailureKinds.Ambiguous
@@ -308,6 +384,8 @@ public static class MauiFlowFailureClassifier
                 => ("input", "preflight", false),
             MauiFlowFailureClasses.AssertionFailed
                 => ("assertion", "verification", false),
+            MauiFlowFailureClasses.AppCrash
+                => ("app", "execution", false),
             MauiFlowFailureClasses.Transport or MauiFlowFailureClasses.AgentDisconnected
                 => ("transport", "execution", true),
             _ => ("infrastructure", "execution", false),
@@ -378,6 +456,28 @@ public static class MauiFlowFailureClassifier
         MauiFlowFailureClasses.AssertionFailed,
         MauiFlowFailureClasses.Transport,
         MauiFlowFailureClasses.AgentDisconnected,
+        MauiFlowFailureClasses.AppCrash,
         MauiFlowFailureClasses.Infrastructure,
+    };
+
+    /// <summary>
+    /// Classes that a proven application crash never replaces. Each describes either a refusal to
+    /// run the flow at all or a decision the host made, so the application dying afterwards adds
+    /// no information and would only hide the real answer.
+    /// </summary>
+    private static readonly HashSet<string> CrashInsensitiveClasses = new(StringComparer.Ordinal)
+    {
+        MauiFlowFailureClasses.FlowInvalid,
+        MauiFlowFailureClasses.SchemaUnsupported,
+        MauiFlowFailureClasses.CapabilityMissing,
+        MauiFlowFailureClasses.LeaseConflict,
+        MauiFlowFailureClasses.LeaseLost,
+        MauiFlowFailureClasses.Cancelled,
+        MauiFlowFailureClasses.Timeout,
+        MauiFlowFailureClasses.ResetFailed,
+        MauiFlowFailureClasses.UnknownCompletion,
+        MauiFlowFailureClasses.SecretUnavailable,
+        MauiFlowFailureClasses.UnsafeValue,
+        MauiFlowFailureClasses.PreconditionUnsatisfied,
     };
 }

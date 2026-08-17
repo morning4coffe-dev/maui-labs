@@ -31,6 +31,13 @@ internal sealed class FlowReplayEvidenceCapture : IFlowRunEvidenceCapture
     public MauiFlowRunEvidenceContext? CapturedRunContext { get; private set; }
     public MauiFlowArtifactReference? CapturedArtifact { get; private set; }
 
+    /// <summary>
+    /// The evidence kinds the last bundle actually contains, read from the written manifest rather
+    /// than from what was requested — an entry that was excluded by policy or by a device error
+    /// must not be reported as collected.
+    /// </summary>
+    public IReadOnlyCollection<string> CapturedEvidenceKinds { get; private set; } = [];
+
     public async Task CaptureOnFailureAsync(
         MauiFlow flow,
         FlowStep failedStep,
@@ -88,6 +95,7 @@ internal sealed class FlowReplayEvidenceCapture : IFlowRunEvidenceCapture
     private void SetCaptured(EvidenceCaptureResult captured, MauiFlowRunEvidenceContext? context)
     {
         CapturedPath = captured.Path;
+        CapturedEvidenceKinds = DescribeCapturedKinds(captured);
         if (string.IsNullOrWhiteSpace(captured.Path))
             return;
 
@@ -111,5 +119,36 @@ internal sealed class FlowReplayEvidenceCapture : IFlowRunEvidenceCapture
             Redacted = true,
             CreatedAt = DateTimeOffset.UtcNow,
         };
+    }
+
+    /// <summary>
+    /// Maps the manifest entries that were written into the neutral evidence-kind vocabulary the
+    /// run report speaks. A missing manifest yields nothing, because an unverifiable claim of
+    /// collection is worse than an honest gap.
+    /// </summary>
+    private static IReadOnlyCollection<string> DescribeCapturedKinds(EvidenceCaptureResult captured)
+    {
+        if (!captured.Ok || captured.Manifest is null)
+            return [];
+
+        var kinds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var entry in captured.Manifest.Entries)
+        {
+            switch (entry.Name)
+            {
+                case EvidenceFormat.TreeEntry:
+                    kinds.Add(MauiFlowEvidenceKinds.VisualTree);
+                    break;
+                case EvidenceFormat.LogsEntry:
+                    kinds.Add(MauiFlowEvidenceKinds.Logs);
+                    break;
+                case EvidenceFormat.ScreenshotEntry:
+                    kinds.Add(MauiFlowEvidenceKinds.Screenshot);
+                    break;
+            }
+        }
+        if (captured.Manifest.Screenshot.Included != true)
+            kinds.Remove(MauiFlowEvidenceKinds.Screenshot);
+        return kinds;
     }
 }

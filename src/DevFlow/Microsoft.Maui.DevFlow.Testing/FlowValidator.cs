@@ -24,6 +24,9 @@ public static class FlowValidator
     private static readonly IReadOnlySet<string> Themes =
         new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "light", "dark", "system" };
 
+    /// <summary>Evidence declarations allowed on one flow or one step.</summary>
+    private const int MaxExpectedEvidenceDeclarations = 16;
+
     public static FlowValidation Validate(MauiFlow flow)
     {
         var v = new FlowValidation();
@@ -38,12 +41,14 @@ public static class FlowValidator
         }
 
         ValidateStepIdentities(v, flow.Steps, requirePositiveSequence: flow.Schema >= 2);
+        ValidateExpectedEvidence(v, "flow", flow.ExpectedEvidence);
 
         var ordinal = 0;
         foreach (var s in flow.Steps)
         {
             ordinal++;
             var where = $"step {(s.Seq > 0 ? s.Seq : ordinal)} ({s.Action})";
+            ValidateExpectedEvidence(v, where, s.ExpectedEvidence);
             if (string.IsNullOrWhiteSpace(s.Action) || !FlowActions.All.Contains(s.Action))
             {
                 v.Errors.Add($"{where}: unknown action '{s.Action}'.");
@@ -116,6 +121,54 @@ public static class FlowValidator
                 v.Warnings.Add($"{where}: uses a fragile selector (no AutomationId) — replay may be brittle.");
         }
         return v;
+    }
+
+    /// <summary>
+    /// Rejects an evidence declaration that cannot be checked. A declaration nobody can evaluate
+    /// is worse than no declaration, because the report would silently show it as satisfied.
+    /// </summary>
+    private static void ValidateExpectedEvidence(
+        FlowValidation validation,
+        string where,
+        List<FlowExpectedEvidence>? declarations)
+    {
+        if (declarations is null)
+            return;
+        if (declarations.Count > MaxExpectedEvidenceDeclarations)
+        {
+            validation.Errors.Add(
+                $"{where}: expectedEvidence declares {declarations.Count} entries; at most " +
+                $"{MaxExpectedEvidenceDeclarations} are allowed.");
+            return;
+        }
+
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var declaration in declarations)
+        {
+            if (declaration is null)
+            {
+                validation.Errors.Add($"{where}: expectedEvidence contains an empty entry.");
+                continue;
+            }
+            // Identity is checked before shape so a duplicate id is reported even when the entry it
+            // collides with is also malformed.
+            if (declaration.Id?.Trim() is { Length: > 0 } id && !seen.Add(id))
+                validation.Errors.Add($"{where}: expectedEvidence id '{id}' is declared more than once.");
+            if (!MauiFlowEvidenceKinds.IsKnown(declaration.Kind))
+            {
+                validation.Errors.Add(
+                    $"{where}: expectedEvidence kind '{declaration.Kind}' is unknown; expected one of " +
+                    $"{string.Join(", ", MauiFlowEvidenceKinds.All)}.");
+                continue;
+            }
+            var kind = declaration.Kind.Trim().ToLowerInvariant();
+            if (kind == MauiFlowEvidenceKinds.BusinessOracle &&
+                string.IsNullOrWhiteSpace(declaration.Reference))
+            {
+                validation.Errors.Add(
+                    $"{where}: expectedEvidence kind 'business-oracle' requires the oracle id in 'reference'.");
+            }
+        }
     }
 
     private static void ValidateStepIdentities(

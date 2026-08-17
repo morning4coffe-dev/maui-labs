@@ -113,6 +113,7 @@ public sealed class MauiFlowTriageTests
         [MauiFlowFailureClasses.NotVisible, MauiFlowTriageDispositions.AppRegression],
         [MauiFlowFailureClasses.Disabled, MauiFlowTriageDispositions.AppRegression],
         [MauiFlowFailureClasses.ActionRejected, MauiFlowTriageDispositions.AppRegression],
+        [MauiFlowFailureClasses.AppCrash, MauiFlowTriageDispositions.AppRegression],
         [MauiFlowFailureClasses.LocatorNotFound, MauiFlowTriageDispositions.TestDrift],
         [MauiFlowFailureClasses.LocatorAmbiguous, MauiFlowTriageDispositions.TestDrift],
         [MauiFlowFailureClasses.RouteStateDrift, MauiFlowTriageDispositions.TestDrift],
@@ -156,7 +157,7 @@ public sealed class MauiFlowTriageTests
             .Select(static row => (string)row[0])
             .ToArray();
 
-        Assert.Equal(25, declared.Length);
+        Assert.Equal(26, declared.Length);
         Assert.Empty(declared.Except(covered, StringComparer.Ordinal));
     }
 

@@ -895,6 +895,174 @@ public sealed class FlowExecutionCoreTests
     }
 
     [Fact]
+    public async Task Coordinator_ProvenAppCrash_IsAttributedToTheAppNotTheSymptom()
+    {
+        var adapter = new FakePlatformAdapter(allowMutation: true)
+        {
+            AppProcessEvidence = new MauiFlowAppProcessEvidence
+            {
+                Probed = true,
+                Source = "android-adb",
+                ProcessExited = true,
+                ExitReason = MauiFlowAppExitReasons.Crash,
+                CrashLogPresent = true,
+                CrashSignature = "java.lang.NullPointerException",
+            },
+        };
+
+        var result = await RunFailingFlowAsync(adapter);
+
+        Assert.Equal(1, adapter.AppProbeCalls);
+        Assert.Equal(MauiFlowFailureClasses.AppCrash, result.Report?.Failure?.Class);
+        Assert.True(result.Report?.AppProcess?.ProcessExited);
+        Assert.Equal(
+            MauiFlowTriageDispositions.AppRegression,
+            MauiFlowFailureClassifier.Project(result.Report!.Failure!.Class!));
+    }
+
+    [Fact]
+    public async Task Coordinator_FailureWithoutCrashEvidence_IsNeverCalledACrash()
+    {
+        var adapter = new FakePlatformAdapter(allowMutation: true)
+        {
+            AppProcessEvidence = new MauiFlowAppProcessEvidence
+            {
+                Probed = true,
+                Source = "android-adb",
+                ProcessExited = true,
+                ExitReason = MauiFlowAppExitReasons.UserRequested,
+            },
+        };
+
+        var result = await RunFailingFlowAsync(adapter);
+
+        Assert.Equal(1, adapter.AppProbeCalls);
+        Assert.NotNull(result.Report?.Failure?.Class);
+        Assert.NotEqual(MauiFlowFailureClasses.AppCrash, result.Report!.Failure!.Class);
+        Assert.True(result.Report.AppProcess?.ProcessExited);
+    }
+
+    [Fact]
+    public async Task Coordinator_ProbeThatCannotAnswer_NeverInventsACrash()
+    {
+        var adapter = new FakePlatformAdapter(allowMutation: true)
+        {
+            AppProcessEvidence = new MauiFlowAppProcessEvidence
+            {
+                Probed = false,
+                Source = "android-adb",
+                ProbeError = "ADB was not found.",
+            },
+        };
+
+        var result = await RunFailingFlowAsync(adapter);
+
+        Assert.NotEqual(MauiFlowFailureClasses.AppCrash, result.Report?.Failure?.Class);
+        Assert.False(result.Report?.AppProcess?.Probed);
+    }
+
+    /// <summary>
+    /// Drives a complete fake Android run whose only failure is a route assertion, so the run
+    /// reaches a terminal failure with a launched platform session for the app probe to observe.
+    /// </summary>
+    private static async Task<FlowExecutionResult> RunFailingFlowAsync(FakePlatformAdapter adapter)
+    {
+        const string status = """
+            {
+              "agent": { "name": "Microsoft.Maui.DevFlow.Agent", "version": "test" },
+              "device": { "platform": "Android", "deviceType": "Virtual", "idiom": "Phone" },
+              "app": { "name": "App", "packageId": "com.example.app", "processId": 321, "build": "42" },
+              "capabilities": { "ui": true, "mutations": true, "workflowCommandLedger": true },
+              "route": "//home",
+              "running": true
+            }
+            """;
+        await using var server = new MockAgentServer(status);
+        await server.StartAsync();
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var listCalls = 0;
+        var binding = new ExactAgentBindingResolver(_ =>
+        {
+            listCalls++;
+            return Task.FromResult<AgentRegistration[]?>(
+                listCalls == 1
+                    ? []
+                    :
+                    [
+                        Agent("new-instance") with
+                        {
+                            Port = server.Port,
+                            ProcessId = 321,
+                        },
+                    ]);
+        }, pollInterval: TimeSpan.Zero);
+        var coordinator = new FlowExecutionCoordinator(
+            new CommittedFlowBundleLoader(),
+            new FakeArtifactResolver(Artifact(Path.Combine(workspace.Root, "app.apk"))),
+            [adapter],
+            new FlowStateEvidenceProviderRegistry([]),
+            binding,
+            new FlowRunReportWriter(),
+            new JUnitFlowExecutionWriter(),
+            new ExecutionManifestWriter(),
+            new ImmutableExecutionOutputWriter(),
+            () => Task.FromResult<int?>(19223),
+            appSourceIdentityProvider: new FakeAppSourceIdentityProvider(),
+            agentSessionIdFactory: static () => "flowsession");
+
+        return await coordinator.RunAsync(Request(bundle, workspace.Output));
+    }
+
+    [Fact]
+    public async Task Coordinator_FlowWithoutExpectedEvidence_WritesNoExpectedEvidenceBlock()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(MauiFlowSideEffectPolicies.None);
+        var coordinator = CreateCoordinator(
+            new FakeArtifactResolver(Artifact(Path.Combine(workspace.Root, "app.apk"))),
+            new FakePlatformAdapter(allowMutation: true));
+
+        var result = await coordinator.RunAsync(Request(bundle, workspace.Output));
+
+        Assert.Null(result.Report?.ExpectedEvidence);
+    }
+
+    [Fact]
+    public async Task Coordinator_DeclaredEvidence_IsReportedAsProducedOrMissing()
+    {
+        using var workspace = new ExecutionTestWorkspace();
+        var bundle = workspace.WriteBundle(
+            MauiFlowSideEffectPolicies.None,
+            expectedEvidence:
+            [
+                new FlowExpectedEvidence { Id = "report", Kind = MauiFlowEvidenceKinds.RunReport },
+                new FlowExpectedEvidence { Id = "tree", Kind = MauiFlowEvidenceKinds.VisualTree },
+            ]);
+        var coordinator = CreateCoordinator(
+            new FakeArtifactResolver(Artifact(Path.Combine(workspace.Root, "app.apk"))),
+            new FakePlatformAdapter(allowMutation: true));
+
+        var result = await coordinator.RunAsync(Request(bundle, workspace.Output));
+
+        var expected = result.Report?.ExpectedEvidence;
+        Assert.NotNull(expected);
+        Assert.Equal(2, expected!.Declared);
+        Assert.Contains(
+            expected.Checks,
+            check => check.ExpectationId == "report" &&
+                check.State == MauiFlowEvidenceExpectationStates.Satisfied);
+        Assert.Contains(
+            expected.Checks,
+            check => check.ExpectationId == "tree" &&
+                check.State == MauiFlowEvidenceExpectationStates.Unsatisfied);
+        Assert.False(expected.AllSatisfied);
+        // Declared evidence is reviewer information, never a second verdict: a missing artifact
+        // must not turn an infrastructure failure into a test failure or the reverse.
+        Assert.Equal(FlowExecutionExitCategories.InfrastructureFailure, result.ExitCategory);
+    }
+
+    [Fact]
     public void ExecutionOutput_RejectsReparsePointAncestor()
     {
         using var workspace = new ExecutionTestWorkspace();
@@ -1530,6 +1698,59 @@ public sealed class FlowExecutionCoreTests
 
         Assert.Equal(
             FlowExecutionExitCategories.InfrastructureFailure,
+            FlowExecutionCoordinator.ClassifyReport(report));
+    }
+
+    /// <summary>
+    /// A crash reaches the runner as a dead agent channel, so the report's outcome status is
+    /// <c>infrastructure-error</c>. Once the platform has proven the app itself exited abnormally,
+    /// the run must stop being filed as an environment problem, because an environment problem is
+    /// what CI retries.
+    /// </summary>
+    [Fact]
+    public void OutputCategory_ProvenAppCrash_IsAttributedToTheAppNotTheHarness()
+    {
+        var report = new MauiFlowRunReport
+        {
+            Outcome = new MauiFlowRunOutcome
+            {
+                Status = MauiFlowRunOutcomes.InfrastructureError,
+                Terminal = true,
+                Verified = false,
+            },
+            Failure = new MauiFlowFailure
+            {
+                Class = MauiFlowFailureClasses.AppCrash,
+                Code = MauiFlowFailureClasses.AppCrash,
+            },
+        };
+
+        Assert.Equal(FlowExecutionExitCategories.TestFailure, FlowExecutionCoordinator.ClassifyReport(report));
+    }
+
+    /// <summary>
+    /// Knowing the app died still does not prove whether the step that was in flight committed its
+    /// mutation, so an unknown-completion outcome stays unknown.
+    /// </summary>
+    [Theory]
+    [InlineData(MauiFlowRunOutcomes.Orphaned)]
+    [InlineData(MauiFlowRunOutcomes.TimedOut)]
+    [InlineData(MauiFlowRunOutcomes.UnknownCompletion)]
+    [InlineData(MauiFlowRunOutcomes.Cancelled)]
+    public void OutputCategory_ProvenAppCrash_NeverRelaxesAnUnknownCompletion(string status)
+    {
+        var report = new MauiFlowRunReport
+        {
+            Outcome = new MauiFlowRunOutcome { Status = status, Terminal = true, Verified = false },
+            Failure = new MauiFlowFailure
+            {
+                Class = MauiFlowFailureClasses.AppCrash,
+                Code = MauiFlowFailureClasses.AppCrash,
+            },
+        };
+
+        Assert.Equal(
+            FlowExecutionExitCategories.UnknownCompletion,
             FlowExecutionCoordinator.ClassifyReport(report));
     }
 
@@ -2563,6 +2784,8 @@ public sealed class FlowExecutionCoreTests
         public int MutationCalls { get; private set; }
         public int CleanupCalls { get; private set; }
         public int AdmissionCalls { get; private set; }
+        public int AppProbeCalls { get; private set; }
+        public MauiFlowAppProcessEvidence? AppProcessEvidence { get; set; }
         public string? AdmissionAppId { get; private set; }
         public string? RefuseAdmissionFor { get; set; }
         public FlowExecutionPlatformDescriptor Descriptor { get; } = new()
@@ -2632,6 +2855,14 @@ public sealed class FlowExecutionCoreTests
                 LaunchedByInvocation = true,
                 State = new object(),
             });
+        }
+
+        public Task<MauiFlowAppProcessEvidence?> ProbeAppProcessAsync(
+            FlowExecutionAppProbeRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            AppProbeCalls++;
+            return Task.FromResult(AppProcessEvidence);
         }
 
         public Task EstablishAgentForwardingAsync(
@@ -2821,7 +3052,8 @@ public sealed class FlowExecutionCoreTests
 
         public (string Flow, string Plan) WriteBundle(
             string policy,
-            string expectedRoute = "//checkout")
+            string expectedRoute = "//checkout",
+            List<FlowExpectedEvidence>? expectedEvidence = null)
         {
             const string flowName = "checkout.md";
             var flow = new MauiFlow
@@ -2829,6 +3061,7 @@ public sealed class FlowExecutionCoreTests
                 Name = "checkout",
                 App = "App",
                 Platform = "android",
+                ExpectedEvidence = expectedEvidence,
                 Steps =
                 [
                     new FlowStep

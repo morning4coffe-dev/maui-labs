@@ -86,6 +86,13 @@ public interface IFlowRunEvidenceCapture : IFlowReplayEvidenceCapture
     /// <summary>Reference to the evidence captured for the most recent failed run, if any.</summary>
     MauiFlowArtifactReference? CapturedArtifact { get; }
 
+    /// <summary>
+    /// The <see cref="MauiFlowEvidenceKinds"/> this capture actually wrote for the most recent
+    /// run. Hosts that do not report their contents return an empty set, which is read as "nothing
+    /// was collected" rather than as "everything was collected".
+    /// </summary>
+    IReadOnlyCollection<string> CapturedEvidenceKinds => [];
+
     Task CaptureOnRunFailureAsync(MauiFlowRunEvidenceContext context, CancellationToken cancellationToken);
 }
 
@@ -675,6 +682,11 @@ public sealed class MauiFlowRunner
         };
         AddEvent(report, "terminal", summary, report.DivergenceStepId);
 
+        report.ExpectedEvidence = MauiFlowExpectedEvidenceEvaluator.Evaluate(
+            flow,
+            report,
+            (_evidenceCapture as IFlowRunEvidenceCapture)?.CapturedEvidenceKinds);
+
         MauiFlowRunReportSerializer.ApplyLimits(report, _options.ReportLimits);
         var reportDigest = MauiFlowRunReportSerializer.ComputeDigest(report);
         report.ReportDigest = reportDigest;
@@ -721,6 +733,12 @@ public sealed class MauiFlowRunner
                     if (detailed.CapturedArtifact is not null)
                     {
                         report.Artifacts.Add(detailed.CapturedArtifact);
+                        // The capture is the only thing that can satisfy a collection expectation,
+                        // so the declared-evidence verdict is recomputed once its results exist.
+                        report.ExpectedEvidence = MauiFlowExpectedEvidenceEvaluator.Evaluate(
+                            flow,
+                            report,
+                            detailed.CapturedEvidenceKinds);
                         MauiFlowRunReportSerializer.ApplyLimits(report, _options.ReportLimits);
                         reportDigest = MauiFlowRunReportSerializer.ComputeDigest(report);
                         report.ReportDigest = reportDigest;

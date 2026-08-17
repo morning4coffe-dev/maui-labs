@@ -1,6 +1,7 @@
 using Microsoft.Maui.Cli.DevFlow.Android;
 using Microsoft.Maui.Cli.Models;
 using Microsoft.Maui.Cli.Providers.Android;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Execution;
 
@@ -9,15 +10,20 @@ internal sealed class AndroidFlowExecutionAdapter : IFlowExecutionPlatformAdapte
     private readonly IAndroidProvider _androidProvider;
     private readonly IAndroidAppDeployment _deployment;
     private readonly IAndroidFlowPortManager _portManager;
+    private readonly AndroidAppProcessProbe _appProcessProbe;
 
     public AndroidFlowExecutionAdapter(
         IAndroidProvider androidProvider,
         IAndroidAppDeployment deployment,
-        IAndroidFlowPortManager portManager)
+        IAndroidFlowPortManager portManager,
+        IExecutionProcessRunner processRunner)
     {
         _androidProvider = androidProvider ?? throw new ArgumentNullException(nameof(androidProvider));
         _deployment = deployment ?? throw new ArgumentNullException(nameof(deployment));
         _portManager = portManager ?? throw new ArgumentNullException(nameof(portManager));
+        _appProcessProbe = new AndroidAppProcessProbe(
+            androidProvider,
+            processRunner ?? throw new ArgumentNullException(nameof(processRunner)));
     }
 
     internal static readonly FlowExecutionPlatformDescriptor PlatformDescriptor = new()
@@ -194,6 +200,11 @@ internal sealed class AndroidFlowExecutionAdapter : IFlowExecutionPlatformAdapte
                 "The exact Android device could not establish the DevFlow agent forward mapping.");
         }
     }
+
+    public Task<MauiFlowAppProcessEvidence?> ProbeAppProcessAsync(
+        FlowExecutionAppProbeRequest request,
+        CancellationToken cancellationToken = default)
+        => _appProcessProbe.ProbeAsync(request, cancellationToken);
 
     public async Task<FlowExecutionCleanupResult> CleanupAsync(
         FlowExecutionPlatformSession session,

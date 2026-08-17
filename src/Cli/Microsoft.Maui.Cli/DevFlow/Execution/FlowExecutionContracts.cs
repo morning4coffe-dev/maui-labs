@@ -314,6 +314,33 @@ internal interface IFlowExecutionPlatformAdapter
         FlowExecutionPlatformSession session,
         string cleanupPolicy,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Asks the platform whether the app under test is still alive and, if not, whether it died
+    /// abnormally.
+    /// </summary>
+    /// <remarks>
+    /// This must run before cleanup, because cleanup deliberately stops or uninstalls the app and
+    /// would replace the evidence with an operator-requested exit. Adapters that cannot answer
+    /// return <see langword="null"/>, which the report records as "not probed" rather than as a
+    /// clean exit.
+    /// </remarks>
+    Task<MauiFlowAppProcessEvidence?> ProbeAppProcessAsync(
+        FlowExecutionAppProbeRequest request,
+        CancellationToken cancellationToken = default)
+        => Task.FromResult<MauiFlowAppProcessEvidence?>(null);
+}
+
+/// <summary>What the app-process probe is allowed to look at.</summary>
+internal sealed record FlowExecutionAppProbeRequest
+{
+    public required FlowExecutionPlatformSession Session { get; init; }
+
+    /// <summary>
+    /// When the run started. Platform crash records are historical, so anything older than this
+    /// belongs to a previous run and must not be attributed to this one.
+    /// </summary>
+    public required DateTimeOffset RunStartedAt { get; init; }
 }
 
 internal sealed record ExactAgentBindingExpectation

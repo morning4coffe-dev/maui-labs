@@ -1,5 +1,6 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Execution;
 
@@ -39,6 +40,13 @@ internal interface IFlowExecutionProcessHandle : IDisposable
 {
     int ProcessId { get; }
     bool HasExited { get; }
+
+    /// <summary>
+    /// The exit code once the process has exited, or <see langword="null"/> when it is still
+    /// running or the host cannot read it.
+    /// </summary>
+    int? ExitCode => null;
+
     void Kill();
     Task WaitForExitAsync(CancellationToken cancellationToken);
 }
@@ -49,6 +57,22 @@ internal sealed class SystemFlowExecutionProcessHandle(Process process) : IFlowE
 
     public int ProcessId => _process.Id;
     public bool HasExited => _process.HasExited;
+
+    public int? ExitCode
+    {
+        get
+        {
+            try
+            {
+                return _process.HasExited ? _process.ExitCode : null;
+            }
+            catch (InvalidOperationException)
+            {
+                return null;
+            }
+        }
+    }
+
     public void Kill() => _process.Kill();
     public Task WaitForExitAsync(CancellationToken cancellationToken)
         => _process.WaitForExitAsync(cancellationToken);
@@ -259,6 +283,52 @@ internal abstract class DesktopFlowExecutionAdapterBase : IFlowExecutionPlatform
         cancellationToken.ThrowIfCancellationRequested();
         return Task.CompletedTask;
     }
+
+    /// <summary>
+    /// Reports whether the launched desktop process is still alive. The host owns the process
+    /// handle, so liveness and the exit code are directly observable — but a bare exit code is not
+    /// a crash reason, so no reason is claimed and the classifier will not call this a crash on
+    /// its own.
+    /// </summary>
+    public Task<MauiFlowAppProcessEvidence?> ProbeAppProcessAsync(
+        FlowExecutionAppProbeRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (request.Session.State is not DesktopFlowExecutionSessionState state)
+        {
+            return Task.FromResult<MauiFlowAppProcessEvidence?>(new MauiFlowAppProcessEvidence
+            {
+                Probed = false,
+                Source = ProbeSource,
+                ProbeError = "The desktop process session was unavailable, so app liveness was not observed.",
+            });
+        }
+
+        try
+        {
+            var exited = state.Process.Handle.HasExited;
+            return Task.FromResult<MauiFlowAppProcessEvidence?>(new MauiFlowAppProcessEvidence
+            {
+                Probed = true,
+                Source = ProbeSource,
+                ProcessExited = exited,
+                ExitCode = exited ? state.Process.Handle.ExitCode : null,
+            });
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return Task.FromResult<MauiFlowAppProcessEvidence?>(new MauiFlowAppProcessEvidence
+            {
+                Probed = false,
+                Source = ProbeSource,
+                ProbeError = "The desktop process handle could not be read.",
+            });
+        }
+    }
+
+    private const string ProbeSource = "process-handle";
 
     public async Task<FlowExecutionCleanupResult> CleanupAsync(
         FlowExecutionPlatformSession session,

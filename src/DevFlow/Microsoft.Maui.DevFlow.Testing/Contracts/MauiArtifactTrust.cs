@@ -420,12 +420,13 @@ public sealed class MauiLocalReproductionFacts
     /// <remarks>
     /// This is published as a diagnostic fact. It is deliberately not used to rescue a
     /// <c>packageDigest</c> mismatch between two occurrences, because no platform has yet been
-    /// shown to produce a byte-stable normalized payload across two builds. Thirteen consecutive
-    /// <c>flow run</c> invocations of one flow, on one commit, on one Android device produced
-    /// thirteen distinct normalized payload digests. The normalization already excludes signature
-    /// material and neutralizes DevFlow's injected agent session id, so by construction those
-    /// differences are in payload bytes that are neither. Treating this digest as a
-    /// cross-occurrence identity would therefore assert something untrue.
+    /// shown to produce a byte-stable normalized payload across two builds. Two <c>flow run</c>
+    /// invocations of one flow, run back to back on one Android device against one clean commit
+    /// with no edit in between, produced two distinct normalized payload digests. The
+    /// normalization already excludes signature material and neutralizes DevFlow's injected agent
+    /// session id, so by construction those differences are in payload bytes that are neither.
+    /// Treating this digest as a cross-occurrence identity would therefore assert something
+    /// untrue.
     /// </remarks>
     [JsonPropertyName("normalizedPayloadDigest")]
     public string? NormalizedPayloadDigest { get; set; }

@@ -322,9 +322,12 @@ reproduction reports one of three refusals:
 | `normalized-payload-identity-differs` | Both sides published one and they differ. |
 | `normalized-payload-identity-unproven` | Both sides published the same digest, but a normalized payload digest is not yet established as a cross-occurrence identity on this platform. |
 
-All three are blocking. The third is the honest state of the art: on Android, thirteen consecutive
-`flow run` invocations of one flow on one commit produced thirteen distinct normalized payload
-digests, so agreement has never been observed and cannot be treated as proof of sameness. The
+All three are blocking. The third is the honest state of the art: two `flow run` invocations of one
+flow, run back to back on one Android device against one clean commit with no edit in between,
+produced two distinct normalized payload digests, so agreement has never been observed and cannot
+be treated as proof of sameness. Two ordinary incremental `dotnet build` invocations of the same
+project were byte-identical across all 879 non-signature entries, so the instability lives in the
+isolated per-invocation build `flow run` performs rather than in Android packaging as such. The
 digest ships as a diagnostic fact only; it does not rescue a `packageDigest` mismatch today.
 
 The command stops immediately after evaluation. It cannot create, approve, apply, validate, or

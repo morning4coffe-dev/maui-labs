@@ -43,11 +43,15 @@ namespace Microsoft.Maui.Cli.DevFlow.Execution;
 /// The digest is a diagnostic fact, not a cross-occurrence identity. It answers "did anything
 /// outside signature material and DevFlow's own injected session id change?", and it is published
 /// on the run report so a reproduction can report that question's answer. It is deliberately not
-/// wired to rescue a signed-digest mismatch: thirteen consecutive <c>flow run</c> invocations of
-/// one flow, on one commit, on one Android device produced thirteen distinct digests. Because the
-/// normalization already excludes signature material and neutralizes the session id, those
-/// differences are by construction in payload bytes that are neither, and excluding them would
-/// mean excluding real payload. This normalization therefore stops where the evidence stops.
+/// wired to rescue a signed-digest mismatch. Two <c>flow run</c> invocations of one flow, run
+/// back to back on one Android device against one clean commit with no edit in between, produced
+/// two distinct digests. Two ordinary incremental <c>dotnet build</c> invocations of the same
+/// project were, by contrast, byte-identical across all 879 non-signature entries, so the
+/// instability lives in the isolated per-invocation build <c>flow run</c> performs rather than in
+/// Android packaging as such. Because the normalization already excludes signature material and
+/// neutralizes the session id, those differences are by construction in payload bytes that are
+/// neither, and excluding them would mean excluding real payload. This normalization therefore
+/// stops where the evidence stops.
 /// </para>
 /// <para>
 /// A caller that cannot compute a digest gets <see langword="null"/>, and every consuming gate

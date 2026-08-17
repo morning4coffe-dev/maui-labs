@@ -21,6 +21,7 @@ The restricted profile exposes only:
 
 - `maui_test_agents`, `maui_test_status`, and `maui_test_capabilities` for explicit target discovery;
 - `maui_test_author`, `maui_test_action`, `maui_test_assertion`, and `maui_test_validate`;
+- `maui_test_explore` for bounded, budget-enforced navigation steps;
 - `maui_test_run`, `maui_test_trace`, `maui_test_failure`, and `maui_test_improvements`;
 - `maui_test_patch` for **inert** proposal/preview/reject storage.
 

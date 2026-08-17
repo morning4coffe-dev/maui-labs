@@ -26,6 +26,7 @@ public class TestAgentSessionServiceTests
         Assert.Contains("maui_test_action", restricted);
         Assert.Contains("maui_test_agents", restricted);
         Assert.Contains("maui_test_status", restricted);
+        Assert.Contains("maui_test_explore", restricted);
         Assert.DoesNotContain("maui_secure_storage_set", restricted);
         Assert.DoesNotContain("maui_preferences_set", restricted);
         Assert.DoesNotContain("maui_files_download", restricted);
@@ -35,6 +36,27 @@ public class TestAgentSessionServiceTests
         Assert.DoesNotContain("maui_invoke_action", restricted);
         Assert.DoesNotContain("maui_set_property", restricted);
         Assert.DoesNotContain("maui_evidence_capture", restricted);
+
+        // Golden inventory. The restricted profile is an allow-list, so a tool that appears here
+        // without a deliberate edit to this list is a policy change, not a refactor.
+        Assert.Equal(
+            [
+                "maui_test_action",
+                "maui_test_agents",
+                "maui_test_assertion",
+                "maui_test_author",
+                "maui_test_capabilities",
+                "maui_test_explore",
+                "maui_test_failure",
+                "maui_test_improvements",
+                "maui_test_patch",
+                "maui_test_run",
+                "maui_test_status",
+                "maui_test_trace",
+                "maui_test_validate",
+            ],
+            restricted);
+        Assert.Equal(13, restricted.Count);
     }
 
     [Fact]
@@ -2079,6 +2101,539 @@ public class TestAgentSessionServiceTests
         });
     }
 
+    [Fact]
+    public void Exploration_WithoutApprovedPlanBudget_FailsClosed()
+    {
+        // No explorationBudget in the plan means no exploration, even with a valid grant. The
+        // budget is the human-approved allowance; absent it there is nothing to spend.
+        var fixture = BeginFixture();
+        var grant = fixture.IssueGrant(ExplorationScope());
+        Assert.True(grant.Ok, grant.Error?.Message);
+
+        var explore = fixture.Explore("explore-1", grant.GrantId, selector: new FlowSelector { AutomationId = "save" });
+
+        Assert.False(explore.Ok);
+        Assert.NotEqual(true, explore.DispatchAllowed);
+        Assert.Null(explore.AuthorizationId);
+        Assert.Equal(MauiTestAgentErrorCodes.ExplorationBudgetRequired, explore.Error?.Code);
+        Assert.False(fixture.Budget().Declared);
+    }
+
+    [Fact]
+    public void Exploration_ScopeOutsideApprovedAllowedScopes_IsDenied()
+    {
+        var fixture = BeginExplorationFixture(allowedScopes: ["settings-path"]);
+        var grant = fixture.IssueGrant(ExplorationScope());
+        Assert.True(grant.Ok, grant.Error?.Message);
+
+        var explore = fixture.Explore(
+            "explore-1",
+            grant.GrantId,
+            scope: "checkout-path",
+            selector: new FlowSelector { AutomationId = "save" });
+
+        Assert.False(explore.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.ExplorationScopeDenied, explore.Error?.Code);
+        // A denied scope must not be charged: the allowance still reads full.
+        Assert.Equal(2, fixture.Budget().RemainingActions);
+    }
+
+    [Fact]
+    public void Exploration_ActionBudgetIsCountedDownByBrokerEvenWhenTheGrantHasHeadroom()
+    {
+        // The grant permits four actions; the approved plan permits two exploration steps. The
+        // budget is a separate server-side counter, so the third step is refused while the grant
+        // itself is still live. This is the difference between an enforced and a declarative budget.
+        var fixture = BeginExplorationFixture(maxActions: 2);
+        var grant = fixture.IssueGrant(ExplorationScope(maxActionCount: 4));
+        Assert.True(grant.Ok, grant.Error?.Message);
+        var selector = new FlowSelector { AutomationId = "save" };
+
+        Assert.Equal(2, fixture.Budget().RemainingActions);
+
+        var first = fixture.Explore("explore-1", grant.GrantId, selector: selector);
+        Assert.True(first.Ok, first.Error?.Message);
+        Assert.True(first.DispatchAllowed);
+        Assert.Equal(1, first.ExplorationBudget?.RemainingActions);
+        Assert.Equal(1, fixture.Budget().RemainingActions);
+
+        var second = fixture.Explore("explore-2", grant.GrantId, action: MauiTestAgentActions.Back);
+        Assert.True(second.Ok, second.Error?.Message);
+        Assert.Equal(0, second.ExplorationBudget?.RemainingActions);
+        Assert.True(second.ExplorationBudget?.Exhausted);
+
+        var third = fixture.Explore("explore-3", grant.GrantId, selector: selector);
+        Assert.False(third.Ok);
+        Assert.Null(third.AuthorizationId);
+        Assert.Equal(MauiTestAgentErrorCodes.ExplorationBudgetExhausted, third.Error?.Code);
+        Assert.Equal(0, third.ExplorationBudget?.RemainingActions);
+
+        var budget = fixture.Budget();
+        Assert.Equal(2, budget.MaxActions);
+        Assert.Equal(2, budget.UsedActions);
+        Assert.Equal(0, budget.RemainingActions);
+        Assert.True(budget.Exhausted);
+        Assert.Equal(["settings-path"], budget.AllowedScopes);
+
+        // The refused step did not consume the grant's own action allowance, but the grant is
+        // still not spendable on the ordinary action route, even when the caller names the
+        // exploration side-effect class itself. Otherwise maui_test_action would be a budget
+        // bypass: it would spend an exploration grant without touching the counter.
+        var bypass = fixture.Authorize(
+            "ordinary",
+            grant.GrantId,
+            MauiTestAgentActions.Tap,
+            selector: selector,
+            sideEffectClass: TestAgentSessionService.ExplorationSideEffectClass);
+        Assert.False(bypass.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.MutationGrantScopeDenied, bypass.Error?.Code);
+        Assert.Equal(2, fixture.Budget().UsedActions);
+    }
+
+    [Fact]
+    public void Exploration_GrantCannotBeSpentOnTheOrdinaryActionRouteAndViceVersa()
+    {
+        // The two grant families are disjoint by side-effect class, which is what keeps the budget
+        // counter on the only path that can spend an exploration approval.
+        var fixture = BeginExplorationFixture(maxActions: 4);
+        var selector = new FlowSelector { AutomationId = "save" };
+
+        var explorationGrant = fixture.IssueGrant(ExplorationScope());
+        Assert.True(explorationGrant.Ok, explorationGrant.Error?.Message);
+
+        foreach (var sideEffectClass in new string?[] { null, "ui", TestAgentSessionService.ExplorationSideEffectClass })
+        {
+            var denied = fixture.Authorize(
+                $"ordinary-{sideEffectClass ?? "none"}",
+                explorationGrant.GrantId,
+                MauiTestAgentActions.Tap,
+                selector: selector,
+                sideEffectClass: sideEffectClass);
+            Assert.False(denied.Ok);
+            Assert.Equal(MauiTestAgentErrorCodes.MutationGrantScopeDenied, denied.Error?.Code);
+        }
+
+        // An ordinary UI grant is likewise unusable for exploration, so exploration cannot be
+        // performed against an approval a human granted for a single named tap.
+        var uiGrant = fixture.IssueGrant(new MauiTestAgentMutationScope
+        {
+            AllowedActions = [MauiTestAgentActions.Tap],
+            AllowedSelectors = ["automationId:save"],
+            AllowedSideEffectClasses = ["ui"],
+            MaxActionCount = 4,
+            MaxValueBytes = 0,
+        });
+        Assert.True(uiGrant.Ok, uiGrant.Error?.Message);
+
+        var explorationDenied = fixture.Explore("explore-with-ui-grant", uiGrant.GrantId, selector: selector);
+        Assert.False(explorationDenied.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.MutationGrantScopeDenied, explorationDenied.Error?.Code);
+        Assert.Equal(0, fixture.Budget().UsedActions);
+    }
+
+    [Fact]
+    public void Exploration_AuthorizationDispatchesOnlyTheOneNavigationStepItAuthorized()
+    {
+        // One bounded navigation step must not buy an arbitrary flow. The budget has to bound what
+        // the agent may do, not merely how often it may dispatch, so the authorization is pinned to
+        // a single-step flow that reduces to the exact action, selector, and route it approved.
+        var fixture = BeginExplorationFixture(maxActions: 2);
+        var grant = fixture.IssueGrant(ExplorationScope());
+        Assert.True(grant.Ok, grant.Error?.Message);
+
+        var step = fixture.Explore("explore-1", grant.GrantId, selector: new FlowSelector { AutomationId = "save" });
+        Assert.True(step.Ok, step.Error?.Message);
+
+        static FlowStep Step(string action, string? automationId = null, string? route = null, FlowSelector? argsSelector = null) => new()
+        {
+            Seq = 1,
+            Action = action,
+            Target = automationId is null ? null : new FlowSelector { AutomationId = automationId },
+            Value = route,
+            Args = route is null && argsSelector is null
+                ? null
+                : new FlowStepArgs { Route = route, Selector = argsSelector },
+        };
+
+        void Refused(IReadOnlyList<FlowStep>? steps, string because)
+        {
+            Assert.False(
+                fixture.Service.CanDispatchRunAuthorization(
+                    step.AuthorizationId,
+                    Target().AgentId,
+                    Target().AgentInstanceId,
+                    steps,
+                    out var error),
+                because);
+            Assert.Contains("exactly the one navigation step", error, StringComparison.Ordinal);
+        }
+
+        Refused([Step("tap", "save"), Step("fill", "name")], "a multi-step flow is not one step");
+        Refused([Step("fill", "save")], "a different action is not the authorized step");
+        Refused([Step("tap", "delete-account")], "a different element is not the authorized step");
+        Refused([Step("tap")], "dropping the selector is not the authorized step");
+        Refused(null, "an unreadable flow must fail closed");
+        Refused([], "an empty flow is not the authorized step");
+
+        // A step carries the selector twice and the runner drives args.selector, so binding to
+        // target would let a forged step be approved for "save" and executed against something
+        // else. Both the disagreement itself and the substituted element must be refused.
+        Refused(
+            [Step("tap", "save", argsSelector: new FlowSelector { AutomationId = "delete-account" })],
+            "args.selector is what the runner drives, so it cannot disagree with the approved target");
+        Refused(
+            [Step("tap", argsSelector: new FlowSelector { AutomationId = "delete-account" })],
+            "moving the substitution into args.selector alone is still a different element");
+
+        // An unkeyed selector has no durable identity, so it must not collide with the digest of
+        // an authorization that named a real element.
+        Refused(
+            [Step("tap", argsSelector: new FlowSelector { Text = "Delete account" })],
+            "a text-only selector has no scope key and cannot stand in for an approved element");
+
+        // The honest producer sets both copies to the same selector; that must keep working.
+        Assert.True(
+            fixture.Service.CanDispatchRunAuthorization(
+                step.AuthorizationId,
+                Target().AgentId,
+                Target().AgentInstanceId,
+                [Step("tap", "save", argsSelector: new FlowSelector { AutomationId = "save" })],
+                out _));
+
+        // The step it actually authorized still dispatches, exactly once.
+        Assert.True(
+            fixture.Service.TryConsumeRunDispatchAuthorization(
+                step.AuthorizationId,
+                Target().AgentId,
+                Target().AgentInstanceId,
+                [Step("tap", "save")],
+                out var allowed),
+            allowed);
+        Assert.False(fixture.Service.TryConsumeRunDispatchAuthorization(
+            step.AuthorizationId,
+            Target().AgentId,
+            Target().AgentInstanceId,
+            [Step("tap", "save")],
+            out var reused));
+        Assert.Contains("already used to start a workflow run", reused, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void Exploration_StepWithNoDurableIdentityIsRefusedBeforeAnyBudgetIsSpent()
+    {
+        // The step digest is the only thing binding one budget unit to one dispatched step, so a
+        // step that cannot be pinned must never be minted. A text-only selector has no scope key,
+        // and hashing it as "no selector" would let one approved tap stand in for a tap on any
+        // other unkeyed element.
+        var fixture = BeginExplorationFixture(maxActions: 3);
+        var grant = fixture.IssueGrant(new MauiTestAgentMutationScope
+        {
+            AllowedActions = [MauiTestAgentActions.Tap, MauiTestAgentActions.Scroll, MauiTestAgentActions.Navigate, MauiTestAgentActions.Back],
+            AllowedSelectors = ["automationId:save"],
+            AllowedRoutes = ["//settings"],
+            AllowedSideEffectClasses = [TestAgentSessionService.ExplorationSideEffectClass],
+            MaxActionCount = 8,
+            MaxValueBytes = 0,
+        });
+        Assert.True(grant.Ok, grant.Error?.Message);
+
+        void Refused(string because, string key, string action, FlowSelector? selector = null, string? route = null)
+        {
+            var result = fixture.Explore(key, grant.GrantId, action: action, selector: selector, route: route);
+            Assert.False(result.Ok, because);
+            Assert.Equal(MauiTestAgentErrorCodes.ExplorationScopeDenied, result.Error?.Code);
+            Assert.Null(result.AuthorizationId);
+        }
+
+        Refused("a tap with no selector names nothing", "explore-1", MauiTestAgentActions.Tap);
+        Refused(
+            "a text-only selector has no durable key",
+            "explore-2",
+            MauiTestAgentActions.Tap,
+            new FlowSelector { Text = "Delete account" });
+        Refused("a scroll with no selector names nothing", "explore-3", MauiTestAgentActions.Scroll);
+        Refused("a navigation with no route names nothing", "explore-4", MauiTestAgentActions.Navigate);
+        Refused(
+            "a selector on a navigation would go unrecorded",
+            "explore-5",
+            MauiTestAgentActions.Navigate,
+            new FlowSelector { AutomationId = "save" },
+            route: "//settings");
+
+        // None of those refusals may be charged.
+        Assert.Equal(3, fixture.Budget().RemainingActions);
+
+        // A step that can be pinned still works, so the guard is not simply refusing everything.
+        var keyed = fixture.Explore("explore-ok", grant.GrantId, selector: new FlowSelector { AutomationId = "save" });
+        Assert.True(keyed.Ok, keyed.Error?.Message);
+        var navigated = fixture.Explore("explore-nav", grant.GrantId, action: MauiTestAgentActions.Navigate, route: "//settings");
+        Assert.True(navigated.Ok, navigated.Error?.Message);
+        Assert.Equal(1, fixture.Budget().RemainingActions);
+    }
+
+    [Fact]
+    public void Exploration_ReplayingAnIdempotencyKeyUnderADifferentScopeIsRefused()
+    {
+        // One idempotency key names one step. Reusing it for a different approved scope is a new
+        // request, and silently returning the first authorization would misattribute the step.
+        var fixture = BeginExplorationFixture(maxActions: 4, allowedScopes: ["settings-path", "cart-path"]);
+        var grant = fixture.IssueGrant(ExplorationScope());
+        Assert.True(grant.Ok, grant.Error?.Message);
+        var selector = new FlowSelector { AutomationId = "save" };
+
+        var first = fixture.Explore("explore-1", grant.GrantId, selector: selector);
+        Assert.True(first.Ok, first.Error?.Message);
+        Assert.Equal(1, fixture.Budget().UsedActions);
+
+        var reused = fixture.Explore("explore-1", grant.GrantId, scope: "cart-path", selector: selector);
+        Assert.False(reused.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.IdempotencyReused, reused.Error?.Code);
+        Assert.Equal(1, fixture.Budget().UsedActions);
+    }
+
+    [Fact]
+    public void Exploration_ApprovalRequestScopePreservesWhatTheHumanWillRead()
+    {
+        // The approval path is where a human sees the request. An exploration approval keeps the
+        // side-effect classes the agent asked for, because rewriting them would hand back a grant
+        // that no longer matches the text that was approved. Asking for "exploration" is therefore
+        // a deliberate, visible act — and it is what makes the grant spendable only on the
+        // budget-enforcing route.
+        var fixture = BeginFixture();
+
+        var ordinary = fixture.Service.SubmitApprovalRequest(new MauiTestAgentApprovalSubmitRequest
+        {
+            Envelope = fixture.Envelope("approval-ui", grantId: null),
+            Kind = MauiTestAgentApprovalKinds.Exploration,
+            Scope = new MauiTestAgentMutationScope
+            {
+                AllowedActions = [MauiTestAgentActions.Tap, MauiTestAgentActions.Fill],
+                AllowedSelectors = ["automationId:save"],
+                AllowedSideEffectClasses = ["ui"],
+                MaxActionCount = 2,
+                MaxValueBytes = 16,
+            },
+        });
+
+        // An ordinary typed-action approval still works: exploration did not take over this kind.
+        Assert.True(ordinary.Ok, ordinary.Error?.Message);
+        Assert.Equal(["ui"], ordinary.Request!.RequestedScope!.AllowedSideEffectClasses);
+
+        var exploration = fixture.Service.SubmitApprovalRequest(new MauiTestAgentApprovalSubmitRequest
+        {
+            Envelope = fixture.Envelope("approval-explore", grantId: null),
+            Kind = MauiTestAgentApprovalKinds.Exploration,
+            Scope = new MauiTestAgentMutationScope
+            {
+                AllowedActions = [MauiTestAgentActions.Tap, MauiTestAgentActions.Back],
+                AllowedSelectors = ["automationId:save"],
+                AllowedSideEffectClasses = [TestAgentSessionService.ExplorationSideEffectClass],
+                MaxActionCount = 2,
+                MaxValueBytes = 0,
+            },
+        });
+        Assert.True(exploration.Ok, exploration.Error?.Message);
+        Assert.Equal(
+            [TestAgentSessionService.ExplorationSideEffectClass],
+            exploration.Request!.RequestedScope!.AllowedSideEffectClasses);
+    }
+
+    [Fact]
+    public void Exploration_DoesNotTakeOverTheOnlyApprovalKindThatAuthorizesOrdinaryTypedActions()
+    {
+        // Regression guard. The exploration kind is the only approval kind that yields a "ui"
+        // grant, so pinning its side-effect classes to "exploration" would have left maui_test_action
+        // with no route to a human-approved executable grant at all — a silent, permanent denial
+        // that burns a human decision. Approving one end to end proves the ordinary path survives.
+        var fixture = BeginFixture();
+
+        var submitted = fixture.Service.SubmitApprovalRequest(new MauiTestAgentApprovalSubmitRequest
+        {
+            Envelope = fixture.Envelope("approval-typed-action", grantId: null),
+            Kind = MauiTestAgentApprovalKinds.Exploration,
+            Scope = new MauiTestAgentMutationScope
+            {
+                AllowedActions = [MauiTestAgentActions.Tap],
+                AllowedSelectors = ["automationId:save"],
+                AllowedSideEffectClasses = ["ui"],
+                MaxActionCount = 1,
+                MaxValueBytes = 0,
+            },
+        });
+        Assert.True(submitted.Ok, submitted.Error?.Message);
+
+        var approved = fixture.Service.ApproveApprovalRequest(
+            submitted.Request!.ApprovalRequestId,
+            approvedScope: null,
+            fixture.State,
+            fixture.HumanDecision(approved: true),
+            grantExpiresAt: null);
+        Assert.True(approved.Ok, approved.Error?.Message);
+
+        var delivered = Assert.Single(fixture.Service.Status(fixture.ReadAccess("status-typed")).Snapshot!.ApprovalRequests);
+        var authorization = fixture.Authorize(
+            "typed-action-tap",
+            delivered.GrantId,
+            MauiTestAgentActions.Tap,
+            selector: new FlowSelector { AutomationId = "save" },
+            sideEffectClass: "ui");
+        Assert.True(authorization.Ok, authorization.Error?.Message);
+    }
+
+    [Fact]
+    public void Exploration_PlanBudgetScopeListIsBoundedAtNormalization()
+    {
+        // The scope list is echoed on every session snapshot, so an oversized plan is trimmed
+        // rather than retained verbatim.
+        var fixture = BeginExplorationFixture(
+            maxActions: 2,
+            allowedScopes: Enumerable.Range(0, 80).Select(i => $"scope-{i}"));
+
+        var budget = fixture.Budget();
+        Assert.Equal(32, budget.AllowedScopes.Count);
+        Assert.Equal("scope-0", budget.AllowedScopes[0]);
+        Assert.DoesNotContain("scope-40", budget.AllowedScopes);
+    }
+
+    [Fact]
+    public void Exploration_DurationBudgetElapses_DeniesFurtherStepsWhileActionsRemain()
+    {
+        var clock = new MutableTimeProvider(DateTimeOffset.UtcNow);
+        var fixture = BeginExplorationFixture(maxActions: 5, maxDurationSeconds: 60, clock: clock);
+        var grant = fixture.IssueGrant(ExplorationScope());
+        Assert.True(grant.Ok, grant.Error?.Message);
+        var selector = new FlowSelector { AutomationId = "save" };
+
+        // The window opens on the first authorized step, not at session begin.
+        Assert.Null(fixture.Budget().StartedAt);
+        var first = fixture.Explore("explore-1", grant.GrantId, selector: selector);
+        Assert.True(first.Ok, first.Error?.Message);
+        Assert.Equal(60, first.ExplorationBudget?.RemainingSeconds);
+        Assert.NotNull(fixture.Budget().StartedAt);
+
+        clock.Advance(TimeSpan.FromSeconds(61));
+
+        var second = fixture.Explore("explore-2", grant.GrantId, action: MauiTestAgentActions.Back);
+        Assert.False(second.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.ExplorationBudgetExhausted, second.Error?.Code);
+        Assert.Equal(0, second.ExplorationBudget?.RemainingSeconds);
+        // Actions were still available; time alone closed the door.
+        Assert.Equal(4, second.ExplorationBudget?.RemainingActions);
+    }
+
+    [Fact]
+    public void Exploration_RejectsNonNavigationActionsAndNonExplorationGrants()
+    {
+        var fixture = BeginExplorationFixture(maxActions: 4);
+        var explorationGrant = fixture.IssueGrant(ExplorationScope());
+        Assert.True(explorationGrant.Ok, explorationGrant.Error?.Message);
+
+        // Data entry is not exploration, whatever the grant says.
+        var fill = fixture.Explore("explore-fill", explorationGrant.GrantId, action: MauiTestAgentActions.Fill);
+        Assert.False(fill.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.UnsupportedOperation, fill.Error?.Code);
+
+        // A grant that also permits drafting is not an exploration grant and cannot be spent here,
+        // even for a navigation action.
+        var draftGrant = fixture.IssueGrant(new MauiTestAgentMutationScope
+        {
+            AllowedActions = [MauiTestAgentActions.Tap, MauiTestAgentActions.DraftAppend],
+            AllowedSelectors = ["automationId:save"],
+            AllowedSideEffectClasses = [TestAgentSessionService.ExplorationSideEffectClass],
+            MaxActionCount = 4,
+            MaxValueBytes = 0,
+        });
+        Assert.True(draftGrant.Ok, draftGrant.Error?.Message);
+        var drafting = fixture.Explore(
+            "explore-draft",
+            draftGrant.GrantId,
+            selector: new FlowSelector { AutomationId = "save" });
+        Assert.False(drafting.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.MutationGrantScopeDenied, drafting.Error?.Code);
+
+        // A run grant forbids exploration outright: ApprovalKindAllowsScope excludes run and cancel.
+        var runGrant = fixture.IssueGrant(new MauiTestAgentMutationScope
+        {
+            AllowedActions = [MauiTestAgentActions.Run],
+            AllowedSideEffectClasses = ["run"],
+            MaxActionCount = 1,
+            MaxValueBytes = 0,
+        });
+        Assert.True(runGrant.Ok, runGrant.Error?.Message);
+        var running = fixture.Explore("explore-run", runGrant.GrantId);
+        Assert.False(running.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.MutationGrantScopeDenied, running.Error?.Code);
+
+        // None of the refusals were charged to the allowance.
+        Assert.Equal(4, fixture.Budget().RemainingActions);
+    }
+
+    [Fact]
+    public void Exploration_RequiresGrantThatApprovedTheExplorationSideEffectClass()
+    {
+        // An ordinary UI grant cannot be repurposed for exploration: the broker, not the caller,
+        // sets the side-effect class, so a grant that never approved "exploration" is refused.
+        var fixture = BeginExplorationFixture(maxActions: 3);
+        var grant = fixture.IssueGrant(new MauiTestAgentMutationScope
+        {
+            AllowedActions = [MauiTestAgentActions.Tap],
+            AllowedSelectors = ["automationId:save"],
+            AllowedSideEffectClasses = ["ui"],
+            MaxActionCount = 3,
+            MaxValueBytes = 0,
+        });
+        Assert.True(grant.Ok, grant.Error?.Message);
+
+        var explore = fixture.Explore(
+            "explore-1",
+            grant.GrantId,
+            selector: new FlowSelector { AutomationId = "save" });
+
+        Assert.False(explore.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.MutationGrantScopeDenied, explore.Error?.Code);
+        Assert.Equal(3, fixture.Budget().RemainingActions);
+    }
+
+    [Fact]
+    public void Exploration_ReplayedRequestReturnsPriorAuthorizationWithoutDoubleCharging()
+    {
+        var fixture = BeginExplorationFixture(maxActions: 1);
+        var grant = fixture.IssueGrant(ExplorationScope());
+        Assert.True(grant.Ok, grant.Error?.Message);
+        var selector = new FlowSelector { AutomationId = "save" };
+
+        var first = fixture.Explore("explore-1", grant.GrantId, selector: selector);
+        Assert.True(first.Ok, first.Error?.Message);
+        Assert.Equal(0, first.ExplorationBudget?.RemainingActions);
+
+        // The same idempotency key and request replays the prior authorization. A retry of the last
+        // allowed step must neither be refused as exhausted nor charged a second time.
+        var replay = fixture.Explore("explore-1", grant.GrantId, selector: selector);
+        Assert.True(replay.Ok, replay.Error?.Message);
+        Assert.Equal(first.AuthorizationId, replay.AuthorizationId);
+        Assert.Equal(1, fixture.Budget().UsedActions);
+    }
+
+    [Fact]
+    public void Exploration_BrokerCapClampsAnOverlyGenerousPlanBudget()
+    {
+        // The plan is agent-authored input. Even an approved plan cannot vote itself a larger
+        // allowance than broker policy permits.
+        var fixture = BeginExplorationFixture(
+            maxActions: 1_000,
+            options: new TestAgentSessionServiceOptions { MaxExplorationActions = 1 });
+        var grant = fixture.IssueGrant(ExplorationScope());
+        Assert.True(grant.Ok, grant.Error?.Message);
+
+        Assert.Equal(1, fixture.Budget().MaxActions);
+        var first = fixture.Explore("explore-1", grant.GrantId, selector: new FlowSelector { AutomationId = "save" });
+        Assert.True(first.Ok, first.Error?.Message);
+
+        var second = fixture.Explore("explore-2", grant.GrantId, action: MauiTestAgentActions.Back);
+        Assert.False(second.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.ExplorationBudgetExhausted, second.Error?.Code);
+    }
+
     private static Fixture BeginFixture(
         MutableTimeProvider? clock = null,
         TestAgentSessionServiceOptions? options = null)
@@ -2093,6 +2648,43 @@ public class TestAgentSessionServiceTests
         Assert.True(begin.Ok, begin.Error?.Message);
         return new Fixture(service, state, begin.Snapshot!);
     }
+
+    private static Fixture BeginExplorationFixture(
+        int? maxActions = 2,
+        int? maxDurationSeconds = 120,
+        IEnumerable<string>? allowedScopes = null,
+        MutableTimeProvider? clock = null,
+        TestAgentSessionServiceOptions? options = null)
+    {
+        var service = new TestAgentSessionService(options, clock);
+        var state = State();
+        var begin = service.Begin(new MauiTestAgentSessionBeginRequest
+        {
+            Envelope = Envelope(Target(), "begin"),
+            TargetState = state,
+            Plan = new MauiTestPlan
+            {
+                Title = "Exploration draft",
+                ExplorationBudget = new MauiExplorationBudget
+                {
+                    MaxActions = maxActions,
+                    MaxDurationSeconds = maxDurationSeconds,
+                    AllowedScopes = [.. allowedScopes ?? ["settings-path"]],
+                },
+            },
+        });
+        Assert.True(begin.Ok, begin.Error?.Message);
+        return new Fixture(service, state, begin.Snapshot!);
+    }
+
+    private static MauiTestAgentMutationScope ExplorationScope(int maxActionCount = 4) => new()
+    {
+        AllowedActions = [MauiTestAgentActions.Tap, MauiTestAgentActions.Back],
+        AllowedSelectors = ["automationId:save"],
+        AllowedSideEffectClasses = [TestAgentSessionService.ExplorationSideEffectClass],
+        MaxActionCount = maxActionCount,
+        MaxValueBytes = 0,
+    };
 
     private static MauiTestAgentTarget Target() => new()
     {
@@ -2271,6 +2863,27 @@ public class TestAgentSessionServiceTests
                 ValueDigest = value is null ? null : "super-secret",
                 CurrentTargetState = state ?? State,
             });
+
+        public MauiTestAgentExplorationResult Explore(
+            string key,
+            string? grantId,
+            string action = MauiTestAgentActions.Tap,
+            string? scope = "settings-path",
+            FlowSelector? selector = null,
+            string? route = null,
+            MauiTestAgentTargetState? state = null)
+            => Service.AuthorizeExploration(new MauiTestAgentExplorationRequest
+            {
+                Envelope = Envelope(key, grantId),
+                Action = action,
+                Scope = scope,
+                Selector = selector,
+                Route = route,
+                CurrentTargetState = state ?? State,
+            });
+
+        public MauiTestAgentExplorationBudgetState Budget()
+            => Service.Status(ReadAccess("budget-" + Guid.NewGuid().ToString("N"))).Snapshot!.ExplorationBudget!;
     }
 
     private sealed class MutableTimeProvider(DateTimeOffset now) : TimeProvider

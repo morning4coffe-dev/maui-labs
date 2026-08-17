@@ -1618,6 +1618,32 @@ public partial class BrokerServer : IDisposable
             return;
         }
 
+        if (string.Equals(normalizedPath, "/api/test-agent/exploration/authorize", StringComparison.OrdinalIgnoreCase))
+        {
+            var request = await ReadWorkflowRunBodyAsync<Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest>(context, maxBodyChars);
+            if (request is null)
+                return;
+            request.CurrentTargetState = await GetLiveTestAgentTargetStateAsync(
+                request.Envelope?.Target,
+                request.CurrentTargetState);
+            if (request.CurrentTargetState is null)
+            {
+                await WriteTypedJsonResponseAsync(context, 409, new Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationResult
+                {
+                    Error = TestAgentRouteError(
+                        Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.TargetStale,
+                        Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCategories.Target,
+                        "The explicit target agent and instance are not currently connected.",
+                        retryable: false),
+                });
+                return;
+            }
+
+            var result = _testAgentSessions.AuthorizeExploration(request);
+            await WriteTypedJsonResponseAsync(context, TestAgentStatusCode(result.Error), result);
+            return;
+        }
+
         if (string.Equals(normalizedPath, "/api/test-agent/mutations/complete", StringComparison.OrdinalIgnoreCase))
         {
             var request = await ReadWorkflowRunBodyAsync<Microsoft.Maui.DevFlow.Testing.MauiTestAgentMutationCompletion>(context, maxBodyChars);
@@ -1952,6 +1978,7 @@ public partial class BrokerServer : IDisposable
                         request.AuthorizationId,
                         request.AgentId,
                         request.AgentInstanceId,
+                        WorkflowRunCoordinator.DescribeDispatchSteps(request.Flow),
                         out var runAuthorizationError))
                 {
                     await WriteTypedJsonResponseAsync(
@@ -2295,6 +2322,7 @@ public partial class BrokerServer : IDisposable
                         dispatch.AuthorizationId,
                         dispatch.AgentId,
                         dispatch.AgentInstanceId,
+                        dispatch.Steps,
                         out var error)
                     ? WorkflowRunDispatchDecision.Allow("test-agent-human-grant")
                     : WorkflowRunDispatchDecision.Deny(error!);

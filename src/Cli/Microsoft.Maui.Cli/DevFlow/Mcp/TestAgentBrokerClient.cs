@@ -87,6 +87,18 @@ internal static class TestAgentBrokerClient
             MauiTestingJsonContext.Default.MauiTestAgentMutationAuthorizationResult,
             cancellationToken);
 
+    internal static Task<TestAgentBrokerResponse<MauiTestAgentExplorationResult>> AuthorizeExplorationAsync(
+        int brokerPort,
+        MauiTestAgentExplorationRequest request,
+        CancellationToken cancellationToken = default)
+        => PostAsync(
+            brokerPort,
+            "/api/test-agent/exploration/authorize",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentExplorationRequest,
+            MauiTestingJsonContext.Default.MauiTestAgentExplorationResult,
+            cancellationToken);
+
     internal static Task<TestAgentBrokerResponse<MauiTestAgentToolResult>> CompleteAsync(
         int brokerPort,
         MauiTestAgentMutationCompletion request,

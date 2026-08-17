@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -24,10 +25,27 @@ public static class MauiTestAgentActions
     public const string AuthorCommit = "author-commit";
     public const string DraftAppend = "draft-append";
 
+    /// <summary>
+    /// Every action the restricted protocol recognises. Frozen for the same reason as
+    /// <see cref="Exploration"/>: every approved scope is gated through this set, so a mutable
+    /// instance behind an <see cref="IReadOnlySet{T}"/> could be cast back and widened.
+    /// </summary>
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.Ordinal)
     {
         Tap, Fill, Scroll, Navigate, Back, Assert, Run, Cancel, AuthorCommit, DraftAppend,
-    };
+    }.ToFrozenSet(StringComparer.Ordinal);
+
+    /// <summary>
+    /// The only actions a bounded exploration step may dispatch. Exploration exists to discover a
+    /// path, so it is deliberately navigation-only: fill enters data, and run, cancel, assert,
+    /// author-commit, and draft-append all change durable state rather than the current view. The
+    /// set is frozen because it is load-bearing for authorization: a mutable set behind an
+    /// <see cref="IReadOnlySet{T}"/> could be cast back and widened process-wide.
+    /// </summary>
+    public static readonly IReadOnlySet<string> Exploration = new HashSet<string>(StringComparer.Ordinal)
+    {
+        Tap, Scroll, Navigate, Back,
+    }.ToFrozenSet(StringComparer.Ordinal);
 }
 
 /// <summary>Known human-review purposes for a restricted test-agent mutation request.</summary>
@@ -39,10 +57,14 @@ public static class MauiTestAgentApprovalKinds
     public const string Commit = "commit";
     public const string Run = "run";
 
+    /// <summary>
+    /// Every approval purpose a human decision can carry. Frozen because approval kinds decide
+    /// which scopes a grant may express, so the set must not be widenable at runtime.
+    /// </summary>
     public static readonly IReadOnlySet<string> All = new HashSet<string>(StringComparer.Ordinal)
     {
         Exploration, DraftChange, Assertion, Commit, Run,
-    };
+    }.ToFrozenSet(StringComparer.Ordinal);
 }
 
 /// <summary>Stable states for a broker-owned human approval request.</summary>
@@ -99,6 +121,9 @@ public static class MauiTestAgentErrorCodes
     public const string UnknownCompletion = "unknown-completion";
     public const string UnsupportedOperation = "unsupported-operation";
     public const string PatchApplyForbidden = "patch-apply-forbidden";
+    public const string ExplorationBudgetRequired = "exploration-budget-required";
+    public const string ExplorationBudgetExhausted = "exploration-budget-exhausted";
+    public const string ExplorationScopeDenied = "exploration-scope-denied";
 }
 
 /// <summary>Identity of the exact connected process that a request may target.</summary>
@@ -320,7 +345,64 @@ public sealed class MauiTestAgentAuthoringSnapshot
     [JsonPropertyName("flowRevision")] public int? FlowRevision { get; set; }
     [JsonPropertyName("committedAt")] public DateTimeOffset? CommittedAt { get; set; }
     [JsonPropertyName("approvalRequests")] public List<MauiTestAgentApprovalRecord> ApprovalRequests { get; set; } = [];
+    [JsonPropertyName("explorationBudget")] public MauiTestAgentExplorationBudgetState? ExplorationBudget { get; set; }
     [JsonPropertyName("readCapabilityId")] public string? ReadCapabilityId { get; set; }
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+/// <summary>
+/// Broker-owned remaining exploration allowance for one authoring session. Every field is derived
+/// from the approved plan's explorationBudget and from counters the broker owns, so it is a report
+/// of enforcement rather than a limit the caller is asked to respect.
+/// </summary>
+public sealed class MauiTestAgentExplorationBudgetState
+{
+    /// <summary>False when the approved plan declares no explorationBudget. Exploration then fails closed.</summary>
+    [JsonPropertyName("declared")] public bool Declared { get; set; }
+    [JsonPropertyName("maxActions")] public int? MaxActions { get; set; }
+    [JsonPropertyName("usedActions")] public int UsedActions { get; set; }
+    [JsonPropertyName("remainingActions")] public int RemainingActions { get; set; }
+    [JsonPropertyName("maxDurationSeconds")] public int? MaxDurationSeconds { get; set; }
+    [JsonPropertyName("remainingSeconds")] public int? RemainingSeconds { get; set; }
+    [JsonPropertyName("startedAt")] public DateTimeOffset? StartedAt { get; set; }
+    [JsonPropertyName("expiresAt")] public DateTimeOffset? ExpiresAt { get; set; }
+    [JsonPropertyName("allowedScopes")] public List<string> AllowedScopes { get; set; } = [];
+    [JsonPropertyName("exhausted")] public bool Exhausted { get; set; }
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+/// <summary>
+/// One bounded exploration step. It carries the same envelope and grant as any other mutation, plus
+/// the exploration scope label the approved plan must already list in explorationBudget.allowedScopes.
+/// </summary>
+public sealed class MauiTestAgentExplorationRequest
+{
+    [JsonPropertyName("envelope")] public MauiTestAgentRequestEnvelope? Envelope { get; set; }
+    [JsonPropertyName("action")] public string? Action { get; set; }
+    [JsonPropertyName("scope")] public string? Scope { get; set; }
+    [JsonPropertyName("selector")] public FlowSelector? Selector { get; set; }
+    [JsonPropertyName("route")] public string? Route { get; set; }
+    // Dispatch parameters for a scroll. Like the ordinary action route, they shape the gesture but
+    // are not authorization inputs: the grant scope covers the action, selector, and route.
+    [JsonPropertyName("deltaX")] public double? DeltaX { get; set; }
+    [JsonPropertyName("deltaY")] public double? DeltaY { get; set; }
+    [JsonPropertyName("itemIndex")] public int? ItemIndex { get; set; }
+    [JsonPropertyName("currentTargetState")] public MauiTestAgentTargetState? CurrentTargetState { get; set; }
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+}
+
+/// <summary>
+/// Result of broker-side exploration authorization. A false DispatchAllowed result must never be
+/// dispatched, and the budget projection always reports the counters after the decision.
+/// </summary>
+public sealed class MauiTestAgentExplorationResult
+{
+    [JsonPropertyName("ok")] public bool Ok { get; set; }
+    [JsonPropertyName("dispatchAllowed")] public bool DispatchAllowed { get; set; }
+    [JsonPropertyName("authorizationId")] public string? AuthorizationId { get; set; }
+    [JsonPropertyName("remainingActions")] public int? RemainingActions { get; set; }
+    [JsonPropertyName("explorationBudget")] public MauiTestAgentExplorationBudgetState? ExplorationBudget { get; set; }
+    [JsonPropertyName("error")] public MauiTestAgentError? Error { get; set; }
     [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
 }
 

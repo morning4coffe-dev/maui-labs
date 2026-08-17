@@ -56,6 +56,14 @@ internal sealed class WorkflowRunCoordinator : IDisposable
     }
 
     /// <summary>
+    /// Projects a dispatch's flow to the steps the broker's authorization check reasons about. A
+    /// null flow projects to null rather than an empty list, so a caller that cannot see the flow
+    /// is treated as unknown and refused rather than as "no steps".
+    /// </summary>
+    internal static IReadOnlyList<Testing.FlowStep>? DescribeDispatchSteps(Testing.MauiFlow? flow)
+        => flow?.Steps;
+
+    /// <summary>
     /// Starts one bounded, mutating replay. Every broker-hosted dispatch surface reaches the device
     /// through this method, so the broker's authorization decision is taken here rather than in the
     /// route that happens to be calling: a new entry point inherits the check instead of having to
@@ -83,7 +91,8 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             target.AgentInstanceId,
             request.AuthorizationId,
             dispatchTicket,
-            leaseHandoff));
+            leaseHandoff,
+            DescribeDispatchSteps(request.Flow)));
         if (!decision.Allowed)
         {
             return WorkflowRunStartResult.Rejected(
@@ -1974,12 +1983,14 @@ internal sealed record WorkflowRunDispatch(
     string AgentInstanceId,
     string? AuthorizationId,
     string? DispatchTicket,
-    WorkflowRunLeaseHandoff? LeaseHandoff)
+    WorkflowRunLeaseHandoff? LeaseHandoff,
+    IReadOnlyList<Testing.FlowStep>? Steps = null)
 {
     /// <summary>
     /// Keeps the ticket out of the generated <c>ToString()</c>, so interpolating a dispatch into a
     /// log line or an exception message cannot publish a credential that stays valid for the life
-    /// of the broker process.
+    /// of the broker process. The flow's steps are summarized by count for the same reason: they
+    /// carry recorded selectors and values.
     /// </summary>
     private bool PrintMembers(StringBuilder builder)
     {
@@ -1988,6 +1999,7 @@ internal sealed record WorkflowRunDispatch(
         builder.Append($"{nameof(AgentInstanceId)} = {AgentInstanceId}, ");
         builder.Append($"{nameof(AuthorizationId)} = {AuthorizationId}, ");
         builder.Append($"{nameof(DispatchTicket)} = {(DispatchTicket is null ? "null" : "[redacted]")}, ");
+        builder.Append($"{nameof(Steps)} = {(Steps is null ? "null" : Steps.Count)}, ");
         builder.Append($"{nameof(LeaseHandoff)} = {LeaseHandoff}");
         return true;
     }

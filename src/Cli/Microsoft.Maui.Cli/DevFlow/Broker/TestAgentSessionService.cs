@@ -13,6 +13,19 @@ namespace Microsoft.Maui.Cli.DevFlow.Broker;
 /// </summary>
 internal sealed class TestAgentSessionService
 {
+    /// <summary>
+    /// The fixed side-effect class every exploration step authorizes under. A human-approved
+    /// exploration grant must list it explicitly, so an ordinary "ui" action grant can never be
+    /// spent on exploration and an exploration grant can never be spent on an ordinary action.
+    /// </summary>
+    internal const string ExplorationSideEffectClass = "exploration";
+
+    /// <summary>
+    /// Upper bound on the number of named scopes a plan-declared exploration budget may retain.
+    /// The list is echoed on every session snapshot, so it is bounded at normalization time.
+    /// </summary>
+    private const int MaxExplorationAllowedScopes = 32;
+
     private readonly object _gate = new();
     private readonly TestAgentSessionServiceOptions _options;
     private readonly TimeProvider _clock;
@@ -646,209 +659,527 @@ internal sealed class TestAgentSessionService
         ArgumentNullException.ThrowIfNull(request);
         lock (_gate)
         {
+            return AuthorizeMutationLocked(request, explorationOrigin: false);
+        }
+    }
+
+    private MauiTestAgentMutationAuthorizationResult AuthorizeMutationLocked(
+        MauiTestAgentMutationAuthorizationRequest request,
+        bool explorationOrigin,
+        bool purge = true)
+    {
+        // The exploration route purges before it reads the idempotency table, and purging a
+        // second time here could age an entry out between those two reads, so the caller that
+        // already purged suppresses it.
+        if (purge)
             PurgeExpiredLocked();
-            var envelope = request.Envelope;
-            var error = ValidateEnvelope(envelope, requireSession: true);
-            if (error is not null)
-                return AuthorizationFailure(error);
+        var envelope = request.Envelope;
+        var error = ValidateEnvelope(envelope, requireSession: true);
+        if (error is not null)
+            return AuthorizationFailure(error);
 
-            if (!_sessions.TryGetValue(envelope!.Correlation!.AuthoringSessionId!, out var session))
-                return AuthorizationFailure(Error(
-                    MauiTestAgentErrorCodes.SessionNotFound,
-                    MauiTestAgentErrorCategories.State,
-                    "The authoring session was not found.",
-                    retryable: false));
+        if (!_sessions.TryGetValue(envelope!.Correlation!.AuthoringSessionId!, out var session))
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.SessionNotFound,
+                MauiTestAgentErrorCategories.State,
+                "The authoring session was not found.",
+                retryable: false));
 
-            if (!TryValidateActiveSessionLocked(session, out error))
-                return AuthorizationFailure(error!);
+        if (!TryValidateActiveSessionLocked(session, out error))
+            return AuthorizationFailure(error!);
 
-            if (!CanonicalTargetsMatch(session.Target, envelope.Target) ||
-                !CanonicalTargetMatchesState(session.Target, request.CurrentTargetState) ||
-                !TargetStatesMatch(session.TargetState, request.CurrentTargetState))
+        // The exploration side-effect class belongs to the budget-enforcing exploration route
+        // alone. Without this the ordinary action route could spend an approved exploration
+        // grant while the budget counter, the allowed scopes, and the duration window are all
+        // skipped, which would make the enforcement decorative. Both directions matter: the
+        // request may not name the class, and a grant that approved it may not be redeemed
+        // here even when the request names no class at all.
+        TryPeekGrantLocked(envelope.ApprovalGrantId, out var peekedGrant);
+        if (!explorationOrigin &&
+            (string.Equals(request.SideEffectClass, ExplorationSideEffectClass, StringComparison.Ordinal) ||
+             peekedGrant?.Scope.AllowedSideEffectClasses.Contains(ExplorationSideEffectClass, StringComparer.Ordinal) == true))
+        {
+            AppendAuditLocked(session, "mutation-denied", envelope, "denied", peekedGrant?.GrantDigest, null, null, MauiTestAgentErrorCodes.MutationGrantScopeDenied);
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.MutationGrantScopeDenied,
+                MauiTestAgentErrorCategories.Authorization,
+                "The exploration side-effect class may only be authorized through the bounded exploration route, which enforces the exploration budget.",
+                retryable: false));
+        }
+
+        if (!CanonicalTargetsMatch(session.Target, envelope.Target) ||
+            !CanonicalTargetMatchesState(session.Target, request.CurrentTargetState) ||
+            !TargetStatesMatch(session.TargetState, request.CurrentTargetState))
+        {
+            AppendAuditLocked(session, "mutation-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.TargetStale);
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.TargetStale,
+                MauiTestAgentErrorCategories.Target,
+                "The target process, app build, or seed is stale. Refresh discovery and obtain a new human approval.",
+                retryable: false));
+        }
+
+        if (!CorrelationMatches(session, envelope.Correlation, requireAll: true) &&
+            !CorrelationMatchesGrantSequence(session, envelope.Correlation))
+        {
+            AppendAuditLocked(session, "mutation-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.MutationGrantStale);
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.MutationGrantStale,
+                MauiTestAgentErrorCategories.State,
+                "The request does not match the current plan or flow revision.",
+                retryable: false));
+        }
+
+        if (!ProvenanceMatches(session.Actor, envelope.Provenance))
+        {
+            AppendAuditLocked(session, "mutation-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.MutationGrantScopeDenied);
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.MutationGrantScopeDenied,
+                MauiTestAgentErrorCategories.Authorization,
+                "The request actor, channel, or provider does not match the approved authoring session.",
+                retryable: false));
+        }
+
+        if (!string.Equals(envelope.PolicyVersion, MauiTestAgentProtocolVersions.PolicyVersion, StringComparison.Ordinal))
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.MutationGrantScopeDenied,
+                MauiTestAgentErrorCategories.Authorization,
+                "The request policy version is not supported.",
+                retryable: false));
+
+        if (envelope.DeadlineMs is not { } deadlineMs || deadlineMs <= 0 || deadlineMs > 300_000)
+        {
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.DeadlineExpired,
+                MauiTestAgentErrorCategories.Validation,
+                "deadlineMs must be a positive bounded duration.",
+                retryable: false));
+        }
+
+        var requestDigest = DigestMutationRequest(request);
+        if (_idempotency.TryGetValue(envelope.IdempotencyKey!, out var priorIdempotency))
+        {
+            if (FixedEquals(priorIdempotency.RequestDigest, requestDigest) &&
+                priorIdempotency.AuthorizationId is { } priorAuthorizationId &&
+                _authorizations.TryGetValue(priorAuthorizationId, out var priorAuthorization))
             {
-                AppendAuditLocked(session, "mutation-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.TargetStale);
-                return AuthorizationFailure(Error(
-                    MauiTestAgentErrorCodes.TargetStale,
-                    MauiTestAgentErrorCategories.Target,
-                    "The target process, app build, or seed is stale. Refresh discovery and obtain a new human approval.",
-                    retryable: false));
-            }
-
-            if (!CorrelationMatches(session, envelope.Correlation, requireAll: true) &&
-                !CorrelationMatchesGrantSequence(session, envelope.Correlation))
-            {
-                AppendAuditLocked(session, "mutation-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.MutationGrantStale);
-                return AuthorizationFailure(Error(
-                    MauiTestAgentErrorCodes.MutationGrantStale,
-                    MauiTestAgentErrorCategories.State,
-                    "The request does not match the current plan or flow revision.",
-                    retryable: false));
-            }
-
-            if (!ProvenanceMatches(session.Actor, envelope.Provenance))
-            {
-                AppendAuditLocked(session, "mutation-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.MutationGrantScopeDenied);
-                return AuthorizationFailure(Error(
-                    MauiTestAgentErrorCodes.MutationGrantScopeDenied,
-                    MauiTestAgentErrorCategories.Authorization,
-                    "The request actor, channel, or provider does not match the approved authoring session.",
-                    retryable: false));
-            }
-
-            if (!string.Equals(envelope.PolicyVersion, MauiTestAgentProtocolVersions.PolicyVersion, StringComparison.Ordinal))
-                return AuthorizationFailure(Error(
-                    MauiTestAgentErrorCodes.MutationGrantScopeDenied,
-                    MauiTestAgentErrorCategories.Authorization,
-                    "The request policy version is not supported.",
-                    retryable: false));
-
-            if (envelope.DeadlineMs is not { } deadlineMs || deadlineMs <= 0 || deadlineMs > 300_000)
-            {
-                return AuthorizationFailure(Error(
-                    MauiTestAgentErrorCodes.DeadlineExpired,
-                    MauiTestAgentErrorCategories.Validation,
-                    "deadlineMs must be a positive bounded duration.",
-                    retryable: false));
-            }
-
-            var requestDigest = DigestMutationRequest(request);
-            if (_idempotency.TryGetValue(envelope.IdempotencyKey!, out var priorIdempotency))
-            {
-                if (FixedEquals(priorIdempotency.RequestDigest, requestDigest) &&
-                    priorIdempotency.AuthorizationId is { } priorAuthorizationId &&
-                    _authorizations.TryGetValue(priorAuthorizationId, out var priorAuthorization))
+                return new MauiTestAgentMutationAuthorizationResult
                 {
-                    return new MauiTestAgentMutationAuthorizationResult
-                    {
-                        Ok = true,
-                        DispatchAllowed = true,
-                        AuthorizationId = priorAuthorization.AuthorizationId,
-                        RemainingActions = priorAuthorization.RemainingActions,
-                        GrantDigest = priorAuthorization.GrantDigest,
-                    };
-                }
-
-                AppendAuditLocked(
-                    session,
-                    "mutation-denied",
-                    envelope,
-                    "idempotency-reused",
-                    null,
-                    null,
-                    null,
-                    MauiTestAgentErrorCodes.IdempotencyReused);
-                return AuthorizationFailure(Error(
-                    MauiTestAgentErrorCodes.IdempotencyReused,
-                    MauiTestAgentErrorCategories.Conflict,
-                    "This idempotency key has already been used for a different request.",
-                    retryable: false));
+                    Ok = true,
+                    DispatchAllowed = true,
+                    AuthorizationId = priorAuthorization.AuthorizationId,
+                    RemainingActions = priorAuthorization.RemainingActions,
+                    GrantDigest = priorAuthorization.GrantDigest,
+                };
             }
 
-            if (string.IsNullOrWhiteSpace(envelope.ApprovalGrantId))
-                return AuthorizationFailure(Error(
-                    MauiTestAgentErrorCodes.MutationGrantRequired,
-                    MauiTestAgentErrorCategories.Authorization,
-                    "A human-issued mutation grant is required before dispatch.",
-                    retryable: false));
+            AppendAuditLocked(
+                session,
+                "mutation-denied",
+                envelope,
+                "idempotency-reused",
+                null,
+                null,
+                null,
+                MauiTestAgentErrorCodes.IdempotencyReused);
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.IdempotencyReused,
+                MauiTestAgentErrorCategories.Conflict,
+                "This idempotency key has already been used for a different request.",
+                retryable: false));
+        }
 
-            var grantDigest = Hash(envelope.ApprovalGrantId);
-            if (!_grants.TryGetValue(grantDigest, out var grant) ||
-                !FixedEquals(grantDigest, grant.GrantDigest))
-            {
-                if (_expiredGrantDigests.ContainsKey(grantDigest))
-                {
-                    return AuthorizationFailure(Error(
-                        MauiTestAgentErrorCodes.MutationGrantExpired,
-                        MauiTestAgentErrorCategories.Authorization,
-                        "The human-issued mutation grant has expired.",
-                        retryable: false));
-                }
-                return AuthorizationFailure(Error(
-                    MauiTestAgentErrorCodes.MutationGrantRequired,
-                    MauiTestAgentErrorCategories.Authorization,
-                    "The mutation grant is not valid for this broker.",
-                    retryable: false));
-            }
+        if (string.IsNullOrWhiteSpace(envelope.ApprovalGrantId))
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.MutationGrantRequired,
+                MauiTestAgentErrorCategories.Authorization,
+                "A human-issued mutation grant is required before dispatch.",
+                retryable: false));
 
-            var now = _clock.GetUtcNow();
-            if (grant.ExpiresAt <= now)
+        var grantDigest = Hash(envelope.ApprovalGrantId);
+        if (!_grants.TryGetValue(grantDigest, out var grant) ||
+            !FixedEquals(grantDigest, grant.GrantDigest))
+        {
+            if (_expiredGrantDigests.ContainsKey(grantDigest))
             {
-                AppendAuditLocked(session, "mutation-denied", envelope, "denied", grantDigest, null, null, MauiTestAgentErrorCodes.MutationGrantExpired);
                 return AuthorizationFailure(Error(
                     MauiTestAgentErrorCodes.MutationGrantExpired,
                     MauiTestAgentErrorCategories.Authorization,
                     "The human-issued mutation grant has expired.",
                     retryable: false));
             }
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.MutationGrantRequired,
+                MauiTestAgentErrorCategories.Authorization,
+                "The mutation grant is not valid for this broker.",
+                retryable: false));
+        }
 
-            if (grant.RemainingActions <= 0)
-            {
-                AppendAuditLocked(session, "mutation-denied", envelope, "denied", grantDigest, null, null, MauiTestAgentErrorCodes.MutationGrantReused);
-                return AuthorizationFailure(Error(
-                    MauiTestAgentErrorCodes.MutationGrantReused,
-                    MauiTestAgentErrorCategories.Authorization,
-                    "The mutation grant was already consumed.",
-                    retryable: false));
-            }
+        var now = _clock.GetUtcNow();
+        if (grant.ExpiresAt <= now)
+        {
+            AppendAuditLocked(session, "mutation-denied", envelope, "denied", grantDigest, null, null, MauiTestAgentErrorCodes.MutationGrantExpired);
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.MutationGrantExpired,
+                MauiTestAgentErrorCategories.Authorization,
+                "The human-issued mutation grant has expired.",
+                retryable: false));
+        }
 
-            if (!GrantMatchesSession(grant, session))
-            {
-                AppendAuditLocked(session, "mutation-denied", envelope, "denied", grantDigest, null, null, MauiTestAgentErrorCodes.MutationGrantStale);
-                return AuthorizationFailure(Error(
-                    MauiTestAgentErrorCodes.MutationGrantStale,
-                    MauiTestAgentErrorCategories.State,
-                    "The grant is bound to a stale target, revision, or actor.",
-                    retryable: false));
-            }
+        if (grant.RemainingActions <= 0)
+        {
+            AppendAuditLocked(session, "mutation-denied", envelope, "denied", grantDigest, null, null, MauiTestAgentErrorCodes.MutationGrantReused);
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.MutationGrantReused,
+                MauiTestAgentErrorCategories.Authorization,
+                "The mutation grant was already consumed.",
+                retryable: false));
+        }
 
-            var scopeError = ValidateMutationScope(grant.Scope, request);
-            if (scopeError is not null)
-            {
-                AppendAuditLocked(session, "mutation-denied", envelope, "denied", grantDigest, null, null, scopeError.Code);
-                return AuthorizationFailure(scopeError);
-            }
+        if (!GrantMatchesSession(grant, session))
+        {
+            AppendAuditLocked(session, "mutation-denied", envelope, "denied", grantDigest, null, null, MauiTestAgentErrorCodes.MutationGrantStale);
+            return AuthorizationFailure(Error(
+                MauiTestAgentErrorCodes.MutationGrantStale,
+                MauiTestAgentErrorCategories.State,
+                "The grant is bound to a stale target, revision, or actor.",
+                retryable: false));
+        }
 
-            grant.RemainingActions--;
-            if (grant.RemainingActions == 0 &&
-                grant.ApprovalRequestId is { } approvalRequestId &&
-                _approvalRequests.TryGetValue(approvalRequestId, out var approvalRequest) &&
-                approvalRequest.State == MauiTestAgentApprovalStates.Approved)
-            {
-                MarkApprovalLocked(approvalRequest, MauiTestAgentApprovalStates.Consumed, "grant-consumed");
-                AppendAuditLocked(
-                    session,
-                    "approval-consumed",
-                    ApprovalEnvelope(approvalRequest),
-                    "consumed",
-                    grantDigest,
-                    null,
-                    null,
-                    null);
-            }
-            var authorizationId = OpaqueId("auth");
-            _authorizations.Add(authorizationId, new AuthorizationRecord(
-                authorizationId,
-                session.SessionId,
+        var scopeError = ValidateMutationScope(grant.Scope, request);
+        if (scopeError is not null)
+        {
+            AppendAuditLocked(session, "mutation-denied", envelope, "denied", grantDigest, null, null, scopeError.Code);
+            return AuthorizationFailure(scopeError);
+        }
+
+        grant.RemainingActions--;
+        if (grant.RemainingActions == 0 &&
+            grant.ApprovalRequestId is { } approvalRequestId &&
+            _approvalRequests.TryGetValue(approvalRequestId, out var approvalRequest) &&
+            approvalRequest.State == MauiTestAgentApprovalStates.Approved)
+        {
+            MarkApprovalLocked(approvalRequest, MauiTestAgentApprovalStates.Consumed, "grant-consumed");
+            AppendAuditLocked(
+                session,
+                "approval-consumed",
+                ApprovalEnvelope(approvalRequest),
+                "consumed",
                 grantDigest,
-                requestDigest,
-                request.Action!,
-                DigestAction(request),
-                now,
-                grant.RemainingActions));
-            _idempotency.Add(
-                envelope.IdempotencyKey!,
-                new IdempotencyRecord(requestDigest, session.SessionId, now, authorizationId: authorizationId));
-            AppendAuditLocked(session, "mutation-authorized", envelope, "authorized", grantDigest, DigestAction(request), null, null);
+                null,
+                null,
+                null);
+        }
+        var authorizationId = OpaqueId("auth");
+        _authorizations.Add(authorizationId, new AuthorizationRecord(
+            authorizationId,
+            session.SessionId,
+            grantDigest,
+            requestDigest,
+            request.Action!,
+            DigestAction(request),
+            now,
+            grant.RemainingActions,
+            explorationOrigin));
+        _idempotency.Add(
+            envelope.IdempotencyKey!,
+            new IdempotencyRecord(requestDigest, session.SessionId, now, authorizationId: authorizationId));
+        AppendAuditLocked(session, "mutation-authorized", envelope, "authorized", grantDigest, DigestAction(request), null, null);
 
-            return new MauiTestAgentMutationAuthorizationResult
+        return new MauiTestAgentMutationAuthorizationResult
+        {
+            Ok = true,
+            DispatchAllowed = true,
+            AuthorizationId = authorizationId,
+            RemainingActions = grant.RemainingActions,
+            GrantDigest = grantDigest,
+        };
+    }
+
+    /// <summary>
+    /// Authorizes exactly one bounded exploration step and consumes one unit of the approved
+    /// exploration budget. The budget is enforced here, in the broker, and never by the caller:
+    /// a session-scoped counter and duration window are checked and advanced under the same lock
+    /// that consumes the human-issued grant, so a client cannot skip, reset, or over-report it.
+    /// </summary>
+    internal MauiTestAgentExplorationResult AuthorizeExploration(MauiTestAgentExplorationRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        lock (_gate)
+        {
+            PurgeExpiredLocked();
+            var envelope = request.Envelope;
+            var error = ValidateEnvelope(envelope, requireSession: true);
+            if (error is not null)
+                return ExplorationFailure(error);
+
+            if (!_sessions.TryGetValue(envelope!.Correlation!.AuthoringSessionId!, out var session))
+                return ExplorationFailure(Error(
+                    MauiTestAgentErrorCodes.SessionNotFound,
+                    MauiTestAgentErrorCategories.State,
+                    "The authoring session was not found.",
+                    retryable: false));
+
+            if (!TryValidateActiveSessionLocked(session, out error))
+                return ExplorationFailure(error!);
+
+            var action = request.Action?.Trim();
+            if (string.IsNullOrEmpty(action) || !MauiTestAgentActions.Exploration.Contains(action))
+            {
+                AppendAuditLocked(session, "exploration-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.UnsupportedOperation);
+                return ExplorationFailure(Error(
+                    MauiTestAgentErrorCodes.UnsupportedOperation,
+                    MauiTestAgentErrorCategories.Unsupported,
+                    "Exploration may only tap, scroll, navigate, or back. Data entry, assertions, drafting, and runs each need their own approval.",
+                    retryable: false));
+            }
+
+            // The grant must be one a human could only have issued for exploration: it names the
+            // "exploration" side-effect class explicitly, and its actions are navigation-only. A
+            // grant that also permits fill, assert, draft-append, run, cancel, or author-commit is
+            // not an exploration grant and must not be spent here. The class requirement is what
+            // keeps the two grant families disjoint, and it is re-checked by ValidateMutationScope
+            // on the delegated path below, so this is a clearer refusal rather than the only one.
+            if (TryPeekGrantLocked(envelope.ApprovalGrantId, out var peekedGrant) &&
+                (!peekedGrant!.Scope.AllowedSideEffectClasses.Contains(ExplorationSideEffectClass, StringComparer.Ordinal) ||
+                 !ApprovalKindAllowsScope(MauiTestAgentApprovalKinds.Exploration, peekedGrant.Scope) ||
+                 peekedGrant.Scope.AllowedActions.Count == 0 ||
+                 !peekedGrant.Scope.AllowedActions.All(MauiTestAgentActions.Exploration.Contains)))
+            {
+                AppendAuditLocked(session, "exploration-denied", envelope, "denied", peekedGrant!.GrantDigest, null, null, MauiTestAgentErrorCodes.MutationGrantScopeDenied);
+                return ExplorationFailure(Error(
+                    MauiTestAgentErrorCodes.MutationGrantScopeDenied,
+                    MauiTestAgentErrorCategories.Authorization,
+                    "Exploration requires a human-approved grant that names the \"exploration\" side-effect class and whose scope allows only navigation actions.",
+                    retryable: false));
+            }
+
+            var now = _clock.GetUtcNow();
+            var budget = session.Plan?.ExplorationBudget;
+            if (budget is null ||
+                budget.MaxActions is not > 0 ||
+                budget.MaxDurationSeconds is not > 0 ||
+                budget.AllowedScopes.Count == 0)
+            {
+                AppendAuditLocked(session, "exploration-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.ExplorationBudgetRequired);
+                return ExplorationFailure(Error(
+                    MauiTestAgentErrorCodes.ExplorationBudgetRequired,
+                    MauiTestAgentErrorCategories.Authorization,
+                    "The plan committed at session begin must declare an explorationBudget with a positive maxActions, a positive maxDurationSeconds, and at least one allowedScope before any exploration step is authorized. It cannot be added to a live session.",
+                    retryable: false));
+            }
+
+            var scope = request.Scope?.Trim();
+            if (string.IsNullOrEmpty(scope) || !budget.AllowedScopes.Contains(scope, StringComparer.Ordinal))
+            {
+                AppendAuditLocked(session, "exploration-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.ExplorationScopeDenied);
+                return ExplorationFailure(Error(
+                    MauiTestAgentErrorCodes.ExplorationScopeDenied,
+                    MauiTestAgentErrorCategories.Authorization,
+                    "The requested exploration scope is not listed in the session plan's explorationBudget.allowedScopes.",
+                    retryable: false));
+            }
+
+            // The time window is enforced on every step. Only the action counter tolerates a
+            // replay, because a retry of the last allowed step returns the prior authorization
+            // without consuming a grant action and so must not be charged twice.
+            if (EffectiveExplorationExpiry(session, budget) is { } windowExpiry && now >= windowExpiry)
+            {
+                AppendAuditLocked(session, "exploration-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.ExplorationBudgetExhausted);
+                return ExplorationFailure(
+                    Error(
+                        MauiTestAgentErrorCodes.ExplorationBudgetExhausted,
+                        MauiTestAgentErrorCategories.Authorization,
+                        "The exploration time budget for this authoring session has elapsed. A new human approval is required.",
+                        retryable: false),
+                    DescribeExplorationBudgetLocked(session, now));
+            }
+
+            // The step must have a durable identity before any budget is spent, because that
+            // identity is the only thing binding this authorization to one dispatched step. An
+            // element action needs a selector with a scope key; a navigation needs a route.
+            var stepDigest = DigestExplorationStep(action, request.Selector, request.Route);
+            if (stepDigest is null)
+            {
+                AppendAuditLocked(session, "exploration-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.ExplorationScopeDenied);
+                return ExplorationFailure(
+                    Error(
+                        MauiTestAgentErrorCodes.ExplorationScopeDenied,
+                        MauiTestAgentErrorCategories.Authorization,
+                        "An exploration step must name what it will touch: tap and scroll require a selector with a durable key such as an automationId, and navigate requires a route. A step that cannot be pinned cannot be bound to the budget it spends.",
+                        retryable: false),
+                    DescribeExplorationBudgetLocked(session, now));
+            }
+
+            // The prior authorization id, captured before dispatch, is what distinguishes a replay
+            // from a fresh step. It is read after the single purge above, and the delegated call
+            // is told not to purge again, so an entry cannot age out between the two reads and
+            // mint an uncharged authorization.
+            _idempotency.TryGetValue(envelope.IdempotencyKey!, out var priorIdempotency);
+            var priorAuthorizationId = priorIdempotency?.AuthorizationId;
+            var scopeDigest = Hash(scope);
+
+            // The scope is not part of the delegated mutation request, so it is not covered by the
+            // idempotency digest. Comparing it here keeps one key bound to one step: replaying a
+            // key under a different approved scope is a different request, not a retry.
+            if (priorAuthorizationId is not null &&
+                _authorizations.TryGetValue(priorAuthorizationId, out var priorAuthorization) &&
+                !string.Equals(priorAuthorization.ExplorationScopeDigest, scopeDigest, StringComparison.Ordinal))
+            {
+                AppendAuditLocked(session, "exploration-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.IdempotencyReused);
+                return ExplorationFailure(
+                    Error(
+                        MauiTestAgentErrorCodes.IdempotencyReused,
+                        MauiTestAgentErrorCategories.Conflict,
+                        "This idempotency key was already used for a different exploration scope. Use a fresh key.",
+                        retryable: false),
+                    DescribeExplorationBudgetLocked(session, now));
+            }
+
+            if (priorAuthorizationId is null &&
+                session.ExplorationActionsUsed >= EffectiveExplorationActions(budget))
+            {
+                AppendAuditLocked(session, "exploration-denied", envelope, "denied", null, null, null, MauiTestAgentErrorCodes.ExplorationBudgetExhausted);
+                return ExplorationFailure(
+                    Error(
+                        MauiTestAgentErrorCodes.ExplorationBudgetExhausted,
+                        MauiTestAgentErrorCategories.Authorization,
+                        "The exploration action budget for this authoring session is fully spent. A new human approval is required.",
+                        retryable: false),
+                    DescribeExplorationBudgetLocked(session, now));
+            }
+
+            // Every remaining check — grant validity and expiry, scope subset, target freshness,
+            // correlation, provenance, policy version, deadline, and idempotency — is delegated to
+            // the single mutation authorization path so exploration can never be a softer door.
+            // The lock is already held, so the budget decision and the grant consumption are atomic.
+            var authorization = AuthorizeMutationLocked(
+                new MauiTestAgentMutationAuthorizationRequest
+                {
+                    Envelope = envelope,
+                    Action = action,
+                    Selector = request.Selector,
+                    Route = request.Route,
+                    SideEffectClass = ExplorationSideEffectClass,
+                    CurrentTargetState = request.CurrentTargetState,
+                },
+                explorationOrigin: true,
+                purge: false);
+            if (authorization.Ok != true || authorization.AuthorizationId is null)
+            {
+                return ExplorationFailure(
+                    authorization.Error ?? Error(
+                        MauiTestAgentErrorCodes.MutationGrantRequired,
+                        MauiTestAgentErrorCategories.Authorization,
+                        "The exploration step was not authorized.",
+                        retryable: false),
+                    DescribeExplorationBudgetLocked(session, now));
+            }
+
+            if (!string.Equals(authorization.AuthorizationId, priorAuthorizationId, StringComparison.Ordinal))
+            {
+                session.ExplorationStartedAt ??= now;
+                session.ExplorationActionsUsed++;
+            }
+
+            if (_authorizations.TryGetValue(authorization.AuthorizationId, out var mintedAuthorization))
+            {
+                mintedAuthorization.ExplorationScopeDigest = scopeDigest;
+                mintedAuthorization.ExplorationStepDigest = stepDigest;
+            }
+
+            AppendAuditLocked(
+                session,
+                "exploration-authorized",
+                envelope,
+                "authorized",
+                authorization.GrantDigest,
+                Hash(action + "\u001f" + scope),
+                null,
+                null);
+
+            var remaining = DescribeExplorationBudgetLocked(session, now);
+            return new MauiTestAgentExplorationResult
             {
                 Ok = true,
                 DispatchAllowed = true,
-                AuthorizationId = authorizationId,
-                RemainingActions = grant.RemainingActions,
-                GrantDigest = grantDigest,
+                AuthorizationId = authorization.AuthorizationId,
+                RemainingActions = remaining.RemainingActions,
+                ExplorationBudget = remaining,
             };
         }
+    }
+
+    private bool TryPeekGrantLocked(string? approvalGrantId, out GrantRecord? grant)
+    {
+        grant = null;
+        if (string.IsNullOrWhiteSpace(approvalGrantId))
+            return false;
+        var grantDigest = Hash(approvalGrantId);
+        return _grants.TryGetValue(grantDigest, out grant) && FixedEquals(grantDigest, grant.GrantDigest);
+    }
+
+    private int EffectiveExplorationActions(MauiExplorationBudget budget)
+        => Math.Min(budget.MaxActions ?? 0, _options.MaxExplorationActions);
+
+    /// <summary>
+    /// The window a declared budget actually buys, clamped by broker policy. Callers reach this
+    /// only after establishing that <c>MaxDurationSeconds</c> is positive, so the fallback exists
+    /// solely to keep the clamp total; it is not a default a plan can inherit by omission.
+    /// </summary>
+    private int EffectiveExplorationDurationSeconds(MauiExplorationBudget budget)
+        => (int) Math.Min(
+            budget.MaxDurationSeconds is > 0 and var seconds ? seconds : 0,
+            _options.MaximumExplorationWindow.TotalSeconds);
+
+    private DateTimeOffset? EffectiveExplorationExpiry(SessionRecord session, MauiExplorationBudget budget)
+    {
+        if (session.ExplorationStartedAt is not { } startedAt)
+            return null;
+        var expiresAt = startedAt + TimeSpan.FromSeconds(EffectiveExplorationDurationSeconds(budget));
+        return expiresAt < session.ExpiresAt ? expiresAt : session.ExpiresAt;
+    }
+
+    private MauiTestAgentExplorationBudgetState DescribeExplorationBudgetLocked(
+        SessionRecord session,
+        DateTimeOffset now)
+    {
+        var budget = session.Plan?.ExplorationBudget;
+        if (budget is null ||
+            budget.MaxActions is not > 0 ||
+            budget.MaxDurationSeconds is not > 0 ||
+            budget.AllowedScopes.Count == 0)
+        {
+            return new MauiTestAgentExplorationBudgetState
+            {
+                Declared = false,
+                UsedActions = session.ExplorationActionsUsed,
+                RemainingActions = 0,
+                Exhausted = true,
+            };
+        }
+
+        var maxActions = EffectiveExplorationActions(budget);
+        var remainingActions = Math.Max(0, maxActions - session.ExplorationActionsUsed);
+        var expiresAt = EffectiveExplorationExpiry(session, budget);
+        var remainingSeconds = expiresAt is { } expiry
+            ? (int) Math.Max(0, Math.Ceiling((expiry - now).TotalSeconds))
+            : (int?) null;
+        return new MauiTestAgentExplorationBudgetState
+        {
+            Declared = true,
+            MaxActions = maxActions,
+            UsedActions = session.ExplorationActionsUsed,
+            RemainingActions = remainingActions,
+            // Always the enforced ceiling, never the plan's unclamped ask: an agent that read the
+            // larger declared number would plan for time the broker will not grant.
+            MaxDurationSeconds = EffectiveExplorationDurationSeconds(budget),
+            RemainingSeconds = remainingSeconds,
+            StartedAt = session.ExplorationStartedAt,
+            ExpiresAt = expiresAt,
+            AllowedScopes = [.. budget.AllowedScopes],
+            Exhausted = remainingActions == 0 || remainingSeconds == 0,
+        };
     }
 
     /// <summary>
@@ -856,10 +1187,17 @@ internal sealed class TestAgentSessionService
     /// The calling client already checks this, but the broker must not rely on a client to enforce
     /// its own authorization boundary. Each authorization dispatches at most one run.
     /// </summary>
+    /// <param name="steps">
+    /// The steps of the flow this dispatch would replay, as the broker read them from the run
+    /// request. An exploration authorization is bound to exactly one navigation step, so an unknown
+    /// flow is refused rather than assumed benign. There is deliberately no overload that omits
+    /// this: a caller that could not name the flow would silently drop that binding.
+    /// </param>
     internal bool TryConsumeRunDispatchAuthorization(
         string? authorizationId,
         string? agentId,
         string? agentInstanceId,
+        IReadOnlyList<FlowStep>? steps,
         out string? error)
     {
         lock (_gate)
@@ -869,6 +1207,7 @@ internal sealed class TestAgentSessionService
                     authorizationId,
                     agentId,
                     agentInstanceId,
+                    steps,
                     out var authorization,
                     out error))
             {
@@ -883,12 +1222,13 @@ internal sealed class TestAgentSessionService
     /// <summary>
     /// Answers the same question without spending the grant, so a caller can refuse an obviously
     /// unauthorized request early. This is a filter, never the authorization itself: the single-use
-    /// decision stays with <see cref="TryConsumeRunDispatchAuthorization"/>.
+    /// decision stays with <see cref="TryConsumeRunDispatchAuthorization(string?, string?, string?, IReadOnlyList{FlowStep}?, out string?)"/>.
     /// </summary>
     internal bool CanDispatchRunAuthorization(
         string? authorizationId,
         string? agentId,
         string? agentInstanceId,
+        IReadOnlyList<FlowStep>? steps,
         out string? error)
     {
         lock (_gate)
@@ -898,6 +1238,7 @@ internal sealed class TestAgentSessionService
                 authorizationId,
                 agentId,
                 agentInstanceId,
+                steps,
                 out _,
                 out error);
         }
@@ -907,6 +1248,7 @@ internal sealed class TestAgentSessionService
         string? authorizationId,
         string? agentId,
         string? agentInstanceId,
+        IReadOnlyList<FlowStep>? steps,
         out AuthorizationRecord? authorization,
         out string? error)
     {
@@ -916,6 +1258,27 @@ internal sealed class TestAgentSessionService
         {
             error = "A human-issued mutation authorization is required to start a workflow run.";
             return false;
+        }
+
+        if (candidate.ExplorationOrigin)
+        {
+            // One unit of exploration budget buys exactly one navigation step, and only the step
+            // that was authorized — same action, same selector, same route. Without this the budget
+            // would bound how *often* the agent may dispatch, not what it may do: a unit approved
+            // to tap "cart" could replay a tap on "delete-account", or an arbitrary flow of fills
+            // and assertions the exploration grant never approved. An unreadable flow is refused
+            // for the same reason, and so is a step with no durable identity: two digests that are
+            // both null describe two steps nobody can tell apart, which is not a match.
+            var dispatchedDigest = steps is { Count: 1 } && MauiTestAgentActions.Exploration.Contains(steps[0].Action)
+                ? DigestExplorationStep(steps[0])
+                : null;
+            if (candidate.ExplorationStepDigest is null ||
+                dispatchedDigest is null ||
+                !string.Equals(dispatchedDigest, candidate.ExplorationStepDigest, StringComparison.Ordinal))
+            {
+                error = "An exploration authorization dispatches exactly the one navigation step it authorized. A different or wider flow needs its own human approval.";
+                return false;
+            }
         }
 
         if (candidate.RunDispatched)
@@ -1583,6 +1946,11 @@ internal sealed class TestAgentSessionService
     private static MauiTestAgentMutationAuthorizationResult AuthorizationFailure(MauiTestAgentError error)
         => new() { Error = error, DispatchAllowed = false };
 
+    private static MauiTestAgentExplorationResult ExplorationFailure(
+        MauiTestAgentError error,
+        MauiTestAgentExplorationBudgetState? budget = null)
+        => new() { Error = error, DispatchAllowed = false, ExplorationBudget = budget };
+
     private static MauiTestAgentRunBindingResult RunBindingFailure(MauiTestAgentError error)
         => new() { Error = error };
 
@@ -2059,6 +2427,13 @@ internal sealed class TestAgentSessionService
             // vocabulary such as "non-replayable" belongs to run admission, not approval scope.
             scope.AllowedSideEffectClasses = ["authoring"];
         }
+
+        // The exploration kind is deliberately left alone. Its side-effect class list is what the
+        // agent asked for and what the human read before approving, and rewriting it here would
+        // hand back a grant that no longer matches the text that was approved. A grant becomes an
+        // exploration grant by listing the "exploration" class explicitly; the two families are
+        // kept disjoint at redemption instead, where the exploration route requires that class and
+        // the ordinary mutation route refuses any grant that carries it.
     }
 
     private static bool ScopeIsSubset(
@@ -2462,6 +2837,74 @@ internal sealed class TestAgentSessionService
     private static string? SelectorScopeKey(FlowSelector selector)
         => MauiTestAgentSelectorScopeKey.FromSelector(selector);
 
+    /// <summary>
+    /// Canonical identity of one exploration step: the action, the selector's scope key, and — for
+    /// a navigation — the route. It is computed identically from the authorization request and from
+    /// the flow step later presented for dispatch, so the two can be compared without trusting the
+    /// client to describe them the same way.
+    /// <para>
+    /// It returns null whenever the step has no durable identity to pin — an element action whose
+    /// selector has no scope key, a navigation without a route, or a selector on an action that
+    /// does not target an element. A null digest is always a refusal, never a comparison: two
+    /// steps that cannot be told apart must not be allowed to spend each other's budget.
+    /// </para>
+    /// </summary>
+    private static string? DigestExplorationStep(string? action, FlowSelector? selector, string? route)
+    {
+        var targetsElement =
+            string.Equals(action, MauiTestAgentActions.Tap, StringComparison.Ordinal) ||
+            string.Equals(action, MauiTestAgentActions.Scroll, StringComparison.Ordinal);
+        var hasSelector = selector is not null && !selector.IsEmpty;
+
+        string? scopeKey = null;
+        if (targetsElement)
+        {
+            if (!hasSelector)
+                return null;
+            scopeKey = SelectorScopeKey(selector!);
+            // A text-only selector, for example, has no scope key. Hashing it as "no selector"
+            // would let one approved tap stand in for a tap on any other unkeyed element.
+            if (string.IsNullOrEmpty(scopeKey))
+                return null;
+        }
+        else if (hasSelector)
+        {
+            // navigate and back do not target an element, so the digest has nowhere to record a
+            // selector. Ignoring it silently would leave it unbound.
+            return null;
+        }
+
+        string? routeKey = null;
+        if (string.Equals(action, MauiTestAgentActions.Navigate, StringComparison.Ordinal))
+        {
+            routeKey = route?.Trim();
+            if (string.IsNullOrEmpty(routeKey))
+                return null;
+        }
+
+        return Hash(string.Join("\n", action, scopeKey, routeKey));
+    }
+
+    private static string? DigestExplorationStep(FlowStep step)
+    {
+        // A step carries the selector twice. The runner drives FlowValidator.EffectiveSelector, so
+        // that is what the digest must bind to; a step whose two copies disagree is only ever a
+        // forgery, because the one honest producer assigns them the same instance.
+        var target = step.Target;
+        var argsSelector = step.Args?.Selector;
+        if (target is not null && !target.IsEmpty &&
+            argsSelector is not null && !argsSelector.IsEmpty &&
+            !string.Equals(SelectorScopeKey(target), SelectorScopeKey(argsSelector), StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        return DigestExplorationStep(
+            step.Action,
+            FlowValidator.EffectiveSelector(step),
+            step.Args?.Route ?? step.Value);
+    }
+
     private static int NextSequence(MauiFlow flow)
         => flow.Steps.Count == 0 ? 1 : flow.Steps.Max(step => step.Seq) + 1;
 
@@ -2689,6 +3132,7 @@ internal sealed class TestAgentSessionService
                 .Select(request => CloneApprovalRequest(request, includeGrant: true))
                 .ToList(),
             ReadCapabilityId = includeReadCapability ? session.ReadCapabilityId : null,
+            ExplorationBudget = DescribeExplorationBudgetLocked(session, _clock.GetUtcNow()),
         };
 
     private static MauiTestPlan NormalizePlan(
@@ -2727,8 +3171,30 @@ internal sealed class TestAgentSessionService
             Strategy = "host-owned",
         }, MauiTestingJsonContext.Default.MauiTestResetRequirement);
         node["provenance"] ??= JsonSerializer.SerializeToNode(CloneProvenance(envelope.Provenance!), MauiTestingJsonContext.Default.MauiActorProvenance);
-        return node.Deserialize(MauiTestingJsonContext.Default.MauiTestPlan)
+        var normalized = node.Deserialize(MauiTestingJsonContext.Default.MauiTestPlan)
             ?? throw new InvalidOperationException("The authoring plan could not be normalized.");
+        NormalizeExplorationBudget(normalized.ExplorationBudget);
+        return normalized;
+    }
+
+    /// <summary>
+    /// Bounds the client-supplied exploration budget so an oversized scope list cannot be echoed
+    /// back on every snapshot. The ceilings that matter for authorization are applied at
+    /// redemption time by <see cref="EffectiveExplorationActions"/> and
+    /// <see cref="EffectiveExplorationDurationSeconds"/>; this only bounds the retained shape.
+    /// </summary>
+    private static void NormalizeExplorationBudget(MauiExplorationBudget? budget)
+    {
+        if (budget is null)
+            return;
+        var scopes = budget.AllowedScopes
+            .Where(static scope => !string.IsNullOrWhiteSpace(scope) && scope.Length <= 256)
+            .Select(static scope => scope.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .Take(MaxExplorationAllowedScopes)
+            .ToList();
+        budget.AllowedScopes.Clear();
+        budget.AllowedScopes.AddRange(scopes);
     }
 
     private static MauiTestAgentCorrelation SnapshotCorrelation(SessionRecord session)
@@ -3054,6 +3520,8 @@ internal sealed class TestAgentSessionService
         public DateTimeOffset ExpiresAt { get; }
         public DateTimeOffset? CommittedAt { get; set; }
         public SessionState State { get; set; } = SessionState.Active;
+        public int ExplorationActionsUsed { get; set; }
+        public DateTimeOffset? ExplorationStartedAt { get; set; }
         public Dictionary<string, MauiTestAgentPatchRecord> Patches { get; } = new(StringComparer.Ordinal);
         public Dictionary<string, string> Runs { get; } = new(StringComparer.Ordinal);
     }
@@ -3160,7 +3628,8 @@ internal sealed class TestAgentSessionService
             string action,
             string actionDigest,
             DateTimeOffset createdAt,
-            int remainingActions)
+            int remainingActions,
+            bool explorationOrigin = false)
         {
             AuthorizationId = authorizationId;
             SessionId = sessionId;
@@ -3170,6 +3639,7 @@ internal sealed class TestAgentSessionService
             CreatedAt = createdAt;
             ActionDigest = actionDigest;
             RemainingActions = remainingActions;
+            ExplorationOrigin = explorationOrigin;
         }
 
         public string AuthorizationId { get; }
@@ -3180,6 +3650,27 @@ internal sealed class TestAgentSessionService
         public string ActionDigest { get; }
         public DateTimeOffset CreatedAt { get; }
         public int RemainingActions { get; }
+
+        /// <summary>
+        /// True when this authorization was minted by the bounded exploration route. Such an
+        /// authorization buys exactly one navigation step and may never be redeemed to start a
+        /// workflow run, which would otherwise let a single budget unit drive an arbitrary flow.
+        /// </summary>
+        public bool ExplorationOrigin { get; }
+
+        /// <summary>
+        /// Digest of the exploration scope this authorization was minted for. A replay of the same
+        /// idempotency key naming a different scope is refused rather than silently returning this
+        /// authorization, which would misattribute the step in the audit trail.
+        /// </summary>
+        public string? ExplorationScopeDigest { get; set; }
+
+        /// <summary>
+        /// Canonical identity of the single navigation step this authorization was minted for. The
+        /// dispatched flow must reduce to the same digest, so one unit of exploration budget cannot
+        /// be redeemed against a different element, route, or a wider flow.
+        /// </summary>
+        public string? ExplorationStepDigest { get; set; }
         public bool Consumed { get; set; }
         public bool RunDispatched { get; set; }
         public bool Completed { get; set; }
@@ -3235,6 +3726,8 @@ internal sealed class TestAgentSessionServiceOptions
     public int MaxPatchesPerSession { get; init; } = 32;
     public int MaxPatchRequestBytes { get; init; } = 65_536;
     public int MaxActionsPerGrant { get; init; } = 64;
+    public int MaxExplorationActions { get; init; } = 32;
+    public TimeSpan MaximumExplorationWindow { get; init; } = TimeSpan.FromMinutes(10);
     public TimeSpan SessionLifetime { get; init; } = TimeSpan.FromMinutes(30);
     public TimeSpan ApprovalRequestLifetime { get; init; } = TimeSpan.FromMinutes(10);
     public TimeSpan ApprovalRetention { get; init; } = TimeSpan.FromMinutes(30);

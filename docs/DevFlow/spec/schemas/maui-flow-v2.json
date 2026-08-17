@@ -36,6 +36,10 @@
       "items": {
         "$ref": "#/$defs/FlowStep"
       }
+    },
+    "expectedEvidence": {
+      "$ref": "#/$defs/NullableFlowExpectedEvidenceList",
+      "description": "Artifacts this flow declares a run is expected to produce. Declaring an expectation records whether the artifact was produced; it never compares artifact content and never causes the artifact to be captured."
     }
   },
   "additionalProperties": true,
@@ -111,6 +115,50 @@
       "items": {
         "$ref": "#/$defs/FlowAssert"
       }
+    },
+    "NullableFlowExpectedEvidenceList": {
+      "type": [
+        "array",
+        "null"
+      ],
+      "maxItems": 16,
+      "items": {
+        "$ref": "#/$defs/FlowExpectedEvidence"
+      }
+    },
+    "FlowExpectedEvidence": {
+      "type": "object",
+      "description": "A declaration that a run is expected to produce a named artifact. This is a production check only: it records whether the artifact exists, never what it contains. It is not a golden image, not a screenshot diff, and not a visual assertion.",
+      "required": [
+        "kind"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/NullableString",
+          "description": "Optional stable identity for this declaration. Must be unique within its flow or step."
+        },
+        "kind": {
+          "type": "string",
+          "description": "The artifact class expected. 'business-oracle' additionally requires 'reference' naming the oracle id.",
+          "enum": [
+            "screenshot",
+            "visual-tree",
+            "logs",
+            "failure-evidence",
+            "run-report",
+            "business-oracle"
+          ]
+        },
+        "reference": {
+          "$ref": "#/$defs/NullableString",
+          "description": "The named target the expectation points at. Required for 'business-oracle', where it is the oracle id."
+        },
+        "note": {
+          "$ref": "#/$defs/NullableString",
+          "description": "Reviewer-facing note explaining why this evidence is expected."
+        }
+      },
+      "additionalProperties": true
     },
     "FlowSelector": {
       "type": "object",
@@ -512,10 +560,15 @@
           "default": false
         },
         "screenshot": {
-          "$ref": "#/$defs/NullableString"
+          "$ref": "#/$defs/NullableString",
+          "description": "Legacy shorthand for a step-scoped screenshot expectation. Read as an expectedEvidence declaration of kind 'screenshot'; prefer expectedEvidence for new flows."
         },
         "asserts": {
           "$ref": "#/$defs/NullableFlowAssertList"
+        },
+        "expectedEvidence": {
+          "$ref": "#/$defs/NullableFlowExpectedEvidenceList",
+          "description": "Artifacts this step declares a run is expected to produce. Production check only; never a content comparison."
         },
         "acceptanceCriterionIds": {
           "type": [

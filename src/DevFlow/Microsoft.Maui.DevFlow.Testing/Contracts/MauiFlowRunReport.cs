@@ -30,6 +30,8 @@ public sealed class MauiFlowRunReport
     [JsonPropertyName("events")] public List<MauiFlowRunEvent> Events { get; set; } = [];
     [JsonPropertyName("steps")] public List<MauiFlowStepAttempt> Steps { get; set; } = [];
     [JsonPropertyName("failure")] public MauiFlowFailure? Failure { get; set; }
+    [JsonPropertyName("appProcess")] public MauiFlowAppProcessEvidence? AppProcess { get; set; }
+    [JsonPropertyName("expectedEvidence")] public MauiFlowExpectedEvidenceReport? ExpectedEvidence { get; set; }
     [JsonPropertyName("artifacts")] public List<MauiFlowArtifactReference> Artifacts { get; set; } = [];
     [JsonPropertyName("selectorHealth")] public MauiFlowSelectorHealthSummary? SelectorHealth { get; set; }
     [JsonPropertyName("reportDigest")] public string? ReportDigest { get; set; }
@@ -331,7 +333,100 @@ public static class MauiFlowFailureClasses
     public const string AssertionFailed = "assertion-failed";
     public const string Transport = "transport";
     public const string AgentDisconnected = "agent-disconnected";
+
+    /// <summary>
+    /// The application process under test died during the run and the host collected evidence
+    /// that it died abnormally. This is only ever emitted from
+    /// <see cref="MauiFlowAppProcessEvidence"/> that proves an abnormal exit; an agent that
+    /// merely stopped answering stays <see cref="AgentDisconnected"/>.
+    /// </summary>
+    public const string AppCrash = "app-crash";
     public const string Infrastructure = "infrastructure";
+}
+
+/// <summary>
+/// Why the application process under test stopped running. Only the reasons listed by
+/// <see cref="MauiFlowAppProcessEvidence.ProvesAbnormalExit"/> are treated as crash evidence; the
+/// rest exist so a deliberate teardown is recorded as what it is rather than being read as a
+/// crash.
+/// </summary>
+public static class MauiFlowAppExitReasons
+{
+    /// <summary>An unhandled managed or Java exception terminated the process.</summary>
+    public const string Crash = "crash";
+
+    /// <summary>A native fault (for example a fatal signal handled by the platform) terminated the process.</summary>
+    public const string CrashNative = "crash-native";
+
+    /// <summary>The platform declared the application not responding and killed it.</summary>
+    public const string Anr = "anr";
+
+    /// <summary>A user, operator, or harness explicitly stopped the application.</summary>
+    public const string UserRequested = "user-requested";
+
+    /// <summary>An external signal stopped the process without a platform crash record.</summary>
+    public const string Signaled = "signaled";
+
+    /// <summary>The application terminated itself normally.</summary>
+    public const string ExitSelf = "exit-self";
+
+    /// <summary>The platform reclaimed the process under memory pressure.</summary>
+    public const string LowMemory = "low-memory";
+
+    /// <summary>The process is gone but the platform did not name a reason.</summary>
+    public const string Unknown = "unknown";
+}
+
+/// <summary>
+/// What the host observed about the application process after a run failed. Every field is an
+/// observation: <see langword="null"/> means the host did not look or could not tell, and is never
+/// interpreted as a crash.
+/// </summary>
+public sealed class MauiFlowAppProcessEvidence
+{
+    /// <summary>Whether the host attempted the probe at all.</summary>
+    [JsonPropertyName("probed")] public bool? Probed { get; set; }
+
+    /// <summary>Where the observation came from, for example <c>android-adb</c> or <c>process-handle</c>.</summary>
+    [JsonPropertyName("source")] public string? Source { get; set; }
+
+    /// <summary>Whether the application process was gone when the host looked.</summary>
+    [JsonPropertyName("processExited")] public bool? ProcessExited { get; set; }
+
+    /// <summary>The process exit code when the host owns the process handle.</summary>
+    [JsonPropertyName("exitCode")] public int? ExitCode { get; set; }
+
+    /// <summary>One of <see cref="MauiFlowAppExitReasons"/>.</summary>
+    [JsonPropertyName("exitReason")] public string? ExitReason { get; set; }
+
+    /// <summary>Whether the platform held a crash record for this application.</summary>
+    [JsonPropertyName("crashLogPresent")] public bool? CrashLogPresent { get; set; }
+
+    /// <summary>A redacted one-line summary of the crash record, when one was found.</summary>
+    [JsonPropertyName("crashSignature")] public string? CrashSignature { get; set; }
+
+    /// <summary>A bounded, redacted excerpt of the crash record.</summary>
+    [JsonPropertyName("crashExcerpt")] public List<string>? CrashExcerpt { get; set; }
+
+    /// <summary>Why the probe could not answer, when it could not.</summary>
+    [JsonPropertyName("probeError")] public string? ProbeError { get; set; }
+
+    [JsonExtensionData] public Dictionary<string, JsonElement>? ExtensionData { get; set; }
+
+    /// <summary>
+    /// Whether this evidence proves the application died abnormally. The bar is deliberately high:
+    /// the process must be observed gone <em>and</em> the platform must independently name an
+    /// abnormal reason or hold a crash record. A missing process on its own, a non-zero exit code
+    /// on its own, and an operator-requested stop are all explicitly not proof, because the honest
+    /// answer for those is that the host does not know why the application went away.
+    /// </summary>
+    public bool ProvesAbnormalExit() => MauiFlowFailureClassifier.ProvesAppCrash(new MauiFlowFailureFacts
+    {
+        AppProcessExited = ProcessExited,
+        AppExitCode = ExitCode,
+        AppExitReason = ExitReason,
+        CrashLogPresent = CrashLogPresent,
+    });
 }
 
 /// <summary>A redaction-aware reference to a bounded artifact associated with a run.</summary>

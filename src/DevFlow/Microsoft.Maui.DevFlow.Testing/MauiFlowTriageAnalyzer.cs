@@ -138,6 +138,10 @@ public static class MauiFlowTriageAnalyzer
             LegacyFailureKind = report?.Failure?.LegacyKind,
             AssertionTargetResolution = MauiFlowFailureClassifier.AssertionTargetResolutionOf(
                 FindNamedFailedStep(report)),
+            AppProcessExited = report?.AppProcess?.ProcessExited,
+            AppExitCode = report?.AppProcess?.ExitCode,
+            AppExitReason = report?.AppProcess?.ExitReason,
+            CrashLogPresent = report?.AppProcess?.CrashLogPresent,
             CompletionCertain = string.Equals(completion, "unknown", StringComparison.Ordinal)
                 ? false
                 : completion is null ? null : true,
@@ -620,6 +624,13 @@ public static class MauiFlowTriageAnalyzer
         {
             return "unknown-completion";
         }
+        // Mirrors FlowExecutionCoordinator.ClassifyReport: a proven app crash is the app's fault,
+        // not the harness's. Placed after the unknown-completion branch so an unknown mutation is
+        // never relaxed, and before the infrastructure branch so a crash is not filed as an
+        // environment problem. The two must stay in lockstep or every crashed run scores its
+        // evidence as insufficient on an "exit-category-match" the runner cannot satisfy.
+        if (report.Failure?.Class is MauiFlowFailureClasses.AppCrash)
+            return "test-failure";
         if (string.Equals(
                 report.Outcome.Status,
                 MauiFlowRunOutcomes.InfrastructureError,

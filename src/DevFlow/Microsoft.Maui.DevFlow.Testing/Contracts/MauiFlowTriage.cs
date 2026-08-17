@@ -286,6 +286,7 @@ internal static class MauiFlowTriageText
         MauiFlowFailureClasses.AssertionFailed => "A required independent assertion did not match.",
         MauiFlowFailureClasses.Transport => "The execution transport failed before a reliable result was recorded.",
         MauiFlowFailureClasses.AgentDisconnected => "The bound app agent disconnected during execution.",
+        MauiFlowFailureClasses.AppCrash => "The app under test exited abnormally during execution.",
         MauiFlowFailureClasses.UnknownCompletion => "The mutation completion state is unknown and must be fenced.",
         MauiFlowFailureClasses.NotVisible or
         MauiFlowFailureClasses.Disabled or

@@ -95,6 +95,7 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         AgentStatus? liveStatus = null;
         AgentClient? client = null;
         FlowReplayEvidenceCapture? evidence = null;
+        MauiFlowAppProcessEvidence? appProcess = null;
         var exitCategory = FlowExecutionExitCategories.InfrastructureFailure;
         var detailCode = "execution-not-started";
         var message = "The flow execution did not start.";
@@ -404,6 +405,12 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         {
             if (platformSession is not null && adapter is not null)
             {
+                // The probe has to run before cleanup, because cleanup force-stops the app and
+                // would erase the very evidence that separates a crash from a teardown.
+                appProcess = await ProbeAppProcessAsync(
+                    adapter,
+                    platformSession,
+                    startedAt).ConfigureAwait(false);
                 var cleanupStopwatch = Stopwatch.StartNew();
                 FlowExecutionCleanupResult cleanup;
                 try
@@ -488,6 +495,36 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             message,
             appSourceIdentity,
             infrastructurePhase);
+        report.AppProcess = appProcess;
+        // Cleanup owns the outcome when the host's own teardown failed, so a crash never displaces
+        // it; the evidence is still attached above so nothing is hidden.
+        var priorFailure = report.Failure;
+        var priorEventCount = report.Events.Count;
+        var crashOwnsFailure = infrastructurePhase is not ("cleanup" or "artifact-cleanup") &&
+            TryStampAppCrash(report, lifecycle.EndedAt ?? _clock.GetUtcNow());
+        if (crashOwnsFailure)
+        {
+            var recomputed = ClassifyReport(report);
+            // Only ever tighten: an infrastructure verdict becomes the app's fault once the crash
+            // is proven. A fail-closed category (unknown-completion, unverified) is never relaxed,
+            // because knowing the app died still does not prove the mutation completed.
+            if (exitCategory == FlowExecutionExitCategories.InfrastructureFailure &&
+                recomputed == FlowExecutionExitCategories.TestFailure)
+            {
+                exitCategory = recomputed;
+                detailCode = report.Failure?.Code ?? detailCode;
+                message = report.Failure?.Message ?? message;
+            }
+            else if (!string.Equals(recomputed, exitCategory, StringComparison.Ordinal))
+            {
+                // The category cannot move but the stamp would make the report disagree with it,
+                // which reads downstream as a corrupt artifact rather than as a crash. Keep the
+                // evidence in report.AppProcess and leave the attribution alone.
+                report.Failure = priorFailure;
+                report.Events.RemoveRange(priorEventCount, report.Events.Count - priorEventCount);
+                crashOwnsFailure = false;
+            }
+        }
         if (exitCategory == FlowExecutionExitCategories.InfrastructureFailure &&
             !string.Equals(report.Outcome?.Status, MauiFlowRunOutcomes.InfrastructureError, StringComparison.Ordinal))
         {
@@ -508,6 +545,12 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         }
         if (diagnosticsArtifact is not null)
             AddDiagnosticsArtifact(report, diagnosticsArtifact, _clock.GetUtcNow());
+        // Re-evaluated last so the verdict reflects the artifacts and oracle results the run
+        // actually ended with, not the ones the replay had produced when it finished.
+        report.ExpectedEvidence = MauiFlowExpectedEvidenceEvaluator.Evaluate(
+            bundle?.Flow,
+            report,
+            evidence?.CapturedEvidenceKinds);
         NormalizeArtifactPaths(report);
 
         var reportFile = _reportWriter.Create(report);
@@ -606,6 +649,12 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         {
         return FlowExecutionExitCategories.UnknownCompletion;
         }
+        // A proven app crash is attributed to the app, not to the harness. This runs after the
+        // unknown-completion branch so knowing the app died never relaxes an unknown mutation, and
+        // before the infrastructure branch so a crash is not filed as an environment problem and
+        // silently retried.
+        if (failureClass is MauiFlowFailureClasses.AppCrash)
+            return FlowExecutionExitCategories.TestFailure;
         if (string.Equals(report.Outcome?.Status, MauiFlowRunOutcomes.InfrastructureError, StringComparison.Ordinal) ||
         failureClass is MauiFlowFailureClasses.Infrastructure or
             MauiFlowFailureClasses.Transport or
@@ -1065,6 +1114,99 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             Message = message,
             At = at,
         };
+    }
+
+    private static async Task<MauiFlowAppProcessEvidence?> ProbeAppProcessAsync(
+        IFlowExecutionPlatformAdapter adapter,
+        FlowExecutionPlatformSession session,
+        DateTimeOffset runStartedAt)
+    {
+        try
+        {
+            // Deliberately not linked to the run's token. A crashed or wedged app is a common cause
+            // of the run being cancelled or deadlined, which is exactly when this evidence matters
+            // most; teardown two lines earlier uses an independent token for the same reason.
+            using var probeTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(20));
+            return await adapter.ProbeAppProcessAsync(
+                new FlowExecutionAppProbeRequest
+                {
+                    Session = session,
+                    RunStartedAt = runStartedAt,
+                },
+                probeTimeout.Token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            // A probe that cannot answer must not invent one. The absence of evidence is recorded
+            // as an absence, so classification keeps whatever it already knew.
+            Trace.WriteLine($"DevFlow app process probe failed with {ex.GetType().Name}.");
+            return new MauiFlowAppProcessEvidence
+            {
+                Probed = true,
+                ProbeError = "probe-failed",
+            };
+        }
+    }
+
+    /// <summary>
+    /// Replaces the report's failure class with <c>app-crash</c> when, and only when, the attached
+    /// process evidence proves the application died abnormally and the classifier agrees the crash
+    /// outranks whatever class the run already carried.
+    /// </summary>
+    private static bool TryStampAppCrash(MauiFlowRunReport report, DateTimeOffset at)
+    {
+        var evidence = report.AppProcess;
+        if (evidence?.ProvesAbnormalExit() != true)
+            return false;
+        if (string.Equals(report.Outcome?.Status, MauiFlowRunOutcomes.Passed, StringComparison.Ordinal))
+            return false;
+
+        var existing = report.Failure;
+        var facts = new MauiFlowFailureFacts
+        {
+            FailureClass = existing?.Class,
+            LegacyFailureKind = existing?.LegacyKind,
+            CompletionCertain = report.Steps
+                .Any(static step => string.Equals(step.CompletionCertainty, "unknown", StringComparison.Ordinal))
+                ? false
+                : null,
+            AppProcessExited = evidence.ProcessExited,
+            AppExitCode = evidence.ExitCode,
+            AppExitReason = evidence.ExitReason,
+            CrashLogPresent = evidence.CrashLogPresent,
+        };
+        var classification = MauiFlowFailureClassifier.Classify(facts);
+        if (!string.Equals(classification.FailureClass, MauiFlowFailureClasses.AppCrash, StringComparison.Ordinal))
+            return false;
+
+        report.Failure = new MauiFlowFailure
+        {
+            FailureId = existing?.FailureId ?? "failure-" + report.RunId,
+            Class = classification.FailureClass,
+            Code = classification.Code,
+            Category = classification.Category,
+            Phase = classification.Phase,
+            StepId = existing?.StepId,
+            LegacyKind = existing?.LegacyKind,
+            Retryable = classification.Retryable,
+            RepairEligible = classification.RepairEligible,
+            Message = "The app under test exited abnormally during execution.",
+            At = existing?.At ?? at,
+        };
+        report.Events.Add(new MauiFlowRunEvent
+        {
+            Sequence = report.Events.Count == 0
+                ? 1
+                : report.Events.Max(static item => item.Sequence ?? 0) + 1,
+            At = at,
+            Kind = "app-process-exit",
+            // The displaced class is kept here rather than dropped: the crash explains the verdict,
+            // but the symptom the run actually hit is what an author needs to find the defect.
+            Message = existing?.Class is { Length: > 0 } displaced
+                ? $"The app process exited abnormally during this run; the run had reported {displaced}."
+                : "The app process exited abnormally during this run.",
+        });
+        return true;
     }
 
     private static JsonElement CreatePrimaryExecutionOutcome(MauiFlowRunReport report)

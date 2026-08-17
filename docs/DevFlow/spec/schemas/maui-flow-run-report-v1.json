@@ -94,6 +94,12 @@
     "failure": {
       "$ref": "#/$defs/Failure"
     },
+    "appProcess": {
+      "$ref": "#/$defs/AppProcessEvidence"
+    },
+    "expectedEvidence": {
+      "$ref": "#/$defs/ExpectedEvidenceReport"
+    },
     "artifacts": {
       "type": "array",
       "items": {
@@ -937,6 +943,131 @@
       },
       "additionalProperties": true
     },
+    "AppProcessEvidence": {
+      "type": "object",
+      "description": "What the host observed about the application process itself after the run ended. Absent members mean the host did not look or could not tell; they never mean the app was healthy.",
+      "properties": {
+        "probed": {
+          "type": "boolean",
+          "description": "Whether the host attempted to observe the app process at all."
+        },
+        "source": {
+          "type": "string",
+          "description": "How the observation was made, for example 'process-handle' or 'adb'."
+        },
+        "processExited": {
+          "type": "boolean",
+          "description": "Whether the app process under test was observed to be gone."
+        },
+        "exitCode": {
+          "type": "integer"
+        },
+        "exitReason": {
+          "$ref": "#/$defs/AppExitReason"
+        },
+        "crashLogPresent": {
+          "type": "boolean",
+          "description": "Whether the platform held a crash record bound to the app process under test."
+        },
+        "crashSignature": {
+          "type": "string",
+          "description": "Redacted single-line summary of the crash, when one was found."
+        },
+        "crashExcerpt": {
+          "type": "array",
+          "maxItems": 12,
+          "items": {
+            "type": "string"
+          },
+          "description": "Redacted, bounded excerpt of the crash record. Each element is one line."
+        },
+        "probeError": {
+          "type": "string",
+          "description": "Why the probe could not answer. Present only when the answer is unknown."
+        }
+      },
+      "additionalProperties": true
+    },
+    "AppExitReason": {
+      "enum": [
+        "crash",
+        "crash-native",
+        "anr",
+        "user-requested",
+        "signaled",
+        "exit-self",
+        "low-memory",
+        "unknown"
+      ]
+    },
+    "ExpectedEvidenceReport": {
+      "type": "object",
+      "description": "Whether each artifact the flow declared as expected was produced by this run. This records production only: it never compares artifact content, so it is not a golden-image or screenshot-diff result, and it never changes the run outcome.",
+      "properties": {
+        "declared": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "satisfied": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unsatisfied": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notApplicable": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "allSatisfied": {
+          "type": "boolean",
+          "description": "True only when every applicable declaration was satisfied."
+        },
+        "checks": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/ExpectedEvidenceCheck"
+          }
+        }
+      },
+      "additionalProperties": true
+    },
+    "ExpectedEvidenceCheck": {
+      "type": "object",
+      "properties": {
+        "expectationId": {
+          "type": "string"
+        },
+        "scope": {
+          "enum": [
+            "flow",
+            "step"
+          ]
+        },
+        "stepId": {
+          "type": "string"
+        },
+        "kind": {
+          "type": "string"
+        },
+        "reference": {
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "satisfied",
+            "unsatisfied",
+            "not-applicable"
+          ]
+        },
+        "reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
     "FailureClass": {
       "enum": [
         "flow-invalid",
@@ -963,6 +1094,7 @@
         "assertion-failed",
         "transport",
         "agent-disconnected",
+        "app-crash",
         "infrastructure"
       ]
     },

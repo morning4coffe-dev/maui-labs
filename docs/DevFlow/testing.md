@@ -156,6 +156,99 @@ JSON uses the versioned flow-triage contract. Markdown is generated only from th
 neither format copies logs, exception text, app text, prompts, secrets, absolute paths, or device
 serials.
 
+### App crash versus agent loss
+
+A crash destroys the DevFlow agent channel, so from inside DevFlow a dead app and a wedged agent
+look identical. After a run ends, the platform adapter reaches the same device over a second
+transport and asks the platform what happened to the process this run launched. On Android that is
+`adb shell pidof`, `adb shell dumpsys activity exit-info`, and the `crash` logcat buffer filtered to
+the launched pid; on desktop it is the process handle the host already owns. The result is recorded
+in `appProcess` on the run report.
+
+DevFlow reports the failure class `app-crash`, which triages to the `app-regression` disposition,
+**only** when both of the following hold:
+
+- the process under test was observed to be gone, **and**
+- the platform independently named an abnormal reason (`crash`, `crash-native`, `anr`) or held a
+  crash record bound to that pid.
+
+Everything weaker stays as it was. An agent that stopped answering, a process that is simply
+missing, a non-zero exit code, `am force-stop` (`user-requested`), and `kill` (`signaled`) are each
+insufficient, because none of them separates an application fault from a harness teardown, a device
+reboot, or an operator kill. A disconnect with no crash evidence remains `agent-disconnected` and
+stays `inconclusive` — DevFlow does not upgrade uncertainty into an accusation.
+
+A proven crash also never displaces a refusal to run or a fail-closed verdict. An invalid flow is
+still `flow-invalid`, a cancelled run is still `cancelled`, a timed-out run is still `timeout`, an
+unconfirmed mutation is still `unknown-completion`, and a failed owned cleanup still owns the exit
+category. Knowing the app died does not prove the mutation completed, so the `unknown-completion`
+exit category is never relaxed.
+
+Evidence must also be shown to belong to *this* run. Platform exit records outlive the run that
+produced them and operating systems recycle process ids, so a record is used only when it matches
+the launched pid **and** is no older than the run. That age is computed entirely on the device's own
+clock, so no host clock is ever compared to a device clock. When the launched pid is unknown, the
+device clock cannot be read, or the transport cannot answer, the probe records that it could not
+observe rather than reporting an exit it did not see.
+
+Crash text is bounded and redacted through the same report redactor as everything else: at most
+twelve excerpt lines, no absolute paths — host or device-side — no tokens, no device serials.
+
+### Expected evidence
+
+A flow can declare which artifacts a run is expected to produce. Declarations are optional and
+additive, so flows that predate the feature stay valid and produce byte-identical reports.
+
+```json
+{
+  "schema": 2,
+  "name": "checkout",
+  "expectedEvidence": [
+    { "id": "oracle", "kind": "business-oracle", "reference": "order-persisted" }
+  ],
+  "steps": [
+    {
+      "seq": 1,
+      "action": "tap",
+      "expectedEvidence": [
+        { "kind": "visual-tree", "note": "reviewers need the tree if this step regresses" }
+      ]
+    }
+  ]
+}
+```
+
+Kinds are `screenshot`, `visual-tree`, `logs`, `failure-evidence`, `run-report`, and
+`business-oracle` (which requires `reference`, the oracle id). The run report gains an
+`expectedEvidence` block recording one three-state check per declaration: `satisfied`,
+`unsatisfied`, or `not-applicable`.
+
+**What this verifies:** that the declared artifact category exists for this run. That is all.
+
+**What this explicitly does not verify:**
+
+- It is **not** a golden image and **not** a screenshot diff. No artifact content is compared
+  against any baseline. A screenshot of a completely broken screen satisfies a `screenshot`
+  expectation.
+- It **never causes evidence to be captured.** A committed flow cannot make the host collect raw
+  screen pixels the operator did not opt into with `--capture-failure-evidence-screenshot`.
+  Satisfaction is measured against what the configured capture actually produced.
+- It **never changes the run outcome, the failure class, or the exit category.** The block is
+  reviewer information beside the verdict, not a second verdict.
+- `screenshot`, `visual-tree`, `logs`, and `failure-evidence` are failure-scoped, because DevFlow
+  collects them only when a run fails. On a passing run they record `not-applicable` rather than a
+  false miss.
+
+A step's legacy `screenshot` field is read as a step-scoped `screenshot` expectation, so the field
+is no longer inert. Prefer `expectedEvidence` in new flows. A pre-existing flow that already sets
+`screenshot` therefore starts emitting an `expectedEvidence` block where it emitted none before;
+no committed flow in this repository uses the field, but a golden report pinned elsewhere will
+change the first time one adopts it.
+
+When the report has to be trimmed to fit its size limit, `declared` keeps the pre-trim count and
+`allSatisfied` is forced to `false`, because the dropped checks are unknown rather than passing. The
+trim is recorded as an `expected-evidence-checks` omission.
+
 ### Independent business oracles: how a run becomes verified
 
 A clean replay is not a verified test. `flow run` reports `exitCategory: "unverified"` when the

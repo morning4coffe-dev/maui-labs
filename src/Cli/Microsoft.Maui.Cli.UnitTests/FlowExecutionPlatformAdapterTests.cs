@@ -340,7 +340,8 @@ public sealed class FlowExecutionPlatformAdapterTests
         var adapter = new AndroidFlowExecutionAdapter(
             new FakeAndroidProvider(),
             deployment,
-            portManager);
+            portManager,
+            new StaticExecutionProcessRunner());
         var preflight = new FlowExecutionPlatformPreflight
         {
             Device = device,
@@ -392,7 +393,8 @@ public sealed class FlowExecutionPlatformAdapterTests
         var adapter = new AndroidFlowExecutionAdapter(
             new FakeAndroidProvider(),
             new FakeAndroidAppDeployment(),
-            portManager);
+            portManager,
+            new StaticExecutionProcessRunner());
         var session = await adapter.PrepareAndLaunchAsync(new FlowExecutionPlatformRequest
         {
             Artifact = AndroidArtifact(),
@@ -429,7 +431,11 @@ public sealed class FlowExecutionPlatformAdapterTests
         var provider = new FakeAndroidProvider { Devices = [physical] };
         var deployment = new FakeAndroidAppDeployment();
         var portManager = new FakeAndroidFlowPortManager();
-        var adapter = new AndroidFlowExecutionAdapter(provider, deployment, portManager);
+        var adapter = new AndroidFlowExecutionAdapter(
+            provider,
+            deployment,
+            portManager,
+            new StaticExecutionProcessRunner());
 
         var failure = await Assert.ThrowsAsync<FlowExecutionException>(() =>
             adapter.PreflightAsync(new FlowExecutionPlatformPreflightRequest

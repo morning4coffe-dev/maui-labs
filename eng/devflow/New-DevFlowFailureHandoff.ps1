@@ -619,6 +619,9 @@ function Test-FirstAttemptMatches {
 function Get-FailureCategory {
     param([Parameter(Mandatory)] [string] $FailureClass)
 
+    # 'app-crash' is emitted by MauiFlowFailureClassifier only when the platform proved the app
+    # under test exited abnormally. 'device-failure' is not produced by any current C# classifier
+    # and remains reserved for a future device-layer signal.
     switch ($FailureClass) {
         'app-crash' { return 'app-crash' }
         'device-failure' { return 'device-failure' }

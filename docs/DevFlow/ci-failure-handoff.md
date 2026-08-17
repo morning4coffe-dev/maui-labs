@@ -95,7 +95,9 @@ Allowed values:
 - `outcome`: `failure`, `pass`, `pending`
 - `qualification`: `qualified`, `not-qualified`, `pending`
 - `category`: `test-failure`, `app-crash`, `timeout`, `device-failure`,
-  `harness-failure`, `infrastructure`, `unknown`
+  `harness-failure`, `infrastructure`, `unknown`. `app-crash` is reached only when the run report's
+  failure class is `app-crash`, which the classifier emits only from proven abnormal-exit evidence;
+  `device-failure` is reserved and no current classifier produces it.
 - `platform`: `android`, `ios`, `maccatalyst`, `macos`, `windows`,
   `cross-platform`, `unknown`
 - `evidenceSufficiency`: `sufficient`, `partial`, `insufficient`

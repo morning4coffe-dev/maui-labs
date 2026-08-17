@@ -12,6 +12,7 @@ internal static class MauiFlowClone
         Platform = source.Platform,
         RecordedAt = source.RecordedAt,
         Preconditions = source.Preconditions,
+        ExpectedEvidence = CloneExpectedEvidence(source.ExpectedEvidence),
         Steps = source.Steps.Select(CloneStep).ToList(),
         ExtensionData = CloneExtensions(source.ExtensionData),
     };
@@ -50,6 +51,7 @@ internal static class MauiFlowClone
         Navigated = step.Navigated,
         Fragile = step.Fragile,
         Screenshot = step.Screenshot,
+        ExpectedEvidence = CloneExpectedEvidence(step.ExpectedEvidence),
         Asserts = step.Asserts?.Select(assertion => new FlowAssert
         {
             Kind = assertion.Kind,
@@ -281,6 +283,16 @@ internal static class MauiFlowClone
         },
         ExtensionData = CloneExtensions(selector.ExtensionData),
     };
+
+    private static List<FlowExpectedEvidence>? CloneExpectedEvidence(List<FlowExpectedEvidence>? declarations)
+        => declarations?.Select(static declaration => new FlowExpectedEvidence
+        {
+            Id = declaration.Id,
+            Kind = declaration.Kind,
+            Reference = declaration.Reference,
+            Note = declaration.Note,
+            ExtensionData = CloneExtensions(declaration.ExtensionData),
+        }).ToList();
 
     private static Dictionary<string, JsonElement>? CloneExtensions(Dictionary<string, JsonElement>? extensions)
     {

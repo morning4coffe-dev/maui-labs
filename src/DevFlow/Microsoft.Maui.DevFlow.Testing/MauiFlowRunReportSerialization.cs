@@ -45,6 +45,12 @@ public static class MauiFlowRunReportSerializer
 {
     public const string FileName = "flow-run.json";
 
+    /// <summary>Lines of device crash output the report will carry, after redaction.</summary>
+    private const int MaxCrashExcerptLines = 12;
+
+    /// <summary>Declared-evidence checks the report will carry.</summary>
+    private const int MaxExpectedEvidenceChecks = 64;
+
     public static byte[] SerializeToUtf8Bytes(MauiFlowRunReport report)
     {
         ArgumentNullException.ThrowIfNull(report);
@@ -438,6 +444,8 @@ public static class MauiFlowRunReportSerializer
         SanitizeCheckpoint(report.Reset);
         SanitizePreconditions(report.Preconditions);
         SanitizeCompensator(report.Compensator);
+        SanitizeAppProcess(report.AppProcess, maxTextLength);
+        SanitizeExpectedEvidence(report, report.ExpectedEvidence, maxTextLength);
         SanitizeOracles(report.BusinessOracles, maxTextLength);
         SanitizeEligibility(report.ReplayEligibility, maxTextLength);
 
@@ -816,6 +824,81 @@ public static class MauiFlowRunReportSerializer
         seed.Source = MauiFlowReportRedactor.SafeIdentifier(seed.Source);
     }
 
+    /// <summary>
+    /// Bounds and redacts host-collected application-process evidence. The crash excerpt is the
+    /// only place raw device output reaches the report, so it is line-capped and every line is put
+    /// through the same message redaction as any other free text.
+    /// </summary>
+    private static void SanitizeAppProcess(MauiFlowAppProcessEvidence? evidence, int maxTextLength)
+    {
+        if (evidence is null)
+            return;
+
+        evidence.Source = MauiFlowReportRedactor.SafeIdentifier(evidence.Source);
+        evidence.ExitReason = MauiFlowReportRedactor.SafeIdentifier(evidence.ExitReason);
+        evidence.CrashSignature = MauiFlowReportRedactor.SafeMessage(evidence.CrashSignature, maxTextLength);
+        evidence.ProbeError = MauiFlowReportRedactor.SafeMessage(evidence.ProbeError, maxTextLength);
+        var excerpt = (evidence.CrashExcerpt ?? [])
+            .Where(static line => !string.IsNullOrWhiteSpace(line))
+            .Take(MaxCrashExcerptLines)
+            .Select(line => MauiFlowReportRedactor.SafeMessage(line, maxTextLength))
+            .Where(static line => !string.IsNullOrWhiteSpace(line))
+            .Select(static line => line!)
+            .ToList();
+        evidence.CrashExcerpt = excerpt.Count == 0 ? null : excerpt;
+    }
+
+    /// <summary>
+    /// Bounds the declared-evidence block and recomputes its counters from the checks that
+    /// survived, so a trimmed report never claims more coverage than it shows.
+    /// </summary>
+    private static void SanitizeExpectedEvidence(
+        MauiFlowRunReport report,
+        MauiFlowExpectedEvidenceReport? evidence,
+        int maxTextLength)
+    {
+        if (evidence is null)
+            return;
+
+        var retained = (evidence.Checks ?? [])
+            .Where(static item => item is not null)
+            .ToList();
+        var declared = retained.Count;
+        var trimmed = declared > MaxExpectedEvidenceChecks;
+        if (trimmed)
+        {
+            retained = retained.Take(MaxExpectedEvidenceChecks).ToList();
+            AddOmission(
+                report,
+                "expected-evidence-checks",
+                "Some expected-evidence checks were omitted to satisfy the report limit.",
+                declared - retained.Count);
+        }
+
+        evidence.Checks = retained;
+        foreach (var check in evidence.Checks)
+        {
+            check.ExpectationId = MauiFlowReportRedactor.SafeReference(check.ExpectationId);
+            check.Kind = MauiFlowReportRedactor.SafeIdentifier(check.Kind);
+            check.Scope = MauiFlowReportRedactor.SafeIdentifier(check.Scope);
+            check.StepId = MauiFlowReportRedactor.SafeIdentifier(check.StepId);
+            check.Reference = MauiFlowReportRedactor.SafeReference(check.Reference);
+            check.State = MauiFlowReportRedactor.SafeIdentifier(check.State);
+            check.Reason = MauiFlowReportRedactor.SafeMessage(check.Reason, maxTextLength);
+        }
+
+        // Declared keeps the pre-trim count so a reader can see coverage was reduced, and a trimmed
+        // report can never claim every expectation held: the dropped checks are unknown, not passing.
+        evidence.Declared = declared;
+        evidence.Satisfied = CountState(evidence.Checks, MauiFlowEvidenceExpectationStates.Satisfied);
+        evidence.Unsatisfied = CountState(evidence.Checks, MauiFlowEvidenceExpectationStates.Unsatisfied);
+        evidence.NotApplicable = CountState(evidence.Checks, MauiFlowEvidenceExpectationStates.NotApplicable);
+        evidence.AllSatisfied = evidence.Unsatisfied == 0 && !trimmed;
+    }
+
+    private static int CountState(List<MauiFlowExpectedEvidenceCheck> checks, string state)
+        => checks.Count(check => string.Equals(check.State, state, StringComparison.Ordinal));
+
     private static void SanitizeCompensator(MauiFlowCompensatorOutcome? outcome)
     {
         if (outcome is null)
@@ -944,6 +1027,13 @@ public static class MauiFlowRunReportSerializer
                 reason.ExtensionData = null;
         });
         report.Verification?.Let(value => value.ExtensionData = null);
+        report.AppProcess?.Let(value => value.ExtensionData = null);
+        report.ExpectedEvidence?.Let(value =>
+        {
+            value.ExtensionData = null;
+            foreach (var check in value.Checks)
+                check.ExtensionData = null;
+        });
         foreach (var oracle in report.BusinessOracles)
             oracle.ExtensionData = null;
         report.Outcome?.Let(value => value.ExtensionData = null);
@@ -1120,6 +1210,8 @@ public static class MauiFlowReportRedactor
           (?:\\\\|//)[^\\/\s]+[\\/][^\s""']+
           |
           /(?:home|users?|var|etc|opt|private|mnt|workspace|workspaces)/[^\s""']+
+          |
+          /(?:data|sdcard|storage|system|vendor|product|apex)/[^\s""']+
         )",
         RegexOptions.CultureInvariant | RegexOptions.Compiled);
 

@@ -133,6 +133,22 @@ pick-first device selection remain unsupported. Plans requiring reset or compens
 unless a matching allow-listed state evidence provider is registered; missing independent
 business-oracle evidence produces `unverified`, never a certified pass.
 
+A plan that declares a `checkpoint` is enforced after launch, not before it. A host that cannot
+observe clean app state before the app exists records
+`replayEligibility.preconditions.observationDeferredUntilLaunch: true`, and the replay is admitted
+only provisionally: run verification, repair validation, repair eligibility, and downstream
+continuation all stay closed until the real observation arrives. The run pays that debt in a
+`verify-preconditions` stage that runs immediately after `validate-agent`, once the agent is bound
+and the live route, window, modal, locale, theme, orientation, and display profile can actually be
+read. A declaration the live app does not satisfy fails the run there. The deferral only excuses a
+missing observation — a conflict between what the plan declared and what a state-evidence provider
+supplied is decided before launch and stays decided.
+
+Because that checkpoint is compared at every step, a `route`, `window`, or `modal` declared in the
+plan is an invariant of the whole run rather than merely its entry state. Declare those fields only
+where they hold for every step; a flow that deliberately navigates away will otherwise classify its
+failures as `route-state-drift` rather than `locator-not-found`.
+
 ### Deterministic triage
 
 `flow triage` reads only bounded schema-1 execution output and calls the shared
@@ -289,6 +305,27 @@ for a clean Git project source tree with a verifiable commit. A dirty or unverif
 deliberately omits that fact. `.mauitrace` v1 is accepted for safe diagnostics, but it normally cannot establish
 an exact match because it does not retain the flow, source, and checkpoint facts required by the
 evaluator.
+
+#### Signed package identity is per-occurrence
+
+A signed Android APK carries a fresh `packageDigest` for every build, so two occurrences of the
+same commit never agree on it, and `appBuildFingerprint` is derived from that digest and cannot
+agree either. When the import and the local run agree on flow, plan, app source, platform, and
+device profile, the evaluator therefore sets those two mismatches aside and asks a narrower
+question: do the two occurrences carry the same *payload*? `normalizedPayloadDigest` publishes a
+signing-insensitive digest of the deployed package to make that question answerable, and the
+reproduction reports one of three refusals:
+
+| Reason code | Meaning |
+|---|---|
+| `normalized-payload-identity-unavailable` | One or both sides published no normalized payload digest, so the question cannot be asked. |
+| `normalized-payload-identity-differs` | Both sides published one and they differ. |
+| `normalized-payload-identity-unproven` | Both sides published the same digest, but a normalized payload digest is not yet established as a cross-occurrence identity on this platform. |
+
+All three are blocking. The third is the honest state of the art: on Android, thirteen consecutive
+`flow run` invocations of one flow on one commit produced thirteen distinct normalized payload
+digests, so agreement has never been observed and cannot be treated as proof of sameness. The
+digest ships as a diagnostic fact only; it does not rescue a `packageDigest` mismatch today.
 
 The command stops immediately after evaluation. It cannot create, approve, apply, validate, or
 rollback a selector or source proposal. Even an exact CLI match is diagnostic-only: its

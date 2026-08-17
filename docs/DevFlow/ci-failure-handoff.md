@@ -134,6 +134,14 @@ The canonical test identity is UTF-8 SHA-256 of:
 devflow-ci-test-identity-v1\n<platform>\n<tier>\n<flow-digest>
 ```
 
+Each `\n` is a single LF (U+000A), never CRLF. `<flow-digest>` is the flow digest
+in exactly the form the source flow-pilot manifest carries it, which the
+producer's `Test-Sha256` guard pins to `sha256:<64 lowercase hexadecimal
+characters>`; the manifest value is itself the `sha256:`-prefixed
+`MauiFlowRunReportSerializer.ComputeFlowDigest` of the committed flow. `<tier>`
+is `tier-1`, the only tier a qualifying candidate can declare. The result is
+`sha256:<64 lowercase hexadecimal characters>`.
+
 Raw test names, paths, logs, stack traces, branch names, messages, source, and
 artifact-provided Markdown are never copied to the handoff. The handoff
 provenance is constructed exclusively from workflow inputs (repository,
@@ -233,6 +241,63 @@ does not claim a root cause, parse raw evidence, request repair authority, or
 copy issue prose. A digest-bound bot-authored guidance marker makes reruns
 idempotent; an untrusted matching marker fails closed.
 
+### Resolving the test identity to a committed flow
+
+The issue names no test. The first step for a human or an agent holding one is
+to map `testIdentitySha256` back to the flow that produced it, in a trusted
+checkout:
+
+```powershell
+maui devflow flow identity `
+  --resolve sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef `
+  --platform android `
+  --search maui-tests
+```
+
+This does not weaken the publisher's boundary. The digest is a lookup key, not a
+secret: the property CI enforces is that no raw name, path, log, or branch is
+ever emitted into a public issue, and that is a property of the *publisher*. The
+resolver runs locally over flow files the operator already has on disk, computes
+the same construction the producer computes, and discloses nothing that was not
+already in the checkout. It performs no network access, reads no handoff
+archive, and never writes.
+
+Resolution is exact, and its bounds are stated rather than implied. Every `.md`
+file under the search root is parsed, its flow digest computed, and its identity
+compared byte-for-byte — excluding `.git`, `bin`, `obj`, `artifacts`, and
+`node_modules`, symlinked directories, and files above 1 MiB (the same per-file
+limit `flow run` enforces, so no runnable flow is excluded by it). There is no
+fuzzy or closest match. Three outcomes are reported, and only the first exits
+zero:
+
+- `matched` — the identity reproduces exactly from the flow bytes in this
+  checkout. The reported flow is the failing test.
+- `matched-superseded` — no current flow reproduces the identity, but a flow's
+  plan sidecar still records the digest that does. Because `flow run` refuses a
+  bundle whose sidecar and flow disagree on *both* `flow.path` and `flow.digest`,
+  and this command re-checks both bindings before honouring a sidecar, the two
+  agreed at run time — so this names the test and states plainly that the flow
+  has been edited since. Check out the commit named in the issue before
+  reproducing.
+- `no-match` — nothing under the search root produces the identity. The command
+  reports the likely causes: the flow was edited after the run (the digest
+  covers flow content, so any edit inside the fenced `json maui-test` block
+  changes it), the platform or tier is wrong, the flow lives outside the search
+  root, or it lies under an excluded directory. The scan refuses rather than
+  truncates when a search root is too large, and every file it could not read is
+  counted and named in `scan.skipped`, so `no-match` never silently means
+  "stopped looking".
+
+Omitting `--platform` computes one identity per platform CI can publish
+(`android`, `ios`, `maccatalyst`, `windows`); each comparison remains exact.
+Those four are the only values accepted — the handoff envelope allows a reader
+to *see* a wider set, but the producer refuses anything else before an identity
+is computed, so any other value would yield a digest that can never appear in an
+issue. Passing a flow or directory without `--resolve` prints the identities
+that flow would produce, which is how a new flow's expected identity is
+obtained. `--json` output is stable and carries the construction it used, for
+agent consumption.
+
 ## Local verification
 
 After downloading the ZIP into a trusted checkout, use the exact provenance from
@@ -268,7 +333,10 @@ issue publication.
 
 The issue, handoff ZIP, CI artifact names, and downloaded CI diagnostics remain diagnostic-only.
 Do not pass `devflow-failure-handoff.zip` to the flow runner and do not extract arbitrary archive
-content. After verifying the trusted handoff envelope above, obtain an allow-listed per-flow
+content. After verifying the trusted handoff envelope above, resolve the issue's test identity to a
+committed flow with `maui devflow flow identity --resolve` (see
+[Resolving the test identity to a committed flow](#resolving-the-test-identity-to-a-committed-flow));
+every step below needs the flow that resolution names. Then obtain an allow-listed per-flow
 `flow-run.json` or `.mauitrace` diagnostic from the retained run artifacts and reproduce it against
 the committed flow, matching plan, and exact local target:
 

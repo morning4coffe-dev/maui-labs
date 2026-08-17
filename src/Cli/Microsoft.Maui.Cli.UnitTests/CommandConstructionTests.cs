@@ -227,6 +227,21 @@ public class CommandConstructionTests
 	}
 
 	[Fact]
+	public void FlowIdentityCommand_IsPresentAndAcceptsBothComputeAndResolveForms()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var flow = Assert.Single(devflowCommand.Subcommands, command => command.Name == "flow");
+		var identity = Assert.Single(flow.Subcommands, command => command.Name == "identity");
+
+		Assert.Empty(identity.Parse("maui-tests").Errors);
+		Assert.Empty(identity.Parse("maui-tests --platform android --tier tier-1").Errors);
+		Assert.Empty(identity.Parse($"--resolve sha256:{new string('0', 64)} --search maui-tests").Errors);
+		foreach (var optionName in new[] { "--resolve", "--search", "--platform", "--tier" })
+			Assert.Contains(identity.Options, option => option.Name == optionName);
+	}
+
+	[Fact]
 	public void DevFlowCommandsInventory_ListsEveryInvocableCommandInTheTree()
 	{
 		// Regression: the inventory was a hand-maintained list and had drifted, omitting the whole
@@ -273,6 +288,7 @@ public class CommandConstructionTests
 	[InlineData("flow replay", true)]
 	[InlineData("flow reproduce", true)]
 	[InlineData("flow commit", false)]
+	[InlineData("flow identity", false)]
 	[InlineData("flow qualify", false)]
 	[InlineData("flow triage", false)]
 	[InlineData("flow validate", false)]

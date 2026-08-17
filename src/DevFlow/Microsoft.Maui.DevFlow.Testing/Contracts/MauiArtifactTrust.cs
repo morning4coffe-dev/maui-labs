@@ -483,10 +483,6 @@ public sealed class MauiLocalReproductionExpectation
     [JsonPropertyName("packageDigest")]
     public string? PackageDigest { get; set; }
 
-    /// <summary>The current workspace's signing-insensitive normalized payload digest, when available.</summary>
-    [JsonPropertyName("normalizedPayloadDigest")]
-    public string? NormalizedPayloadDigest { get; set; }
-
     [JsonPropertyName("platform")]
     public string? Platform { get; set; }
 

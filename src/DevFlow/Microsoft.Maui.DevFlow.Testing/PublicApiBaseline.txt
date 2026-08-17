@@ -1966,7 +1966,6 @@ P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.AppSourceFinge
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.DeviceProfile[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.FlowDigest[]:System.String{get:public;set:public}
-P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.NormalizedPayloadDigest[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.PackageDigest[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.Platform[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiLocalReproductionExpectation.RuntimeProfileFingerprint[]:System.String{get:public;set:public}

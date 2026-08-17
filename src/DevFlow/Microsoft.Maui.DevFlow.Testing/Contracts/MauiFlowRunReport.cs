@@ -53,9 +53,10 @@ public sealed class MauiFlowRunTarget
     [JsonPropertyName("packageDigest")] public string? PackageDigest { get; set; }
 
     /// <summary>
-    /// A signing-insensitive digest of the deployed package payload. The signed package digest
-    /// identifies one occurrence of a build; this identifies the payload two occurrences share.
-    /// Optional: a producer that cannot compute one omits it and consumers keep refusing.
+    /// A signing-insensitive digest of the deployed package payload, published as a diagnostic
+    /// fact. It has not been established as a cross-occurrence identity on any platform and does
+    /// not rescue a <c>packageDigest</c> mismatch. Optional: a producer that cannot compute one
+    /// omits it and consumers keep refusing.
     /// </summary>
     [JsonPropertyName("normalizedPayloadDigest")] public string? NormalizedPayloadDigest { get; set; }
     [JsonPropertyName("agentId")] public string? AgentId { get; set; }

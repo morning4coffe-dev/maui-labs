@@ -1,8 +1,14 @@
-# Scenario: adding a todo commits it to the app's durable ledger
+# Scenario: adding a todo fails because the add button's AutomationId drifted
 
-This is the repository's worked example of a **verified** DevFlow run. The UI assertion below is
-not what makes it verified: the plan sidecar declares an independent business oracle that reads
-the app's private storage over adb, outside the DevFlow agent channel this flow drives.
+This is the repository's worked example of a **deliberately failing** DevFlow run. It is a copy of
+`verified-add-todo.md` with one change: the add button is addressed as `AddButtonRenamed`, an
+AutomationId the app does not expose. The run is expected to end `locator-not-found` at that step,
+which is the input the selector self-repair pipeline is meant to act on.
+
+Because the tap never lands, the plan's independent business oracle also fails: the todo is never
+written to the app's durable ledger. That is correct and is why this run is not repair-eligible —
+repair eligibility requires the business outcome to have verified independently, so that a drifted
+selector is never confused with an app that is genuinely broken.
 
 ```json maui-test
 {

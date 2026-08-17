@@ -790,17 +790,33 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
     private void VerifyDeclaredPreconditions(
         CommittedFlowBundle bundle,
         MauiFlowRunContext runContext,
-        AgentStatus? liveStatus)
+        AgentStatus liveStatus)
     {
-        if (liveStatus is null)
-            return;
-
+        ArgumentNullException.ThrowIfNull(liveStatus);
         FlowStateEvidenceProviderRegistry.ApplyDeclaredCheckpoint(runContext, bundle.Plan.Checkpoint);
         var preconditions = runContext.Preconditions;
         if (preconditions is null)
-            return;
+        {
+            throw FlowExecutionException.Invalid(
+                "precondition-context-missing",
+                "The run context carries no preconditions to verify, so the declared checkpoint cannot be enforced.");
+        }
 
-        preconditions.Observed = MauiFlowRunner.CreateCheckpoint(liveStatus);
+        // The live reading only fills fields the agent can actually see. A provider that attested a
+        // seed or a backend state at preflight owns those fields, so they are kept rather than
+        // overwritten with the nulls CreateCheckpoint produces for them.
+        var live = MauiFlowRunner.CreateCheckpoint(liveStatus);
+        var observed = preconditions.Observed ?? new MauiFlowCheckpoint();
+        observed.AppBuildFingerprint ??= live.AppBuildFingerprint;
+        observed.AgentInstanceId ??= live.AgentInstanceId;
+        observed.Route ??= live.Route;
+        observed.Window ??= live.Window;
+        observed.Modal ??= live.Modal;
+        observed.Locale ??= live.Locale;
+        observed.Theme ??= live.Theme;
+        observed.Orientation ??= live.Orientation;
+        observed.DisplayProfile ??= live.DisplayProfile;
+        preconditions.Observed = observed;
         preconditions.ObservationDeferredUntilLaunch = null;
         preconditions.CheckedAt = _clock.GetUtcNow();
 
@@ -814,10 +830,10 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         if (decision.OrdinaryReplayAllowed)
             return;
 
-        var blocking = decision.Reasons.FirstOrDefault(static reason =>
-            reason.Blocking == true &&
-            reason.Code is not null &&
-            reason.Code.StartsWith("precondition", StringComparison.Ordinal));
+        // The first blocking reason is the diagnosis, whatever it is named. Preferring a
+        // "precondition"-prefixed code would report a checkpoint problem for refusals that are not
+        // one, such as an unauthorized one-shot or an uncertain prior mutation.
+        var blocking = decision.Reasons.FirstOrDefault(static reason => reason.Blocking == true);
         throw FlowExecutionException.Invalid(
             blocking?.Code ?? "precondition-checkpoint-unsatisfied",
             blocking?.Message ??

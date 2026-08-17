@@ -160,7 +160,7 @@ public sealed class FlowReproductionCoordinatorTests
 
         Assert.False(result.Ok);
         Assert.False(result.Report.Matched);
-        Assert.Contains("normalized-payload-identity-not-an-identity", result.Report.ReasonCodes);
+        Assert.Contains("normalized-payload-identity-unproven", result.Report.ReasonCodes);
         Assert.DoesNotContain("normalized-payload-identity-unavailable", result.Report.ReasonCodes);
         Assert.DoesNotContain("normalized-payload-identity-differs", result.Report.ReasonCodes);
     }

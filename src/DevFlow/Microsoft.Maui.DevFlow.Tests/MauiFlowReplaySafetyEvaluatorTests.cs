@@ -22,10 +22,30 @@ public sealed class MauiFlowReplaySafetyEvaluatorTests
         Assert.False(decision.RepairValidationAllowed);
         Assert.False(decision.RepairEligibility);
         Assert.False(decision.RunVerificationAllowed);
+        Assert.False(decision.DownstreamContinuationAllowed);
         var reason = Assert.Single(
             decision.Reasons,
             candidate => candidate.Code == "preconditions-observation-deferred");
         Assert.False(reason.Blocking);
+    }
+
+    [Fact]
+    public void Evaluate_DeferralDoesNotExcuseADeclarationConflict()
+    {
+        var context = Context(includeReset: false, includeOracle: true);
+        context.Preconditions!.Observed = null;
+        context.Preconditions.ObservationDeferredUntilLaunch = true;
+        // The plan declares "/home"; the host supplied a different expectation. That conflict is
+        // decided before anything is launched, so the deferral must not admit the replay.
+        context.Preconditions.Expected!.Route = "/settings";
+
+        var decision = MauiFlowReplaySafetyEvaluator.Evaluate(Request(
+            Plan(MauiFlowSideEffectPolicies.None),
+            context));
+
+        Assert.False(decision.OrdinaryReplayAllowed);
+        Assert.Contains(decision.Reasons, reason => reason.Code == "precondition-declaration-route-mismatch");
+        Assert.Contains(decision.Reasons, reason => reason.Code == "preconditions-observation-deferred");
     }
 
     [Fact]

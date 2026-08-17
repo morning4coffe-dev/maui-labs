@@ -154,7 +154,6 @@ internal sealed class FlowReproductionCoordinator : IFlowReproductionCoordinator
             AppBuildFingerprint = localFacts.AppBuildFingerprint,
             AppSourceFingerprint = localFacts.AppSourceFingerprint,
             PackageDigest = localFacts.PackageDigest,
-            NormalizedPayloadDigest = localFacts.NormalizedPayloadDigest,
             Platform = localFacts.Platform,
             DeviceProfile = localFacts.DeviceProfile,
             RuntimeProfileFingerprint = localFacts.RuntimeProfileFingerprint,
@@ -650,25 +649,31 @@ internal sealed class FlowReproductionCoordinator : IFlowReproductionCoordinator
                 reasons.Add(new MauiArtifactTrustReason
                 {
                     Code = "normalized-payload-identity-differs",
-                    Message = "Source identity and target profile matched, but the two occurrences carry different payloads outside signature material and DevFlow's injected agent session id.",
+                    // The normalization excludes JAR/APK v1 signature material only, so on a target
+                    // whose signing artefacts take another shape this states the digests differ and
+                    // says nothing about where.
+                    Message = "Source identity and target profile matched, but the two occurrences carry different normalized payload digests.",
                     Blocking = true,
                 });
             }
         }
-        else if (reasons.All(reason =>
-                     !string.Equals(
-                         reason.Code,
-                         "normalized-payload-identity-not-an-identity",
-                         StringComparison.Ordinal)))
+        else
         {
-            // Two occurrences agreeing here is not yet evidence that this platform can produce a
-            // stable payload identity, so it is recorded as an observation and still refuses.
-            reasons.Add(new MauiArtifactTrustReason
+            if (reasons.All(reason =>
+                    !string.Equals(
+                        reason.Code,
+                        "normalized-payload-identity-unproven",
+                        StringComparison.Ordinal)))
             {
-                Code = "normalized-payload-identity-not-an-identity",
-                Message = "The two occurrences carry the same normalized payload digest, but a normalized payload digest has not been established as a cross-occurrence identity on this platform.",
-                Blocking = true,
-            });
+                // Two occurrences agreeing here is not yet evidence that this platform can produce a
+                // stable payload identity, so it is recorded as an observation and still refuses.
+                reasons.Add(new MauiArtifactTrustReason
+                {
+                    Code = "normalized-payload-identity-unproven",
+                    Message = "The two occurrences carry the same normalized payload digest, but a normalized payload digest has not been established as a cross-occurrence identity on this platform.",
+                    Blocking = true,
+                });
+            }
         }
         evaluation.Binding.Matched = false;
         evaluation.Binding.Verification = evaluation.Verification;

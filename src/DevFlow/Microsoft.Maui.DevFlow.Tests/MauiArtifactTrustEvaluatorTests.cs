@@ -141,7 +141,6 @@ public class MauiArtifactTrustEvaluatorTests
         var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
         local.NormalizedPayloadDigest = NormalizedPayload;
         var expected = CreateExpectation();
-        expected.NormalizedPayloadDigest = NormalizedPayload;
 
         var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(imported, local, expected);
 
@@ -176,7 +175,6 @@ public class MauiArtifactTrustEvaluatorTests
         var local = CreateMatchingLocalRun(imported.ImportedAt!.Value);
         local.NormalizedPayloadDigest = NormalizedPayload;
         var expected = CreateExpectation();
-        expected.NormalizedPayloadDigest = NormalizedPayload;
 
         var evaluation = MauiArtifactTrustEvaluator.EvaluateLocalReproduction(imported, local, expected);
 

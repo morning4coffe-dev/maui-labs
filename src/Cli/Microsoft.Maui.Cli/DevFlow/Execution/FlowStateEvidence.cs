@@ -255,6 +255,14 @@ internal sealed class FlowStateEvidenceProviderRegistry : IFlowStateEvidenceProv
     /// make <c>checkpointMatches</c> self-fulfilling and destroy the locator-drift-versus-state-drift
     /// distinction it exists to draw.
     /// </para>
+    /// <para>
+    /// Because the runner compares this checkpoint at <em>every</em> step, a declared or supplied
+    /// <c>route</c>, <c>window</c> or <c>modal</c> is an invariant of the whole run and not merely
+    /// its entry state. A flow that deliberately navigates away from the declared route will report
+    /// <c>routeMatches: false</c> from that point on, and a failure there classifies as
+    /// <c>route-state-drift</c> rather than <c>locator-not-found</c>. Declare these fields only
+    /// where they hold for the entire flow.
+    /// </para>
     /// </remarks>
     internal static void ApplyDeclaredCheckpoint(
         MauiFlowRunContext context,

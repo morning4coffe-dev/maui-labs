@@ -421,6 +421,9 @@ public static class MauiFlowReplaySafetyEvaluator
             decision.RepairValidationAllowed = false;
             decision.RepairEligibility = false;
             decision.RunVerificationAllowed = false;
+            // Continuing a dependent flow is a claim that this run started from the clean state it
+            // declared, which is exactly the observation that has not been made yet.
+            decision.DownstreamContinuationAllowed = false;
         }
 
         if (policy == MauiFlowSideEffectPolicy.NonReplayable)
@@ -507,7 +510,9 @@ public static class MauiFlowReplaySafetyEvaluator
                     "The host cannot observe clean state before launch and owes the observation. Replay is admitted provisionally; verification and repair stay ineligible until the observation is supplied.",
                     blocking: false,
                     scope: "admission");
-                return true;
+                // The deferral only excuses the missing observation. A conflict between what the
+                // plan declared and what the host supplied is already decided and stays decided.
+                return !decision.Reasons.Skip(before).Any(static reason => reason.Blocking == true);
             }
 
             AddReason(

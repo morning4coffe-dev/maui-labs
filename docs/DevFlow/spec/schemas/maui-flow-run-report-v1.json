@@ -176,7 +176,7 @@
         },
         "normalizedPayloadDigest": {
           "type": "string",
-          "description": "Optional signing-insensitive digest of the deployed package payload. The signed packageDigest identifies a single occurrence of a build because the package is re-signed on every deployment and carries DevFlow's per-invocation agent session id; this digest identifies the payload two occurrences of the same build share. Producers that cannot compute one omit the field, and consumers that require it keep refusing."
+          "description": "Optional signing-insensitive digest of the deployed package payload, published as a diagnostic fact. The signed packageDigest identifies a single occurrence of a build because the package is re-signed on every deployment and carries DevFlow's per-invocation agent session id. This digest has not been established as a cross-occurrence identity on any platform and does not rescue a packageDigest mismatch. Producers that cannot compute one omit the field, and consumers that require it keep refusing."
         },
         "agentId": {
           "type": "string"
@@ -345,6 +345,10 @@
         },
         "checkedAt": {
           "$ref": "#/$defs/Timestamp"
+        },
+        "observationDeferredUntilLaunch": {
+          "type": "boolean",
+          "description": "Optional. True while a host that cannot observe clean state before launch still owes the observation. Replay is admitted provisionally, and run verification, repair validation, repair eligibility and downstream continuation stay closed until the observation is supplied. Cleared once the observation is made."
         },
         "evidenceReference": {
           "type": "string"

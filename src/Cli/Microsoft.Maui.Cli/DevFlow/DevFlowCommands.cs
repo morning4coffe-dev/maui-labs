@@ -1655,6 +1655,11 @@ public class DevFlowCommands
             noJsonOption,
             output,
             static () => _errorOccurred = true));
+        flowCommand.Add(Flows.FlowIdentityCommands.Create(
+            jsonOption,
+            noJsonOption,
+            output,
+            static () => _errorOccurred = true));
         devflowCommand.Add(flowCommand);
 
         // ===== shared Inspector / Test Workbench =====

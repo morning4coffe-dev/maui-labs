@@ -93,13 +93,35 @@ public sealed class FlowAgentSessionIdentityTests
     [Fact]
     public void CreateBuildScopedAgentSessionId_MatchesGoldenConstant()
     {
-        if (!OperatingSystem.IsWindows())
-            return; // The golden constant pins a Windows-rooted project path.
+        // An external oracle: SHA-256 of the lowercased full path, first 32 hex characters. A
+        // component that varied per process or per machine could not satisfy this.
+        var (projectPath, expected) = OperatingSystem.IsWindows()
+            ? (@"C:\repo\app\App.csproj", "flow624136b09085ab89ca18375cc9631d24")
+            : ("/repo/app/App.csproj", "flow8184d5ed3b101ec58e1bc8408d2b9e57");
 
+        Assert.Equal(expected, FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(projectPath)));
+    }
+
+    [Fact]
+    public void CreateBuildScopedAgentSessionId_IsDistinguishableFromTheAgentTargetsDefault()
+    {
+        // Microsoft.Maui.DevFlow.Agent.targets defaults to "dw" + the sanitised path tail, so a
+        // flow-run agent must never be mistakable for a plain `maui devflow run` agent.
         var sessionId = FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(
-            Request(@"C:\repo\app\App.csproj"));
+            Request(Path.Combine("C:", "repo", "App.csproj")));
 
-        Assert.Equal("flow624136b09085ab89ca18375cc9631d24", sessionId);
+        Assert.StartsWith("flow", sessionId, StringComparison.Ordinal);
+        Assert.False(sessionId.StartsWith("dw", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void CreateBuildScopedAgentSessionId_UnresolvableProjectPath_StillReturnsAValidIdentity()
+    {
+        // Path.GetFullPath("") throws; the fallback must not escape as an unstructured exception.
+        var sessionId = FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(""));
+
+        Assert.Equal(36, sessionId.Length);
+        Assert.All(sessionId, character => Assert.True(char.IsAsciiLetterOrDigit(character)));
     }
 
     [Fact]
@@ -108,11 +130,25 @@ public sealed class FlowAgentSessionIdentityTests
         var directory = Path.Combine(Path.GetTempPath(), "devflow-session-id");
         var direct = Path.Combine(directory, "App.csproj");
         var indirect = Path.Combine(directory, "nested", "..", "App.csproj");
-        var cased = Path.Combine(directory.ToUpperInvariant(), "APP.CSPROJ");
 
-        var expected = FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(direct));
+        Assert.Equal(
+            FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(direct)),
+            FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(indirect)));
+    }
 
-        Assert.Equal(expected, FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(indirect)));
-        Assert.Equal(expected, FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(Request(cased)));
+    [Fact]
+    public void CreateBuildScopedAgentSessionId_CaseOnlyPathDifference_IsDeliberatelyFolded()
+    {
+        // Case folding is unconditional, so on a case-sensitive filesystem two genuinely distinct
+        // files share an identity. That is a strict subset of the collisions the agent targets'
+        // own 24-character path-tail default already has, and it keeps one repository path from
+        // producing two identities depending on the host filesystem.
+        var directory = Path.Combine(Path.GetTempPath(), "devflow-session-id");
+
+        Assert.Equal(
+            FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(
+                Request(Path.Combine(directory, "App.csproj"))),
+            FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(
+                Request(Path.Combine(directory.ToUpperInvariant(), "APP.CSPROJ"))));
     }
 }

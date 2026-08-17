@@ -42,9 +42,15 @@ namespace Microsoft.Maui.Cli.DevFlow.Execution;
 /// <para>
 /// The digest is a diagnostic fact, not a cross-occurrence identity. It answers "did anything
 /// outside signature material and DevFlow's own injected session id change?", and it is published
-/// on the run report so a reproduction can report that question's answer. It is deliberately not
-/// wired to rescue a signed-digest mismatch, and the measured reason is that the underlying
-/// package is not reproducible in the first place.
+/// on the run report so a reproduction can report that question's answer. That question is only
+/// well posed between builds that share a session id. Neutralization substitutes the identity's
+/// literal bytes, but the identity is also an input to deterministic compilation, so an assembly
+/// built under a different one differs in its MVID, its deterministic PE timestamp and its debug
+/// directory content id — bytes no length-preserving substitution can reach. Because
+/// <c>FlowExecutionCoordinator.CreateBuildScopedAgentSessionId</c> keys the identity on the absolute
+/// project path, this digest is comparable within one project path on one machine and not across
+/// machines. It is deliberately not wired to rescue a signed-digest mismatch, and the measured
+/// reason is that the underlying package is not reproducible even within that scope.
 /// </para>
 /// <para>
 /// An earlier note here claimed that two ordinary incremental <c>dotnet build</c> invocations were
@@ -70,7 +76,10 @@ namespace Microsoft.Maui.Cli.DevFlow.Execution;
 /// The consequence for this type is that normalization cannot close the gap either: the timestamp
 /// drift is already outside the digest by construction, but the Kotlin metadata entries are real
 /// payload, and excluding them would mean excluding real payload. This normalization therefore
-/// stops where the evidence stops.
+/// stops where the evidence stops. Measured after the session identity became build-scoped, two
+/// consecutive <c>flow run</c> invocations of one flow on one Android emulator against one clean
+/// commit still published two different normalized payload digests, so the entry-set contributor
+/// alone is sufficient to keep agreement unobserved.
 /// </para>
 /// <para>
 /// A caller that cannot compute a digest gets <see langword="null"/>, and every consuming gate

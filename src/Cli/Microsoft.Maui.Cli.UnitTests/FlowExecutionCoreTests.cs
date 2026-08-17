@@ -2404,6 +2404,32 @@ public sealed class FlowExecutionCoreTests
     }
 
     [Fact]
+    public async Task Coordinator_WithoutInjectedSessionFactory_PassesTheSameSessionIdToEveryBuild()
+    {
+        // Regression: the session id used to be "flow" + Guid.NewGuid(), which is compiled into the
+        // app by Microsoft.Maui.DevFlow.Agent.targets and so gave every run a different app binary.
+        // Every other coordinator test injects a fixed factory, so only this one fails if the
+        // per-invocation default comes back.
+        using var first = new ExecutionTestWorkspace();
+        using var second = new ExecutionTestWorkspace();
+        var firstResolver = new FakeArtifactResolver(Artifact(Path.Combine(first.Root, "app.apk")));
+        var secondResolver = new FakeArtifactResolver(Artifact(Path.Combine(second.Root, "app.apk")));
+
+        var firstRequest = Request(first.WriteBundle(MauiFlowSideEffectPolicies.None), first.Output);
+        var secondRequest = Request(second.WriteBundle(MauiFlowSideEffectPolicies.None), second.Output);
+
+        await CreateCoordinator(firstResolver, new FakePlatformAdapter()).RunAsync(firstRequest);
+        await CreateCoordinator(secondResolver, new FakePlatformAdapter()).RunAsync(secondRequest);
+
+        Assert.Equal(1, firstResolver.Calls);
+        Assert.Equal(1, secondResolver.Calls);
+        Assert.Equal(firstResolver.ObservedAgentSessionId, secondResolver.ObservedAgentSessionId);
+        Assert.Equal(
+            FlowExecutionCoordinator.CreateBuildScopedAgentSessionId(firstRequest),
+            firstResolver.ObservedAgentSessionId);
+    }
+
+    [Fact]
     public async Task Coordinator_DeviceAdmissionAccepted_StillRunsTheRestOfThePipeline()
     {
         using var workspace = new ExecutionTestWorkspace();
@@ -2692,11 +2718,14 @@ public sealed class FlowExecutionCoreTests
     {
         public int Calls { get; private set; }
 
+        public string? ObservedAgentSessionId { get; private set; }
+
         public Task<ResolvedAppArtifact> ResolveAsync(
             AppArtifactResolutionRequest request,
             CancellationToken cancellationToken = default)
         {
             Calls++;
+            ObservedAgentSessionId = request.AgentSessionId;
             return Task.FromResult(artifact with { AgentSessionId = request.AgentSessionId });
         }
     }

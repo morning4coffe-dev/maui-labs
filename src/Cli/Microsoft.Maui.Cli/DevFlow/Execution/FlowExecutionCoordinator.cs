@@ -1476,14 +1476,25 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
     /// <para>
     /// The identity is derived from the full project path and nothing else, which is deliberately the
     /// same input <c>Microsoft.Maui.DevFlow.Agent.targets</c> uses for its own default session id
-    /// (<c>dw</c> followed by the sanitised tail of <c>$(MSBuildProjectFullPath)</c>). Separate
-    /// worktrees, CI agents and developer machines therefore still produce distinct identities, while
-    /// every spelling of one build — <c>Debug</c> versus <c>debug</c>, <c>android</c> versus
-    /// <c>Android</c>, <c>ios</c> versus <c>ios-simulator</c>, an omitted versus an explicit
-    /// <c>-f</c> — produces the same identity. Folding the artifact selectors into the hash instead
-    /// would make an imported run and its local reproduction disagree whenever the two were spelled
-    /// differently, which is the exact failure this method exists to remove. The path is lowercased
-    /// unconditionally to match the sanitisation the targets apply on every platform.
+    /// (<c>dw</c> followed by the last 24 alphanumeric characters of the sanitised
+    /// <c>$(MSBuildProjectFullPath)</c>). Separate worktrees, CI agents and developer machines
+    /// therefore still produce distinct identities, while every spelling of one build — <c>Debug</c>
+    /// versus <c>debug</c>, <c>android</c> versus <c>Android</c>, <c>ios</c> versus
+    /// <c>ios-simulator</c>, an omitted versus an explicit <c>-f</c> — produces the same identity.
+    /// Folding the artifact selectors into the hash instead would make an imported run and its local
+    /// reproduction disagree whenever the two were spelled differently, which is the exact failure
+    /// this method exists to remove.
+    /// </para>
+    /// <para>
+    /// The path is lowercased unconditionally rather than only on case-insensitive hosts. Hashing the
+    /// whole path is strictly more discriminating than the identity it replaces — the targets' own
+    /// default collides for any two projects whose sanitised path tails agree over 24 alphanumeric
+    /// characters — so case folding removes a strict subset of collisions that already exist in the
+    /// default path, and it keeps one repository path from producing two identities depending on the
+    /// host filesystem. Equivalence extends exactly as far as <see cref="Path.GetFullPath(string)"/>
+    /// normalization plus case folding: a junction, a symbolic link, an 8.3 short name, a
+    /// <c>\\?\</c> prefix, and a mapped drive versus its UNC spelling are each a distinct identity,
+    /// as they are for <c>$(MSBuildProjectFullPath)</c>.
     /// </para>
     /// <para>
     /// Nothing about agent binding exactness is relaxed. The selectors dropped here are still matched
@@ -1492,6 +1503,15 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
     /// target framework and platform to match, compares the process id whenever the expectation
     /// carries one, compares device identity when device identity matching is required, and refuses
     /// ambiguous candidates outright.
+    /// </para>
+    /// <para>
+    /// One consequence is worth stating plainly. Because the identity is keyed on the absolute project
+    /// path, an imported run produced on another machine and its local reproduction necessarily carry
+    /// different identities, and the length-preserving neutralisation in
+    /// <see cref="NormalizedPayloadDigest"/> removes the embedded literal but not the compiler outputs
+    /// derived from it. A normalized payload digest is therefore comparable only between builds that
+    /// share a session identity — that is, one project path on one machine. This change strictly
+    /// improves that case, which previously could never agree, and does not create a cross-machine one.
     /// </para>
     /// <para>
     /// The result keeps the 36-character shape of the previous <c>"flow" + Guid("N")</c> value so the
@@ -1508,10 +1528,10 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         {
             projectPath = Path.GetFullPath(projectPath);
         }
-        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or IOException)
         {
             // Fall back to the caller-supplied spelling; resolution failures surface later with a
-            // precise diagnostic and must not change the session identity shape here.
+            // precise diagnostic and must not escape as an unstructured exception here.
         }
 
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(projectPath.ToLowerInvariant()));

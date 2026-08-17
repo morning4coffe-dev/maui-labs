@@ -58,6 +58,7 @@ public static class McpServerHost
 		"maui_test_assertion",
 		"maui_test_author",
 		"maui_test_capabilities",
+		"maui_test_explore",
 		"maui_test_failure",
 		"maui_test_improvements",
 		"maui_test_patch",
@@ -171,6 +172,7 @@ public static class McpServerHost
 				.WithTools<TestAgentCapabilitiesTool>()
 				.WithTools<TestAgentAuthoringTool>()
 				.WithTools<TestAgentActionTool>()
+				.WithTools<TestAgentExplorationTool>()
 				.WithTools<TestAgentAssertionTool>()
 				.WithTools<TestAgentValidationTool>()
 				.WithTools<TestAgentRunTool>()

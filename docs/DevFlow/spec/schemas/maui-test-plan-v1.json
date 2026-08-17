@@ -340,18 +340,31 @@
       "additionalProperties": true
     },
     "ExplorationBudget": {
+      "description": "A bounded allowance for agent-driven exploration. The broker refuses every exploration step unless all three fields are present and positive, so a partially-declared budget is a plan-authoring error rather than a runtime surprise.",
       "type": "object",
+      "required": [
+        "maxActions",
+        "maxDurationSeconds",
+        "allowedScopes"
+      ],
       "properties": {
         "maxActions": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 1
         },
         "maxDurationSeconds": {
           "type": "integer",
-          "minimum": 0
+          "minimum": 1
         },
         "allowedScopes": {
-          "$ref": "#/$defs/StringList"
+          "allOf": [
+            {
+              "$ref": "#/$defs/StringList"
+            },
+            {
+              "minItems": 1
+            }
+          ]
         }
       },
       "additionalProperties": true

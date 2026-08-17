@@ -241,6 +241,9 @@ C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthorRequest()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthoringSnapshot()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentCorrelation()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentError()
+C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState()
+C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest()
+C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationResult()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueRequest()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueResult()
 C:Microsoft.Maui.DevFlow.Testing.MauiTestAgentHumanApproval()
@@ -514,6 +517,7 @@ F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentActions.AuthorCommit:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentActions.Back:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentActions.Cancel:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentActions.DraftAppend:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentActions.Exploration:System.Collections.Generic.IReadOnlySet`1[System.String]
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentActions.Fill:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentActions.Navigate:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentActions.Run:System.String
@@ -547,6 +551,9 @@ F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.ApprovalRequestNotFound
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.ApprovalRequestScopeDenied:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.DeadlineExpired:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.ExplicitTargetRequired:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.ExplorationBudgetExhausted:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.ExplorationBudgetRequired:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.ExplorationScopeDenied:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.HumanApprovalRequired:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.IdempotencyReused:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.InvalidRequest:System.String
@@ -651,6 +658,7 @@ M:Microsoft.Maui.DevFlow.Testing.FlowSelector.IsOpaqueStableItemKey(value:System
 M:Microsoft.Maui.DevFlow.Testing.FlowTargetResolution.Failure(kind:System.String,error:System.String,candidates:System.Collections.Generic.IReadOnlyList`1[Microsoft.Maui.DevFlow.Driver.ElementInfo]=null):Microsoft.Maui.DevFlow.Testing.FlowTargetResolution
 M:Microsoft.Maui.DevFlow.Testing.FlowTargetResolution.Success(element:Microsoft.Maui.DevFlow.Driver.ElementInfo,count:System.Int32,quality:System.String):Microsoft.Maui.DevFlow.Testing.FlowTargetResolution
 M:Microsoft.Maui.DevFlow.Testing.FlowTargetResolution.WithFailure(kind:System.String,error:System.String):Microsoft.Maui.DevFlow.Testing.FlowTargetResolution
+M:Microsoft.Maui.DevFlow.Testing.FlowValidator.EffectiveSelector(step:Microsoft.Maui.DevFlow.Testing.FlowStep):Microsoft.Maui.DevFlow.Testing.FlowSelector
 M:Microsoft.Maui.DevFlow.Testing.FlowValidator.Validate(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow):Microsoft.Maui.DevFlow.Testing.FlowValidation
 M:Microsoft.Maui.DevFlow.Testing.IFlowReplayEvidenceCapture.BeginRunAsync(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow,cancellationToken:System.Threading.CancellationToken):System.Threading.Tasks.Task`1[System.IAsyncDisposable]
 M:Microsoft.Maui.DevFlow.Testing.IFlowReplayEvidenceCapture.CaptureOnFailureAsync(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow,failedStep:Microsoft.Maui.DevFlow.Testing.FlowStep,result:Microsoft.Maui.DevFlow.Testing.FlowStepResult,cancellationToken:System.Threading.CancellationToken):System.Threading.Tasks.Task
@@ -2717,6 +2725,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthorRequest.WaitTimeoutSeconds[]
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthoringSnapshot.ApprovalRequests[]:System.Collections.Generic.List`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentApprovalRecord]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthoringSnapshot.CommittedAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthoringSnapshot.ExpiresAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthoringSnapshot.ExplorationBudget[]:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthoringSnapshot.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthoringSnapshot.FlowDigest[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthoringSnapshot.FlowRevision[]:System.Nullable`1[System.Int32]{get:public;set:public}
@@ -2744,6 +2753,34 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentError.Code[]:System.String{get:pub
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentError.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentError.Message[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentError.Retryable[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState.AllowedScopes[]:System.Collections.Generic.List`1[System.String]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState.Declared[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState.Exhausted[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState.ExpiresAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState.MaxActions[]:System.Nullable`1[System.Int32]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState.MaxDurationSeconds[]:System.Nullable`1[System.Int32]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState.RemainingActions[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState.RemainingSeconds[]:System.Nullable`1[System.Int32]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState.StartedAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState.UsedActions[]:System.Int32{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest.Action[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest.CurrentTargetState[]:Microsoft.Maui.DevFlow.Testing.MauiTestAgentTargetState{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest.DeltaX[]:System.Nullable`1[System.Double]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest.DeltaY[]:System.Nullable`1[System.Double]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest.Envelope[]:Microsoft.Maui.DevFlow.Testing.MauiTestAgentRequestEnvelope{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest.ItemIndex[]:System.Nullable`1[System.Int32]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest.Route[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest.Scope[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest.Selector[]:Microsoft.Maui.DevFlow.Testing.FlowSelector{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationResult.AuthorizationId[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationResult.DispatchAllowed[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationResult.Error[]:Microsoft.Maui.DevFlow.Testing.MauiTestAgentError{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationResult.ExplorationBudget[]:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationResult.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationResult.Ok[]:System.Boolean{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationResult.RemainingActions[]:System.Nullable`1[System.Int32]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueRequest.Approval[]:Microsoft.Maui.DevFlow.Testing.MauiTestAgentHumanApproval{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueRequest.Correlation[]:Microsoft.Maui.DevFlow.Testing.MauiTestAgentCorrelation{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueRequest.ExpiresAt[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
@@ -3255,6 +3292,9 @@ P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentAuthorReque
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentAuthoringSnapshot[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthoringSnapshot]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentCorrelation[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentCorrelation]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentError[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentError]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentExplorationBudgetState[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentExplorationRequest[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest]{get:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentExplorationResult[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationResult]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentGrantIssueRequest[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueRequest]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentGrantIssueResult[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueResult]{get:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiTestingJsonContext.MauiTestAgentHumanApproval[]:System.Text.Json.Serialization.Metadata.JsonTypeInfo`1[Microsoft.Maui.DevFlow.Testing.MauiTestAgentHumanApproval]{get:public}
@@ -3677,6 +3717,9 @@ T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthorRequest
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentAuthoringSnapshot
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentCorrelation
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentError
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationBudgetState
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationRequest
+T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentExplorationResult
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueRequest
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentGrantIssueResult
 T:class sealed Microsoft.Maui.DevFlow.Testing.MauiTestAgentHumanApproval

@@ -14,9 +14,20 @@ public sealed class TestAgentActionTool
 {
     [McpServerTool(Name = "maui_test_action"),
      System.ComponentModel.Description("Execute only a human-approved typed semantic action (tap, fill, scroll, navigate, or back) against the authoring session's canonical target. Appending its normalized form requires a separately authorized and consumed draft-append action; execute+append therefore needs a grant scope containing both actions with maxActionCount at least 2. Never invokes arbitrary actions or mutates arbitrary properties.")]
-    public static async Task<string> Action(
+    public static Task<string> Action(
         [System.ComponentModel.Description("MCP session injected by the server and used for the local broker and exact target")] McpAgentSession session,
         [System.ComponentModel.Description("Typed semantic action request containing a complete envelope, durable selector or route, bounded value, and optional draft append")] MauiTestAgentActionRequest request)
+        => ExecuteAsync(session, request, explorationScope: null);
+
+    /// <summary>
+    /// Shared dispatch path for approved typed actions. When <paramref name="explorationScope"/> is
+    /// supplied the step is authorized through the broker's exploration endpoint instead, so the
+    /// broker — not this client — decides whether an exploration budget still permits the step.
+    /// </summary>
+    internal static async Task<string> ExecuteAsync(
+        McpAgentSession session,
+        MauiTestAgentActionRequest request,
+        string? explorationScope)
     {
         if (request is null)
         {
@@ -33,6 +44,19 @@ public sealed class TestAgentActionTool
                 MauiTestAgentErrorCodes.InvalidRequest,
                 MauiTestAgentErrorCategories.Validation,
                 "A typed semantic action request with a protocol envelope is required.",
+                retryable: false));
+        }
+
+        // Exploration is a single executed navigation step and nothing else. The broker refuses a
+        // draft append or a value against an exploration grant independently; pinning it here keeps
+        // the invariant visible at the seam the two tools share.
+        if (explorationScope is not null &&
+            (!request.Execute || request.AppendDraft || request.Value is not null))
+        {
+            return TestAgentToolSupport.Failure(envelope.RequestId, TestAgentToolSupport.Error(
+                MauiTestAgentErrorCodes.UnsupportedOperation,
+                MauiTestAgentErrorCategories.Unsupported,
+                "An exploration step executes exactly one navigation action. It cannot append to the draft or carry a value.",
                 retryable: false));
         }
         if (!request.Execute && !request.AppendDraft)
@@ -82,25 +106,47 @@ public sealed class TestAgentActionTool
             };
         }
 
-        TestAgentBrokerResponse<MauiTestAgentMutationAuthorizationResult>? executeAuthorization = null;
+        string? executeAuthorizationId = null;
+        MauiTestAgentExplorationBudgetState? explorationBudget = null;
         if (request.Execute)
         {
-            executeAuthorization = await TestAgentToolSupport.AuthorizeAsync(
-                session,
-                envelope,
-                request.Action ?? string.Empty,
-                request.Selector,
-                request.Route,
-                ResolveSideEffectClass(request),
-                request.Value).ConfigureAwait(false);
-            if (executeAuthorization.Value?.Ok != true ||
-                executeAuthorization.Value.AuthorizationId is null)
+            if (explorationScope is null)
             {
-                return TestAgentToolSupport.BrokerFailure(envelope.RequestId, executeAuthorization);
+                var executeAuthorization = await TestAgentToolSupport.AuthorizeAsync(
+                    session,
+                    envelope,
+                    request.Action ?? string.Empty,
+                    request.Selector,
+                    request.Route,
+                    ResolveSideEffectClass(request),
+                    request.Value).ConfigureAwait(false);
+                if (executeAuthorization.Value?.Ok != true ||
+                    executeAuthorization.Value.AuthorizationId is null)
+                {
+                    return TestAgentToolSupport.BrokerFailure(envelope.RequestId, executeAuthorization);
+                }
+                executeAuthorizationId = executeAuthorization.Value.AuthorizationId;
+            }
+            else
+            {
+                var exploration = await TestAgentToolSupport.AuthorizeExplorationAsync(
+                    session,
+                    envelope,
+                    request.Action ?? string.Empty,
+                    explorationScope,
+                    request.Selector,
+                    request.Route,
+                    request.DeltaX,
+                    request.DeltaY,
+                    request.ItemIndex).ConfigureAwait(false);
+                if (exploration.Value?.Ok != true || exploration.Value.AuthorizationId is null)
+                    return TestAgentToolSupport.BrokerFailure(envelope.RequestId, exploration);
+                executeAuthorizationId = exploration.Value.AuthorizationId;
+                explorationBudget = exploration.Value.ExplorationBudget;
             }
 
             // The broker verifies this authorization itself before dispatching the run.
-            runRequest!.AuthorizationId = executeAuthorization.Value.AuthorizationId;
+            runRequest!.AuthorizationId = executeAuthorizationId;
             runJson = TestAgentBrokerClient.SerializeWorkflowRunRequest(
                 runRequest,
                 DevFlowCliJsonContext.Default.WorkflowRunStartRequest);
@@ -122,7 +168,7 @@ public sealed class TestAgentActionTool
             if (appendAuthorization.Value?.Ok != true ||
                 appendAuthorization.Value.AuthorizationId is null)
             {
-                if (executeAuthorization?.Value?.AuthorizationId is { } unusedExecuteAuthorization)
+                if (executeAuthorizationId is { } unusedExecuteAuthorization)
                 {
                     await CompleteAsync(
                         session,
@@ -151,7 +197,7 @@ public sealed class TestAgentActionTool
                 // grant stays consumed and the caller must not retry this idempotency key.
                 await CompleteAsync(
                     session,
-                    executeAuthorization!.Value!.AuthorizationId!,
+                    executeAuthorizationId!,
                     "unknown-completion",
                     request,
                     null,
@@ -166,7 +212,7 @@ public sealed class TestAgentActionTool
             {
                 await CompleteAsync(
                     session,
-                    executeAuthorization!.Value!.AuthorizationId!,
+                    executeAuthorizationId!,
                     "rejected",
                     request,
                     null,
@@ -197,7 +243,7 @@ public sealed class TestAgentActionTool
                         }),
                     () => CompleteAsync(
                         session,
-                        executeAuthorization!.Value!.AuthorizationId!,
+                        executeAuthorizationId!,
                         "unknown-completion",
                         request,
                         runId,
@@ -222,7 +268,7 @@ public sealed class TestAgentActionTool
                     request,
                     null,
                     append.Value?.Error?.Code).ConfigureAwait(false);
-                if (executeAuthorization?.Value?.AuthorizationId is { } completedExecuteAuthorization)
+                if (executeAuthorizationId is { } completedExecuteAuthorization)
                 {
                     await CompleteAsync(
                         session,
@@ -244,11 +290,11 @@ public sealed class TestAgentActionTool
                 null).ConfigureAwait(false);
         }
 
-        if (executeAuthorization?.Value?.AuthorizationId is { } executeAuthorizationId)
+        if (executeAuthorizationId is { } queuedExecuteAuthorizationId)
         {
             await CompleteAsync(
                 session,
-                executeAuthorizationId,
+                queuedExecuteAuthorizationId,
                 "queued",
                 request,
                 runId,
@@ -260,6 +306,8 @@ public sealed class TestAgentActionTool
             runId,
             queued = request.Execute,
             draft = appended?.Snapshot,
+            explorationScope,
+            explorationBudget,
             completion = request.Execute ? "queued" : "completed",
         });
     }

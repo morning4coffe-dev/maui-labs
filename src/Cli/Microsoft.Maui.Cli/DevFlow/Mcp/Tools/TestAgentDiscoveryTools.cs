@@ -35,10 +35,11 @@ public sealed class TestAgentDiscoveryTools
     }
 
     [McpServerTool(Name = "maui_test_status"),
-     System.ComponentModel.Description("Return a safe status projection for one explicitly named test-agent target. It does not select a default target or reveal UI text, logs, files, network bodies, screenshots, or source.")]
+     System.ComponentModel.Description("Return a safe status projection for one explicitly named test-agent target. It does not select a default target or reveal UI text, logs, files, network bodies, screenshots, or source. Supplying an authoring session access request additionally returns the broker-enforced exploration budget still remaining for that session.")]
     public static async Task<string> Status(
         [System.ComponentModel.Description("MCP session injected by the server and used only to resolve the exact target")] McpAgentSession session,
-        [System.ComponentModel.Description("Exact stable agent ID and process instance ID returned by maui_test_agents")] MauiTestAgentTarget target)
+        [System.ComponentModel.Description("Exact stable agent ID and process instance ID returned by maui_test_agents")] MauiTestAgentTarget target,
+        [System.ComponentModel.Description("Optional authoring session read request — session id, its read capability, and a complete protocol envelope — whose remaining exploration budget should also be reported")] MauiTestAgentSessionAccessRequest? authoringSession = null)
     {
         var resolved = await TestAgentToolSupport.ResolveTargetAsync(session, target).ConfigureAwait(false);
         if (resolved.Error is not null)
@@ -53,6 +54,29 @@ public sealed class TestAgentDiscoveryTools
                 MauiTestAgentErrorCategories.Target,
                 "The explicit target did not return a status response.",
                 retryable: true));
+        }
+
+        MauiTestAgentExplorationBudgetState? explorationBudget = null;
+        if (authoringSession is not null)
+        {
+            // The budget is authoring-session state, so reading it needs the session's read
+            // capability and a complete envelope, exactly as every other session read does.
+            if (string.IsNullOrWhiteSpace(authoringSession.SessionId) ||
+                string.IsNullOrWhiteSpace(authoringSession.ReadCapabilityId) ||
+                authoringSession.Envelope is null)
+            {
+                return TestAgentToolSupport.Failure(null, TestAgentToolSupport.Error(
+                    MauiTestAgentErrorCodes.ReadCapabilityRequired,
+                    MauiTestAgentErrorCategories.Authorization,
+                    "Reporting the exploration budget requires the authoring session id, the read capability issued with it, and a complete protocol envelope.",
+                    retryable: false));
+            }
+
+            var brokerPort = await session.GetBrokerPortAsync().ConfigureAwait(false);
+            var snapshot = await TestAgentBrokerClient.StatusAsync(brokerPort, authoringSession).ConfigureAwait(false);
+            if (snapshot.Value?.Ok != true || snapshot.Value.Snapshot is null)
+                return TestAgentToolSupport.BrokerFailure(authoringSession.Envelope.RequestId, snapshot);
+            explorationBudget = snapshot.Value.Snapshot.ExplorationBudget;
         }
 
         return TestAgentToolSupport.Success(null, new
@@ -73,6 +97,7 @@ public sealed class TestAgentDiscoveryTools
             },
             route = status.Route,
             window = status.Window,
+            explorationBudget,
         });
     }
 }

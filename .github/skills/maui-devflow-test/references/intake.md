@@ -59,34 +59,80 @@ numbers in chat before submitting anything:
 omitted scope list are all invalid proposals. Size `maxActions` to the number
 of unknowns, not to the size of the app.
 
-Submit it with the `exploration-request` operation of `maui_test_author`, and
-wait. An exploration request is a request; chat approval is not authorization,
-and `awaiting-approval` is not `approved`.
+The budget itself must already be present as `explorationBudget` on the `plan`
+you passed to `maui_test_author begin`; it cannot be added to a live session. If
+you began without one, `abandon` and begin again with the budget in the plan —
+the broker refuses every exploration step with `exploration-budget-required`
+until the plan declares it.
 
-## Step 5 — Draft only when nothing is unknown
+Then request the matching grant with the `exploration-request` operation of
+`maui_test_author`. Its `explorationScope` may list only `tap`, `scroll`,
+`navigate`, and `back`; anything wider is refused. Then wait. An exploration
+request is a request; chat approval is not authorization, and
+`awaiting-approval` is not `approved`.
+
+## Step 5 — Explore within the approved budget
+
+Once a human approves the exploration grant, take the discovery steps one at a
+time with `maui_test_explore`, naming the scope you are exploring and the
+navigation action. The budget is **enforced by the broker**, not by this skill:
+
+- Each authorized step is charged against the session plan's
+  `explorationBudget`, clamped by broker policy, by a server-side counter. When
+  `maxActions` is spent, or
+  the `maxDurationSeconds` window that opened on the first step has elapsed,
+  the next step is refused with `exploration-budget-exhausted`. Running over is
+  a refusal, not something to apologize for afterwards.
+- The remaining allowance comes back on every `maui_test_explore` result, and
+  `maui_test_status` reports it when given the authoring session's access
+  request — session id, read capability, and a complete envelope. Quote that
+  number rather than your own tally.
+- A scope that is not in the approved `allowedScopes` is refused with
+  `exploration-scope-denied`, and the broker caps an over-generous plan at its
+  own policy limit.
+- A step must name what it will touch, or it is refused with
+  `exploration-scope-denied` before any budget is spent. A tap or scroll needs a
+  selector with a durable key such as an `AutomationId`; a navigate needs a
+  route. A text-only selector has no durable key, so it would let one approved
+  tap stand in for a tap on any other unkeyed element.
+- Exploration only taps, scrolls, navigates, and goes back. Filling text,
+  asserting, appending to the draft, committing, and running each need their
+  own approval, and the grant must be an exploration grant: one that also
+  permits drafting, running, or committing is refused.
+- Exploration grants carry the `exploration` side-effect class and are spendable
+  only here. `maui_test_action` refuses them, and the authorization an
+  exploration step mints dispatches exactly one navigation step matching the
+  action, element, and route it approved, so one unit of budget can never replay
+  a wider flow and there is no way to redeem the approval on a
+  route that skips the counter — and an ordinary action grant is
+  refused by `maui_test_explore` for the same reason.
+- The broker also bounds what it will honour: `maxActions` is clamped to its own
+  policy ceiling and the window to ten minutes, so an over-generous plan buys
+  nothing extra. `maui_test_status` reports the clamped numbers, not the ask.
+
+Report what you found and how much of the allowance the broker says is left.
+
+## Step 6 — Draft only when nothing is unknown
 
 Every step must be `[known]` before the author route starts. An unanswered
 selector, oracle, or reset is a stop, not a default. If the user declines to
 answer, record the gap as an explicit limitation and stop with an inert
 partial restatement instead of a draft.
 
-## Tool gap — say this out loud
+## What stays outside the enforced budget
 
-The exploration budget is **declarative**. In the current build:
+The broker enforces the count, the clock, and the scope. It does not judge
+whether a step was a good idea, so two things remain yours:
 
-- Nothing enforces `maxActions` or `maxDurationSeconds`. They are recorded in
-  the plan and reviewed by a human; no runtime component stops the agent when
-  the count is exceeded.
-- There is **no `maui_test_explore` tool**. Exploration is performed with the
-  ordinary read-only tools (`maui_test_capabilities`, tree and query reads)
-  under self-imposed limits.
-- `maui_test_status` reports **no budget counter**. Nothing external tells the
-  user how much of the budget has been consumed.
+- **Size the proposal honestly.** `maxActions` should match the number of
+  unknowns, not the size of the app. The broker will not object to a wasteful
+  budget a human approved.
+- **Stop when the question is answered**, even with allowance left. Unspent
+  budget is not an invitation.
 
-Therefore the agent counts its own actions and reports "used N of the proposed
-M actions" when exploration ends. Do not describe the budget as enforced,
-sandboxed, or capped by the tooling — describe it as a declared limit the agent
-holds itself to and reports against.
+Never describe exploration as unbounded or as something the agent polices
+itself — the count, the window, the scope list, and the navigation-only action
+set are all checked server-side before each step is authorized.
 
 ## Worked example
 

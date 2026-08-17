@@ -55,6 +55,7 @@ internal static class TestAgentToolSupport
             MauiTestAgentGrantIssueResult value => value.Error,
             MauiTestAgentApprovalResult value => value.Error,
             MauiTestAgentMutationAuthorizationResult value => value.Error,
+            MauiTestAgentExplorationResult value => value.Error,
             MauiTestAgentToolResult value => value.Error,
             MauiTestAgentPatchResult value => value.Error,
             MauiTestAgentAuditResult value => value.Error,
@@ -238,6 +239,60 @@ internal static class TestAgentToolSupport
                 SideEffectClass = sideEffectClass,
                 ValueLength = value is null ? null : System.Text.Encoding.UTF8.GetByteCount(value),
                 ValueDigest = value is null ? null : Digest(value),
+                CurrentTargetState = sessionTarget.LiveTarget!.State,
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static async Task<TestAgentBrokerResponse<MauiTestAgentExplorationResult>> AuthorizeExplorationAsync(
+        McpAgentSession session,
+        MauiTestAgentRequestEnvelope? envelope,
+        string action,
+        string explorationScope,
+        FlowSelector? selector = null,
+        string? route = null,
+        double? deltaX = null,
+        double? deltaY = null,
+        int? itemIndex = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (envelope is null)
+        {
+            return new TestAgentBrokerResponse<MauiTestAgentExplorationResult>(
+                400,
+                new MauiTestAgentExplorationResult
+                {
+                    Error = Error(
+                        MauiTestAgentErrorCodes.InvalidRequest,
+                        MauiTestAgentErrorCategories.Validation,
+                        "A protocol envelope is required.",
+                        retryable: false),
+                },
+                null);
+        }
+
+        var sessionTarget = await ResolveSessionTargetAsync(session, envelope, cancellationToken).ConfigureAwait(false);
+        if (sessionTarget.Error is not null)
+        {
+            return new TestAgentBrokerResponse<MauiTestAgentExplorationResult>(
+                409,
+                new MauiTestAgentExplorationResult { Error = sessionTarget.Error },
+                null);
+        }
+
+        var brokerPort = await session.GetBrokerPortAsync().ConfigureAwait(false);
+        return await TestAgentBrokerClient.AuthorizeExplorationAsync(
+            brokerPort,
+            new MauiTestAgentExplorationRequest
+            {
+                Envelope = envelope,
+                Action = action,
+                Scope = explorationScope,
+                Selector = selector,
+                Route = route,
+                DeltaX = deltaX,
+                DeltaY = deltaY,
+                ItemIndex = itemIndex,
                 CurrentTargetState = sessionTarget.LiveTarget!.State,
             },
             cancellationToken).ConfigureAwait(false);

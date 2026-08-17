@@ -109,20 +109,39 @@ turn the words into a reviewable structure before touching any tool.
 3. **Ask one combined question** covering every `[unknown]` at once, following
    [clarification-policy.md](references/clarification-policy.md). Do not send a
    question per step and do not open a questionnaire.
-4. **When the missing fact is UI-discoverable**, propose a bounded
+4. **When the missing fact is UI-discoverable**, put a bounded
    `explorationBudget` — `maxActions`, `maxDurationSeconds`, and
-   `allowedScopes` as named routes, never "the whole app" — and submit
-   `maui_test_author` with `exploration-request`. Report the proposed numbers
-   in chat before submitting.
+   `allowedScopes` as named routes, never "the whole app" — in the `plan` you
+   pass to `maui_test_author begin`; it cannot be added to a live session. Then
+   request the matching navigation-only grant with `exploration-request`. Report
+   the proposed numbers in chat before submitting.
 5. **Never draft with an unresolved `[unknown]`.** An unanswered selector,
    oracle, or reset is a stop, not a default.
 
-**Tool gap, stated plainly:** the budget is declarative. Nothing in the current
-build enforces `maxActions` or `maxDurationSeconds`, there is no
-`maui_test_explore` tool, and `maui_test_status` reports no budget counter. The
-agent self-limits, counts its own actions, and must report actions consumed
-against the proposed budget. Say this to the user rather than implying the
-budget is enforced.
+**How the budget is enforced:** once a human approves an exploration grant,
+take one step at a time with `maui_test_explore`. The broker owns the counter:
+it charges each authorized step against the session plan's `explorationBudget`,
+clamped by broker policy, and refuses with `exploration-budget-exhausted` when
+`maxActions` or
+`maxDurationSeconds` runs out, so an over-run is a refusal rather than a
+self-reported apology. Read the remaining allowance from the tool result or
+from `maui_test_status`, supplying the authoring session's access request —
+session id, its read capability, and a complete envelope.
+Exploration only taps, scrolls, navigates, and goes back — it never fills text,
+asserts, edits the draft, commits, or starts a run. The two grant families are
+disjoint by side-effect class: an exploration grant carries the `exploration`
+class and is spendable only on `maui_test_explore`, while an ordinary action
+grant is not accepted there. `maui_test_action` cannot redeem an exploration
+grant, and an exploration authorization dispatches only the single navigation
+step it authorized — same action, same element, same route, never a wider flow —
+so there is no route that spends the approval without charging the counter.
+Each step must name what it will touch: a tap or scroll needs a selector with a
+durable key such as an `AutomationId`, and a navigate needs a route. A text-only
+selector is refused with `exploration-scope-denied`, because a step nobody can
+tell apart from another cannot be bound to the budget it spends.
+An exploration request is
+still a request: chat approval is not authorization, and `awaiting-approval` is
+not `approved`.
 
 See [references/intake.md](references/intake.md) for the worked example and the
 exact wording of the combined question.

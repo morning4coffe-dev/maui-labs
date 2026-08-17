@@ -217,12 +217,17 @@ public static class FlowValidator
         }
     }
 
-    /// <summary>args.selector is authoritative; fall back to the step's target for compatibility.</summary>
-    internal static FlowSelector? EffectiveSelector(FlowStep s)
+    /// <summary>
+    /// args.selector is authoritative; fall back to the step's target for compatibility.
+    /// This is the single source of truth for which element a step will actually drive, and it is
+    /// public so that authorization can bind to the same answer the runner will act on. Anything
+    /// that decides what a step is allowed to touch must call this rather than reimplement it.
+    /// </summary>
+    public static FlowSelector? EffectiveSelector(FlowStep step)
     {
-        var sel = s.Args?.Selector;
+        var sel = step.Args?.Selector;
         if (sel is not null && !sel.IsEmpty) return sel;
-        return s.Target;
+        return step.Target;
     }
 
     private static void ValidateSelector(FlowValidation v, string where, FlowSelector? sel, bool required)

@@ -86,10 +86,33 @@ Inspector, and MCP server**. They default to off; without
 `DEVFLOW_PREVIEW_AGENT_AUTHORING` the `test-agent` profile refuses to start and
 reports that it is a disabled preview surface.
 
+> **The broker is a long-running daemon and does not re-read these.** If a
+> broker is already running, exporting the variables in a shell, or setting them
+> in an agent host's MCP configuration, changes nothing for it: the authoring
+> route stays closed and every draft is refused with *"agent authoring preview is
+> disabled"*. Stop and restart the broker from an environment that has the
+> variables set:
+>
+> ```powershell
+> $env:DEVFLOW_PREVIEW_AGENT_AUTHORING = 'true'
+> maui devflow broker stop
+> maui devflow broker start
+> maui devflow approve --list      # ok:true means the gate is open
+> ```
+>
+> An agent host that spawns the MCP server with its own `env` block covers the
+> MCP process only. To avoid the mismatch entirely, set both variables at user
+> or machine scope so every later process inherits them.
+
 Start a Debug build of the app so its agent registers, confirm it with
 `maui devflow list`, and open `maui devflow inspect` — the Inspector is the
 trusted host that can approve work. Without it, drafts still get prepared but
 every mutation stops at a pending request.
+
+Keep exactly one instance of the app under test connected. Approvals bind to one
+exact target, so a second instance makes `maui devflow approve` fail as
+`AgentAmbiguous`, and a second instance on another platform can take the agent
+port and turn runs into infrastructure failures.
 
 ### 2. Describe the journey
 

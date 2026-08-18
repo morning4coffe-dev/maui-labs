@@ -1506,7 +1506,11 @@ public partial class BrokerServer : IDisposable
                     Error = TestAgentRouteError(
                         Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCodes.UnsupportedOperation,
                         Microsoft.Maui.DevFlow.Testing.MauiTestAgentErrorCategories.Unsupported,
-                        "The restricted test-agent preview is disabled by the effective agent-authoring feature policy.",
+                    "The restricted test-agent preview is disabled by the effective agent-authoring feature policy. " +
+                        "Set DEVFLOW_PREVIEW_AGENT_AUTHORING=true in the environment that starts the broker, then restart " +
+                        "the broker: setting it only in an agent host or a new shell does not change a broker that is " +
+                        "already running. PowerShell: $env:DEVFLOW_PREVIEW_AGENT_AUTHORING = 'true'; maui devflow broker " +
+                        "stop; maui devflow broker start.",
                         retryable: false),
                 });
             return;

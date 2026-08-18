@@ -49,6 +49,16 @@ finding and route to app testability; do not create a brittle executable flow.
 8. Call `maui_test_author` with `commit` only with the approved broker grant
    from an actually available native approval client.
    Refresh status and record the current flow and plan revisions/digests.
+   **`commit` commits the authoring session, not the workspace.** It advances
+   revisions and digests in broker memory and stamps `committedAt`. It writes
+   **no** Markdown flow and **no** plan sidecar to disk, and the whole session
+   is lost if the broker restarts. The response carries a `persistence` block
+   that says so; read it before reporting. Say "committed draft revision N,
+   flow digest …" and never "committed `<name>.md` and its sidecar", never
+   quote a file path, and never claim files exist. Writing files is a separate
+   workspace commit through the Inspector's authoring surface with its own
+   approval. If the human asked for a file on disk, say plainly that this step
+   did not produce one and hand off to that surface.
 
 Typing approval in chat has no authorization meaning. Never synthesize a grant
 ID, continue from a stale revision, or use a commit grant for a later run.

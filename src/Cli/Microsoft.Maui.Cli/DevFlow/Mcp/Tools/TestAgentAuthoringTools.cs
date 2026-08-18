@@ -11,7 +11,7 @@ namespace Microsoft.Maui.Cli.DevFlow.Mcp.Tools;
 public sealed class TestAgentAuthoringTool
 {
     [McpServerTool(Name = "maui_test_author"),
-     System.ComponentModel.Description("Manage a broker-owned test draft. Preferred agent-led authoring supplies the complete inert plan and flow to begin, then needs only one commit review and one separate run review. Draft-change and assertion approvals are for incremental edits to an existing human or recorded draft. Operations are begin, status, await-approval, commit, abandon, migrate-preview, approval-request, and exploration-request. Approval requests appear in the Inspector Agent requests inbox; only a human decision there can issue a grant.")]
+     System.ComponentModel.Description("Manage a broker-owned test draft. Preferred agent-led authoring supplies the complete inert plan and flow to begin, then needs only one commit review and one separate run review. Draft-change and assertion approvals are for incremental edits to an existing human or recorded draft. Operations are begin, status, await-approval, commit, abandon, migrate-preview, approval-request, and exploration-request. Approval requests appear in the Inspector Agent requests inbox; only a human decision there can issue a grant. The commit operation commits the AUTHORING SESSION, not the workspace: it advances revisions and digests in broker memory and writes no Markdown flow or plan sidecar to disk, and its result is lost if the broker restarts. Never report a successful commit as files created.")]
     public static async Task<string> Author(
         [System.ComponentModel.Description("MCP session injected by the server and used only for local broker and exact-target access")] McpAgentSession session,
         [System.ComponentModel.Description("Authoring operation: begin, status, await-approval, commit, abandon, migrate-preview, approval-request, or exploration-request")] string operation,
@@ -141,7 +141,24 @@ public sealed class TestAgentAuthoringTool
                     commit.Value?.Ok == true ? "author-commit" : null,
                     commit.Value?.Error?.Code).ConfigureAwait(false);
                 return commit.Value?.Ok == true
-                    ? TestAgentToolSupport.Success(envelope.RequestId, commit.Value)
+                    ? TestAgentToolSupport.Success(envelope.RequestId, new
+                    {
+                        ok = commit.Value.Ok,
+                        commit.Value.Snapshot,
+                        persistence = new
+                        {
+                            wroteFiles = false,
+                            scope = "authoring-session",
+                            note =
+                                "This commit advanced the broker-owned authoring session only: it " +
+                                "bumped the flow and plan revisions, recomputed the digests, and " +
+                                "stamped committedAt. No Markdown flow or plan sidecar was written to " +
+                                "disk, and the session is lost if the broker restarts. Writing files " +
+                                "is a separate, separately approved workspace commit. Do not report " +
+                                "this result as files created; report it as a committed draft " +
+                                "revision and name the digests.",
+                        },
+                    })
                     : TestAgentToolSupport.BrokerFailure(envelope.RequestId, commit);
             }
 

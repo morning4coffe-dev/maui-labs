@@ -123,4 +123,88 @@ public class RepairEligibilityFromObservedRunTests
                 or "checkpoint-theme-expected-missing"
                 or "checkpoint-orientation-expected-missing");
     }
+
+    /// <summary>
+    /// The observed run reported `replayEligibility.repairEligibility: true` and
+    /// `failure.repairEligible: false` in the same artifact. The cause was ordering, not
+    /// classification: the runner materialised the conjunction while the run's required independent
+    /// oracle had not been evaluated yet, and the post-run decision that lifted replay eligibility
+    /// never revisited the failure.
+    /// </summary>
+    private static MauiFlowRunReport ReportWithClassifiedFailure(bool repairEligibility) => new()
+    {
+        RunId = "run-1",
+        Outcome = new MauiFlowRunOutcome { Status = MauiFlowRunOutcomes.Failed },
+        ReplayEligibility = new MauiFlowReplayEligibilityDecision
+        {
+            SideEffectPolicy = MauiFlowSideEffectPolicies.None,
+            RepairValidationAllowed = repairEligibility,
+            RepairEligibility = repairEligibility,
+        },
+        Failure = MauiFlowFailureClassifier.ToFailure(
+            MauiFlowFailureClassifier.Classify(ObservedRunFacts()),
+            "failure-run-1",
+            FlowFailureKinds.NotFound,
+            "3",
+            DateTimeOffset.UnixEpoch),
+    };
+
+    [Fact]
+    public void RepairEligibilityGate_RestoresTheClassifierVerdictWhenOraclesLaterSucceed()
+    {
+        // The run starts with a required oracle that has not been evaluated, so replay safety is
+        // provisionally false and the gate suppresses the classifier's verdict.
+        var report = ReportWithClassifiedFailure(repairEligibility: false);
+        MauiFlowFailureClassifier.ApplyRepairEligibilityGate(report);
+
+        Assert.False(report.Failure!.RepairEligible);
+        Assert.True(
+            report.Failure.ClassifierRepairEligible,
+            "Suppressing the conjunction must not erase what the classifier concluded.");
+
+        // The oracle then succeeds and the host installs the real decision. Re-applying the gate
+        // must restore eligibility rather than leave the report contradicting itself.
+        report.ReplayEligibility!.RepairEligibility = true;
+        MauiFlowFailureClassifier.ApplyRepairEligibilityGate(report);
+
+        Assert.True(report.Failure.RepairEligible);
+        Assert.Empty(MauiFlowRunReportSerializer.Validate(report).Errors
+            .Where(error => error.Contains("repair", StringComparison.OrdinalIgnoreCase)));
+    }
+
+    [Fact]
+    public void RepairEligibilityGate_NeverManufacturesEligibilityTheClassifierRefused()
+    {
+        var facts = ObservedRunFacts();
+        facts.AssertionTargetResolution = FlowFailureKinds.NotFound;
+        var report = ReportWithClassifiedFailure(repairEligibility: true);
+        report.Failure = MauiFlowFailureClassifier.ToFailure(
+            MauiFlowFailureClassifier.Classify(facts),
+            "failure-run-1",
+            FlowFailureKinds.NotFound,
+            "3",
+            DateTimeOffset.UnixEpoch);
+
+        MauiFlowFailureClassifier.ApplyRepairEligibilityGate(report);
+
+        // Replay safety permits repairing from this run, but the symptom is assertion drift, which
+        // is never automatically repairable. The permissive half must not win.
+        Assert.False(report.Failure.RepairEligible);
+        Assert.False(report.Failure.ClassifierRepairEligible);
+    }
+
+    [Fact]
+    public void RepairEligibilityGate_IsIdempotentForReportsWithoutTheClassifierVerdict()
+    {
+        // A report produced before the classifier verdict was recorded separately carries only the
+        // conjunction. Re-gating it must not promote an unknown verdict to eligible.
+        var report = ReportWithClassifiedFailure(repairEligibility: true);
+        report.Failure!.ClassifierRepairEligible = null;
+        report.Failure.RepairEligible = false;
+
+        MauiFlowFailureClassifier.ApplyRepairEligibilityGate(report);
+        MauiFlowFailureClassifier.ApplyRepairEligibilityGate(report);
+
+        Assert.False(report.Failure.RepairEligible);
+    }
 }

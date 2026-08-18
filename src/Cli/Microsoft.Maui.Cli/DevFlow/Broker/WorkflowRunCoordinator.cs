@@ -1159,8 +1159,9 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             Reason = report.Outcome.VerificationReason,
             CheckedAt = report.EndedAt,
         };
-        if (report.Failure is not null && !run.Admission.RepairEligibility)
-            report.Failure.RepairEligible = false;
+        // run.Admission is this report's replay eligibility, assigned above, so the shared gate is
+        // the single rule deciding whether the classifier's verdict survives.
+        Testing.MauiFlowFailureClassifier.ApplyRepairEligibilityGate(report);
     }
 
     private void PersistStructuredReportLocked(RunRecord run)

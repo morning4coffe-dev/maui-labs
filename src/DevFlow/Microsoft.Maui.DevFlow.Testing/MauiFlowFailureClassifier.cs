@@ -350,11 +350,44 @@ public static class MauiFlowFailureClassifier
         Phase = classification.Phase,
         Retryable = classification.Retryable,
         RepairEligible = classification.RepairEligible,
+        ClassifierRepairEligible = classification.RepairEligible,
         LegacyKind = legacyKind,
         StepId = stepId,
         At = at,
         Message = MauiFlowReportRedactor.SafeMessage(message),
     };
+
+    /// <summary>
+    /// Recomputes <see cref="MauiFlowFailure.RepairEligible"/> from the classifier's own verdict and
+    /// the report's current replay eligibility.
+    /// </summary>
+    /// <remarks>
+    /// Repair eligibility is a conjunction of two independent judgements: the classifier decides
+    /// whether the symptom is repairable, and the replay-safety evaluator decides whether this run
+    /// is a safe basis to repair from. The second half is not knowable until the run's independent
+    /// business oracles have been evaluated, which happens after execution ends. Materialising the
+    /// conjunction earlier pins it to a provisional decision, so a run whose oracles later succeed
+    /// stays permanently repair-ineligible while the report simultaneously reports the run as
+    /// repair-eligible. Callers therefore apply this gate again each time replay eligibility is
+    /// replaced with a more complete decision.
+    /// <para>
+    /// The gate is monotone in the classifier's verdict and can only ever narrow it: it re-reads the
+    /// preserved verdict rather than reclassifying, so a later call cannot manufacture eligibility
+    /// the classifier never granted.
+    /// </para>
+    /// </remarks>
+    public static void ApplyRepairEligibilityGate(MauiFlowRunReport report)
+    {
+        ArgumentNullException.ThrowIfNull(report);
+        if (report.Failure is not { } failure)
+            return;
+        // A report that predates this field, or one that arrived from an older producer, still
+        // carries the conjunction in RepairEligible. Falling back to it keeps the gate idempotent
+        // for those reports instead of silently promoting an unknown verdict to eligible.
+        var classifierVerdict = failure.ClassifierRepairEligible ?? failure.RepairEligible ?? false;
+        failure.ClassifierRepairEligible = classifierVerdict;
+        failure.RepairEligible = classifierVerdict && report.ReplayEligibility?.RepairEligibility == true;
+    }
 
     private static MauiFlowFailureClassification Describe(string failureClass, MauiFlowFailureFacts facts, string basis)
     {

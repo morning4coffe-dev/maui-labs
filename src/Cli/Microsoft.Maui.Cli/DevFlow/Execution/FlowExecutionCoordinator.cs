@@ -620,6 +620,9 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         }, flow);
         report.BusinessOracles = runContext.BusinessOracles.ToList();
         report.ReplayEligibility = decision;
+        // This is the first decision that reflects the run's evaluated independent oracles, so it is
+        // the first point at which a failure's repair eligibility can be stated honestly.
+        MauiFlowFailureClassifier.ApplyRepairEligibilityGate(report);
 
         var executionPassed = string.Equals(
             report.Outcome?.Status,

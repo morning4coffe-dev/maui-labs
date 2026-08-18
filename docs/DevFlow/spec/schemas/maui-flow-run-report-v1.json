@@ -928,7 +928,12 @@
           "type": "boolean"
         },
         "repairEligible": {
-          "type": "boolean"
+          "type": "boolean",
+          "description": "Whether this failure may be repaired automatically. It is the conjunction of classifierRepairEligible and replayEligibility.repairEligibility, so it is false whenever either half withholds permission."
+        },
+        "classifierRepairEligible": {
+          "type": "boolean",
+          "description": "What the failure classifier concluded from the symptom alone, before replay safety was consulted. It differs from repairEligible exactly when the symptom is repairable but the run was not a safe basis to repair from, which is a property of the run rather than a classifier defect."
         },
         "legacyKind": {
           "type": "string"

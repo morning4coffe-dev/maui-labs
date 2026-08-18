@@ -306,6 +306,13 @@ public sealed class MauiFlowFailure
     [JsonPropertyName("phase")] public string? Phase { get; set; }
     [JsonPropertyName("retryable")] public bool? Retryable { get; set; }
     [JsonPropertyName("repairEligible")] public bool? RepairEligible { get; set; }
+    /// <summary>
+    /// What the failure classifier concluded on its own, before replay-safety was consulted.
+    /// <see cref="RepairEligible"/> is the conjunction of this and the run's replay eligibility, so
+    /// the two differ exactly when the symptom is repairable but the run was not safe to repair
+    /// from. Keeping both visible stops that distinction from being read as a classifier defect.
+    /// </summary>
+    [JsonPropertyName("classifierRepairEligible")] public bool? ClassifierRepairEligible { get; set; }
     [JsonPropertyName("legacyKind")] public string? LegacyKind { get; set; }
     [JsonPropertyName("message")] public string? Message { get; set; }
     [JsonPropertyName("stepId")] public string? StepId { get; set; }

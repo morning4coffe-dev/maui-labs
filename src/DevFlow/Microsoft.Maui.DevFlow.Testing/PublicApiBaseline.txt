@@ -724,6 +724,7 @@ M:Microsoft.Maui.DevFlow.Testing.MauiFlowAppProcessEvidence.ProvesAbnormalExit()
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerifier.VerifyAsync(driver:Microsoft.Maui.DevFlow.Testing.IMauiFlowDriver,assertion:Microsoft.Maui.DevFlow.Testing.FlowAssert,pollTries:System.Int32=1,pollGapMs:System.Int32=0,cancellationToken:System.Threading.CancellationToken=null):System.Threading.Tasks.Task`1[Microsoft.Maui.DevFlow.Testing.MauiFlowAssertionVerification]
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowEvidenceKinds.IsKnown(value:System.String):System.Boolean
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowExpectedEvidenceEvaluator.Evaluate(flow:Microsoft.Maui.DevFlow.Testing.MauiFlow,report:Microsoft.Maui.DevFlow.Testing.MauiFlowRunReport,producedEvidenceKinds:System.Collections.Generic.IReadOnlyCollection`1[System.String]=null):Microsoft.Maui.DevFlow.Testing.MauiFlowExpectedEvidenceReport
+M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.ApplyRepairEligibilityGate(report:Microsoft.Maui.DevFlow.Testing.MauiFlowRunReport):System.Void
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.AssertionTargetResolutionOf(step:Microsoft.Maui.DevFlow.Testing.MauiFlowStepAttempt):System.String
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.Classify(facts:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureFacts):Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassification
 M:Microsoft.Maui.DevFlow.Testing.MauiFlowFailureClassifier.FromLegacyFailureKind(legacyKind:System.String):System.String
@@ -1469,6 +1470,7 @@ P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.Artifacts[]:System.Collections.
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.At[]:System.Nullable`1[System.DateTimeOffset]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.Category[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.Class[]:System.String{get:public;set:public}
+P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.ClassifierRepairEligible[]:System.Nullable`1[System.Boolean]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.Code[]:System.String{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.ExtensionData[]:System.Collections.Generic.Dictionary`2[System.String,System.Text.Json.JsonElement]{get:public;set:public}
 P:Microsoft.Maui.DevFlow.Testing.MauiFlowFailure.FailureId[]:System.String{get:public;set:public}

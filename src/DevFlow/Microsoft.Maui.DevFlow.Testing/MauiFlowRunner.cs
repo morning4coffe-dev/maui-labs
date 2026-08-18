@@ -666,9 +666,10 @@ public sealed class MauiFlowRunner
                 endedAt,
                 summary);
         }
-        if (report.Failure is not null && report.ReplayEligibility?.RepairEligibility != true)
-            report.Failure.RepairEligible = false;
-
+        // The decision available here is provisional: this run's independent business oracles have
+        // not been evaluated yet, so a flow that requires one is necessarily not yet repair-eligible.
+        // Hosts that evaluate those oracles re-apply the gate once the real decision exists.
+        MauiFlowFailureClassifier.ApplyRepairEligibilityGate(report);
         var verified = outcome == MauiFlowRunOutcomes.Passed &&
             report.ReplayEligibility?.RunVerificationAllowed == true;
         var verificationReason = VerificationReason(outcome, report.ReplayEligibility, verified);

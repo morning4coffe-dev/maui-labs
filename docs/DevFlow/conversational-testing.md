@@ -86,6 +86,33 @@ Inspector, and MCP server**. They default to off; without
 `DEVFLOW_PREVIEW_AGENT_AUTHORING` the `test-agent` profile refuses to start and
 reports that it is a disabled preview surface.
 
+The last command above runs the MCP server in the foreground, which suits a
+terminal agent. An IDE starts the server itself, so it needs the same command as
+configuration instead. In VS Code that is `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "maui-test-agent": {
+      "type": "stdio",
+      "command": "<absolute path to maui or maui.exe>",
+      "args": ["devflow", "mcp", "--profile", "test-agent"],
+      "env": {
+        "DEVFLOW_PREVIEW_AGENT_AUTHORING": "true",
+        "DEVFLOW_PREVIEW_WORKBENCH": "true",
+        "DEVFLOW_PREVIEW_REPAIR_PROPOSALS": "true"
+      }
+    }
+  }
+}
+```
+
+`.vscode/` is git-ignored in this repository, and the `command` is an absolute
+path, so this file is per-machine and is not shared through the repository. The
+`env` block here covers only the MCP server the IDE launches; the broker is a
+separate long-running process and needs the variables in *its* environment too,
+as below.
+
 > **The broker is a long-running daemon and does not re-read these.** If a
 > broker is already running, exporting the variables in a shell, or setting them
 > in an agent host's MCP configuration, changes nothing for it: the authoring

@@ -951,8 +951,88 @@ public partial class BrokerServer : IDisposable
         Log("Broker stopped");
     }
 
+    /// <summary>
+    /// True when this broker may publish itself into the machine-wide broker state file.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="BrokerPaths.StateFile"/> is a single well-known path shared by every broker on the
+    /// machine, and it carries the owner-only native-host approval token. A short-lived broker on an
+    /// ephemeral port must not overwrite the entry belonging to the long-running broker a developer
+    /// is actually using: the test suite starts thousands of brokers, and a second IDE MCP server
+    /// starts its own. Clobbering the entry silently invalidates the running broker's approval token,
+    /// so every later approval fails with no signal beyond a confusing error at approval time.
+    /// The slot is taken over only once the broker that claimed it is gone, which keeps recovery
+    /// automatic after a crash.
+    /// </remarks>
+    private bool ShouldPublishBrokerState()
+    {
+        try
+        {
+            if (!File.Exists(BrokerPaths.StateFile))
+                return true;
+
+            var existing = CliJson.Deserialize<BrokerState>(File.ReadAllText(BrokerPaths.StateFile));
+            return MayPublishBrokerState(existing, _port, IsProcessAlive);
+        }
+        catch
+        {
+            return true;
+        }
+    }
+
+    /// <summary>
+    /// Decides whether a broker on <paramref name="ourPort"/> may claim the shared state slot
+    /// currently held by <paramref name="existing"/>. Unreadable state cannot yield a usable token,
+    /// so replacing it is the recovering move.
+    /// </summary>
+    internal static bool MayPublishBrokerState(
+        BrokerState? existing,
+        int ourPort,
+        Func<int, bool> isProcessAlive)
+    {
+        if (existing is null || existing.Port == ourPort)
+            return true;
+
+        return !isProcessAlive(existing.Pid);
+    }
+
+    /// <summary>
+    /// Decides whether a broker may retract the shared state slot. Only an exact self-match
+    /// qualifies, so a broker can never delete an entry another broker owns.
+    /// </summary>
+    internal static bool MayDeleteBrokerState(BrokerState? existing, int ourPort, int ourPid)
+        => existing is null || (existing.Port == ourPort && existing.Pid == ourPid);
+
+    private static bool IsProcessAlive(int pid)
+    {
+        if (pid <= 0)
+            return false;
+
+        try
+        {
+            using var process = System.Diagnostics.Process.GetProcessById(pid);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+        catch
+        {
+            // Treat an undecidable probe as alive so an unrelated failure never destroys a state
+            // file we could not prove is stale.
+            return true;
+        }
+    }
+
     private void WriteBrokerState()
     {
+        if (!ShouldPublishBrokerState())
+        {
+            Log($"Not publishing broker state: {BrokerPaths.StateFile} belongs to another running broker");
+            return;
+        }
+
         var tmpPath = BrokerPaths.StateFile + ".tmp";
         try
         {
@@ -2604,9 +2684,25 @@ public partial class BrokerServer : IDisposable
 
     private sealed class RequestBodyTooLargeException : Exception;
 
-    private static void DeleteBrokerState()
+    /// <summary>
+    /// Retracts this broker's registration, and only this broker's: the state file is shared
+    /// machine-wide, so deleting an entry we do not own would destroy another broker's native-host
+    /// approval token. See <see cref="ShouldPublishBrokerState"/>.
+    /// </summary>
+    private void DeleteBrokerState()
     {
-        try { File.Delete(BrokerPaths.StateFile); } catch { }
+        try
+        {
+            if (!File.Exists(BrokerPaths.StateFile))
+                return;
+
+            var existing = CliJson.Deserialize<BrokerState>(File.ReadAllText(BrokerPaths.StateFile));
+            if (!MayDeleteBrokerState(existing, _port, Environment.ProcessId))
+                return;
+
+            File.Delete(BrokerPaths.StateFile);
+        }
+        catch { }
     }
 
     private void Log(string message)

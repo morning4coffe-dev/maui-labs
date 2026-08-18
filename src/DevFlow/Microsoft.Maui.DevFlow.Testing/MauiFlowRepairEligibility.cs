@@ -154,8 +154,8 @@ public static class MauiFlowRepairEligibilityEvaluator
         CompareCheckpoint(decision, expected, current);
         VerifyTrust(decision, input, trust);
         VerifyFailureSafety(decision, report, failure, failedStep, input.AdditionalFailureCodes);
-        VerifyReplaySafety(decision, input.Plan, input.ReplayEligibility);
-        VerifyIndependentOracle(decision, input.Plan);
+        VerifyReplaySafety(decision, input.Plan, report, input.ReplayEligibility);
+        VerifyIndependentOracle(decision, input.Plan, report);
         VerifyPriorResolution(decision, input.PriorActiveSelectorResolution);
         VerifyTargetScope(
             decision,
@@ -313,12 +313,23 @@ public static class MauiFlowRepairEligibilityEvaluator
         }
     }
 
+    /// <remarks>
+    /// A caller that holds the plan supplies it. A caller working from bounded evidence — CLI
+    /// triage, for instance, whose inputs are deliberately just the manifest and the report — does
+    /// not. The run report records the policy the run was actually admitted under, so falling back
+    /// to it stops the decision from asserting "no replayable policy is declared" about a run whose
+    /// own report names one. The fallback narrows nothing: an absent report policy still reads as
+    /// unspecified and still blocks.
+    /// </remarks>
     private static void VerifyReplaySafety(
         MauiFlowRepairEligibilityDecision decision,
         MauiTestPlan? plan,
+        MauiFlowRunReport? report,
         MauiFlowReplayEligibilityDecision? replay)
     {
-        var policy = plan?.ParsedSideEffectPolicy ?? MauiFlowSideEffectPolicy.Unspecified;
+        var policy = plan is not null
+            ? plan.ParsedSideEffectPolicy
+            : MauiFlowSideEffectPolicies.Parse(report?.SideEffectPolicy);
         if (policy is MauiFlowSideEffectPolicy.Unspecified or MauiFlowSideEffectPolicy.NonReplayable)
         {
             Add(
@@ -336,20 +347,30 @@ public static class MauiFlowRepairEligibilityEvaluator
         }
     }
 
+    /// <remarks>
+    /// Without the plan, the run report's recorded oracle results are the evidence that a required
+    /// independent oracle existed and was evaluated. Only a result the run host marked independent
+    /// and successful counts, so this cannot turn an unverified run into a repairable one.
+    /// </remarks>
     private static void VerifyIndependentOracle(
         MauiFlowRepairEligibilityDecision decision,
-        MauiTestPlan? plan)
+        MauiTestPlan? plan,
+        MauiFlowRunReport? report)
     {
-        var declared = plan?.IndependentBusinessOracles
-            .Concat(plan.BusinessOracles.Select(static oracle => new MauiIndependentBusinessOracleDeclaration
-            {
-                OracleId = oracle.OracleId,
-                Required = oracle.Required,
-                Independent = oracle.Independent,
-            }))
-            .Any(static oracle =>
-                oracle.Required &&
-                oracle.Independent &&
+        var declared = plan is not null
+            ? plan.IndependentBusinessOracles
+                .Concat(plan.BusinessOracles.Select(static oracle => new MauiIndependentBusinessOracleDeclaration
+                {
+                    OracleId = oracle.OracleId,
+                    Required = oracle.Required,
+                    Independent = oracle.Independent,
+                }))
+                .Any(static oracle =>
+                    oracle.Required &&
+                    oracle.Independent &&
+                    !string.IsNullOrWhiteSpace(oracle.OracleId))
+            : report?.BusinessOracles.Any(static oracle =>
+                oracle is { Independent: true, Succeeded: true } &&
                 !string.IsNullOrWhiteSpace(oracle.OracleId)) == true;
         if (!declared)
         {

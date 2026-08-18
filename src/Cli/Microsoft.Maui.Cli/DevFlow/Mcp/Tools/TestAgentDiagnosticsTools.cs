@@ -219,6 +219,17 @@ public sealed class TestAgentFailureTool
         var repairAllowed = !nonReplayable &&
             Bool(admission, "repairEligibility") != false &&
             classification.RepairEligible;
+        // Two independent authorities can each withhold repair, and conflating them sends a reader
+        // to the wrong place. The classifier judges the symptom; replay safety judges whether this
+        // run is a sound basis to repair from. Naming which one refused, and the admission's own
+        // reason codes, is the difference between an actionable answer and a dead end.
+        var admissionRefused = !nonReplayable && Bool(admission, "repairEligibility") == false;
+        var admissionReasons = Array(admission, "reasons")
+            .Select(reason => String(reason, "code"))
+            .Where(static code => !string.IsNullOrWhiteSpace(code))
+            .Distinct(StringComparer.Ordinal)
+            .Take(6)
+            .ToList();
         var explanation = Explain(classification, projection);
         var nextAction = NextSafeAction(classification, projection, replayAdviceAllowed);
 
@@ -286,7 +297,17 @@ public sealed class TestAgentFailureTool
                     ? "The failure is a verified pre-dispatch missing-selector failure, so one inert selector-only proposal may be prepared for human review."
                     : nonReplayable
                         ? "The retained admission marks this run non-replayable. Do not replay it or create a repair proposal."
-                        : "This failure is not a verified pre-dispatch missing-selector failure. Do not create a selector repair proposal.",
+                        : admissionRefused && classification.RepairEligible
+                            ? "The failure shape is repairable, but this run is not an admissible basis to repair from" +
+                                (admissionReasons.Count > 0
+                                    ? $": {string.Join(", ", admissionReasons)}."
+                                    : ".") +
+                                " Repairing from it would assert a business outcome this run never established. " +
+                                "Re-run the flow on a host that produces the missing admission evidence, then diagnose that run."
+                            : "This failure is not a verified pre-dispatch missing-selector failure. Do not create a selector repair proposal.",
+                ClassifierEligible = classification.RepairEligible,
+                AdmissionEligible = !admissionRefused && !nonReplayable,
+                AdmissionReasonCodes = admissionReasons,
             },
         };
     }
@@ -600,6 +621,15 @@ internal sealed class TestAgentSelectorRepairAdvice
     public bool Eligible { get; init; }
     public bool ProposalRecommended { get; init; }
     public string Reason { get; init; } = "";
+
+    /// <summary>Whether the failure classifier judged the symptom itself repairable.</summary>
+    public bool ClassifierEligible { get; init; }
+
+    /// <summary>Whether the run's retained admission permits repairing from this run.</summary>
+    public bool AdmissionEligible { get; init; }
+
+    /// <summary>The admission's own blocking reason codes, so a refusal names its cause.</summary>
+    public IReadOnlyList<string> AdmissionReasonCodes { get; init; } = [];
 }
 
 /// <summary>Inert patch proposal storage only; no agent path can apply or approve a patch.</summary>

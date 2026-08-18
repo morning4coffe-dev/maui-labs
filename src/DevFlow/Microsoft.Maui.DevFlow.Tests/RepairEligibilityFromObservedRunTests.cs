@@ -168,8 +168,9 @@ public class RepairEligibilityFromObservedRunTests
         MauiFlowFailureClassifier.ApplyRepairEligibilityGate(report);
 
         Assert.True(report.Failure.RepairEligible);
-        Assert.Empty(MauiFlowRunReportSerializer.Validate(report).Errors
-            .Where(error => error.Contains("repair", StringComparison.OrdinalIgnoreCase)));
+        Assert.DoesNotContain(
+            MauiFlowRunReportSerializer.Validate(report).Errors,
+            error => error.Contains("repair", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]
@@ -206,5 +207,66 @@ public class RepairEligibilityFromObservedRunTests
         MauiFlowFailureClassifier.ApplyRepairEligibilityGate(report);
 
         Assert.False(report.Failure.RepairEligible);
+    }
+
+    private static MauiFlowRepairEligibilityInput PlanlessInput(MauiFlowRunReport run) => new()
+    {
+        Run = run,
+        ReplayEligibility = run.ReplayEligibility,
+        ExpectedCheckpoint = Expected(),
+        CurrentCheckpoint = Observed(),
+    };
+
+    /// <summary>
+    /// `maui devflow flow triage` is given only the manifest and the report, never the plan. It
+    /// reported `side-effect-policy-repair-prohibited` and `independent-oracle-absent` for a run
+    /// whose own report recorded policy `none` and a succeeded independent oracle, which reads as
+    /// two hard defects in a flow that has neither.
+    /// </summary>
+    [Fact]
+    public void PlanlessEvaluation_ReadsPolicyAndOracleFactsFromTheRunReport()
+    {
+        var run = ReportWithClassifiedFailure(repairEligibility: true);
+        run.SideEffectPolicy = MauiFlowSideEffectPolicies.None;
+        run.BusinessOracles =
+        [
+            new MauiIndependentBusinessOracleResult
+            {
+                OracleId = "todo-ledger-record",
+                Independent = true,
+                Succeeded = true,
+            },
+        ];
+        run.ReplayEligibility!.RepairValidationAllowed = true;
+
+        var codes = MauiFlowRepairEligibilityEvaluator.Evaluate(PlanlessInput(run))
+            .Reasons.Select(static reason => reason.Code).ToList();
+
+        Assert.DoesNotContain("side-effect-policy-repair-prohibited", codes);
+        Assert.DoesNotContain("independent-oracle-absent", codes);
+    }
+
+    [Fact]
+    public void PlanlessEvaluation_StillBlocksWhenTheReportItselfCarriesNoSuchEvidence()
+    {
+        // The fallback must read evidence, not assume it. A run with no recorded policy and an
+        // oracle that did not succeed stays blocked for exactly those two reasons.
+        var run = ReportWithClassifiedFailure(repairEligibility: false);
+        run.SideEffectPolicy = null;
+        run.BusinessOracles =
+        [
+            new MauiIndependentBusinessOracleResult
+            {
+                OracleId = "todo-ledger-record",
+                Independent = true,
+                Succeeded = false,
+            },
+        ];
+
+        var codes = MauiFlowRepairEligibilityEvaluator.Evaluate(PlanlessInput(run))
+            .Reasons.Select(static reason => reason.Code).ToList();
+
+        Assert.Contains("side-effect-policy-repair-prohibited", codes);
+        Assert.Contains("independent-oracle-absent", codes);
     }
 }

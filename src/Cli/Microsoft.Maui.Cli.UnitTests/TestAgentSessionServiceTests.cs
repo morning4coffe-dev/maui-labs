@@ -419,6 +419,67 @@ public class TestAgentSessionServiceTests
     }
 
     [Fact]
+    public void FailureDiagnostic_AdmissionRefusalIsNotReportedAsAWrongFailureShape()
+    {
+        // A broker-owned run never evaluates the plan's independent business oracles, so its
+        // admission withholds repair even when the symptom is exactly the drifted action selector
+        // repair exists for. Reporting that as "not a verified pre-dispatch missing-selector
+        // failure" blames the classifier and sends the reader to inspect a step that is fine.
+        using var document = JsonDocument.Parse(
+            """
+            {
+              "run": {
+                "state": "failed",
+                "admission": {
+                  "sideEffectPolicy": "none",
+                  "ordinaryReplayAllowed": true,
+                  "repairEligibility": false,
+                  "reasons": [
+                    { "code": "independent-oracle-missing", "scope": "verification" }
+                  ]
+                },
+                "report": {
+                  "outcome": { "status": "failed" },
+                  "failure": {
+                    "class": "locator-not-found",
+                    "code": "locator-not-found",
+                    "category": "selector",
+                    "phase": "resolution",
+                    "legacyKind": "not-found",
+                    "stepId": "2"
+                  },
+                  "steps": [
+                    {
+                      "stepId": "2",
+                      "sequence": 2,
+                      "action": "tap",
+                      "targetResolution": { "status": "not-found", "matchCount": 0 },
+                      "expectedCheckpoint": { "agentInstanceId": "instance-a", "route": "//native" },
+                      "observedCheckpoint": { "agentInstanceId": "instance-a", "route": "//native" }
+                    }
+                  ]
+                }
+              }
+            }
+            """);
+
+        var diagnostic = TestAgentFailureTool.ReadDiagnostic(document.RootElement);
+
+        Assert.False(diagnostic.SelectorRepair.Eligible);
+        Assert.True(diagnostic.SelectorRepair.ClassifierEligible);
+        Assert.False(diagnostic.SelectorRepair.AdmissionEligible);
+        Assert.Contains("independent-oracle-missing", diagnostic.SelectorRepair.AdmissionReasonCodes);
+        Assert.Contains(
+            "not an admissible basis to repair from",
+            diagnostic.SelectorRepair.Reason,
+            StringComparison.Ordinal);
+        Assert.DoesNotContain(
+            "not a verified pre-dispatch missing-selector failure",
+            diagnostic.SelectorRepair.Reason,
+            StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void FailureDiagnostic_NonReplayableAdmissionNeverRecommendsReplayOrRepair()
     {
         using var document = JsonDocument.Parse(

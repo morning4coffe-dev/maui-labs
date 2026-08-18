@@ -870,6 +870,8 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
         preconditions.ObservationDeferredUntilLaunch = null;
         preconditions.CheckedAt = _clock.GetUtcNow();
 
+        SealExpectedRunIdentity(preconditions, observed);
+
         var decision = MauiFlowReplaySafetyEvaluator.EvaluateWithFlow(
             new MauiFlowRunRequest
             {
@@ -888,6 +890,43 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
             blocking?.Code ?? "precondition-checkpoint-unsatisfied",
             blocking?.Message ??
                 "The app's observed clean state does not satisfy the plan's declared checkpoint preconditions.");
+    }
+
+    /// <summary>
+    /// Records the run-identity facts the plan cannot declare in advance onto the expected
+    /// checkpoint, once, after preconditions verified.
+    /// <para>
+    /// A plan author can meaningfully declare a route, a window, a locale, or a theme. They cannot
+    /// declare the app build fingerprint, the agent instance id, or the seed and backend
+    /// fingerprints a provider attests at preflight, because those are properties of the run about
+    /// to happen. Repair eligibility nonetheless requires all of them
+    /// (<c>checkpoint-app-build-expected-missing</c> and friends), so leaving them unset made every
+    /// local run permanently repair-ineligible no matter how clean it was — the reason selector
+    /// self-repair had never once been reachable from `flow run`.
+    /// </para>
+    /// <para>
+    /// This is not weakening the gate. These fields are sealed from the state the run was already
+    /// held to: preconditions verified first, and only facts the plan left unspecified are filled.
+    /// Anything the plan did declare stays exactly as declared and is still compared, so a plan
+    /// that pins a build or a seed continues to fail closed when the app does not match it.
+    /// </para>
+    /// </summary>
+    private static void SealExpectedRunIdentity(
+        MauiFlowReplayPreconditions preconditions,
+        MauiFlowCheckpoint observed)
+    {
+        var expected = preconditions.Expected;
+        if (expected is null)
+            return;
+
+        expected.AppBuildFingerprint ??= observed.AppBuildFingerprint;
+        expected.AgentInstanceId ??= observed.AgentInstanceId;
+        expected.SeedFingerprint ??= observed.SeedFingerprint;
+        expected.BackendStateFingerprint ??= observed.BackendStateFingerprint;
+        expected.Locale ??= observed.Locale;
+        expected.Theme ??= observed.Theme;
+        expected.Orientation ??= observed.Orientation;
+        expected.DisplayProfile ??= observed.DisplayProfile;
     }
 
     private static MauiFlowRunTarget CreateRunTarget(

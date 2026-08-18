@@ -475,7 +475,12 @@ public partial class BrokerServer : IDisposable
                 Version = registration.Version,
                 SessionId = registration.SessionId,
                 ProcessId = registration.ProcessId,
-                InstanceId = Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(),
+                InstanceId = AgentRegistration.ComputeInstanceId(
+                        registration.PackageId ?? registration.Project,
+                        registration.Tfm,
+                        registration.SessionId,
+                        registration.ProcessId) ??
+                    Convert.ToHexString(RandomNumberGenerator.GetBytes(16)).ToLowerInvariant(),
                 ConnectedAt = DateTime.UtcNow
             };
 
@@ -489,10 +494,17 @@ public partial class BrokerServer : IDisposable
                     staleInspector.Dispose();
                 if (replaced is not null)
                 {
+                    // A dropped socket loses the delivery evidence an in-flight run depends on, so
+                    // the run is abandoned whether or not the process behind it is the same one.
+                    // Only the wording distinguishes the two, because a same-process reconnect now
+                    // keeps its instance identity and "reconnected with a new instance" would be
+                    // false.
                     _workflowRuns.MarkAgentInstanceUnavailable(
                         replaced.Registration.Id,
                         replaced.Registration.InstanceId,
-                        "The agent reconnected with a new instance.");
+                        string.Equals(replaced.Registration.InstanceId, agent.InstanceId, StringComparison.Ordinal)
+                            ? "The agent connection was replaced, so in-flight command delivery can no longer be proven."
+                            : "The agent reconnected with a new instance.");
                     if (replaced.Registration.Port != assignedPort)
                         ReleasePort(replaced.Registration.Port);
                     try { replaced.WebSocket.Dispose(); } catch { }

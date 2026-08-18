@@ -79,6 +79,36 @@ public record AgentRegistration
         return ComputeId(input);
     }
 
+    /// <summary>
+    /// Computes the process instance identity that authoring sessions, approvals, grants, and
+    /// checkpoints bind to, or <see langword="null"/> when the registration carries no evidence of
+    /// which process it came from.
+    /// </summary>
+    /// <remarks>
+    /// This identifies the app process, not the broker connection. Minting a fresh value per
+    /// WebSocket made a broker restart, or any transient reconnect, look like a different app: every
+    /// retained session and issued approval bound to the old value became stale even though the app
+    /// never restarted, and the only apparent remedy was restarting the editor session. Deriving it
+    /// from the app's own session id and process id keeps the property the trust model actually
+    /// needs — a genuinely new process reports a new session id and process id, so it still gets a
+    /// new instance identity — while a reconnect of the same process keeps its own.
+    /// <para>
+    /// A registration that reports no process id proves nothing about which process it is, so this
+    /// returns null and the caller keeps minting an unguessable per-connection value rather than
+    /// inventing continuity from absent evidence.
+    /// </para>
+    /// </remarks>
+    public static string? ComputeInstanceId(string? project, string? tfm, string? sessionId, int? processId)
+    {
+        if (processId is not > 0)
+            return null;
+
+        // The domain separator keeps this from ever colliding with the agent id computed from the
+        // same facts, so one can never be presented in place of the other.
+        var input = $"devflow-agent-instance|{project ?? ""}|{tfm ?? ""}|{sessionId ?? ""}|{processId.Value}";
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(input))).ToLowerInvariant()[..32];
+    }
+
     private static string ComputeId(string input)
     {
         var hash = SHA256.HashData(Encoding.UTF8.GetBytes(input));

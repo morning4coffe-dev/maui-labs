@@ -107,8 +107,52 @@ public sealed class TestAgentValidationTool
                 target = target.State,
                 rootCount = tree.Count,
                 findings,
+                admission = DescribeResetAdmission(snapshot.Plan),
             },
             [TestAgentToolSupport.Untrusted("ui-tree")]);
+    }
+
+    /// <summary>
+    /// Reports whether run admission can satisfy the plan's declared reset contract. Live validation
+    /// otherwise only proves selectors resolve, so a plan that declares a reset no owner can prove
+    /// validates clean, consumes a commit approval and a one-shot run grant, and only then fails
+    /// admission. Surfacing it here costs the caller nothing and spends no human approval.
+    /// </summary>
+    internal static object DescribeResetAdmission(MauiTestPlan? plan)
+    {
+        var reset = plan?.Reset;
+        if (reset?.Required != true)
+        {
+            return new
+            {
+                resetRequired = false,
+                admissible = true,
+                note = "The plan does not require a reset, so admission will not ask for one.",
+            };
+        }
+
+        var missing = new List<string>();
+        if (string.IsNullOrWhiteSpace(reset.Strategy))
+            missing.Add("reset.strategy");
+        if (string.IsNullOrWhiteSpace(reset.ResetIdentity))
+            missing.Add("reset.resetIdentity");
+
+        return new
+        {
+            resetRequired = true,
+            strategy = reset.Strategy,
+            resetIdentity = reset.ResetIdentity,
+            declaredMissing = missing.ToArray(),
+            admissible = (bool?)null,
+            note =
+                "Admission requires a reset owner to PROVE this contract: it compares the declared " +
+                "resetIdentity and seed fingerprints against the fingerprints an owner actually " +
+                "reports, and fails closed on not-proven or mismatch. Live validation cannot issue a " +
+                "reset, so it cannot confirm an owner exists. If no lifecycle reset owner is " +
+                "registered for this target, the run will fail admission after the one-shot grant is " +
+                "consumed. Confirm the owner with the human before requesting a run approval, or " +
+                "declare reset.required=false and state that repeated runs are not independent.",
+        };
     }
 }
 

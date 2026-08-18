@@ -17,6 +17,20 @@ execution authority.
 3. Check declared route, build, app instance, seed/backend, locale, display,
    and reset facts. Ask for a reset/seed provider when a repeatable or mutating
    flow needs one.
+   **Confirm a reset owner exists before requesting a run approval.** When the
+   plan sets `reset.required: true`, admission compares the declared
+   `resetIdentity` and seed fingerprints against fingerprints an owner actually
+   reports, and fails closed on `not-proven` or `-mismatch`. A one-shot run
+   grant is consumed by that attempt even though no action ran, so an
+   unsatisfiable reset contract costs the human an approval and produces no
+   result. `maui_test_validate` with `mode: "live"` returns an `admission`
+   block for exactly this: it names the declared strategy and identity, lists
+   anything missing, and cannot confirm an owner exists. Treat
+   `resetRequired: true` with no confirmed owner as a stop. Ask the human
+   whether a reset owner is registered for this target, or agree to declare
+   `reset.required: false` and say plainly that repeated runs are then not
+   independent. Never invent a `resetIdentity`; a plausible-looking value that
+   no owner reports fails admission exactly like an empty one.
 4. State the verification limitation if no required independent business oracle
    is declared. Do not call the result a verified pass.
 5. For `non-replayable`, prepare only a one-shot run review request. It cannot

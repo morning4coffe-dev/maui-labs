@@ -203,11 +203,21 @@ actually verified the business outcome. `failure.repairEligible` is the
 conjunction; `failure.classifierRepairEligible` records the first half alone, so
 a refusal by the second is not mistaken for a misclassification.
 
-That distinction has a practical consequence: only `maui devflow flow run`
-evaluates independent oracles, so only its runs can satisfy the second half. A
-broker-owned run started from the Inspector never evaluates them and is
-consequently never repair-eligible; `maui_test_failure` says so explicitly and
-names the admission's own reason codes rather than blaming the failure shape.
+That distinction has a practical consequence for where a run must come from. The plan's required
+independent oracle has to have actually verified the business outcome, and that evidence is produced
+out of band — over adb, outside the agent channel the flow drove.
+
+`maui devflow flow run` gets that for free: it installs the app, so app-private storage is empty
+when the run starts and anything read afterwards was written by that run. A run started from the
+Inspector attaches to an app that was already running with arbitrary prior state, so presence alone
+proves nothing. Those runs are therefore evaluated against a **baseline** taken before the run: a
+record only counts as this run's evidence if it was absent beforehand and present after. A run whose
+declared record already existed stays unverified and repair-ineligible, as does one whose device
+cannot be identified unambiguously.
+
+Both kinds of run can now reach the repair pipeline. `maui_test_failure` reports the two authorities
+separately — `classifierEligible` and `admissionEligible` — and names the admission's own reason
+codes, so a refusal points at its actual cause instead of blaming the failure shape.
 
 A legitimate repair re-points a test at what it always meant to check. Deleting
 an assertion, flipping `verify: true` to `false`, relaxing an expected value to

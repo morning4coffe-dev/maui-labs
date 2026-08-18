@@ -5161,7 +5161,11 @@ public class DevFlowCommands
             Console.CancelKeyPress += (_, _) => cts.Cancel();
 
             using var server = new Broker.BrokerServer(
-                log: msg => Console.WriteLine(msg));
+                Broker.BrokerServer.DefaultPort,
+                idleTimeout: null,
+                log: msg => Console.WriteLine(msg),
+                attachedRunOracles: Program.Services
+                    .GetService<Execution.IAttachedRunOracleEvaluator>());
             await server.RunAsync(cts.Token);
             return;
         }

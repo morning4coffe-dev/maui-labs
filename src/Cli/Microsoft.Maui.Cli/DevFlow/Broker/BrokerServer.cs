@@ -34,6 +34,13 @@ public partial class BrokerServer : IDisposable
     private readonly ConcurrentDictionary<string, SemaphoreSlim> _agentStateGates = new(StringComparer.Ordinal);
     private readonly MutationLeaseRegistry _mutationLeases;
     private readonly DeviceRegistry _devices = new();
+
+    /// <summary>
+    /// Reads independent business-oracle evidence out of band for a run against an already-running
+    /// app. Null in a broker whose host registered no evaluator, in which case such a run stays
+    /// unverified and repair-ineligible rather than being certified on weaker evidence.
+    /// </summary>
+    private readonly Execution.IAttachedRunOracleEvaluator? _attachedRunOracles;
     private readonly BrokerFlowCoordinator _flows;
     private readonly RouteCheckpointCoordinator _checkpoints;
     private readonly WorkflowRunCoordinator _workflowRuns;
@@ -73,6 +80,19 @@ public partial class BrokerServer : IDisposable
         int port = DefaultPort,
         TimeSpan? idleTimeout = null,
         Action<string>? log = null)
+        : this(port, idleTimeout, log, attachedRunOracles: null)
+    {
+    }
+
+    /// <summary>
+    /// Creates the broker a host runs, supplying the evaluator that reads independent business-
+    /// oracle evidence out of band for runs against an already-running app.
+    /// </summary>
+    internal BrokerServer(
+        int port,
+        TimeSpan? idleTimeout,
+        Action<string>? log,
+        Execution.IAttachedRunOracleEvaluator? attachedRunOracles)
         : this(
             port,
             idleTimeout,
@@ -82,7 +102,8 @@ public partial class BrokerServer : IDisposable
             clock: null,
             previewFlags: null,
             trustedHostApprovalVerifier: null,
-            nativeApprovalToken: CreateNativeApprovalToken())
+            nativeApprovalToken: CreateNativeApprovalToken(),
+            attachedRunOracles: attachedRunOracles)
     {
     }
 
@@ -137,13 +158,15 @@ public partial class BrokerServer : IDisposable
         Func<string?, bool>? trustedHostApprovalVerifier = null,
         string? nativeApprovalToken = null,
         bool requireWorkflowRunAuthorization = true,
-        Func<AgentRegistration, IWorkflowRepairResetAttester?>? repairResetAttesterResolver = null)
+        Func<AgentRegistration, IWorkflowRepairResetAttester?>? repairResetAttesterResolver = null,
+        Execution.IAttachedRunOracleEvaluator? attachedRunOracles = null)
     {
         _port = port;
         _idleTimeout = idleTimeout ?? TimeSpan.FromMinutes(5);
         _log = log;
         _requireWorkflowRunAuthorization = requireWorkflowRunAuthorization;
         _repairResetAttesterResolver = repairResetAttesterResolver;
+        _attachedRunOracles = attachedRunOracles;
         _previewFlags = previewFlags ?? MauiPreviewFeatureFlagConfiguration.FromEnvironment();
         _nativeApprovalToken = nativeApprovalToken;
         _trustedHostApprovalVerifier = nativeApprovalToken is null
@@ -165,7 +188,8 @@ public partial class BrokerServer : IDisposable
             },
             clock: clock,
             controlLedger: ControlWorkflowRunLedgerAsync,
-            authorizeDispatch: AuthorizeWorkflowRunDispatch);
+            authorizeDispatch: AuthorizeWorkflowRunDispatch,
+            beginOracleSession: BeginWorkflowRunOracleSessionAsync);
         _testAgentSessions = new TestAgentSessionService(clock: clock);
         _artifactTrustImports = new ArtifactTrustImportService(clock);
         _artifactTrustStore = new ArtifactTrustStore(clock: clock);
@@ -2458,8 +2482,68 @@ public partial class BrokerServer : IDisposable
             .ConfigureAwait(false)).LegacyReport;
     }
 
-    private async Task<WorkflowRunLedgerControlResult> ControlWorkflowRunLedgerAsync(
-        WorkflowRunLedgerControl control,
+    /// <summary>
+    /// Opens an independent business-oracle evaluation for a run against an app the broker attached
+    /// to rather than installed.
+    /// </summary>
+    /// <remarks>
+    /// The evaluator reaches the device out of band, through the same transport the CLI uses, so
+    /// the evidence is produced outside the agent channel the flow itself drove. Returning null
+    /// leaves the run unverified and therefore repair-ineligible, which is the correct outcome
+    /// whenever the plan declares no evaluable oracle or the device cannot be reached.
+    /// </remarks>
+    private async Task<IWorkflowRunOracleSession?> BeginWorkflowRunOracleSessionAsync(
+        RunOracleSessionRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (_attachedRunOracles is null)
+            return null;
+
+        var agent = _agents.Values
+            .Select(static connection => connection.Registration)
+            .FirstOrDefault(registration =>
+                string.Equals(registration.Id, request.Target.AgentId, StringComparison.Ordinal) &&
+                string.Equals(registration.InstanceId, request.Target.AgentInstanceId, StringComparison.Ordinal));
+        if (agent?.PackageId is not { Length: > 0 } packageId)
+            return null;
+        if (!_attachedRunOracles.SupportsAttachedRun(request.Plan, agent.Platform))
+            return null;
+
+        var target = new Execution.AttachedRunOracleTarget
+        {
+            Plan = request.Plan,
+            Platform = agent.Platform ?? string.Empty,
+            PackageId = packageId,
+            DeviceIdentity = agent.DeviceId,
+            Deadline = DateTimeOffset.UtcNow.AddSeconds(30),
+        };
+        var baseline = await _attachedRunOracles
+            .ObserveAttachedBaselineAsync(target, cancellationToken)
+            .ConfigureAwait(false);
+        if (!baseline.Observed)
+        {
+            Log($"Workflow run oracle baseline unavailable: {baseline.UnavailableCode}");
+            return null;
+        }
+
+        return new AttachedRunOracleSession(_attachedRunOracles, target, baseline);
+    }
+
+    /// <summary>Evaluates one run's declared oracles against the baseline taken before it ran.</summary>
+    private sealed class AttachedRunOracleSession(
+        Execution.IAttachedRunOracleEvaluator evaluator,
+        Execution.AttachedRunOracleTarget target,
+        Execution.AttachedRunOracleBaseline baseline) : IWorkflowRunOracleSession
+    {
+        public Task<IReadOnlyList<Microsoft.Maui.DevFlow.Testing.MauiIndependentBusinessOracleResult>> EvaluateAsync(
+            CancellationToken cancellationToken)
+            => evaluator.EvaluateAttachedAsync(
+                target with { Deadline = DateTimeOffset.UtcNow.AddSeconds(30) },
+                baseline,
+                cancellationToken);
+    }
+
+    private async Task<WorkflowRunLedgerControlResult> ControlWorkflowRunLedgerAsync(        WorkflowRunLedgerControl control,
         CancellationToken cancellationToken)
     {
         using var client = new Microsoft.Maui.DevFlow.Driver.AgentClient("localhost", control.Target.AgentPort)

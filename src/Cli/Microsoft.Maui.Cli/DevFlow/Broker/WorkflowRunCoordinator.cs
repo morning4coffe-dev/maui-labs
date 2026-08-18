@@ -7,14 +7,33 @@ using Testing = Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow.Broker;
 
+/// <summary>Identifies the run whose independent business oracles are to be evaluated.</summary>
+internal sealed record RunOracleSessionRequest(
+    string RunId,
+    Testing.MauiTestPlan Plan,
+    WorkflowRunTarget Target);
+
+/// <summary>
+/// An open evaluation of one run's independent business oracles.
+/// </summary>
+/// <remarks>
+/// The session is created before the flow runs so the evaluator can record what the declared
+/// evidence already said. A run the broker merely attached to did not start from a freshly
+/// installed app, so only the difference between the two observations can be attributed to it.
+/// </remarks>
+internal interface IWorkflowRunOracleSession
+{
+    Task<IReadOnlyList<Testing.MauiIndependentBusinessOracleResult>> EvaluateAsync(
+        CancellationToken cancellationToken);
+}
+
 /// <summary>
 /// Coordinates one bounded, mutating flow replay for a connected agent instance. It owns broker
 /// lifecycle state, idempotency, the mutation-lease transaction, and retained reports; the public
 /// Testing package remains the only replay implementation.
 /// </summary>
 internal sealed class WorkflowRunCoordinator : IDisposable
-{
-    private const int MaxLifecycleEvents = 128;
+{    private const int MaxLifecycleEvents = 128;
 
     /// <summary>
     /// Holder kinds whose idle lease a human-approved run may adopt. These are the trusted local
@@ -27,6 +46,7 @@ internal sealed class WorkflowRunCoordinator : IDisposable
     private readonly Func<WorkflowRunExecution, CancellationToken, Task<Testing.FlowReplayReport>> _execute;
     private readonly Func<WorkflowRunLedgerControl, CancellationToken, Task<WorkflowRunLedgerControlResult>>? _controlLedger;
     private readonly WorkflowRunDispatchAuthorizer _authorizeDispatch;
+    private readonly Func<RunOracleSessionRequest, CancellationToken, Task<IWorkflowRunOracleSession?>>? _beginOracleSession;
     private readonly WorkflowRunCoordinatorOptions _options;
     private readonly TimeProvider _clock;
     private readonly Dictionary<string, RunRecord> _runs = new(StringComparer.Ordinal);
@@ -41,11 +61,13 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         WorkflowRunCoordinatorOptions? options = null,
         TimeProvider? clock = null,
         Func<WorkflowRunLedgerControl, CancellationToken, Task<WorkflowRunLedgerControlResult>>? controlLedger = null,
-        WorkflowRunDispatchAuthorizer? authorizeDispatch = null)
+        WorkflowRunDispatchAuthorizer? authorizeDispatch = null,
+        Func<RunOracleSessionRequest, CancellationToken, Task<IWorkflowRunOracleSession?>>? beginOracleSession = null)
     {
         _leases = leases ?? throw new ArgumentNullException(nameof(leases));
         _execute = execute ?? throw new ArgumentNullException(nameof(execute));
         _controlLedger = controlLedger;
+        _beginOracleSession = beginOracleSession;
         // A coordinator without an authorizer refuses every start. Authorization is a precondition
         // of this type rather than of one HTTP route, so a host that forgets to wire it up fails
         // closed instead of silently dispatching device-mutating runs for nobody.
@@ -536,6 +558,7 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         var terminalState = WorkflowRunState.InfrastructureError;
         var message = "Workflow runner stopped unexpectedly.";
         var failureClass = Testing.MauiFlowFailureClasses.Infrastructure;
+        IWorkflowRunOracleSession? oracleSession = null;
 
         try
         {
@@ -664,6 +687,7 @@ internal sealed class WorkflowRunCoordinator : IDisposable
             using var linkedCancellation = CancellationTokenSource.CreateLinkedTokenSource(
                 run.Cancellation.Token,
                 run.TimeoutCancellation.Token);
+            oracleSession = await BeginOracleSessionAsync(run, linkedCancellation.Token).ConfigureAwait(false);
             var executionOptions = new WorkflowRunExecutionOptions
             {
                 EvidenceCaptureFactory = run.ExecutionOptions.EvidenceCaptureFactory,
@@ -780,12 +804,105 @@ internal sealed class WorkflowRunCoordinator : IDisposable
 
             if (shouldComplete)
             {
+                await AdoptPostRunOracleEvidenceAsync(run, oracleSession, terminalState).ConfigureAwait(false);
                 lock (_gate)
                 {
                     if (!WorkflowRunStates.IsTerminal(run.State))
                         CompleteTerminalLocked(run, terminalState, message, compatibilityReport, failureClass);
                 }
             }
+        }
+    }
+
+    /// <summary>
+    /// Opens an independent business-oracle evaluation for this run, or returns null when nothing
+    /// can evaluate the plan's declared oracles against this target.
+    /// </summary>
+    /// <remarks>
+    /// A run that cannot be oracle-verified is not a failure: it simply stays unverified and
+    /// therefore ineligible for repair, exactly as before. Only a session that opened successfully
+    /// can later certify anything.
+    /// </remarks>
+    private async Task<IWorkflowRunOracleSession?> BeginOracleSessionAsync(
+        RunRecord run,
+        CancellationToken cancellationToken)
+    {
+        if (_beginOracleSession is null || run.SafetyRequest.Plan is not { } plan)
+            return null;
+
+        try
+        {
+            var session = await _beginOracleSession(
+                new RunOracleSessionRequest(run.RunId, plan, run.Target),
+                cancellationToken).ConfigureAwait(false);
+            if (session is not null)
+                AddEvent(run, "oracle-baseline-observed", "Recorded the declared business evidence before the run.");
+            return session;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            // Evidence that cannot be observed must not stop a run the human already approved. The
+            // run simply stays unverified, which is the outcome an absent baseline already implies.
+            AddEvent(run, "oracle-baseline-unavailable", "The declared business evidence could not be read before the run.");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Attaches this run's independent business-oracle results and re-decides admission from them.
+    /// </summary>
+    /// <remarks>
+    /// Admission is first decided before the run, when no oracle has produced anything, so a plan
+    /// that requires one is necessarily unverified and repair-ineligible at that moment. That
+    /// provisional decision was previously the only one ever recorded, which is why a broker-owned
+    /// run could never become repair-eligible however well it went. The decision made here is the
+    /// first one that can account for what the run actually established.
+    /// </remarks>
+    private async Task AdoptPostRunOracleEvidenceAsync(
+        RunRecord run,
+        IWorkflowRunOracleSession? session,
+        WorkflowRunState terminalState)
+    {
+        if (session is null || run.SafetyRequest.Context is not { } context)
+            return;
+
+        // A run that never reached its steps, or whose outcome is unknown, cannot support a claim
+        // about what the app committed, so its evidence is not collected at all.
+        if (terminalState is not (WorkflowRunState.Passed or WorkflowRunState.Failed))
+            return;
+
+        IReadOnlyList<Testing.MauiIndependentBusinessOracleResult> results;
+        try
+        {
+            using var timeout = new CancellationTokenSource(_options.OracleEvaluationTimeout);
+            results = await session.EvaluateAsync(timeout.Token).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            AddEvent(run, "oracle-evaluation-failed", "The declared business evidence could not be read after the run.");
+            return;
+        }
+
+        if (results.Count == 0)
+            return;
+
+        context.BusinessOracles = [.. results];
+        var decision = Testing.MauiFlowReplaySafetyEvaluator.EvaluateWithFlow(run.SafetyRequest, run.Flow);
+        run.AdoptPostRunAdmission(decision);
+        AddEvent(
+            run,
+            "oracle-evidence-recorded",
+            results.All(static result => result.Succeeded == true)
+                ? "Independent business-oracle evidence verified this run."
+                : "Independent business-oracle evidence did not verify this run.");
+    }
+
+    private void AddEvent(RunRecord run, string kind, string message)
+    {
+        lock (_gate)
+        {
+            if (!WorkflowRunStates.IsTerminal(run.State))
+                AddEventLocked(run, kind, message);
         }
     }
 
@@ -1908,7 +2025,16 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         public string FlowDigest { get; }
         public Testing.MauiFlow Flow { get; }
         public Testing.MauiFlowRunRequest SafetyRequest { get; }
-        public Testing.MauiFlowReplayEligibilityDecision Admission { get; }
+        public Testing.MauiFlowReplayEligibilityDecision Admission { get; private set; }
+
+        /// <summary>
+        /// Replaces the admission decided before the run with the one decided from what the run
+        /// established. Only the post-run decision can account for independent oracle evidence,
+        /// which by definition does not exist yet when a run is admitted.
+        /// </summary>
+        public void AdoptPostRunAdmission(Testing.MauiFlowReplayEligibilityDecision decision)
+            => Admission = decision ?? throw new ArgumentNullException(nameof(decision));
+
         public WorkflowRunTarget Target { get; }
         public TimeSpan Timeout { get; }
         public Func<bool> IsTargetCurrent { get; }
@@ -2151,6 +2277,13 @@ internal sealed class WorkflowRunCoordinatorOptions
     public TimeSpan LeaseAcquisitionTimeout { get; init; } = TimeSpan.FromSeconds(20);
 
     public TimeSpan LeaseAcquisitionPollInterval { get; init; } = TimeSpan.FromMilliseconds(500);
+
+    /// <summary>
+    /// How long the post-run independent business-oracle read may take. It runs after the mutation
+    /// lease is released, so it delays only the run's own terminal transition.
+    /// </summary>
+    public TimeSpan OracleEvaluationTimeout { get; init; } = TimeSpan.FromSeconds(45);
+
     /// <summary>Optional trusted root for atomic &lt;runId&gt;/flow-run.json artifacts.</summary>
     public string? ArtifactRoot { get; init; }
     public Testing.MauiFlowRunReportLimits ReportLimits { get; init; } = new();

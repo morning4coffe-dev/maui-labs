@@ -32,7 +32,7 @@ namespace Microsoft.Maui.Cli.DevFlow.Execution;
 /// the exact run, device, build, flow, and evaluation window.
 /// </para>
 /// </remarks>
-internal sealed partial class AndroidAppStorageEvidenceProvider : IFlowStateEvidenceProvider
+internal sealed partial class AndroidAppStorageEvidenceProvider : IFlowStateEvidenceProvider, IAttachedRunOracleEvaluator
 {
     /// <summary>The <c>evidenceKind</c> a plan oracle declares to select this provider.</summary>
     public const string AndroidAppStorageEvidenceKind = "android-app-storage";
@@ -186,17 +186,271 @@ internal sealed partial class AndroidAppStorageEvidenceProvider : IFlowStateEvid
         };
     }
 
+    // ── Attached runs ───────────────────────────────────────────────────────────────────────────
+
+    public bool SupportsAttachedRun(MauiTestPlan? plan, string? platform)
+        => string.Equals(platform, "android", StringComparison.OrdinalIgnoreCase) &&
+           ReadDeclarations(plan).Count > 0;
+
+    public async Task<AttachedRunOracleBaseline> ObserveAttachedBaselineAsync(
+        AttachedRunOracleTarget target,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        if (!SupportsAttachedRun(target.Plan, target.Platform))
+        {
+            return AttachedRunOracleBaseline.Unavailable(
+                "android-app-storage-attached-unsupported",
+                "The Android app-storage oracle can only read evidence from an attached Android run.");
+        }
+
+        var reads = await ReadDeclaredEvidenceAsync(target, cancellationToken).ConfigureAwait(false);
+        if (reads.FailureCode is not null)
+            return AttachedRunOracleBaseline.Unavailable(reads.FailureCode, reads.FailureMessage!);
+
+        var preExisting = new Dictionary<string, IReadOnlyList<int>>(StringComparer.Ordinal);
+        foreach (var observation in reads.Observations)
+        {
+            var content = observation.Content;
+            preExisting[observation.Oracle.OracleId] = content is null
+                ? []
+                : [.. Enumerable.Range(0, observation.Oracle.Contains.Count)
+                    .Where(index => content.Contains(observation.Oracle.Contains[index], StringComparison.Ordinal))];
+        }
+
+        return new AttachedRunOracleBaseline { Observed = true, PreExistingContains = preExisting };
+    }
+
+    public async Task<IReadOnlyList<MauiIndependentBusinessOracleResult>> EvaluateAttachedAsync(
+        AttachedRunOracleTarget target,
+        AttachedRunOracleBaseline baseline,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        ArgumentNullException.ThrowIfNull(baseline);
+
+        // Without a baseline there is no evidence that anything read now was produced by this run.
+        // Reporting no result leaves the run unverified, which is the correct outcome; reporting a
+        // successful one would certify a record that may have predated the run entirely.
+        if (!baseline.Observed)
+            return [];
+
+        var reads = await ReadDeclaredEvidenceAsync(target, cancellationToken).ConfigureAwait(false);
+        if (reads.FailureCode is not null)
+            return [];
+
+        return
+        [
+            .. reads.Observations.Select(observation => BuildResult(
+                observation.Oracle,
+                observation.Content,
+                baseline.PreExistingContains.TryGetValue(observation.Oracle.OracleId, out var pre)
+                    ? pre
+                    : [])),
+        ];
+    }
+
+    /// <summary>Reads every declared oracle's evidence file once, bounded by the target deadline.</summary>
+    private async Task<DeclaredEvidenceReads> ReadDeclaredEvidenceAsync(
+        AttachedRunOracleTarget target,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrEmpty(target.PackageId) || !PackagePattern().IsMatch(target.PackageId))
+        {
+            return DeclaredEvidenceReads.Failure(
+                "android-app-storage-target-invalid",
+                "The Android package identity is not a safe adb argument.");
+        }
+
+        var adbPath = ResolveAdbPath();
+        if (adbPath is null)
+        {
+            return DeclaredEvidenceReads.Failure(
+                "android-adb-not-found",
+                "ADB was not found in the configured Android SDK, so app-storage evidence cannot be read.");
+        }
+
+        var serial = await ResolveAttachedSerialAsync(adbPath, target, cancellationToken).ConfigureAwait(false);
+        if (serial is null)
+        {
+            return DeclaredEvidenceReads.Failure(
+                "android-app-storage-device-unresolved",
+                "The exact Android device running the attached app could not be identified, so its " +
+                "app-private storage cannot be read without guessing which device to reach.");
+        }
+
+        var observations = new List<AppStorageObservation>();
+        foreach (var declaration in ReadDeclarations(target.Plan))
+        {
+            var parsed = ParseDeclaration(declaration);
+            var remaining = target.Deadline - _clock.GetUtcNow();
+            if (remaining <= TimeSpan.Zero)
+            {
+                return DeclaredEvidenceReads.Failure(
+                    "android-app-storage-deadline-elapsed",
+                    "The bounded evaluation window closed before app-storage evidence could be read.");
+            }
+
+            var read = await ReadAppStorageFileAsync(
+                adbPath,
+                serial,
+                target.PackageId,
+                parsed.RelativePath,
+                remaining < ReadTimeout ? remaining : ReadTimeout,
+                cancellationToken).ConfigureAwait(false);
+            if (read.ChannelFailureCode is not null)
+                return DeclaredEvidenceReads.Failure(read.ChannelFailureCode, read.ChannelFailureMessage!);
+
+            observations.Add(new AppStorageObservation(parsed, read.Content));
+        }
+
+        return new DeclaredEvidenceReads { Observations = observations };
+    }
+
+    /// <summary>
+    /// Finds the adb serial of the device the attached app is running on, or null when that cannot
+    /// be established without guessing.
+    /// </summary>
+    /// <remarks>
+    /// Reaching the wrong device would read another app's storage and certify a business outcome
+    /// that never happened here, so every ambiguous case resolves to null. An agent that named its
+    /// AVD must match exactly one attached emulator; an agent that recognised nothing about its
+    /// host is accepted only when exactly one device is attached at all.
+    /// </remarks>
+    private async Task<string?> ResolveAttachedSerialAsync(
+        string adbPath,
+        AttachedRunOracleTarget target,
+        CancellationToken cancellationToken)
+    {
+        var attached = await ListAttachedSerialsAsync(adbPath, cancellationToken).ConfigureAwait(false);
+        if (attached.Count == 0)
+            return null;
+
+        var avdName = ReadAvdName(target.DeviceIdentity);
+        if (avdName is null)
+            return attached.Count == 1 ? attached[0] : null;
+
+        string? matched = null;
+        foreach (var serial in attached)
+        {
+            var name = await ReadEmulatorAvdNameAsync(adbPath, serial, cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(name, avdName, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (matched is not null)
+                return null;
+            matched = serial;
+        }
+
+        return matched;
+    }
+
+    private async Task<IReadOnlyList<string>> ListAttachedSerialsAsync(
+        string adbPath,
+        CancellationToken cancellationToken)
+    {
+        ProcessResult result;
+        try
+        {
+            result = await _processRunner.RunAsync(
+                adbPath,
+                ["devices"],
+                timeout: TimeSpan.FromSeconds(15),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return [];
+        }
+
+        if (!result.Success)
+            return [];
+
+        return
+        [
+            .. (result.StandardOutput ?? string.Empty)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Select(static line => line.Split('\t', StringSplitOptions.TrimEntries))
+                // Only a fully booted 'device' state can serve a run-as read; 'offline' and
+                // 'unauthorized' would fail later with a channel error that reads like a defect.
+                .Where(static parts => parts.Length == 2 &&
+                    string.Equals(parts[1], "device", StringComparison.Ordinal) &&
+                    IsValidSerial(parts[0]))
+                .Select(static parts => parts[0]),
+        ];
+    }
+
+    private async Task<string?> ReadEmulatorAvdNameAsync(
+        string adbPath,
+        string serial,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _processRunner.RunAsync(
+                adbPath,
+                ["-s", serial, "emu", "avd", "name"],
+                timeout: TimeSpan.FromSeconds(15),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+            if (!result.Success)
+                return null;
+
+            // The emulator console answers with the name followed by its own OK acknowledgement.
+            return (result.StandardOutput ?? string.Empty)
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault(static line => !string.Equals(line, "OK", StringComparison.Ordinal));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ReadAvdName(string? deviceIdentity)
+        => deviceIdentity?
+            .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(static part => part.Split('=', 2, StringSplitOptions.TrimEntries))
+            .Where(static parts => parts.Length == 2 &&
+                string.Equals(parts[0], "avd", StringComparison.OrdinalIgnoreCase))
+            .Select(static parts => parts[1])
+            .FirstOrDefault(static value => !string.IsNullOrWhiteSpace(value));
+
+    private sealed record AppStorageObservation(AppStorageOracle Oracle, string? Content);
+
+    private sealed record DeclaredEvidenceReads
+    {
+        public IReadOnlyList<AppStorageObservation> Observations { get; init; } = [];
+        public string? FailureCode { get; init; }
+        public string? FailureMessage { get; init; }
+
+        public static DeclaredEvidenceReads Failure(string code, string message)
+            => new() { FailureCode = code, FailureMessage = message };
+    }
+
     /// <summary>
     /// Evaluates the declared predicates. The reason never repeats file content, because app
     /// storage can hold user data that must not reach a report.
     /// </summary>
     private MauiIndependentBusinessOracleResult BuildResult(AppStorageOracle oracle, string? content)
+        => BuildResult(oracle, content, preExistingContains: []);
+
+    private MauiIndependentBusinessOracleResult BuildResult(
+        AppStorageOracle oracle,
+        string? content,
+        IReadOnlyList<int> preExistingContains)
     {
         var succeeded = false;
         string message;
         if (content is null)
         {
             message = "The app did not commit the declared evidence file to its private storage.";
+        }
+        else if (preExistingContains.Count > 0)
+        {
+            // The record was already there before the run, so its presence afterwards says nothing
+            // about what this run did. Failing closed is the only honest reading.
+            message =
+                $"The record required by expect.contains[{preExistingContains[0]}] already existed before this run, " +
+                "so this evidence does not show that this run committed it.";
         }
         else if (FirstUnsatisfiedPredicate(oracle, content) is { } unsatisfied)
         {

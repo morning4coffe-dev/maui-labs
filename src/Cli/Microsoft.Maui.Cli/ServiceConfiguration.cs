@@ -153,6 +153,8 @@ public static class ServiceConfiguration
 		services.AddSingleton<AndroidAppStorageEvidenceProvider>();
 		services.AddSingleton<IFlowStateEvidenceProvider>(
 			static provider => provider.GetRequiredService<AndroidAppStorageEvidenceProvider>());
+		services.AddSingleton<IAttachedRunOracleEvaluator>(
+			static provider => provider.GetRequiredService<AndroidAppStorageEvidenceProvider>());
 		services.AddSingleton<IFlowStateEvidenceProviderRegistry>(
 			static provider => new FlowStateEvidenceProviderRegistry(
 				provider.GetServices<IFlowStateEvidenceProvider>()));

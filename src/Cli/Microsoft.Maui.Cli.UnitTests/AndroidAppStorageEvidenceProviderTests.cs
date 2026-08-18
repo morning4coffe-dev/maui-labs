@@ -395,6 +395,156 @@ public class AndroidAppStorageEvidenceProviderTests : IDisposable
     private AndroidAppStorageEvidenceProvider CreateProvider(IExecutionProcessRunner runner)
         => new(new FakeAndroidProvider { SdkPath = _sdkRoot }, runner);
 
+    private AttachedRunOracleTarget CreateAttachedTarget(MauiTestPlan plan) => new()
+    {
+        Plan = plan,
+        Platform = "android",
+        PackageId = "com.example.app",
+        DeviceIdentity = "platform=android;avd=test-avd",
+        Deadline = DateTimeOffset.MaxValue,
+    };
+
+    /// <summary>
+    /// The reads a successful attached evaluation performs, in order: list devices, ask the one
+    /// emulator its AVD name, then read the declared evidence file.
+    /// </summary>
+    private static ProcessResult[] AttachedReads(string evidence) =>
+    [
+        Ok("List of devices attached\nemulator-5554\tdevice\n"),
+        Ok("test-avd\nOK\n"),
+        Ok(evidence),
+    ];
+
+    // ── Attached runs ───────────────────────────────────────────────────────────────────────────
+    //
+    // A run the broker attached to did not install the app, so app-private storage was not empty
+    // when it started. Only the difference between a baseline taken before the run and what is
+    // there afterwards can be attributed to that run.
+
+    [Fact]
+    public async Task Attached_RecordWrittenDuringTheRun_Verifies()
+    {
+        var runner = new QueueRunner([.. AttachedReads(string.Empty), .. AttachedReads("""{"id":"todo-0001"}""")]);
+        var provider = CreateProvider(runner);
+        var target = CreateAttachedTarget(CreatePlan());
+
+        var baseline = await provider.ObserveAttachedBaselineAsync(target);
+        var results = await provider.EvaluateAttachedAsync(target, baseline);
+
+        Assert.True(baseline.Observed);
+        var result = Assert.Single(results);
+        Assert.True(result.Succeeded);
+        Assert.True(result.Independent);
+    }
+
+    [Fact]
+    public async Task Attached_RecordThatPredatesTheRun_DoesNotVerify()
+    {
+        // Identical content before and after means the app committed nothing during this run.
+        // Certifying it would attribute a stale record to a run that never produced it.
+        var runner = new QueueRunner([.. AttachedReads("""{"id":"todo-0001"}"""), .. AttachedReads("""{"id":"todo-0001"}""")]);
+        var provider = CreateProvider(runner);
+        var target = CreateAttachedTarget(CreatePlan());
+
+        var baseline = await provider.ObserveAttachedBaselineAsync(target);
+        var results = await provider.EvaluateAttachedAsync(target, baseline);
+
+        var result = Assert.Single(results);
+        Assert.False(result.Succeeded);
+        Assert.Contains("already existed before this run", result.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task Attached_RecordNeverWritten_DoesNotVerify()
+    {
+        var runner = new QueueRunner([.. AttachedReads(string.Empty), .. AttachedReads("""{"id":"todo-0002"}""")]);
+        var provider = CreateProvider(runner);
+        var target = CreateAttachedTarget(CreatePlan());
+
+        var baseline = await provider.ObserveAttachedBaselineAsync(target);
+        var results = await provider.EvaluateAttachedAsync(target, baseline);
+
+        var result = Assert.Single(results);
+        Assert.False(result.Succeeded);
+    }
+
+    [Fact]
+    public async Task Attached_WithoutABaseline_CertifiesNothing()
+    {
+        // No baseline means no evidence that anything read now was produced by this run. Returning
+        // no result leaves the run unverified, which is correct; a successful one would be a claim
+        // the provider cannot support.
+        var runner = new QueueRunner([.. AttachedReads("""{"id":"todo-0001"}""")]);
+        var provider = CreateProvider(runner);
+        var target = CreateAttachedTarget(CreatePlan());
+
+        var results = await provider.EvaluateAttachedAsync(
+            target,
+            AttachedRunOracleBaseline.Unavailable("android-adb-not-found", "unreachable"));
+
+        Assert.Empty(results);
+        Assert.Empty(runner.Calls);
+    }
+
+    [Fact]
+    public async Task Attached_UnreadableEvidenceChannel_CertifiesNothing()
+    {
+        // An unusable channel is not a business verdict. It must not be reported as either a
+        // verified or a failed oracle, because neither is known.
+        var provider = CreateProvider(new QueueRunner(
+            Ok("List of devices attached\nemulator-5554\tdevice\n"),
+            Ok("test-avd\nOK\n"),
+            new ProcessResult { ExitCode = 13, StandardError = "device offline" }));
+        var target = CreateAttachedTarget(CreatePlan());
+
+        var baseline = await provider.ObserveAttachedBaselineAsync(target);
+
+        Assert.False(baseline.Observed);
+        Assert.Equal("android-app-storage-read-failed", baseline.UnavailableCode);
+    }
+
+    [Fact]
+    public void Attached_IsRefusedForNonAndroidTargetsAndUndeclaredOracles()
+    {
+        var provider = CreateProvider(new QueueRunner());
+
+        Assert.True(provider.SupportsAttachedRun(CreatePlan(), "android"));
+        Assert.False(provider.SupportsAttachedRun(CreatePlan(), "ios"));
+        Assert.False(provider.SupportsAttachedRun(CreatePlan(evidenceKind: "other-kind"), "android"));
+        Assert.False(provider.SupportsAttachedRun(plan: null, "android"));
+    }
+
+    [Fact]
+    public async Task Attached_AmbiguousDevice_CertifiesNothing()
+    {
+        // Two emulators are attached and neither answers to the AVD the agent named. Reading a
+        // guessed device would certify another app's storage as this run's business outcome.
+        var provider = CreateProvider(new QueueRunner(
+            Ok("List of devices attached\nemulator-5554\tdevice\nemulator-5556\tdevice\n"),
+            Ok("other-avd\nOK\n"),
+            Ok("another-avd\nOK\n")));
+
+        var baseline = await provider.ObserveAttachedBaselineAsync(CreateAttachedTarget(CreatePlan()));
+
+        Assert.False(baseline.Observed);
+        Assert.Equal("android-app-storage-device-unresolved", baseline.UnavailableCode);
+    }
+
+    [Fact]
+    public async Task Attached_UnbootedDevice_IsNotUsed()
+    {
+        // An offline device cannot serve a run-as read, so it must not be counted as the single
+        // attached candidate for an agent that recognised nothing about its host.
+        var provider = CreateProvider(new QueueRunner(
+            Ok("List of devices attached\nemulator-5554\toffline\n")));
+        var target = CreateAttachedTarget(CreatePlan()) with { DeviceIdentity = null };
+
+        var baseline = await provider.ObserveAttachedBaselineAsync(target);
+
+        Assert.False(baseline.Observed);
+        Assert.Equal("android-app-storage-device-unresolved", baseline.UnavailableCode);
+    }
+
     private static ProcessResult Ok(string standardOutput)
         => new() { ExitCode = 0, StandardOutput = standardOutput };
 

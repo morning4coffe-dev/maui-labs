@@ -145,4 +145,43 @@ public class InspectorWriterLockTests
     [InlineData("/api/control", false)]
     public void IsMutation_GatesOnlyStateChangingPosts(string path, bool mutation)
         => Assert.Equal(mutation, InspectorServer.IsMutation(path));
+
+    [Fact]
+    public void AdoptIdleLease_TakesAnIdleInspectorLeaseForAnApprovedRun()
+    {
+        var leases = new MutationLeaseRegistry();
+        Assert.True(leases.Control("agent", "claim", "inspector", "vscode", "VS Code Inspector", false).YouHold);
+
+        var adopted = leases.TryAdoptIdleLease(
+            "agent", "run-lease", "txn-1", "workflow-run", "run-1", ["vscode", "web"]);
+
+        Assert.True(adopted.YouHold);
+        Assert.Equal("txn-1", adopted.TransactionId);
+    }
+
+    [Fact]
+    public void AdoptIdleLease_RefusesWhileTheHolderIsMidMutation()
+    {
+        var leases = new MutationLeaseRegistry();
+        Assert.True(leases.Control("agent", "claim", "inspector", "vscode", "VS Code Inspector", false).YouHold);
+        // A human actively driving the app has an open transaction. Never interrupt that.
+        Assert.NotNull(leases.Control("agent", "begin", "inspector", "vscode", "VS Code Inspector", false, "human-txn").TransactionId);
+
+        var adopted = leases.TryAdoptIdleLease(
+            "agent", "run-lease", "txn-1", "workflow-run", "run-1", ["vscode", "web"]);
+
+        Assert.False(adopted.YouHold);
+    }
+
+    [Fact]
+    public void AdoptIdleLease_RefusesAHolderKindThatIsNotAllowListed()
+    {
+        var leases = new MutationLeaseRegistry();
+        Assert.True(leases.Control("agent", "claim", "other", "cli", "Some CLI", false).YouHold);
+
+        var adopted = leases.TryAdoptIdleLease(
+            "agent", "run-lease", "txn-1", "workflow-run", "run-1", ["vscode", "web"]);
+
+        Assert.False(adopted.YouHold);
+    }
 }

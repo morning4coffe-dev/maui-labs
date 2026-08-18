@@ -139,6 +139,53 @@ internal sealed class MutationLeaseRegistry : IWorkflowMutationLeaseRegistry
         }
     }
 
+    /// <summary>
+    /// Atomically takes an idle lease held by an allow-listed trusted host and opens a transaction on
+    /// it. The Inspector is both the surface a human approves a run in and the holder of the app's
+    /// single-writer lease while it is open, so an approved agent run would otherwise deadlock behind
+    /// the very window that authorized it. Adoption is deliberately narrow: it refuses while any
+    /// transaction is open, so a human actually driving the app is never interrupted mid-mutation,
+    /// and it refuses any holder kind outside <paramref name="adoptableHolderKinds"/>.
+    /// </summary>
+    public MutationLeaseSnapshot TryAdoptIdleLease(
+        string agentId,
+        string targetLeaseId,
+        string transactionId,
+        string? holderKind,
+        string? label,
+        IReadOnlyCollection<string> adoptableHolderKinds)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(targetLeaseId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(transactionId);
+        ArgumentNullException.ThrowIfNull(adoptableHolderKinds);
+
+        var state = _leases.GetOrAdd(agentId, static _ => new LeaseState());
+        lock (state.Gate)
+        {
+            ExpireIfNeeded(state);
+
+            // Nothing to adopt, or the caller already holds it: the ordinary claim path applies.
+            if (state.LeaseId is null || string.Equals(state.LeaseId, targetLeaseId, StringComparison.Ordinal))
+                return Snapshot(state, targetLeaseId, transactionId);
+
+            // A transaction in flight means someone is mid-mutation. Never interrupt that.
+            if (state.TransactionIds.Count != 0)
+                return Snapshot(state, targetLeaseId, transactionId);
+
+            if (state.HolderKind is null ||
+                !adoptableHolderKinds.Contains(state.HolderKind, StringComparer.OrdinalIgnoreCase))
+            {
+                return Snapshot(state, targetLeaseId, transactionId);
+            }
+
+            SetHolder(state, targetLeaseId, holderKind, label);
+            state.TransactionLeaseId = targetLeaseId;
+            state.TransactionIds[transactionId] = _getTicks();
+            state.LastSeenTicks = _getTicks();
+            return Snapshot(state, targetLeaseId, transactionId);
+        }
+    }
+
     public void Remove(string agentId) => _leases.TryRemove(agentId, out _);
 
     public void Clear() => _leases.Clear();

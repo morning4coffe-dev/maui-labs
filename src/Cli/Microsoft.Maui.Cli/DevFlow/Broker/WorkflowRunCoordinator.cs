@@ -16,6 +16,12 @@ internal sealed class WorkflowRunCoordinator : IDisposable
 {
     private const int MaxLifecycleEvents = 128;
 
+    /// <summary>
+    /// Holder kinds whose idle lease a human-approved run may adopt. These are the trusted local
+    /// Inspector surfaces that issue approvals; nothing else is adoptable.
+    /// </summary>
+    private static readonly string[] AdoptableLeaseHolderKinds = ["vscode", "web", "canvas"];
+
     private readonly object _gate = new();
     private readonly IWorkflowMutationLeaseRegistry _leases;
     private readonly Func<WorkflowRunExecution, CancellationToken, Task<Testing.FlowReplayReport>> _execute;
@@ -187,6 +193,32 @@ internal sealed class WorkflowRunCoordinator : IDisposable
                 run.TransactionBegun = true;
                 run.AuthorityEpoch = transfer.AuthorityEpoch;
                 AddEventLocked(run, "lease-transferred", "Inspector authority transferred atomically to the workflow run.");
+            }
+            else if (dispatchOrigin == WorkflowRunDispatchOrigin.TestAgentGrant)
+            {
+                // The human approved this exact run in the Inspector, and the Inspector holds the
+                // app's single-writer lease for as long as it is open. Without this the approval
+                // deadlocks behind the window that granted it. Adoption refuses while any
+                // transaction is open, so a human mid-mutation keeps control.
+                var adopted = _leases.TryAdoptIdleLease(
+                    target.AgentId,
+                    run.LeaseId,
+                    run.TransactionId,
+                    "workflow-run",
+                    run.RunId,
+                    AdoptableLeaseHolderKinds);
+                if (adopted.Allowed &&
+                    adopted.YouHold &&
+                    string.Equals(adopted.TransactionId, run.TransactionId, StringComparison.Ordinal))
+                {
+                    run.LeaseClaimed = true;
+                    run.TransactionBegun = true;
+                    run.AuthorityEpoch = adopted.AuthorityEpoch;
+                    AddEventLocked(
+                        run,
+                        "lease-adopted",
+                        "An idle trusted-host mutation lease was adopted for this human-approved run.");
+                }
             }
             AddEventLocked(run, "queued", "Run accepted and queued.");
             AddEventLocked(
@@ -1998,6 +2030,18 @@ internal interface IWorkflowMutationLeaseRegistry
         string transactionId,
         string? holderKind,
         string? label);
+
+    /// <summary>
+    /// Adopts an idle lease held by an allow-listed trusted host. Implementations must refuse while a
+    /// transaction is open so an active human driver is never interrupted.
+    /// </summary>
+    MutationLeaseSnapshot TryAdoptIdleLease(
+        string agentId,
+        string targetLeaseId,
+        string transactionId,
+        string? holderKind,
+        string? label,
+        IReadOnlyCollection<string> adoptableHolderKinds);
 }
 
 internal sealed record WorkflowRunLeaseHandoff(

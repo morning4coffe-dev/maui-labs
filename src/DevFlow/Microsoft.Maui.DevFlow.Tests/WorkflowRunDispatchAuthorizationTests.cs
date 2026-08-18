@@ -321,6 +321,16 @@ public class WorkflowRunDispatchAuthorizationTests
             };
         }
 
+
+        public MutationLeaseSnapshot TryAdoptIdleLease(
+            string agentId,
+            string targetLeaseId,
+            string transactionId,
+            string? holderKind,
+            string? label,
+            IReadOnlyCollection<string> adoptableHolderKinds)
+            => new(false, false, true, null, null, "vscode", "VS Code Inspector", 5_000);
+
         public MutationLeaseSnapshot TransferAndBegin(
             string agentId,
             string sourceLeaseId,

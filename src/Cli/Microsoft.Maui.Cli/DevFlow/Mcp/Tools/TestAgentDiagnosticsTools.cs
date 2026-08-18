@@ -663,6 +663,12 @@ public sealed class TestAgentPatchTool
 [McpServerToolType]
 public sealed class TestAgentImprovementsTool
 {
+    /// <summary>
+    /// The element cap the Inspector's selector-health route uses. Sharing it keeps the two hosts
+    /// from disagreeing about whether the same app was fully observed.
+    /// </summary>
+    private const int LiveTreeElementLimit = 2_000;
+
     [McpServerTool(Name = "maui_test_improvements"),
      System.ComponentModel.Description("Return deterministic selector-health findings and a bounded value-free live selector projection for the current broker draft. Read-only selector discovery needs no mutation grant; this tool never returns UI text/values or generates, applies, or approves changes.")]
     public static async Task<string> Improvements(
@@ -680,12 +686,28 @@ public sealed class TestAgentImprovementsTool
             return TestAgentToolSupport.Failure(envelope.RequestId, target.Error);
 
         using var agent = await session.GetTestAgentClientAsync(snapshotResult.Value.Snapshot.Target).ConfigureAwait(false);
-        var tree = await agent.GetTreeAsync(maxDepth: 8).ConfigureAwait(false);
+        // The whole tree, not a shallow slice. A depth cap of 8 sat below the depth of a templated
+        // collection row — the exact place an AutomationId is most likely to be repeated — so the
+        // duplicate-id diagnostic could not see the duplicates and the coverage summary then
+        // described a selector matching three controls as a durable target.
+        var tree = await agent.GetTreeAsync().ConfigureAwait(false);
+        var observation = tree.Count > 0
+            ? MauiSelectorObservationFactory.Create(tree[0], tree, new MauiSelectorObservationContext
+            {
+                AppBuild = target.State?.AppBuildFingerprint,
+                Platform = target.Registration?.Platform,
+                Route = target.State?.Route,
+                Window = target.State?.Window,
+            })
+            : null;
+        // Completeness is a claim about coverage, so it has to mean "nothing was dropped" rather
+        // than "something came back"; a truncated observation must not license a coverage verdict.
+        var liveTreeTruncated = observation is not null && observation.Elements.Count > LiveTreeElementLimit;
         var input = new MauiSelectorHealthAnalysisInput
         {
             Flow = snapshotResult.Value.Snapshot.Flow,
             Plan = snapshotResult.Value.Snapshot.Plan,
-            LiveTreeComplete = tree.Count > 0,
+            LiveTreeComplete = observation is not null && !liveTreeTruncated,
             Context = new MauiSelectorObservationContext
             {
                 AppBuild = target.State?.AppBuildFingerprint,
@@ -695,11 +717,11 @@ public sealed class TestAgentImprovementsTool
             },
         };
         IReadOnlyList<MauiSelectorObservationElement> observedElements = [];
-        if (tree.Count > 0)
+        if (observation is not null)
         {
             // The factory intentionally drops ElementInfo.Text and Value before the analyzer sees
             // anything, so UI content cannot become a policy input or tool output.
-            observedElements = MauiSelectorObservationFactory.Create(tree[0], tree, input.Context).Elements;
+            observedElements = observation.Elements.Take(LiveTreeElementLimit).ToList();
             input.LiveElements = observedElements.ToList();
         }
 
@@ -714,7 +736,8 @@ public sealed class TestAgentImprovementsTool
                 coverage = analysis.Coverage,
                 liveSelectors = new
                 {
-                    available = tree.Count > 0,
+                    available = observation is not null,
+                    complete = input.LiveTreeComplete,
                     observedElementCount = observedElements.Count,
                     returned = selectorProjection.Count,
                     truncated = observedElements.Count > selectorProjection.Count,

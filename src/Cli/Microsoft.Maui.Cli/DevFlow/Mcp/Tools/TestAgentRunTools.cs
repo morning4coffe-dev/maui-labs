@@ -64,8 +64,10 @@ public sealed class TestAgentValidationTool
             return TestAgentToolSupport.Failure(request.Envelope.RequestId, target.Error);
 
         using var agent = await session.GetTestAgentClientAsync(snapshotResult.Value.Snapshot.Target).ConfigureAwait(false);
-        var tree = await agent.GetTreeAsync(maxDepth: 8).ConfigureAwait(false);
+        var tree = await agent.GetTreeAsync().ConfigureAwait(false);
         var findings = new List<object>();
+        var ambiguous = new List<string>();
+        var unresolved = new List<string>();
         foreach (var step in snapshot.Flow?.Steps ?? [])
         {
             var selector = step.Args?.Selector ?? step.Target;
@@ -79,12 +81,20 @@ public sealed class TestAgentValidationTool
                         string.Equals(match.StableItemKey, selector.StableItemKey, StringComparison.Ordinal) &&
                         string.Equals(match.CollectionScope, selector.CollectionScope, StringComparison.Ordinal)).ToArray()
                     : matches.ToArray();
+                var key = MauiTestAgentSelectorScopeKey.FromSelector(selector);
+                var verdict = ClassifySelectorResolution(resolved.Length);
+                if (resolved.Length == 0)
+                    unresolved.Add(key);
+                else if (resolved.Length > 1)
+                    ambiguous.Add(key);
                 findings.Add(new
                 {
                     sequence = step.Seq,
-                    selector = MauiTestAgentSelectorScopeKey.FromSelector(selector),
+                    selector = key,
                     matchCount = resolved.Length,
+                    status = verdict.Status,
                     types = resolved.Select(match => match.Type).Where(type => !string.IsNullOrWhiteSpace(type)).Distinct().Take(8).ToArray(),
+                    resolution = verdict.Resolution,
                 });
             }
             else
@@ -94,6 +104,7 @@ public sealed class TestAgentValidationTool
                     sequence = step.Seq,
                     selector = "non-durable",
                     matchCount = (int?)null,
+                    status = "not-queried",
                     warning = "Only durable AutomationId selectors are queried during restricted live validation.",
                 });
             }
@@ -107,10 +118,37 @@ public sealed class TestAgentValidationTool
                 target = target.State,
                 rootCount = tree.Count,
                 findings,
+                // Hoisted so the outcome cannot be missed by reading only the summary line.
+                selectorsUsable = ambiguous.Count == 0 && unresolved.Count == 0,
+                ambiguousSelectors = ambiguous.ToArray(),
+                unresolvedSelectors = unresolved.ToArray(),
                 admission = DescribeResetAdmission(snapshot.Plan),
             },
             [TestAgentToolSupport.Untrusted("ui-tree")]);
     }
+
+    /// <summary>
+    /// Names what a live match count means for one step's selector.
+    /// </summary>
+    /// <remarks>
+    /// A bare count reads the same whether it is 0, 1, or 3, so a caller could commit a step that
+    /// addresses three controls without ever being told there was a choice to make. Naming the
+    /// status, and saying what to do about it, is what turns an ambiguous selector into a question
+    /// for the human instead of a silent resolution by document order.
+    /// </remarks>
+    internal static (string Status, string? Resolution) ClassifySelectorResolution(int matchCount) => matchCount switch
+    {
+        0 => (
+            "unresolved",
+            "This selector matches nothing on the observed route. Confirm the route and the " +
+            "control's AutomationId before committing the step."),
+        1 => ("unique", null),
+        _ => (
+            "ambiguous",
+            "This selector addresses more than one live control. Ask the human which one the test " +
+            "means and record a durable differentiator — a scoped collection item key, or a " +
+            "distinct AutomationId. Do not let it resolve by document order."),
+    };
 
     /// <summary>
     /// Reports whether run admission can satisfy the plan's declared reset contract. Live validation

@@ -60,6 +60,30 @@ finding and route to app testability; do not create a brittle executable flow.
    approval. If the human asked for a file on disk, say plainly that this step
    did not produce one and hand off to that surface.
 
+## Never Hand Off a Live Authoring Session
+
+`begin` returns the session's read capability exactly once. It is an opaque
+bearer secret held in the calling context; the broker stores only its hash, so
+it **cannot be recovered, re-issued, or looked up** — that is the point of a
+capability, not a defect.
+
+Consequences, which are not obvious until the work is already lost:
+
+- **Do the whole session in one context.** Author, validate, request approval,
+  await it, commit, and start the run from the same place that called `begin`.
+- **Never delegate a step to a sub-agent or background agent.** The capability
+  does not travel with the instruction, so the receiving context gets a session
+  it can read nothing from, and the human's approval becomes unconsumable.
+  Spawning a second agent to recover from the first loses it again.
+- **Never re-request an approval to work around a lost capability.** The new
+  request is just as unconsumable, and it spends the human's attention twice.
+- If the capability is genuinely gone, say so plainly, state that the draft and
+  any session-committed revision are unrecoverable because nothing was written
+  to disk, and begin a fresh session. Do not imply the prior work can be
+  restored.
+- A broker restart ends every session for the same reason. Prefer finishing a
+  session promptly over leaving a draft open across unrelated work.
+
 Typing approval in chat has no authorization meaning. Never synthesize a grant
 ID, continue from a stale revision, or use a commit grant for a later run.
 Never submit a second request while the first request is pending; await the

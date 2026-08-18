@@ -114,6 +114,13 @@ exact target, so a second instance makes `maui devflow approve` fail as
 `AgentAmbiguous`, and a second instance on another platform can take the agent
 port and turn runs into infrastructure failures.
 
+> **Restarting the broker does not invalidate the app you are testing.** The
+> agent instance identity that approvals and sessions bind to is derived from the
+> app's own process, so it survives a broker restart or a dropped connection and
+> changes only when the app itself is relaunched. Relaunching the app *does*
+> invalidate every retained draft, approval, and run binding, because they were
+> reviewed against a process that no longer exists — expect to re-request them.
+
 ### 2. Describe the journey
 
 > "Write a test that adds a todo and checks the count goes to 4."
@@ -186,10 +193,32 @@ or inconclusive. Only drift is repairable, and the proposal is inert until a
 human approves it. An app regression must be reported, not "repaired": the test
 was right. Thin evidence stays inconclusive rather than becoming a guess.
 
+Two independent authorities must agree before a repair may even be proposed. The
+failure classifier judges the *symptom*: only a pre-dispatch missing-selector
+failure on a verified, matching checkpoint qualifies, and assertion-selector
+drift never does, because re-pointing an assertion changes what the test checks.
+Replay safety separately judges whether the run is a sound *basis* to repair
+from, which requires the plan's required independent business oracle to have
+actually verified the business outcome. `failure.repairEligible` is the
+conjunction; `failure.classifierRepairEligible` records the first half alone, so
+a refusal by the second is not mistaken for a misclassification.
+
+That distinction has a practical consequence: only `maui devflow flow run`
+evaluates independent oracles, so only its runs can satisfy the second half. A
+broker-owned run started from the Inspector never evaluates them and is
+consequently never repair-eligible; `maui_test_failure` says so explicitly and
+names the admission's own reason codes rather than blaming the failure shape.
+
 A legitimate repair re-points a test at what it always meant to check. Deleting
 an assertion, flipping `verify: true` to `false`, relaxing an expected value to
 match what happened, widening a selector until something matches, or adding
 sleeps are all excluded.
+
+`maui devflow flow triage --manifest <execution-manifest.json> --report
+<flow-run.json>` classifies a completed run from its artifacts alone and lists
+every reason repair is withheld. It treats those artifacts as imported evidence,
+so it is deliberately diagnostic-only and always reports
+`imported-evidence-diagnostic-only`.
 
 ### Operational notes
 

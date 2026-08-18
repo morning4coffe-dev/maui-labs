@@ -225,6 +225,13 @@ internal sealed class AndroidFlowExecutionAdapter : IFlowExecutionPlatformAdapte
                 "with 'netsh interface ipv4 show excludedportrange protocol=tcp' and choose an agent port " +
                 "outside every reserved range.");
         }
+        else if (LooksLikePortAlreadyInUse(detail))
+        {
+            parts.Add(
+                $"Local port {agentPort} is already bound by another process. Another instance of this app " +
+                "on a different platform is the usual cause, because each connected agent takes an agent " +
+                "port. Close the other instance, or run 'maui devflow list' to see what is connected.");
+        }
 
         foreach (var suggestion in report?.Suggestions ?? [])
         {
@@ -238,8 +245,17 @@ internal sealed class AndroidFlowExecutionAdapter : IFlowExecutionPlatformAdapte
     private static bool LooksLikeReservedLocalPort(string? adbMessage)
         => adbMessage is { Length: > 0 } &&
            (adbMessage.Contains("10013", StringComparison.Ordinal) ||
-            adbMessage.Contains("cannot bind", StringComparison.OrdinalIgnoreCase) ||
             adbMessage.Contains("forbidden by its access permissions", StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>
+    /// WSAEADDRINUSE. Distinct from a reserved range: something really is listening, and the usual
+    /// cause is a second instance of the same app holding the agent port.
+    /// </summary>
+    private static bool LooksLikePortAlreadyInUse(string? adbMessage)
+        => adbMessage is { Length: > 0 } &&
+           (adbMessage.Contains("10048", StringComparison.Ordinal) ||
+            adbMessage.Contains("Only one usage of each socket address", StringComparison.OrdinalIgnoreCase) ||
+            adbMessage.Contains("address already in use", StringComparison.OrdinalIgnoreCase));
 
     public Task<MauiFlowAppProcessEvidence?> ProbeAppProcessAsync(
         FlowExecutionAppProbeRequest request,

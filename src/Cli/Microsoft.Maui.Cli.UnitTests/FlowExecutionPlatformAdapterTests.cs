@@ -1741,6 +1741,23 @@ public sealed class FlowExecutionPlatformAdapterTests
     }
 
     [Fact]
+    public void AndroidAgentForwardFailure_WithPortInUse_BlamesAnotherInstanceNotAReservation()
+    {
+        var report = new AndroidDevFlowForwardingReport
+        {
+            Status = AndroidDevFlowForwardingStatus.Error,
+            Message = "adb forward tcp:9225 tcp:9225 failed: cannot bind to 127.0.0.1:9225: " +
+                      "Only one usage of each socket address (protocol/network address/port) is normally permitted. (10048)",
+        };
+
+        var message = AndroidFlowExecutionAdapter.DescribeAgentForwardFailure(9225, report);
+
+        Assert.Contains("already bound by another process", message, StringComparison.Ordinal);
+        Assert.Contains("maui devflow list", message, StringComparison.Ordinal);
+        // A port that is in use is not a reserved range; suggesting netsh would send the reader nowhere.
+        Assert.DoesNotContain("excludedportrange", message, StringComparison.Ordinal);
+    }
+    [Fact]
     public void AndroidAgentForwardFailure_WithUnrelatedError_DoesNotClaimAPortReservation()
     {
         var report = new AndroidDevFlowForwardingReport

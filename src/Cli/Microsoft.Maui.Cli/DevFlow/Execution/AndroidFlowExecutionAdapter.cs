@@ -197,9 +197,49 @@ internal sealed class AndroidFlowExecutionAdapter : IFlowExecutionPlatformAdapte
         {
             throw FlowExecutionException.Infrastructure(
                 "android-agent-forward-failed",
-                "The exact Android device could not establish the DevFlow agent forward mapping.");
+                DescribeAgentForwardFailure(agentPort, report));
         }
     }
+
+    /// <summary>
+    /// Explains why <c>adb forward</c> could not be established. The forwarder already captured the
+    /// underlying adb text, so surface it instead of discarding it, and name the Windows reserved-port
+    /// case explicitly: an operator cannot act on "forward mapping failed" alone.
+    /// </summary>
+    internal static string DescribeAgentForwardFailure(int agentPort, AndroidDevFlowForwardingReport report)
+    {
+        var parts = new List<string>
+        {
+            $"The exact Android device could not establish the DevFlow agent forward mapping on port {agentPort}.",
+        };
+
+        var detail = report?.Message;
+        if (!string.IsNullOrWhiteSpace(detail))
+            parts.Add(detail.Trim());
+
+        if (LooksLikeReservedLocalPort(detail))
+        {
+            parts.Add(
+                $"The host refused to bind local port {agentPort}. On Windows, Hyper-V, WSL, and Docker " +
+                "reserve TCP port ranges that adb cannot bind even when nothing is listening. List them " +
+                "with 'netsh interface ipv4 show excludedportrange protocol=tcp' and choose an agent port " +
+                "outside every reserved range.");
+        }
+
+        foreach (var suggestion in report?.Suggestions ?? [])
+        {
+            if (!string.IsNullOrWhiteSpace(suggestion))
+                parts.Add($"Try: {suggestion}");
+        }
+
+        return string.Join(" ", parts);
+    }
+
+    private static bool LooksLikeReservedLocalPort(string? adbMessage)
+        => adbMessage is { Length: > 0 } &&
+           (adbMessage.Contains("10013", StringComparison.Ordinal) ||
+            adbMessage.Contains("cannot bind", StringComparison.OrdinalIgnoreCase) ||
+            adbMessage.Contains("forbidden by its access permissions", StringComparison.OrdinalIgnoreCase));
 
     public Task<MauiFlowAppProcessEvidence?> ProbeAppProcessAsync(
         FlowExecutionAppProbeRequest request,

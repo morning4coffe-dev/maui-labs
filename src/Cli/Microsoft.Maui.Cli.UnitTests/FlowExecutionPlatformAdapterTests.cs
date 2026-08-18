@@ -1720,4 +1720,38 @@ public sealed class FlowExecutionPlatformAdapterTests
             string cleanupPolicy,
             CancellationToken cancellationToken = default) => throw new NotSupportedException();
     }
+
+    [Fact]
+    public void AndroidAgentForwardFailure_WithReservedLocalPort_NamesThePortAndTheReservation()
+    {
+        var report = new AndroidDevFlowForwardingReport
+        {
+            Status = AndroidDevFlowForwardingStatus.Error,
+            Message = "adb forward tcp:9224 tcp:9224 failed: cannot bind to 127.0.0.1:9224: " +
+                      "An attempt was made to access a socket in a way forbidden by its access permissions. (10013)",
+            Suggestions = ["adb -s emulator-5554 forward tcp:9224 tcp:9224"],
+        };
+
+        var message = AndroidFlowExecutionAdapter.DescribeAgentForwardFailure(9224, report);
+
+        Assert.Contains("port 9224", message, StringComparison.Ordinal);
+        Assert.Contains("10013", message, StringComparison.Ordinal);
+        Assert.Contains("excludedportrange", message, StringComparison.Ordinal);
+        Assert.Contains("adb -s emulator-5554 forward tcp:9224 tcp:9224", message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void AndroidAgentForwardFailure_WithUnrelatedError_DoesNotClaimAPortReservation()
+    {
+        var report = new AndroidDevFlowForwardingReport
+        {
+            Status = AndroidDevFlowForwardingStatus.Error,
+            Message = "device offline",
+        };
+
+        var message = AndroidFlowExecutionAdapter.DescribeAgentForwardFailure(9223, report);
+
+        Assert.Contains("device offline", message, StringComparison.Ordinal);
+        Assert.DoesNotContain("excludedportrange", message, StringComparison.Ordinal);
+    }
 }

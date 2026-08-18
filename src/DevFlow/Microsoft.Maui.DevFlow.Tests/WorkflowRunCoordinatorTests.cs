@@ -812,6 +812,50 @@ public class WorkflowRunCoordinatorTests
     /// authorization boundary. The authorizer is stated explicitly here so that a coordinator
     /// created without one keeps its production behaviour of refusing every start.
     /// </summary>
+    [Fact]
+    public async Task Start_LeaseBusyThenReleased_WaitsAndRunsInsteadOfFailing()
+    {
+        // The human approves in the Inspector, which holds a renewing writer lease, then closes it.
+        var leases = new BusyThenFreeLeaseRegistry(refusals: 3);
+        var coordinator = TestCoordinator(
+            leases,
+            static (execution, _) => Task.FromResult(PassingReport(execution.Flow)),
+            new WorkflowRunCoordinatorOptions
+            {
+                LeaseAcquisitionTimeout = TimeSpan.FromSeconds(20),
+                LeaseAcquisitionPollInterval = TimeSpan.FromMilliseconds(1),
+            });
+
+        var started = coordinator.Start(Request("pass", "busy-then-free"), Target(), static () => true);
+        var snapshot = await WaitForTerminalAsync(coordinator, started);
+
+        Assert.True(started.Ok);
+        Assert.Equal("passed", snapshot.State);
+        Assert.True(leases.ClaimAttempts > 1, "the coordinator should have retried the busy lease");
+    }
+
+    [Fact]
+    public async Task Start_LeaseHeldThroughout_FailsClosedAndNamesTheHolder()
+    {
+        // A human genuinely driving the app keeps it: the wait must never force a takeover.
+        var leases = new BusyThenFreeLeaseRegistry(refusals: int.MaxValue);
+        var coordinator = TestCoordinator(
+            leases,
+            static (execution, _) => Task.FromResult(PassingReport(execution.Flow)),
+            new WorkflowRunCoordinatorOptions
+            {
+                LeaseAcquisitionTimeout = TimeSpan.FromMilliseconds(20),
+                LeaseAcquisitionPollInterval = TimeSpan.FromMilliseconds(1),
+            });
+
+        var started = coordinator.Start(Request("pass", "always-busy"), Target(), static () => true);
+        var snapshot = await WaitForTerminalAsync(coordinator, started);
+
+        Assert.Equal("failed", snapshot.State);
+        Assert.Equal(MauiFlowFailureClasses.LeaseConflict, snapshot.Report!.Failure!.Class);
+        Assert.Contains("VS Code Inspector", snapshot.Message, StringComparison.Ordinal);
+        Assert.Contains("maui devflow approve", snapshot.Message, StringComparison.Ordinal);
+    }
     private static WorkflowRunCoordinator TestCoordinator(
         IWorkflowMutationLeaseRegistry leases,
         Func<WorkflowRunExecution, CancellationToken, Task<FlowReplayReport>> execute,
@@ -951,6 +995,65 @@ public class WorkflowRunCoordinatorTests
         }
     };
 
+    /// <summary>
+    /// Refuses the claim a fixed number of times, then allows it. Models the Inspector holding a
+    /// renewing writer lease that lapses shortly after the human finishes approving.
+    /// </summary>
+    private sealed class BusyThenFreeLeaseRegistry : IWorkflowMutationLeaseRegistry
+    {
+        private int _refusalsRemaining;
+
+        public BusyThenFreeLeaseRegistry(int refusals) => _refusalsRemaining = refusals;
+
+        public int ClaimAttempts { get; private set; }
+
+        public MutationLeaseSnapshot Control(
+            string agentId,
+            string action,
+            string? leaseId,
+            string? holderKind,
+            string? label,
+            bool force,
+            string? transactionId)
+        {
+            if (action != "claim")
+            {
+                return new MutationLeaseSnapshot(true, true, false, leaseId, transactionId, holderKind, label, 10_000)
+                {
+                    AuthorityEpoch = 1
+                };
+            }
+
+            ClaimAttempts++;
+            if (_refusalsRemaining-- > 0)
+            {
+                // Never forced: the holder keeps the lease until it lapses on its own.
+                return new MutationLeaseSnapshot(
+                    Allowed: false,
+                    YouHold: false,
+                    HeldByOther: true,
+                    LeaseId: null,
+                    TransactionId: null,
+                    HolderKind: "vscode",
+                    Label: "VS Code Inspector",
+                    ExpiresInMs: 5_000);
+            }
+
+            return new MutationLeaseSnapshot(true, true, false, leaseId, transactionId, holderKind, label, 10_000)
+            {
+                AuthorityEpoch = 1
+            };
+        }
+
+        public MutationLeaseSnapshot TransferAndBegin(
+            string agentId,
+            string sourceLeaseId,
+            string targetLeaseId,
+            string transactionId,
+            string? holderKind,
+            string? label)
+            => new(true, true, false, targetLeaseId, transactionId, holderKind, label, 10_000) { AuthorityEpoch = 1 };
+    }
     private sealed class RecordingLeaseRegistry : IWorkflowMutationLeaseRegistry
     {
         private readonly ConcurrentQueue<string> _actions = new();

@@ -533,18 +533,11 @@ internal sealed class WorkflowRunCoordinator : IDisposable
 
             if (!run.LeaseClaimed)
             {
-                var claim = _leases.Control(
-                    run.Target.AgentId,
-                    "claim",
-                    run.LeaseId,
-                    "workflow-run",
-                    run.RunId,
-                    force: false,
-                    transactionId: null);
+                var claim = await AcquireLeaseAsync(run).ConfigureAwait(false);
                 if (!claim.Allowed)
                 {
                     terminalState = WorkflowRunState.Failed;
-                    message = "The target agent is already held by another mutation lease.";
+                    message = DescribeLeaseConflict(claim);
                     failureClass = Testing.MauiFlowFailureClasses.LeaseConflict;
                     return;
                 }
@@ -1340,6 +1333,58 @@ internal sealed class WorkflowRunCoordinator : IDisposable
         => WorkflowRunDispatchDecision.Deny(
             "This broker was not configured to authorize workflow run dispatch, so no run can start.");
 
+    /// <summary>
+    /// Claims the mutation lease, waiting for a current holder to finish rather than failing on the
+    /// first attempt. The Inspector holds a short renewing lease while it is open, and it is also the
+    /// surface a human uses to approve this very run, so failing immediately made an approved run
+    /// unrunnable for the most ordinary sequence there is: approve in the Inspector, then run. This
+    /// never forces. It only proceeds once the holder releases or its lease lapses, so a human who is
+    /// actively driving the app keeps control and the wait ends in an honest, named conflict.
+    /// </summary>
+    private async Task<MutationLeaseSnapshot> AcquireLeaseAsync(RunRecord run)
+    {
+        var deadline = _clock.GetUtcNow() + _options.LeaseAcquisitionTimeout;
+        while (true)
+        {
+            var claim = _leases.Control(
+                run.Target.AgentId,
+                "claim",
+                run.LeaseId,
+                "workflow-run",
+                run.RunId,
+                force: false,
+                transactionId: null);
+            if (claim.Allowed ||
+                run.Cancellation.IsCancellationRequested ||
+                _clock.GetUtcNow() >= deadline)
+            {
+                return claim;
+            }
+
+            try
+            {
+                await Task.Delay(_options.LeaseAcquisitionPollInterval, _clock, run.Cancellation.Token)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                return claim;
+            }
+        }
+    }
+
+    /// <summary>Names the blocking surface, because "held by another lease" is not actionable.</summary>
+    private static string DescribeLeaseConflict(MutationLeaseSnapshot claim)
+    {
+        var holder = string.IsNullOrWhiteSpace(claim.Label) ? claim.HolderKind : claim.Label;
+        return string.IsNullOrWhiteSpace(holder)
+            ? "The target agent is already held by another mutation lease."
+            : $"The target agent is still held by another mutation lease ('{holder}'). Close or " +
+              "release that surface, then request a new run approval. The Inspector holds a renewing " +
+              "lease while it is open, so approving there and leaving it open blocks the run it just " +
+              "authorized; approving with 'maui devflow approve' avoids that.";
+    }
+
     private void AddEventLocked(RunRecord run, string kind, string message)
     {
         if (run.Events.Count == MaxLifecycleEvents)
@@ -2052,6 +2097,15 @@ internal sealed class WorkflowRunCoordinatorOptions
     public TimeSpan DefaultTimeout { get; init; } = TimeSpan.FromMinutes(2);
     public TimeSpan MaximumTimeout { get; init; } = TimeSpan.FromMinutes(10);
     public TimeSpan HeartbeatInterval { get; init; } = TimeSpan.FromSeconds(3);
+
+    /// <summary>
+    /// How long an approved run waits for a busy mutation lease before giving up. The Inspector's
+    /// lease renews only while it is open, so a few seconds covers the ordinary "approve, then close
+    /// the panel" sequence without ever taking the app from a human still using it.
+    /// </summary>
+    public TimeSpan LeaseAcquisitionTimeout { get; init; } = TimeSpan.FromSeconds(20);
+
+    public TimeSpan LeaseAcquisitionPollInterval { get; init; } = TimeSpan.FromMilliseconds(500);
     /// <summary>Optional trusted root for atomic &lt;runId&gt;/flow-run.json artifacts.</summary>
     public string? ArtifactRoot { get; init; }
     public Testing.MauiFlowRunReportLimits ReportLimits { get; init; } = new();

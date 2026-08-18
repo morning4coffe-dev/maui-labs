@@ -142,14 +142,42 @@ When the agent needs to commit, run, or patch, it stops and names a pending
 request:
 
 ```powershell
-maui devflow approve --list
-maui devflow approve <request-id>
-maui devflow approve <request-id> --reject --reason scope-too-broad
+maui devflow approve --list --agent-port <port>
+maui devflow approve <request-id> --agent-port <port>
+maui devflow approve <request-id> --agent-port <port> --reject --reason scope-too-broad
 ```
 
-The same decision is available in the Inspector's agent-request surface. Grants
-are scope-bound and short-lived. **A chat reply approves nothing**; the skill is
-required to say so and point at the request rather than proceed.
+Pass `--agent-port` whenever more than one app is connected; approvals bind to
+one exact target and the command refuses to guess. The same decision is
+available in the Inspector's agent-request surface. **A chat reply approves
+nothing**; the skill is required to say so and point at the request rather than
+proceed.
+
+#### Decide promptly — there are two clocks
+
+| Clock | Default | What it bounds |
+|---|---|---|
+| Authoring session | 30 min | How long the whole draft-and-review session stays alive |
+| Approval decision window | 10 min | How long *you* have to decide on one request |
+| Issued grant | 300 s (`--grant-seconds`, 1-900) | How long the approved action stays usable |
+
+The decision window is **clamped to whatever remains of the authoring session**,
+so it is often shorter than 10 minutes:
+
+```csharp
+expiresAt = request.ExpiresAt ??
+    (defaultExpiresAt <= session.ExpiresAt ? defaultExpiresAt : session.ExpiresAt);
+```
+
+An agent that spends 25 minutes reading files, validating, and retrying leaves
+you 5 minutes to approve, not 10. A request that is not decided in time moves to
+`state: expired` with `reasonCode: decision-window-expired`, and
+`maui devflow approve --list` then reports `pendingCount: 0`.
+
+Nothing is lost when that happens — an unapproved draft writes no files — but
+the work must be redone. Ask the agent to request approval again, and decide
+while the request is fresh. `maui devflow approve --list` prints the `expires`
+timestamp for exactly this reason.
 
 ### 5. Read the failure, review the repair
 

@@ -558,11 +558,37 @@ internal static class ApprovalCommands
             if (!string.IsNullOrEmpty(correlation))
                 Console.WriteLine($"  bound  : {Display(correlation)}");
             if (ReadString(request, "expiresAt") is { Length: > 0 } expiresAt)
-                Console.WriteLine($"  expires: {Display(expiresAt)}");
+                Console.WriteLine($"  expires: {Display(expiresAt)}{DescribeTimeRemaining(expiresAt)}");
         }
         Console.WriteLine();
         Console.WriteLine("Approve with: maui devflow approve <id>");
         Console.WriteLine(NotABoundaryNotice);
+    }
+
+    /// <summary>
+    /// Renders the time an operator actually has left to decide. The absolute timestamp alone does
+    /// not convey urgency, and the decision window is clamped to the remaining authoring session, so
+    /// it is routinely shorter than the configured approval lifetime.
+    /// </summary>
+    internal static string DescribeTimeRemaining(string? expiresAt, DateTimeOffset? now = null)
+    {
+        if (string.IsNullOrWhiteSpace(expiresAt) ||
+            !DateTimeOffset.TryParse(
+                expiresAt,
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.RoundtripKind,
+                out var parsed))
+        {
+            return string.Empty;
+        }
+
+        var remaining = parsed - (now ?? DateTimeOffset.UtcNow);
+        if (remaining <= TimeSpan.Zero)
+            return "  (expired)";
+
+        return remaining.TotalMinutes >= 1
+            ? $"  ({(int)remaining.TotalMinutes}m {remaining.Seconds}s left)"
+            : $"  ({remaining.Seconds}s left)";
     }
 
     private static void WriteDecision(

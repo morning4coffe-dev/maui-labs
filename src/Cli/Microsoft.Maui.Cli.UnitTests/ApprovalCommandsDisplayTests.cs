@@ -93,4 +93,42 @@ public class ApprovalCommandsDisplayTests
             Assert.False(char.IsLowSurrogate(clamped[index]));
         }
     }
+
+    [Fact]
+    public void TimeRemaining_ShowsMinutesAndSecondsLeft()
+    {
+        var now = DateTimeOffset.Parse("2026-08-18T10:47:31Z");
+        var text = ApprovalCommands.DescribeTimeRemaining("2026-08-18T10:52:00Z", now);
+
+        Assert.Contains("4m", text, StringComparison.Ordinal);
+        Assert.Contains("left", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TimeRemaining_UnderOneMinute_ShowsSecondsOnly()
+    {
+        var now = DateTimeOffset.Parse("2026-08-18T10:51:30Z");
+        var text = ApprovalCommands.DescribeTimeRemaining("2026-08-18T10:52:00Z", now);
+
+        Assert.Contains("30s left", text, StringComparison.Ordinal);
+        Assert.DoesNotContain("m ", text, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void TimeRemaining_AlreadyPast_SaysExpired()
+    {
+        var now = DateTimeOffset.Parse("2026-08-18T10:53:00Z");
+        var text = ApprovalCommands.DescribeTimeRemaining("2026-08-18T10:52:00Z", now);
+
+        Assert.Contains("expired", text, StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not a timestamp")]
+    public void TimeRemaining_Unparsable_AddsNothing(string? value)
+    {
+        Assert.Equal(string.Empty, ApprovalCommands.DescribeTimeRemaining(value));
+    }
 }

@@ -221,6 +221,38 @@ public sealed class TestAgentFailureTool
             classification.RepairEligible;
         var explanation = Explain(classification, projection);
         var nextAction = NextSafeAction(classification, projection, replayAdviceAllowed);
+
+        // A passed run has no failure to classify. Classifying the empty failure facts anyway
+        // produced "The failed step failed with canonical code 'infrastructure'" on a clean pass,
+        // which reads as a defect report for a healthy run and would send a reader hunting for a
+        // problem that does not exist.
+        if (string.Equals(facts.TerminalOutcome, MauiFlowRunOutcomes.Passed, StringComparison.Ordinal) &&
+            string.IsNullOrWhiteSpace(facts.FailureClass))
+        {
+            return new TestAgentFailureDiagnostic
+            {
+                Facts = new TestAgentFailureFactsProjection
+                {
+                    TerminalOutcome = facts.TerminalOutcome,
+                    FailureClass = null,
+                    CompletionCertain = facts.CompletionCertain,
+                    BeforeDispatch = facts.BeforeDispatch,
+                },
+                FailedStep = null,
+                PlainLanguage = "The run passed; there is no failure to diagnose.",
+                NextSafeAction = nonReplayable
+                    ? "No further action is authorized: the retained admission marks this run non-replayable."
+                    : "No action is required.",
+                SelectorRepair = new TestAgentSelectorRepairAdvice
+                {
+                    Status = "ineligible",
+                    Eligible = false,
+                    ProposalRecommended = false,
+                    Reason = "The run passed, so there is nothing to repair.",
+                },
+            };
+        }
+
         return new TestAgentFailureDiagnostic
         {
             Classification = new TestAgentFailureClassification

@@ -65,6 +65,91 @@ See [Restricted DevFlow test-agent protocol](test-agent.md) for the actual
 tool inventory, grants, and enforcement rules, and [human-authored testing](testing.md)
 for the underlying flow lifecycle.
 
+## Walkthrough: what the loop looks like
+
+A worked end-to-end pass, from an empty terminal to a reviewed repair. Each
+command here is the one an operator actually types.
+
+### 1. Bring the pieces up
+
+```powershell
+$env:DEVFLOW_PREVIEW_WORKBENCH = 'true'
+$env:DEVFLOW_PREVIEW_AGENT_AUTHORING = 'true'
+
+maui devflow broker start
+maui devflow skills install --scope project --target github
+maui devflow mcp --profile test-agent
+```
+
+Both variables must be set **in the process environment that starts the broker,
+Inspector, and MCP server**. They default to off; without
+`DEVFLOW_PREVIEW_AGENT_AUTHORING` the `test-agent` profile refuses to start and
+reports that it is a disabled preview surface.
+
+Start a Debug build of the app so its agent registers, confirm it with
+`maui devflow list`, and open `maui devflow inspect` — the Inspector is the
+trusted host that can approve work. Without it, drafts still get prepared but
+every mutation stops at a pending request.
+
+### 2. Describe the journey
+
+> "Write a test that adds a todo and checks the count goes to 4."
+
+The skill does not begin drafting. It restates the journey as numbered steps in
+the user's own vocabulary and marks each one `[known]`, `[unknown: selector]`,
+`[unknown: oracle]`, or `[unknown: reset]`. `[known]` means *observed* in a tree
+dump, a committed flow, or a user statement — a control that is "probably called
+`AddButton`" is `[unknown: selector]`. See
+[conversational intake](../../plugins/dotnet-maui/skills/maui-devflow-test/references/intake.md).
+
+### 3. Answer one combined question
+
+Every unknown arrives in a single message naming the step number and the
+smallest answer that unblocks it — never one question per step, and never a
+guessed default to keep things moving.
+
+The oracle question is the one that decides whether the test can ever be
+trusted. Answering "the label on screen" yields a run that can pass but reports
+`verified: false`. Naming something independent — a record the test can query
+outside the channel the agent drove — is what produces `verified: true`.
+
+### 4. Approve, explicitly
+
+When the agent needs to commit, run, or patch, it stops and names a pending
+request:
+
+```powershell
+maui devflow approve --list
+maui devflow approve <request-id>
+maui devflow approve <request-id> --reject --reason scope-too-broad
+```
+
+The same decision is available in the Inspector's agent-request surface. Grants
+are scope-bound and short-lived. **A chat reply approves nothing**; the skill is
+required to say so and point at the request rather than proceed.
+
+### 5. Read the failure, review the repair
+
+A failed run is classified as selector drift, an app regression, infrastructure,
+or inconclusive. Only drift is repairable, and the proposal is inert until a
+human approves it. An app regression must be reported, not "repaired": the test
+was right. Thin evidence stays inconclusive rather than becoming a guess.
+
+A legitimate repair re-points a test at what it always meant to check. Deleting
+an assertion, flipping `verify: true` to `false`, relaxing an expected value to
+match what happened, widening a selector until something matches, or adding
+sleeps are all excluded.
+
+### Operational notes
+
+- **Close other instances of the app under test first.** A second instance takes
+  the agent port; on Windows the next port may fall inside a Hyper-V/WSL reserved
+  range, and the run fails as infrastructure rather than as a test result.
+- **Local reproduction of a CI failure does not currently reach `matched: true`
+  on Android.** Behaviour reproduces — step and runtime fingerprints agree — but
+  package identity cannot, because Android packaging is not byte-reproducible
+  across builds. Repair review therefore remains the end of the automated path.
+
 ## Conversational contract
 
 The skill asks questions only when an answer is necessary to bind the work

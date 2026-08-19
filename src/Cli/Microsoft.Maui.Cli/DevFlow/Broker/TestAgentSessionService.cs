@@ -2088,12 +2088,30 @@ internal sealed class TestAgentSessionService
         if (!TryValidateActiveSessionLocked(found, out error))
             return false;
 
-        if (string.IsNullOrWhiteSpace(readCapabilityId) || !FixedEquals(found.ReadCapabilityDigest, Hash(readCapabilityId)))
+        if (string.IsNullOrWhiteSpace(readCapabilityId))
+        {
+            // Naming the field and where it lives is the whole point. "A read capability is
+            // required" sends an agent hunting for a field name and a place to put it, and the
+            // observed cost of that hunt was several wasted calls per session before anything
+            // could be validated.
+            error = Error(
+                MauiTestAgentErrorCodes.ReadCapabilityRequired,
+                MauiTestAgentErrorCategories.Authorization,
+                "The envelope must name a readCapabilityId. It is an envelope field alongside " +
+                "correlation, not a tool argument, and 'maui_test_author begin' returns it for " +
+                "this authoring session.",
+                retryable: false);
+            return false;
+        }
+
+        if (!FixedEquals(found.ReadCapabilityDigest, Hash(readCapabilityId)))
         {
             error = Error(
                 MauiTestAgentErrorCodes.ReadCapabilityRequired,
                 MauiTestAgentErrorCategories.Authorization,
-                "A valid session read capability is required.",
+                "The envelope's readCapabilityId does not belong to this authoring session. Use " +
+                "the value 'maui_test_author begin' returned for this session rather than one " +
+                "from an earlier session.",
                 retryable: false);
             return false;
         }

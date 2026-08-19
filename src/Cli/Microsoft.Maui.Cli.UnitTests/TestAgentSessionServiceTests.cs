@@ -929,6 +929,45 @@ public class TestAgentSessionServiceTests
     }
 
     [Fact]
+    public void ReadCapabilityRefusal_NamesTheFieldAndWhereItBelongs()
+    {
+        // Three agent-led sessions stalled repeatedly on this refusal because it named no field,
+        // no location, and no source, so the agent had to guess all three. The message is the
+        // fix, and it regresses silently unless something asserts on it.
+        var fixture = BeginFixture();
+
+        var missing = fixture.Service.ValidateRunBinding(new MauiTestAgentRunBindingRequest
+        {
+            SessionId = fixture.SessionId,
+            ReadCapabilityId = null,
+            Envelope = fixture.Envelope("validate-missing-capability", null),
+            RunId = "run-any",
+            RunCapabilityToken = "token-any",
+        });
+
+        Assert.False(missing.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.ReadCapabilityRequired, missing.Error?.Code);
+        Assert.Contains("readCapabilityId", missing.Error?.Message, StringComparison.Ordinal);
+        Assert.Contains("envelope", missing.Error!.Message!, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains("maui_test_author", missing.Error.Message!, StringComparison.Ordinal);
+
+        var wrong = fixture.Service.ValidateRunBinding(new MauiTestAgentRunBindingRequest
+        {
+            SessionId = fixture.SessionId,
+            ReadCapabilityId = "read-capability-from-some-other-session",
+            Envelope = fixture.Envelope("validate-wrong-capability", null),
+            RunId = "run-any",
+            RunCapabilityToken = "token-any",
+        });
+
+        // A wrong value is a different mistake from an absent one, and saying so keeps an agent
+        // from re-sending the same stale id it already holds.
+        Assert.False(wrong.Ok);
+        Assert.Equal(MauiTestAgentErrorCodes.ReadCapabilityRequired, wrong.Error?.Code);
+        Assert.Contains("does not belong to this authoring session", wrong.Error?.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public void RunBinding_RejectsAnotherBoundRunsCapabilityToken()
     {
         var fixture = BeginFixture();

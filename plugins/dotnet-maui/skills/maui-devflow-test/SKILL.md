@@ -212,6 +212,14 @@ Use this workflow only to author an inert draft or execute a committed flow.
    proposal, preview, or rejection only. It cannot approve, apply, execute a
    repair, write source, or weaken an assertion. Fresh local reproduction and
    the human Workbench repair ceremony are required before any repair path.
+7. **Close with a report, not a counter.** Finish every piece of work with a
+   short written result for the human. Name the terminal run state, what the
+   assertions and any independent oracle actually returned, where the artifact
+   lives, and what remains undone. A task list reaching `(2/2)` is bookkeeping,
+   not a result: ending on it tells the human nothing about whether their test
+   works. When a repair proposal exists, show its diff and proposal id here and
+   state the decision you need from them. When you stopped early, say where and
+   why, and never describe unfinished work as complete.
 
 ## Read-Only Routes
 

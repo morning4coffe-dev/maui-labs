@@ -63,3 +63,25 @@ fallbacks, duplicate IDs, and unscoped virtualized rows.
 The agent does not issue grants, apply the patch, alter actions/order/assertions,
 or change application source. When a durable selector requires a new
 `AutomationId` or stable item key, make a separate testability recommendation.
+
+## Where the Agent Stops, and What It Hands Over
+
+Steps 2–5 are human-gated on purpose. Validation replay, approval, and the
+compare-and-swap apply each mutate a committed artifact or the device, and the
+whole point of proposing rather than healing is that a human decides. There is
+no agent-side route to them and you should not go looking for one: a refusal
+there is the design working, not a capability gap.
+
+What the agent owes the human is a decision they can actually take. Storing the
+proposal is not the deliverable — presenting it is. End the work by showing:
+
+- the proposal id and the step it repairs;
+- the selector change, old to new, using the returned `diff.markdown`;
+- the invariant proof: assertions, actions, values, and order all unchanged;
+- what made the run a sound basis — the terminal failure class, and that the
+  required independent oracle verified the business outcome;
+- the single decision you need: approve this selector change, or reject it.
+
+Say plainly that you cannot approve or apply it, and that the change stays inert
+until they act. Never leave a stored proposal unmentioned: a repair nobody was
+told about is indistinguishable from no repair at all.

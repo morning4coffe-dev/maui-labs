@@ -37,16 +37,31 @@ The `test-agent` profile exposes exactly these 13 tools, and no others:
 `maui_test_assertion`, `maui_test_validate`, `maui_test_status`,
 `maui_test_run`, `maui_test_trace`, `maui_test_failure`, `maui_test_patch`.
 
+### Load the tools before calling one
+
+**Do this first, before any other step.** Some hosts defer or virtualise tool
+schemas, and a deferred tool that is called before its schema has been loaded
+can hang instead of returning: the call never reaches the broker, so no result
+and no error ever arrive, and the session stalls with nothing to diagnose. This
+has been observed repeatedly, across different models, and it is the single most
+common way this workflow fails.
+
+If your host has a tool-discovery or tool-loading step, run it **once** for the
+exact names above, then confirm every tool you intend to use is loaded before
+calling it. Prefer one pass over the whole list to repeated narrow searches; the
+list is complete, so a search that returns fewer names has under-reported rather
+than discovered a shorter truth. If your host exposes the tools directly, this
+costs one cheap step and changes nothing.
+
+If a `maui_test_*` call ever returns nothing at all — no result, no error, no
+refusal — do not retry it and do not wait longer. Treat it as an unloaded tool:
+load the inventory again, and say plainly that the host failed to dispatch the
+call rather than reporting the work as blocked on DevFlow.
+
 Authoring, approval, commit, and await-approval are **operations of
 `maui_test_author`**, not separate tools; the same is true of `start` and
 `status` on `maui_test_run`. Do not go looking for a tool that is not on this
 list.
-
-Some hosts defer or virtualise tool schemas, so a discovery search can return a
-partial list. Treat this list as the authority on what exists: load the names
-above directly in a single pass rather than searching repeatedly to find out
-whether a tool is real. Repeated partial searches burn the turn and discover
-nothing this list does not already state.
 
 ## First-Time Setup
 

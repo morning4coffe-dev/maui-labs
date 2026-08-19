@@ -72,6 +72,48 @@ If `ownerAvailable` is false there is no conforming reset owner: say so and
 either declare `reset.required = false`, stating that repeated runs are not
 independent and repair is foreclosed, or stop and ask the human.
 
+## Request Envelope
+
+Every restricted call carries one envelope. Correlation and capability fields sit
+**on the envelope**, not inside the tool's own arguments, and a call that omits
+them is refused for a reason that reads like a validation error rather than a
+misplaced field. Use this shape:
+
+```jsonc
+{
+  "schema": 1,
+  "requestId": "req-<intent>-<unique>",
+  "idempotencyKey": "idem-<intent>-<unique>",
+  "intent": "<what this call is for>",
+  "policyVersion": "test-agent-policy-v1",
+  "deadlineMs": 120000,
+  "target": { "agentId": "...", "agentInstanceId": "...", "appBuildFingerprint": "..." },
+  "correlation": {
+    "authoringSessionId": "...",   // snapshot.sessionId from begin
+    "planId": "...", "planRevision": 1,
+    "flowId": "...", "flowRevision": 1,
+    "planDigest": "...", "flowDigest": "...",
+    "runId": "..."                 // only once a run exists; run status and
+                                   // failure are refused without it
+  },
+  "readCapabilityId": "...",       // from begin; an envelope field, not an argument
+  "approvalGrantId": "..."         // the grantId await-approval returned, for
+                                   // commit, run start, run status, and patch
+}
+```
+
+`begin` returns every correlation value; read them from its snapshot rather than
+reusing what you sent. **Commit advances the plan and flow revisions**, so
+refresh `planRevision`, `flowRevision`, `planDigest`, and `flowDigest` from the
+commit snapshot before requesting a run — a stale revision is refused as
+`mutation-grant-stale`.
+
+Approval scopes are checked against the approval kind: a `commit` request must
+scope `allowedActions` to exactly `["author-commit"]` with `maxActionCount: 1`,
+and a `run` request to exactly `["run"]`. Anything wider is
+`approval-request-scope-denied`. Keep `approvalExpiresAt` inside the session
+lifetime; a far-future expiry is refused.
+
 ## Restricted Authoring Sequence
 
 The target app is a **running process**, not a folder. Identify it with

@@ -1722,6 +1722,24 @@ internal sealed class TestAgentSessionService
                     return new MauiTestAgentPatchResult { Ok = true, Record = ClonePatchRecord(record) };
 
                 case "preview":
+                    // A preview that names a candidate selector instead of an existing proposal is
+                    // the repair counterpart of the reset offer. Admission can declare a failure
+                    // repair-eligible and still leave the agent unable to act on it: a proposal is
+                    // accepted only when it carries the canonical patch digest, and that digest is
+                    // a pure function of the committed flow the broker holds. Recomputing it
+                    // outside the broker would mean reimplementing the patch builder, so without
+                    // this the channel advertises a repair no caller can actually submit.
+                    // Nothing is stored and nothing is approved: this reports what the canonical
+                    // patch for that selector would be, and the proposal path still rebuilds and
+                    // compares it before accepting anything.
+                    if (string.IsNullOrWhiteSpace(request.ProposalId) && request.Proposal is not null)
+                    {
+                        if (!TryDescribeCanonicalPatch(session!, request.Proposal, out var offered, out error))
+                            return new MauiTestAgentPatchResult { Error = error };
+
+                        return new MauiTestAgentPatchResult { Ok = true, Record = offered };
+                    }
+
                     if (string.IsNullOrWhiteSpace(request.ProposalId))
                     {
                         return new MauiTestAgentPatchResult
@@ -1729,7 +1747,8 @@ internal sealed class TestAgentSessionService
                             Error = Error(
                                 MauiTestAgentErrorCodes.InvalidRequest,
                                 MauiTestAgentErrorCategories.Validation,
-                                "proposalId is required for a patch preview.",
+                                "A patch preview requires either proposalId, or proposal.sourceStepId with " +
+                                "proposal.proposedSelector to be told the canonical patch digest to propose.",
                                 retryable: false),
                         };
                     }
@@ -2682,6 +2701,89 @@ internal sealed class TestAgentSessionService
                 _ => selector is null ? null : new FlowStepArgs { Selector = selector },
             },
             Fragile = FlowSelector.IsFragile(selector),
+        };
+        return true;
+    }
+
+    /// <summary>
+    /// Reports the canonical selector-only patch a candidate selector would produce, without
+    /// creating, approving, or applying anything.
+    /// </summary>
+    /// <remarks>
+    /// The proposal path accepts a patch only when the caller's <c>patchDigest</c> equals the one
+    /// the broker rebuilds from its own committed flow. That digest covers canonical before/after
+    /// flow digests and the serialized operation, so it cannot be derived from anything the
+    /// restricted protocol otherwise exposes. This is the same shape as the reset offer: state the
+    /// value admission will compare against, rather than making a caller guess a value that fails
+    /// closed. It stays inert — the returned record is not stored in the session, carries no
+    /// proposal id, and grants nothing.
+    /// </remarks>
+    private static bool TryDescribeCanonicalPatch(
+        SessionRecord session,
+        MauiFlowRepairProposal supplied,
+        out MauiTestAgentPatchRecord? record,
+        out MauiTestAgentError? error)
+    {
+        record = null;
+        error = null;
+
+        if (string.IsNullOrWhiteSpace(supplied.SourceStepId) ||
+            supplied.ProposedSelector is null ||
+            !IsSafeRepairSelector(supplied.ProposedSelector))
+        {
+            error = Error(
+                MauiTestAgentErrorCodes.InvalidRequest,
+                MauiTestAgentErrorCategories.Validation,
+                "A patch preview requires sourceStepId and a durable AutomationId-only proposedSelector.",
+                retryable: false);
+            return false;
+        }
+
+        var built = MauiFlowRepairPatchBuilder.Build(
+            session.Flow,
+            supplied.SourceStepId,
+            supplied.ProposedSelector);
+        if (!built.Ok || built.Patch is null || built.Diff is null || built.Proof is null ||
+            string.IsNullOrWhiteSpace(built.PatchDigest))
+        {
+            error = Error(
+                MauiTestAgentErrorCodes.InvalidRequest,
+                MauiTestAgentErrorCategories.Validation,
+                built.Error ?? "The candidate selector does not produce a selector-only patch for that step.",
+                retryable: false);
+            return false;
+        }
+
+        var sourceStep = FindFlowStep(session.Flow, supplied.SourceStepId);
+        var oldSelector = sourceStep is null ? null : sourceStep.Args?.Selector ?? sourceStep.Target;
+
+        record = new MauiTestAgentPatchRecord
+        {
+            State = "preview",
+            RecordedAt = DateTimeOffset.UtcNow,
+            Proposal = new MauiFlowRepairProposal
+            {
+                Revision = 1,
+                State = "preview",
+                SourceStepId = Bounded(supplied.SourceStepId, 128),
+                SourceFailureCode = MauiFlowFailureClasses.LocatorNotFound,
+                PreDispatch = true,
+                BaseFlow = new MauiFlowReference
+                {
+                    Path = session.Plan.Flow?.Path,
+                    FlowId = session.Plan.Flow?.FlowId,
+                    Revision = session.FlowRevision,
+                    Digest = session.FlowDigest,
+                },
+                OldSelector = CloneSelector(oldSelector),
+                ProposedSelector = CloneSelector(supplied.ProposedSelector),
+                Patch = built.Patch,
+                PatchDigest = built.PatchDigest,
+                Diff = built.Diff,
+                UnchangedAssertionsProof = built.Proof,
+                Trust = "broker-preview-not-proposed",
+                Provenance = CloneProvenance(session.Actor),
+            },
         };
         return true;
     }

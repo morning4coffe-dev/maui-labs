@@ -53,10 +53,39 @@ name what each one costs. When the human still chooses `non-replayable` or has
 no independent oracle, author it and say plainly that the flow can never produce
 a repair proposal, so future drift will always need a human edit.
 
+### Never guess the reset contract
+
+`reset.resetIdentity` and `reset.seedFingerprint` digest owner, strategy, app,
+device, and build. They are the broker's to state and cannot be derived from
+source, from a seed constant in the app, or from a previous run. Do not invent
+them.
+
+Run `maui_test_validate` in `live` mode and read the `resetOffer` it returns.
+Copy `strategy`, `resetIdentity`, and `seedFingerprint` **verbatim** into the
+plan's `reset` block, and use the `sideEffectPolicy` the offer names. Admission
+compares declared against attested values and fails closed on any mismatch, so a
+guessed identity costs a one-shot run grant and forces the draft to be abandoned
+and re-authored. Live validation also reports `admission.declaredMissing`; treat
+a non-empty list as a blocking defect in the draft, not a warning.
+
+If `ownerAvailable` is false there is no conforming reset owner: say so and
+either declare `reset.required = false`, stating that repeated runs are not
+independent and repair is foreclosed, or stop and ask the human.
+
 ## Restricted Authoring Sequence
 
+The target app is a **running process**, not a folder. Identify it with
+`maui_test_agents` before reading any source. Do not search the workspace to
+find out which app to test, and do not conclude an app is absent because no
+project matches its name: the `appName` a device reports is the running app's
+name, and it routinely differs from the project or solution that produced it
+(`MauiTodo` may ship from `DevFlow.Sample`). Searching first wastes the turn and
+invents a mismatch the runtime would have settled in one call. Read source only
+after a target is bound, and only to confirm selectors you already observed.
+
 1. Call `maui_test_agents`; if candidates are ambiguous, ask the human to
-   choose one.
+   choose one. If it reports no targets, say the app is not running and stop —
+   do not substitute a project you found on disk.
 2. Call `maui_test_capabilities` with the selected exact `agentId` and
    `agentInstanceId`. Stop if the required platform or operation is unsupported.
 3. Use `maui_test_improvements` for value-free selector health facts when

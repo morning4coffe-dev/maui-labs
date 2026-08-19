@@ -28,6 +28,26 @@ approval and the embedding host advertises `nativeApproval`. Standalone browser
 tabs and chat are non-authoritative. If either capability is absent, stop at an
 inert draft or a pending/rejected/expired request.
 
+## Tool Inventory
+
+The `test-agent` profile exposes exactly these 13 tools, and no others:
+
+`maui_test_agents`, `maui_test_capabilities`, `maui_test_improvements`,
+`maui_test_explore`, `maui_test_author`, `maui_test_action`,
+`maui_test_assertion`, `maui_test_validate`, `maui_test_status`,
+`maui_test_run`, `maui_test_trace`, `maui_test_failure`, `maui_test_patch`.
+
+Authoring, approval, commit, and await-approval are **operations of
+`maui_test_author`**, not separate tools; the same is true of `start` and
+`status` on `maui_test_run`. Do not go looking for a tool that is not on this
+list.
+
+Some hosts defer or virtualise tool schemas, so a discovery search can return a
+partial list. Treat this list as the authority on what exists: load the names
+above directly in a single pass rather than searching repeatedly to find out
+whether a tool is real. Repeated partial searches burn the turn and discover
+nothing this list does not already state.
+
 ## First-Time Setup
 
 For a first-use request, require a connected **Debug** app/DevFlow agent, then
@@ -155,6 +175,10 @@ Use this workflow only to author an inert draft or execute a committed flow.
    `agentInstanceId` using `maui_test_capabilities`. Ask only if there are
    multiple candidates, a missing platform capability, or an unspecified
    project/device/agent. Never use a most-recent or port-only fallback.
+   The target is a running process, so bind it from the runtime before reading
+   any source: do not search the workspace to identify the app, and do not
+   decide it is missing because no project carries its name — a reported
+   `appName` often differs from the project that built it.
 2. **Prepare a complete inert draft.** State the goal, prerequisites, expected
    hard assertions, routes, durable selectors, side-effect policy, reset/seed
    policy when applicable, and independent business oracle when required.

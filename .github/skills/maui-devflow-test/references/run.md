@@ -71,3 +71,11 @@ independently verified. Do not upgrade simulator, CI, source-only, or
 attested-artifact evidence to a physical-device or qualification claim.
 Preserve the committed plan's reset, seed, and oracle requirements exactly;
 never infer that they are unnecessary merely because the actions look UI-only.
+
+A run is finished only when `maui_test_run status` reports a terminal state.
+Nothing else counts: not a granted approval, not a submitted `start`, not a
+corrected draft, and not a plan you believe would pass. If you keep a task list,
+the run task stays open until you hold that terminal state, and abandoning a
+draft moves it backwards rather than completing it. Ending a turn without a
+terminal state is an unfinished run — say exactly where you stopped and what
+remains, and never record it as done.

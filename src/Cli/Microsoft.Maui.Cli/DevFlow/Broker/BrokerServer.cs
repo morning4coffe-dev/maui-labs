@@ -1956,6 +1956,77 @@ public partial class BrokerServer : IDisposable
     /// <summary>
     /// Builds the app-action reset owner for a registration, or null when the app cannot host one.
     /// </summary>
+    /// <summary>
+    /// Performs a plan's declared lifecycle reset and records what the owner attested, before
+    /// replay admission is evaluated.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Admission compares a declared reset contract against evidence an owner actually produced,
+    /// and fails closed when that evidence is absent. Describing an offer is not evidence, so
+    /// without this step a plan that correctly declares <c>reset.required</c> is denied on every
+    /// attempt — and because the denial happens after the grant is bound, each attempt silently
+    /// spends a one-shot run approval while executing nothing.
+    /// </para>
+    /// <para>
+    /// The reset runs here rather than inside the coordinator because it is outbound async work
+    /// against the app, and because doing it before <c>Start</c> keeps one attested result visible
+    /// to both admission and the run report. Every failure path leaves the context untouched: a
+    /// missing owner, a refusal, or a thrown client error must all read as "no reset was proven",
+    /// never as a reset that did not happen.
+    /// </para>
+    /// </remarks>
+    private static async Task EstablishPreRunResetAsync(
+        AgentConnection connection,
+        WorkflowRunStartRequest request)
+    {
+        var declared = request?.Plan?.Reset;
+        if (declared?.Required != true)
+            return;
+
+        // Only supply evidence that is missing. Overwriting a caller's attestation would let this
+        // step relabel a reset somebody else owns.
+        if (request!.Context?.Reset is not null)
+            return;
+
+        var owner = CreateAppActionResetOwnerFor(connection.Registration);
+        if (owner is null)
+            return;
+
+        Execution.FlowLifecycleResetOutcome outcome;
+        try
+        {
+            outcome = await owner.ResetAsync(new Execution.FlowLifecycleResetRequest
+            {
+                Reason = "flow-replay-admission",
+                RequiredStrategy = declared.Strategy,
+                ExpectedSeedIdentity = declared.AppStateSeed?.SeedId,
+                RequiresBackendSeed = declared.BackendTestDataSeed is not null,
+            }).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            return;
+        }
+
+        if (!outcome.Succeeded || outcome.Applied is null)
+            return;
+
+        var applied = outcome.Applied;
+        request.Context ??= new Microsoft.Maui.DevFlow.Testing.MauiFlowRunContext();
+        request.Context.Reset = new Microsoft.Maui.DevFlow.Testing.MauiFlowResetResult
+        {
+            Requested = true,
+            Succeeded = true,
+            AppStateSucceeded = applied.AppStateSucceeded,
+            BackendTestDataSucceeded = applied.BackendTestDataSucceeded,
+            Strategy = applied.Strategy,
+            ResetIdentity = applied.ResetIdentity,
+            SeedFingerprint = applied.SeedFingerprint,
+            BackendStateFingerprint = applied.BackendStateFingerprint,
+        };
+    }
+
     /// <remarks>
     /// Shared so the offer a caller is told to declare and the reset a run later performs are
     /// derived from exactly the same identity facts. Computing them apart would let an author
@@ -2220,6 +2291,11 @@ public partial class BrokerServer : IDisposable
                     request.AvailableCapabilities = await ReadWorkflowRunCapabilitiesAsync(connection.Registration)
                         .ConfigureAwait(false);
                 }
+
+                // Admission reads attested reset evidence; nothing else in the run path produces
+                // it, so the reset happens here, before admission and before any device work.
+                await EstablishPreRunResetAsync(connection, request).ConfigureAwait(false);
+
                 var target = CreateWorkflowRunTarget(connection.Registration);
                 var result = _workflowRuns.Start(
                     request,

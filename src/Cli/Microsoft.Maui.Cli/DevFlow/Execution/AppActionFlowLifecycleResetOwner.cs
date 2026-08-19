@@ -60,6 +60,45 @@ internal sealed class AppActionFlowLifecycleResetOwner : IFlowLifecycleResetOwne
     public string OwnerId => "devflow-app-action-reset";
 
     /// <summary>
+    /// What this owner would establish if asked, without asking. The fingerprints are pure
+    /// functions of facts the owner already holds, so describing them performs no reset and
+    /// mutates nothing.
+    /// </summary>
+    /// <remarks>
+    /// An author has to declare the seed fingerprint admission will compare against, but cannot
+    /// compute it: it digests the owner id, strategy, app, device, and build. Without this the only
+    /// options are to guess a value that fails closed, or to spend a one-shot run grant discovering
+    /// it. This is deliberately an offer, not an attestation — nothing here is evidence that a reset
+    /// happened, and <see cref="GetAppliedStateAsync"/> still reports nothing until one does.
+    /// </remarks>
+    internal FlowLifecycleResetOffer DescribeOffer(string? seedIdentity = null)
+    {
+        var seed = string.IsNullOrWhiteSpace(seedIdentity) ? null : seedIdentity.Trim();
+        var resetIdentity = FlowLifecycleResetFingerprints.ResetIdentity(
+            OwnerId,
+            ResetStrategy,
+            _appIdentity,
+            _deviceIdentity);
+
+        return new FlowLifecycleResetOffer
+        {
+            OwnerId = OwnerId,
+            Strategy = ResetStrategy,
+            ResetIdentity = resetIdentity,
+            SeedIdentity = seed,
+            SeedFingerprint = FlowLifecycleResetFingerprints.SeedFingerprint(
+                resetIdentity,
+                _appBuildIdentity,
+                seed),
+            BackendStateFingerprint = FlowLifecycleResetFingerprints.NoBackendApplied,
+        };
+    }
+
+    /// <summary>Confirms the app currently advertises the reset action this owner depends on.</summary>
+    internal Task<bool> CanResetAsync(CancellationToken cancellationToken = default)
+        => SupportsResetActionAsync(cancellationToken);
+
+    /// <summary>
     /// What this owner has applied so far. It stays null until the owner has actually performed a
     /// reset: before that it has established nothing, and reporting the app's current state would
     /// be echoing the app rather than attesting the owner's own action.

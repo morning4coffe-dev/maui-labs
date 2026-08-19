@@ -68,6 +68,24 @@ internal sealed record FlowLifecycleAppliedState
     public bool BackendTestDataSucceeded { get; init; }
 }
 
+/// <summary>
+/// What a lifecycle owner would establish if it were asked to reset, described without resetting.
+/// </summary>
+/// <remarks>
+/// This is an offer, not evidence. It exists so an author can declare the seed fingerprint that
+/// admission will later compare against, instead of guessing a value that fails closed or spending
+/// a one-shot run grant to discover it. Nothing here asserts that a reset happened.
+/// </remarks>
+internal sealed record FlowLifecycleResetOffer
+{
+    public required string OwnerId { get; init; }
+    public required string Strategy { get; init; }
+    public required string ResetIdentity { get; init; }
+    public string? SeedIdentity { get; init; }
+    public required string SeedFingerprint { get; init; }
+    public required string BackendStateFingerprint { get; init; }
+}
+
 /// <summary>Result of one owner-performed reset.</summary>
 internal sealed record FlowLifecycleResetOutcome
 {

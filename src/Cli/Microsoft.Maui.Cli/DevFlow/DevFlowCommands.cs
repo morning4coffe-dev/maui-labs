@@ -5198,22 +5198,8 @@ public class DevFlowCommands
     private static Broker.IWorkflowRepairResetAttester? CreateRepairResetAttester(
         Broker.AgentRegistration registration)
     {
-        if (registration is null || registration.Port <= 0)
-            return null;
-
-        // The package is the app identity a reset re-establishes. Without it the owner cannot build
-        // a stable reset identity, so it declines rather than digesting an empty string.
-        var appIdentity = registration.PackageId;
-        if (string.IsNullOrWhiteSpace(appIdentity))
-            return null;
-
-        var owner = new Execution.AppActionFlowLifecycleResetOwner(
-            registration.Port,
-            appIdentity,
-            registration.DeviceId ?? registration.Platform,
-            $"{registration.AppName}:{registration.Tfm}:{registration.Version}");
-
-        return new Broker.WorkflowRepairLifecycleResetAttester(owner);
+        var owner = Broker.BrokerServer.CreateAppActionResetOwnerFor(registration);
+        return owner is null ? null : new Broker.WorkflowRepairLifecycleResetAttester(owner);
     }
 
     private static async Task BrokerStopAsync()

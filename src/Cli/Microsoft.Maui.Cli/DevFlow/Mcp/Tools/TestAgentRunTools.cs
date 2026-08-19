@@ -123,8 +123,42 @@ public sealed class TestAgentValidationTool
                 ambiguousSelectors = ambiguous.ToArray(),
                 unresolvedSelectors = unresolved.ToArray(),
                 admission = DescribeResetAdmission(snapshot.Plan),
+                resetOffer = await DescribeResetOfferAsync(session, request).ConfigureAwait(false),
             },
             [TestAgentToolSupport.Untrusted("ui-tree")]);
+    }
+
+    /// <summary>
+    /// Reports what the target's reset owner would establish, so an author can declare a seed
+    /// fingerprint that admission will actually accept.
+    /// </summary>
+    /// <remarks>
+    /// The fingerprint digests owner, strategy, app, device, and build, so it cannot be derived by
+    /// the caller. Reporting it here is the difference between declaring a value that admits and
+    /// guessing one that fails closed after a one-shot run grant has already been spent. It is an
+    /// offer, not evidence: no reset is performed and admission still requires a real attestation.
+    /// </remarks>
+    private static async Task<object?> DescribeResetOfferAsync(
+        McpAgentSession session,
+        MauiTestAgentValidationRequest request)
+    {
+        try
+        {
+            var brokerPort = await session.GetBrokerPortAsync().ConfigureAwait(false);
+            var response = await TestAgentBrokerClient.GetResetOfferAsync(
+                brokerPort,
+                new MauiTestAgentRunBindingRequest { Envelope = request.Envelope }).ConfigureAwait(false);
+            if (response.TransportError is not null || response.Value.ValueKind != JsonValueKind.Object)
+                return null;
+
+            return JsonSerializer.Deserialize<JsonElement>(response.Value.GetRawText());
+        }
+        catch (Exception)
+        {
+            // An unavailable offer must never fail validation: it is advisory, and its absence
+            // leaves the caller exactly where it was before.
+            return null;
+        }
     }
 
     /// <summary>

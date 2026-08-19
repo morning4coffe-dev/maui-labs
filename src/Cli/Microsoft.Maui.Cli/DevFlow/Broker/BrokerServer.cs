@@ -1863,6 +1863,12 @@ public partial class BrokerServer : IDisposable
             return;
         }
 
+        if (string.Equals(normalizedPath, "/api/test-agent/reset-offer", StringComparison.OrdinalIgnoreCase))
+        {
+            await HandleTestAgentResetOfferAsync(context, maxBodyChars);
+            return;
+        }
+
         await WriteTypedJsonResponseAsync(context, 404, new Microsoft.Maui.DevFlow.Testing.MauiTestAgentToolResult
         {
             Error = TestAgentRouteError(
@@ -1871,6 +1877,103 @@ public partial class BrokerServer : IDisposable
                 "The requested restricted test-agent broker operation is not supported.",
                 retryable: false),
         });
+    }
+
+    /// <summary>
+    /// Reports what the target's lifecycle reset owner would establish, without establishing it.
+    /// </summary>
+    /// <remarks>
+    /// Admission compares a plan's declared seed fingerprint against the one an owner reports, but
+    /// that fingerprint digests owner, strategy, app, device, and build — facts only the broker
+    /// holds. Without this an author can only guess a value that fails closed, or spend a one-shot
+    /// run grant to discover it. The answer is deliberately an offer: it performs no reset, and the
+    /// broker still refuses admission unless an owner later actually attests one.
+    /// </remarks>
+    private async Task HandleTestAgentResetOfferAsync(HttpListenerContext context, int maxBodyChars)
+    {
+        var request = await ReadWorkflowRunBodyAsync<Microsoft.Maui.DevFlow.Testing.MauiTestAgentRunBindingRequest>(
+            context,
+            maxBodyChars);
+        if (request is null)
+            return;
+
+        var target = request.Envelope?.Target;
+        if (target is null ||
+            string.IsNullOrWhiteSpace(target.AgentId) ||
+            !_agents.TryGetValue(target.AgentId, out var connection) ||
+            !string.Equals(connection.Registration.InstanceId, target.AgentInstanceId, StringComparison.Ordinal))
+        {
+            await WriteJsonResponseAsync(context, 409, new JsonObject
+            {
+                ["ok"] = false,
+                ["reason"] = "target-unavailable",
+                ["note"] = "The reset offer requires the exact connected agentId and agentInstanceId.",
+            });
+            return;
+        }
+
+        var owner = CreateAppActionResetOwnerFor(connection.Registration);
+        if (owner is null)
+        {
+            await WriteJsonResponseAsync(context, 200, new JsonObject
+            {
+                ["ok"] = true,
+                ["ownerAvailable"] = false,
+                ["note"] =
+                    "No lifecycle reset owner is registered for this target, so a plan that sets " +
+                    "reset.required=true cannot be admitted. Either add an in-app reset action, or " +
+                    "declare reset.required=false and state that repeated runs are not independent.",
+            });
+            return;
+        }
+
+        // Whether the app still advertises the action is a live fact, so it is probed rather than
+        // assumed: an app can be rebuilt without it while the broker keeps running.
+        var canReset = await owner.CanResetAsync(CancellationToken.None).ConfigureAwait(false);
+        var offer = owner.DescribeOffer();
+
+        await WriteJsonResponseAsync(context, 200, new JsonObject
+        {
+            ["ok"] = true,
+            ["ownerAvailable"] = canReset,
+            ["ownerId"] = offer.OwnerId,
+            ["strategy"] = offer.Strategy,
+            ["resetIdentity"] = offer.ResetIdentity,
+            ["seedFingerprint"] = offer.SeedFingerprint,
+            ["backendStateFingerprint"] = offer.BackendStateFingerprint,
+            ["sideEffectPolicy"] = Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicies.AppStateResettable,
+            ["note"] = canReset
+                ? "Declare reset.strategy and reset.seedFingerprint exactly as reported, with " +
+                  "sideEffectPolicy app-state-resettable. This owner resets app state only and seeds " +
+                  "no backend, so test-tenant-resettable can never be admitted for it. This is an " +
+                  "offer, not evidence: admission still requires an owner to attest a real reset."
+                : "The app does not currently advertise the reset action this owner needs, so a " +
+                  "reset-requiring plan would fail admission. Ask the human to add it before " +
+                  "declaring reset.required=true.",
+        });
+    }
+
+    /// <summary>
+    /// Builds the app-action reset owner for a registration, or null when the app cannot host one.
+    /// </summary>
+    /// <remarks>
+    /// Shared so the offer a caller is told to declare and the reset a run later performs are
+    /// derived from exactly the same identity facts. Computing them apart would let an author
+    /// declare a plausible fingerprint that admission then rejects.
+    /// </remarks>
+    internal static Execution.AppActionFlowLifecycleResetOwner? CreateAppActionResetOwnerFor(
+        AgentRegistration registration)
+    {
+        // The package is the app identity a reset re-establishes. Without it the owner cannot build
+        // a stable reset identity, so it declines rather than digesting an empty string.
+        if (registration is null || registration.Port <= 0 || string.IsNullOrWhiteSpace(registration.PackageId))
+            return null;
+
+        return new Execution.AppActionFlowLifecycleResetOwner(
+            registration.Port,
+            registration.PackageId,
+            registration.DeviceId ?? registration.Platform,
+            $"{registration.AppName}:{registration.Tfm}:{registration.Version}");
     }
 
     private async Task<Microsoft.Maui.DevFlow.Testing.MauiTestAgentTargetState?> GetLiveTestAgentTargetStateAsync(

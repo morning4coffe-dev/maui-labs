@@ -207,6 +207,20 @@ internal static class TestAgentBrokerClient
             MauiTestingJsonContext.Default.MauiTestAgentRunBindingResult,
             cancellationToken);
 
+    /// <summary>
+    /// Asks the broker what the target's lifecycle reset owner would establish, without resetting.
+    /// </summary>
+    internal static Task<TestAgentBrokerRawResponse> GetResetOfferAsync(
+        int brokerPort,
+        MauiTestAgentRunBindingRequest request,
+        CancellationToken cancellationToken = default)
+        => PostWorkflowRunAsync(
+            brokerPort,
+            "/api/test-agent/reset-offer",
+            request,
+            MauiTestingJsonContext.Default.MauiTestAgentRunBindingRequest,
+            cancellationToken);
+
     internal static string SerializeWorkflowRunRequest<TRequest>(
         TRequest request,
         JsonTypeInfo<TRequest> requestType)

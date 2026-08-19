@@ -2025,6 +2025,20 @@ public partial class BrokerServer : IDisposable
             SeedFingerprint = applied.SeedFingerprint,
             BackendStateFingerprint = applied.BackendStateFingerprint,
         };
+
+        // A plan may also declare the seed as a checkpoint precondition, which admission compares
+        // against an observed value. Live target observation deliberately reports no seed, because
+        // the app cannot be trusted to name its own state, so the only thing that can supply it is
+        // a reset owner that just established it — which is exactly what happened here. Without
+        // this, declaring the same seed the reset offer reports is unsatisfiable: the expected
+        // value is present, the observed one never is, and the run is denied for a precondition
+        // that was in fact met.
+        var seeded = request.Context.Preconditions ??= new Microsoft.Maui.DevFlow.Testing.MauiFlowReplayPreconditions();
+        seeded.Observed ??= new Microsoft.Maui.DevFlow.Testing.MauiFlowCheckpoint();
+        // Only the seeds are attested here. Route, window, and the rest stay whatever the host
+        // observed, because a reset owner establishes state, not where the app is standing.
+        seeded.Observed.SeedFingerprint ??= applied.SeedFingerprint;
+        seeded.Observed.BackendStateFingerprint ??= applied.BackendStateFingerprint;
     }
 
     /// <remarks>

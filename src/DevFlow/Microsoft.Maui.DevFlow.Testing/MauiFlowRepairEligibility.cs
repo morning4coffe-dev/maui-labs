@@ -335,7 +335,7 @@ public static class MauiFlowRepairEligibilityEvaluator
             Add(
                 decision,
                 "side-effect-policy-repair-prohibited",
-                "A repair requires a declared replayable side-effect policy (none, test-tenant-resettable, or compensated).");
+                "A repair requires a declared replayable side-effect policy (none, app-state-resettable, test-tenant-resettable, or compensated).");
         }
 
         if (replay is not null && replay.RepairValidationAllowed != true)

@@ -463,11 +463,13 @@ F:Microsoft.Maui.DevFlow.Testing.MauiFlowRunOutcomes.Passed:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowRunOutcomes.TimedOut:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowRunOutcomes.UnknownCompletion:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowRunReportSerializer.FileName:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicies.AppStateResettable:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicies.Compensated:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicies.NonReplayable:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicies.None:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicies.TestTenantResettable:System.String
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicies.Unspecified:System.String
+F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.AppStateResettable:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.Compensated:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.NonReplayable:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy
 F:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy.None:Microsoft.Maui.DevFlow.Testing.MauiFlowSideEffectPolicy

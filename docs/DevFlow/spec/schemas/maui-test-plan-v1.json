@@ -97,6 +97,7 @@
     "sideEffectPolicy": {
       "enum": [
         "none",
+        "app-state-resettable",
         "test-tenant-resettable",
         "compensated",
         "non-replayable"

@@ -23,6 +23,7 @@ chooses to continue to local reproduction or an executable draft.
 | Expected business result is unclear | The independent oracle and its expected result | Equate UI appearance with business success |
 | Repeated execution can change data | Reset/seed provider or side-effect policy | Assume a reset exists |
 | The flow is destructive or non-replayable | Whether to prepare a one-shot review request | Run, retry, or compensate automatically |
+| The user wants the test to repair itself, or says a selector drifts | Confirmation of a replayable side-effect policy, a required independent oracle, and a repeatable run | Author `non-replayable` or a one-shot and leave repair silently foreclosed |
 | A platform or action capability is absent | Whether to stop, use a supported target, or hand off | Claim a substitute platform result |
 | An imported artifact is offered for repair | Whether a fresh local reproduction is available | Treat CI or attestation as execution authority |
 | A flow is described in words and names a screen you have not seen | Which route it is, or approval for a bounded look at named routes | Assume a route name from the screen title |

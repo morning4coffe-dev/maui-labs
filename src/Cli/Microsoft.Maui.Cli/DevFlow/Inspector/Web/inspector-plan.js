@@ -278,6 +278,7 @@ function createPolicyEditor(parent, plan, update) {
   const policy = el('select', { className: 'df-authoring-select' });
   for (const [value, text] of [
     ['none', 'No side effects'],
+    ['app-state-resettable', 'App state resettable'],
     ['test-tenant-resettable', 'Test tenant resettable'],
     ['compensated', 'Compensated'],
     ['non-replayable', 'Non-replayable'],

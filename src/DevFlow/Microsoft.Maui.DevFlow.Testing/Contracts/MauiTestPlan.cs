@@ -392,16 +392,23 @@ public static class MauiFlowSideEffectPolicies
 {
     public const string Unspecified = "unspecified";
     public const string None = "none";
+
+    /// <summary>
+    /// The flow mutates app-local state only and a reset owner restores it in place. Distinct from
+    /// <see cref="TestTenantResettable"/>, which asserts that a backend test tenant was also reset.
+    /// </summary>
+    public const string AppStateResettable = "app-state-resettable";
     public const string TestTenantResettable = "test-tenant-resettable";
     public const string Compensated = "compensated";
     public const string NonReplayable = "non-replayable";
 
     public static bool IsKnown(string? value) =>
-        value is None or TestTenantResettable or Compensated or NonReplayable;
+        value is None or AppStateResettable or TestTenantResettable or Compensated or NonReplayable;
 
     public static MauiFlowSideEffectPolicy Parse(string? value) => value switch
     {
         None => MauiFlowSideEffectPolicy.None,
+        AppStateResettable => MauiFlowSideEffectPolicy.AppStateResettable,
         TestTenantResettable => MauiFlowSideEffectPolicy.TestTenantResettable,
         Compensated => MauiFlowSideEffectPolicy.Compensated,
         NonReplayable => MauiFlowSideEffectPolicy.NonReplayable,
@@ -411,6 +418,7 @@ public static class MauiFlowSideEffectPolicies
     public static string ToWireValue(MauiFlowSideEffectPolicy value) => value switch
     {
         MauiFlowSideEffectPolicy.None => None,
+        MauiFlowSideEffectPolicy.AppStateResettable => AppStateResettable,
         MauiFlowSideEffectPolicy.TestTenantResettable => TestTenantResettable,
         MauiFlowSideEffectPolicy.Compensated => Compensated,
         MauiFlowSideEffectPolicy.NonReplayable => NonReplayable,

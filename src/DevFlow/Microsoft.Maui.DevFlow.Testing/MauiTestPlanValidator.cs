@@ -47,7 +47,7 @@ public static class MauiTestPlanValidator
         }
 
         if (!MauiFlowSideEffectPolicies.IsKnown(plan.SideEffectPolicy))
-            result.Errors.Add("sideEffectPolicy must be none, test-tenant-resettable, compensated, or non-replayable.");
+            result.Errors.Add("sideEffectPolicy must be none, app-state-resettable, test-tenant-resettable, compensated, or non-replayable.");
 
         if (plan.Reset is null)
             result.Errors.Add("reset is required.");

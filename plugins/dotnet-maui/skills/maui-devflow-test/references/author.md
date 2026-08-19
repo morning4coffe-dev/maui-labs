@@ -16,8 +16,11 @@ changes the draft:
 4. Durable selectors: unique app-owned `AutomationId`, or, for every repeated
    item, the complete `AutomationId + collectionScope + stableItemKey`
    composite. Do not author a partial composite.
-5. Side-effect policy: `none`, `test-tenant-resettable`, `compensated`, or
-   `non-replayable`.
+5. Side-effect policy: `none`, `app-state-resettable`, `test-tenant-resettable`, `compensated`,
+   or `non-replayable`. Choose `app-state-resettable` when the app exposes an in-process reset
+   surface that restores app state without restarting the process; it proves the app-state reset
+   only. Claim `test-tenant-resettable` only when a backend test tenant is genuinely reset too,
+   because that policy demands backend proof an app-only reset can never supply.
 6. A reset/seed provider for repeatable or mutating paths when applicable.
 7. An independent business oracle when a verified pass or repair eligibility is
    required.
@@ -25,6 +28,30 @@ changes the draft:
 Do not use text, type/index, coordinates, screenshots, or a duplicate
 AutomationId as a durable selector. If no durable selector exists, preserve the
 finding and route to app testability; do not create a brittle executable flow.
+
+## Repair-Admissible Drafts
+
+Repair admission is decided by the draft, not by the failure. A textbook
+pre-dispatch `locator-not-found` is still refused when the draft forecloses
+repair, and the refusal appears only later at triage as
+`non-replayable-repair-prohibited`, `independent-oracle-absent`,
+`verification-flow-missing`, or `manual-one-shot-authorized`. Decide these
+before `begin`, because no later evidence can recover them:
+
+- A `sideEffectPolicy` other than `non-replayable`, with a reset/seed provider
+  that genuinely resets the state the flow mutates. For an app that exposes an
+  in-process reset surface and touches no backend, that is `app-state-resettable`;
+  `test-tenant-resettable` additionally demands backend reset proof, so claiming it
+  without a real backend tenant makes admission unsatisfiable rather than stricter.
+- A business oracle that is both `required` and `independent`, so a candidate
+  repair can be validated against evidence the UI cannot fabricate.
+- A repeatable run rather than a one-shot review request.
+
+When the human asks for a test that repairs itself, says a selector drifts, or
+expects the agent to fix breakage later, confirm these three before `begin` and
+name what each one costs. When the human still chooses `non-replayable` or has
+no independent oracle, author it and say plainly that the flow can never produce
+a repair proposal, so future drift will always need a human edit.
 
 ## Restricted Authoring Sequence
 

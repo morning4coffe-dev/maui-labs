@@ -145,13 +145,18 @@ capability-token gated, bounded, memory-only safe projections; raw content has n
 
 ### Side-effect admission
 
-`sideEffectPolicy` is one of `none`, `test-tenant-resettable`, `compensated`, or
-`non-replayable`. The broker and Testing runtime use the same pure admission decision before a
-mutation lease or device mutation:
+`sideEffectPolicy` is one of `none`, `app-state-resettable`, `test-tenant-resettable`,
+`compensated`, or `non-replayable`. The broker and Testing runtime use the same pure admission
+decision before a mutation lease or device mutation:
 
 - `none` requires matching declared/observed preconditions.
-- `test-tenant-resettable` additionally requires successful app-state and backend/test-data reset
-  evidence and matching fingerprints.
+- `app-state-resettable` additionally requires successful app-state reset evidence and a matching
+  app-state seed fingerprint. It deliberately asks for no backend proof, because the flow changed
+  no backend for such proof to be about. Use it when an in-app reset surface restores app state
+  without restarting the process.
+- `test-tenant-resettable` additionally requires successful app-state **and** backend/test-data
+  reset evidence and matching fingerprints. Claim it only when a backend test tenant really is
+  reset; an app-only reset cannot satisfy it.
 - `compensated` additionally requires either that reset evidence or a successful result for the
   plan's declared compensator.
 - `non-replayable` rejects automatic replay and repair validation. A distinct

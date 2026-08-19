@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Microsoft.Maui.DevFlow.Driver;
 using Microsoft.Maui.DevFlow.Testing;
 
@@ -140,6 +141,77 @@ public sealed class MauiFlowReplaySafetyEvaluatorTests
         Assert.False(decision.DiagnosticReplayAllowed);
         Assert.False(decision.RepairValidationAllowed);
         Assert.Contains(decision.Reasons, reason => reason.Code == "backend-test-data-reset-not-proven");
+    }
+
+    /// <summary>A plan that declares an app-state seed and deliberately declares no backend seed.</summary>
+    private static MauiTestPlan AppStateOnlyPlan(bool declareAppSeed = true)
+    {
+        // Round-trips the shared helper so the plan keeps every field deterministic validation
+        // requires, then removes exactly the seed declarations under test.
+        var json = JsonSerializer.SerializeToNode(
+            Plan(MauiFlowSideEffectPolicies.AppStateResettable),
+            MauiTestingJsonContext.Default.MauiTestPlan)!.AsObject();
+
+        foreach (var section in new[] { "checkpoint", "reset" })
+        {
+            if (json[section] is not JsonObject node)
+                continue;
+            node.Remove("backendStateFingerprint");
+            node.Remove("backendTestDataSeed");
+            if (!declareAppSeed)
+            {
+                node.Remove("seedFingerprint");
+                node.Remove("appStateSeed");
+            }
+        }
+
+        return json.Deserialize(MauiTestingJsonContext.Default.MauiTestPlan)!;
+    }
+
+    [Fact]
+    public void Evaluate_AppStateResettable_WithAppOnlyResetProof_AllowsReplay()
+    {
+        // An in-app reset owner restores app state and seeds no backend. Demanding backend proof
+        // here would make the claim unprovable rather than safer, so the policy asks only for what
+        // an app-state reset can actually establish.
+        var context = Context(includeReset: true, includeOracle: true);
+        context.Reset!.BackendTestDataSucceeded = false;
+        context.Reset.Outcome!.BackendTestDataSucceeded = false;
+        context.Reset.BackendStateFingerprint = null;
+
+        var decision = MauiFlowReplaySafetyEvaluator.Evaluate(Request(AppStateOnlyPlan(), context));
+
+        Assert.True(decision.OrdinaryReplayAllowed);
+        Assert.True(decision.RepairValidationAllowed);
+        Assert.DoesNotContain(decision.Reasons, reason => reason.Code == "backend-test-data-reset-not-proven");
+        Assert.DoesNotContain(decision.Reasons, reason => reason.Code == "backend-test-data-seed-not-declared");
+    }
+
+    [Fact]
+    public void Evaluate_AppStateResettable_WithoutAppStateResetProof_DeniesBeforeReplay()
+    {
+        // Dropping backend proof must not weaken the proof the policy does claim.
+        var context = Context(includeReset: true, includeOracle: true);
+        context.Reset!.AppStateSucceeded = false;
+        context.Reset.Outcome!.AppStateSucceeded = false;
+
+        var decision = MauiFlowReplaySafetyEvaluator.Evaluate(Request(AppStateOnlyPlan(), context));
+
+        Assert.False(decision.OrdinaryReplayAllowed);
+        Assert.False(decision.RepairValidationAllowed);
+        Assert.Contains(decision.Reasons, reason => reason.Code == "app-state-reset-not-proven");
+    }
+
+    [Fact]
+    public void Evaluate_AppStateResettable_WithoutDeclaredAppSeed_DeniesBeforeReplay()
+    {
+        var context = Context(includeReset: true, includeOracle: true);
+
+        var decision = MauiFlowReplaySafetyEvaluator.Evaluate(
+            Request(AppStateOnlyPlan(declareAppSeed: false), context));
+
+        Assert.False(decision.OrdinaryReplayAllowed);
+        Assert.Contains(decision.Reasons, reason => reason.Code == "app-state-seed-not-declared");
     }
 
     [Fact]

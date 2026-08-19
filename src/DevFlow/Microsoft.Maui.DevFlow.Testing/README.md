@@ -95,6 +95,7 @@ interfaces.
 | Policy | Admission rule |
 |---|---|
 | `none` | Expected and observed clean-state checkpoints must match. |
+| `app-state-resettable` | Matching checkpoints plus successful app-state reset evidence with a matching app-state seed fingerprint. No backend proof is required, because no backend was changed. |
 | `test-tenant-resettable` | Matching checkpoints plus successful app-state and backend/test-data reset evidence with matching seed fingerprints. |
 | `compensated` | Matching checkpoints plus either matching successful reset evidence or a successful outcome for the plan's declared compensator. |
 | `non-replayable` | No automatic replay, continuation, or repair validation. A caller can admit one human run only with `manualOneShotAuthorization: true`; it is never repair-eligible. |

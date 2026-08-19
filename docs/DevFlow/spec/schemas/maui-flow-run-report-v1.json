@@ -47,6 +47,7 @@
       "enum": [
         "unspecified",
         "none",
+        "app-state-resettable",
         "test-tenant-resettable",
         "compensated",
         "non-replayable"
@@ -453,6 +454,7 @@
           "enum": [
             "unspecified",
             "none",
+            "app-state-resettable",
             "test-tenant-resettable",
             "compensated",
             "non-replayable"

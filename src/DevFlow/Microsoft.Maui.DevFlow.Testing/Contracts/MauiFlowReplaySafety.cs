@@ -14,6 +14,12 @@ public enum MauiFlowSideEffectPolicy
 {
     Unspecified,
     None,
+    /// <summary>
+    /// The flow mutates only app-local state, and a reset owner can restore that state without
+    /// touching a backend. Admission proves the app-state reset and its seed, and deliberately does
+    /// not ask for backend proof, because no backend was changed to prove anything about.
+    /// </summary>
+    AppStateResettable,
     TestTenantResettable,
     Compensated,
     NonReplayable,
@@ -343,14 +349,26 @@ public static class MauiFlowReplaySafetyEvaluator
             return decision;
         }
 
-        var requiresResetProof = policy is MauiFlowSideEffectPolicy.TestTenantResettable or MauiFlowSideEffectPolicy.Compensated;
+        var requiresResetProof = policy is MauiFlowSideEffectPolicy.AppStateResettable
+            or MauiFlowSideEffectPolicy.TestTenantResettable
+            or MauiFlowSideEffectPolicy.Compensated;
+        // App-state proof is demanded by both resettable policies. Backend proof is demanded only by
+        // the tenant policy, because that is the one claiming a backend tenant was reset. Asking an
+        // app-state-only flow for backend proof would make the claim unprovable rather than safer.
         var resetProven = requiresResetProof &&
-            HasSuccessfulReset(plan, context, decision, requireTenantProof: policy == MauiFlowSideEffectPolicy.TestTenantResettable);
+            HasSuccessfulReset(
+                plan,
+                context,
+                decision,
+                requireAppStateProof: policy is MauiFlowSideEffectPolicy.AppStateResettable
+                    or MauiFlowSideEffectPolicy.TestTenantResettable,
+                requireBackendProof: policy == MauiFlowSideEffectPolicy.TestTenantResettable);
         var compensatorProven = policy == MauiFlowSideEffectPolicy.Compensated &&
             HasSuccessfulCompensator(plan, context, decision);
         var admitted = policy switch
         {
             MauiFlowSideEffectPolicy.None => preconditionsMatch,
+            MauiFlowSideEffectPolicy.AppStateResettable => preconditionsMatch && resetProven,
             MauiFlowSideEffectPolicy.TestTenantResettable => preconditionsMatch && resetProven,
             MauiFlowSideEffectPolicy.Compensated => preconditionsMatch && (resetProven || compensatorProven),
             MauiFlowSideEffectPolicy.NonReplayable => preconditionsMatch && context?.ManualOneShotAuthorization == true,
@@ -441,8 +459,17 @@ public static class MauiFlowReplaySafetyEvaluator
 
         if (!preconditionsMatch)
             AddReason(decision, "preconditions-unsatisfied", "Required clean-state preconditions do not match.", true, "admission");
-        if (policy == MauiFlowSideEffectPolicy.TestTenantResettable && !resetProven)
-            AddReason(decision, "reset-proof-required", "A successful app and backend reset with matching seed fingerprints is required.", true, "admission");
+        if (policy is MauiFlowSideEffectPolicy.AppStateResettable or MauiFlowSideEffectPolicy.TestTenantResettable && !resetProven)
+        {
+            AddReason(
+                decision,
+                "reset-proof-required",
+                policy == MauiFlowSideEffectPolicy.AppStateResettable
+                    ? "A successful app-state reset with a matching seed fingerprint is required."
+                    : "A successful app and backend reset with matching seed fingerprints is required.",
+                true,
+                "admission");
+        }
         if (policy == MauiFlowSideEffectPolicy.Compensated && !resetProven && !compensatorProven)
             AddReason(decision, "reset-or-compensator-required", "A successful reset or declared compensator outcome is required.", true, "admission");
 
@@ -610,7 +637,8 @@ public static class MauiFlowReplaySafetyEvaluator
         MauiTestPlan? plan,
         MauiFlowRunContext? context,
         MauiFlowReplayEligibilityDecision decision,
-        bool requireTenantProof)
+        bool requireAppStateProof,
+        bool requireBackendProof)
     {
         var reset = context?.Reset;
         if (!IsResetSucceeded(reset))
@@ -630,12 +658,12 @@ public static class MauiFlowReplaySafetyEvaluator
         var backendSucceeded = reset?.Outcome?.BackendTestDataSucceeded ?? reset?.BackendTestDataSucceeded ?? reset?.Succeeded;
         var valid = true;
 
-        if (requireTenantProof && appSucceeded != true)
+        if (requireAppStateProof && appSucceeded != true)
         {
             AddReason(decision, "app-state-reset-not-proven", "The app-state reset was not proven successful.", true, "admission");
             valid = false;
         }
-        if (requireTenantProof && backendSucceeded != true)
+        if (requireBackendProof && backendSucceeded != true)
         {
             AddReason(decision, "backend-test-data-reset-not-proven", "The backend/test-data reset was not proven successful.", true, "admission");
             valid = false;
@@ -646,13 +674,13 @@ public static class MauiFlowReplaySafetyEvaluator
             "app-state-seed",
             expectedAppSeed,
             actualAppSeed,
-            required: requireTenantProof);
+            required: requireAppStateProof);
         valid &= CompareResetFingerprint(
             decision,
             "backend-test-data-seed",
             expectedBackendSeed,
             actualBackendSeed,
-            required: requireTenantProof);
+            required: requireBackendProof);
         return valid;
     }
 
@@ -673,7 +701,7 @@ public static class MauiFlowReplaySafetyEvaluator
                 AddReason(
                     decision,
                     $"{name}-not-declared",
-                    $"A {name} fingerprint must be declared for a test-tenant-resettable flow.",
+                    $"A {name} fingerprint must be declared for a flow whose policy requires this reset proof.",
                     true,
                     "admission");
                 return false;

@@ -26,6 +26,27 @@ Do not use text, type/index, coordinates, screenshots, or a duplicate
 AutomationId as a durable selector. If no durable selector exists, preserve the
 finding and route to app testability; do not create a brittle executable flow.
 
+## Repair-Admissible Drafts
+
+Repair admission is decided by the draft, not by the failure. A textbook
+pre-dispatch `locator-not-found` is still refused when the draft forecloses
+repair, and the refusal appears only later at triage as
+`non-replayable-repair-prohibited`, `independent-oracle-absent`,
+`verification-flow-missing`, or `manual-one-shot-authorized`. Decide these
+before `begin`, because no later evidence can recover them:
+
+- A `sideEffectPolicy` other than `non-replayable`, with a reset/seed provider
+  that genuinely resets the state the flow mutates.
+- A business oracle that is both `required` and `independent`, so a candidate
+  repair can be validated against evidence the UI cannot fabricate.
+- A repeatable run rather than a one-shot review request.
+
+When the human asks for a test that repairs itself, says a selector drifts, or
+expects the agent to fix breakage later, confirm these three before `begin` and
+name what each one costs. When the human still chooses `non-replayable` or has
+no independent oracle, author it and say plainly that the flow can never produce
+a repair proposal, so future drift will always need a human edit.
+
 ## Restricted Authoring Sequence
 
 1. Call `maui_test_agents`; if candidates are ambiguous, ask the human to

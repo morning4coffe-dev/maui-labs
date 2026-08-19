@@ -5164,6 +5164,7 @@ public class DevFlowCommands
                 Broker.BrokerServer.DefaultPort,
                 idleTimeout: null,
                 log: msg => Console.WriteLine(msg),
+                repairResetAttesterResolver: CreateRepairResetAttester,
                 attachedRunOracles: Program.Services
                     .GetService<Execution.IAttachedRunOracleEvaluator>());
             await server.RunAsync(cts.Token);
@@ -5182,6 +5183,37 @@ public class DevFlowCommands
             Console.Error.WriteLine(errorMessage);
             throw new InvalidOperationException(errorMessage);
         }
+    }
+
+    /// <summary>
+    /// Supplies the reset owner a repair validation needs, for apps that opt in by registering the
+    /// well-known DevFlow reset action.
+    /// </summary>
+    /// <remarks>
+    /// Returning null is the normal answer, and it is the safe one: without an owner the broker
+    /// refuses repair validation instead of resetting an app it cannot restore. Only an app that
+    /// registers an in-process reset action gets an owner, because only that app can be reset
+    /// without restarting the process the validation is fenced to.
+    /// </remarks>
+    private static Broker.IWorkflowRepairResetAttester? CreateRepairResetAttester(
+        Broker.AgentRegistration registration)
+    {
+        if (registration is null || registration.Port <= 0)
+            return null;
+
+        // The package is the app identity a reset re-establishes. Without it the owner cannot build
+        // a stable reset identity, so it declines rather than digesting an empty string.
+        var appIdentity = registration.PackageId;
+        if (string.IsNullOrWhiteSpace(appIdentity))
+            return null;
+
+        var owner = new Execution.AppActionFlowLifecycleResetOwner(
+            new Microsoft.Maui.DevFlow.Driver.AgentClient(port: registration.Port),
+            appIdentity,
+            registration.DeviceId ?? registration.Platform,
+            $"{registration.AppName}:{registration.Tfm}:{registration.Version}");
+
+        return new Broker.WorkflowRepairLifecycleResetAttester(owner);
     }
 
     private static async Task BrokerStopAsync()

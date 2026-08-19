@@ -86,13 +86,15 @@ public partial class BrokerServer : IDisposable
 
     /// <summary>
     /// Creates the broker a host runs, supplying the evaluator that reads independent business-
-    /// oracle evidence out of band for runs against an already-running app.
+    /// oracle evidence out of band for runs against an already-running app, and the resolver that
+    /// supplies a lifecycle reset owner for apps which opt into repair validation.
     /// </summary>
     internal BrokerServer(
         int port,
         TimeSpan? idleTimeout,
         Action<string>? log,
-        Execution.IAttachedRunOracleEvaluator? attachedRunOracles)
+        Execution.IAttachedRunOracleEvaluator? attachedRunOracles,
+        Func<AgentRegistration, IWorkflowRepairResetAttester?>? repairResetAttesterResolver = null)
         : this(
             port,
             idleTimeout,
@@ -103,6 +105,7 @@ public partial class BrokerServer : IDisposable
             previewFlags: null,
             trustedHostApprovalVerifier: null,
             nativeApprovalToken: CreateNativeApprovalToken(),
+            repairResetAttesterResolver: repairResetAttesterResolver,
             attachedRunOracles: attachedRunOracles)
     {
     }

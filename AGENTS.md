@@ -73,6 +73,29 @@ dotnet test src/DevFlow/Microsoft.Maui.DevFlow.Tests/
 - Test results: `artifacts/TestResults/**/*.xml`
 - No quarantine or outerloop test attributes are used in this repo
 
+### DevFlow test-agent end-to-end smoke test
+
+Unit tests cover the pieces; this covers the loop the product actually ships,
+spoken over the same MCP protocol an editor uses:
+
+```bash
+node eng/smoke-tests/devflow-test-agent-smoke-test.mjs --maui <path-to-maui>
+```
+
+It authors a plan and flow, validates them live, copies the broker's reset
+offer, commits, runs, and drives a drifted trailing selector all the way to an
+accepted selector repair proposal — 18 checks, exit code 0 only if every one
+passes. It needs no editor, no chat model, and no human, which is the point:
+editors have repeatedly failed to dispatch these tools, and from the outside
+that is indistinguishable from the product being broken. Run this before
+believing an editor-side report that the workflow is broken.
+
+Requires a connected **Debug** DevFlow agent whose app registers the
+`devflow-reset` action (the `DevFlow.Sample` MauiTodo app does), a broker
+started with `DEVFLOW_PREVIEW_AGENT_AUTHORING=true` and
+`DEVFLOW_PREVIEW_REPAIR_PROPOSALS=true`, and an approval host to decide the two
+native approval requests.
+
 ## Code Conventions
 
 - **ImplicitUsings**: enabled repo-wide

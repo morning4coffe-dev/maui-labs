@@ -640,9 +640,20 @@ public sealed class TestAgentPatchTool
      System.ComponentModel.Description("Store, preview, or reject an inert structured flow patch proposal. Apply and approve are forbidden in this profile; this tool never edits source, flow files, or an app.")]
     public static async Task<string> Patch(
         [System.ComponentModel.Description("MCP session injected by the server and used only for the local broker")] McpAgentSession session,
-        [System.ComponentModel.Description("Typed inert patch request with operation proposal, preview, reject, apply, approve, or rollback. Apply, approve, and rollback are rejected.")] MauiTestAgentPatchRequest request)
+        [System.ComponentModel.Description("Typed inert patch request with operation proposal, preview, reject, apply, approve, or rollback. Apply, approve, and rollback are rejected. Call preview with only proposal.sourceStepId and proposal.proposedSelector to be told the canonical patchDigest, then send proposal with that digest.")] McpTestAgentPatchRequest request)
     {
-        if (request?.Envelope is null)
+        MauiTestAgentPatchRequest? typed = null;
+        string? readError = null;
+        if (request is null || !request.TryToTyped(out typed, out readError))
+        {
+            return TestAgentToolSupport.Failure(request?.Envelope?.RequestId, TestAgentToolSupport.Error(
+                MauiTestAgentErrorCodes.InvalidRequest,
+                MauiTestAgentErrorCategories.Validation,
+                readError ?? "A typed inert patch request is required.",
+                retryable: false));
+        }
+
+        if (typed?.Envelope is null)
         {
             return TestAgentToolSupport.Failure(null, TestAgentToolSupport.Error(
                 MauiTestAgentErrorCodes.InvalidRequest,
@@ -652,10 +663,10 @@ public sealed class TestAgentPatchTool
         }
 
         var brokerPort = await session.GetBrokerPortAsync().ConfigureAwait(false);
-        var result = await TestAgentBrokerClient.PatchAsync(brokerPort, request).ConfigureAwait(false);
+        var result = await TestAgentBrokerClient.PatchAsync(brokerPort, typed).ConfigureAwait(false);
         return result.Value?.Ok == true
-            ? TestAgentToolSupport.Success(request.Envelope.RequestId, result.Value)
-            : TestAgentToolSupport.BrokerFailure(request.Envelope.RequestId, result);
+            ? TestAgentToolSupport.Success(typed.Envelope.RequestId, result.Value)
+            : TestAgentToolSupport.BrokerFailure(typed.Envelope.RequestId, result);
     }
 }
 

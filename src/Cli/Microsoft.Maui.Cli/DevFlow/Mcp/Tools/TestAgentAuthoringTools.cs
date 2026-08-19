@@ -15,19 +15,29 @@ public sealed class TestAgentAuthoringTool
     public static async Task<string> Author(
         [System.ComponentModel.Description("MCP session injected by the server and used only for local broker and exact-target access")] McpAgentSession session,
         [System.ComponentModel.Description("Authoring operation: begin, status, await-approval, commit, abandon, migrate-preview, approval-request, or exploration-request")] string operation,
-        [System.ComponentModel.Description("Typed provider-neutral authoring request. For new agent-authored tests, put the complete inert plan, actions, and assertions in begin; do not request draft-change/assertion grants unless incrementally changing an existing draft. Every envelope needs a positive bounded deadlineMs. await-approval needs approvalRequestId and may set waitTimeoutSeconds from 1 to 150; repeat the same wait request after a pending timeout rather than submitting another approval. Request and consume grants sequentially because commit advances revisions. approvalKind exact values: exploration, draft-change, assertion, commit, run. approvalScope allowedActions exact values: tap, fill, scroll, navigate, back, draft-append, assert, author-commit, run, cancel. Execute+append needs both the semantic action and draft-append with maxActionCount at least 2. allowedSelectors uses automationId:<id>, scopedItem:<collection>:<itemKey>:<automationId>, or typeIndex:<type>:<index>; equivalent selector objects are normalized. Authoring scopes are normalized to side effect authoring; run scopes to run. An exploration scope may list only tap, scroll, navigate, and back, and is normalized to side effect exploration, which is spendable only on maui_test_explore; its budget must already be in the plan passed to begin, because explorationBudget cannot be added to a live session. Commit must use author-commit + maxActionCount 1. Run start must use run + maxActionCount 1, and a run scope may not bundle any other action, so cancel needs its own run-kind approval. Use sideEffectPolicy non-replayable for one explicitly approved run with no repeat/repair; use test-tenant-resettable only when a real reset/seed contract exists.")] MauiTestAgentAuthorRequest request,
-        [System.ComponentModel.Description("Cancellation token injected by the MCP host for bounded approval waiting")] CancellationToken cancellationToken = default)
-    {
-        var normalized = operation?.Trim().ToLowerInvariant();
-        var envelope = request?.Envelope;
-        if (request is null)
-        {
-            return TestAgentToolSupport.Failure(null, TestAgentToolSupport.Error(
-                MauiTestAgentErrorCodes.InvalidRequest,
-                MauiTestAgentErrorCategories.Validation,
-                "A typed authoring request is required.",
-                retryable: false));
-        }
+        [System.ComponentModel.Description("Typed provider-neutral authoring request. For new agent-authored tests, put the complete inert plan, actions, and assertions in begin; do not request draft-change/assertion grants unless incrementally changing an existing draft. Every envelope needs a positive bounded deadlineMs. await-approval needs approvalRequestId and may set waitTimeoutSeconds from 1 to 150; repeat the same wait request after a pending timeout rather than submitting another approval. Request and consume grants sequentially because commit advances revisions. approvalKind exact values: exploration, draft-change, assertion, commit, run. approvalScope allowedActions exact values: tap, fill, scroll, navigate, back, draft-append, assert, author-commit, run, cancel. Execute+append needs both the semantic action and draft-append with maxActionCount at least 2. allowedSelectors uses automationId:<id>, scopedItem:<collection>:<itemKey>:<automationId>, or typeIndex:<type>:<index>; equivalent selector objects are normalized. Authoring scopes are normalized to side effect authoring; run scopes to run. An exploration scope may list only tap, scroll, navigate, and back, and is normalized to side effect exploration, which is spendable only on maui_test_explore; its budget must already be in the plan passed to begin, because explorationBudget cannot be added to a live session. Commit must use author-commit + maxActionCount 1. Run start must use run + maxActionCount 1, and a run scope may not bundle any other action, so cancel needs its own run-kind approval.                 Use sideEffectPolicy non-replayable for one explicitly approved run with no repeat/repair; use test-tenant-resettable only when a real reset/seed contract exists.")] McpTestAgentAuthorRequest request,
+                [System.ComponentModel.Description("Cancellation token injected by the MCP host for bounded approval waiting")] CancellationToken cancellationToken = default)
+            {
+                var normalized = operation?.Trim().ToLowerInvariant();
+                if (request is null)
+                {
+                    return TestAgentToolSupport.Failure(null, TestAgentToolSupport.Error(
+                        MauiTestAgentErrorCodes.InvalidRequest,
+                        MauiTestAgentErrorCategories.Validation,
+                        "A typed authoring request is required.",
+                        retryable: false));
+                }
+
+                if (!request.TryToTyped(out var typed, out var readError))
+                {
+                    return TestAgentToolSupport.Failure(request.Envelope?.RequestId, TestAgentToolSupport.Error(
+                        MauiTestAgentErrorCodes.InvalidRequest,
+                        MauiTestAgentErrorCategories.Validation,
+                        readError!,
+                        retryable: false));
+                }
+
+                var envelope = typed!.Envelope;
 
         switch (normalized)
         {
@@ -44,8 +54,8 @@ public sealed class TestAgentAuthoringTool
                     {
                         Envelope = envelope,
                         TargetState = target.State,
-                        Plan = request.Plan,
-                        Flow = request.Flow,
+                        Plan = typed.Plan,
+                        Flow = typed.Flow,
                         DurationSeconds = request.DurationSeconds,
                     }).ConfigureAwait(false);
                 return result.Value?.Ok == true
@@ -62,7 +72,7 @@ public sealed class TestAgentAuthoringTool
             }
 
             case "await-approval":
-                return await AwaitApprovalAsync(session, request, cancellationToken).ConfigureAwait(false);
+                return await AwaitApprovalAsync(session, typed, cancellationToken).ConfigureAwait(false);
 
             case "abandon":
             {

@@ -12,7 +12,7 @@ namespace Microsoft.Maui.DevFlow.Tests;
 public class AppActionFlowLifecycleResetOwnerTests
 {
     private static AppActionFlowLifecycleResetOwner Owner()
-        => new(new AgentClient(port: 1), "com.example.app", "device-1", "app:tfm:1.0");
+        => new(agentPort: 1, "com.example.app", "device-1", "app:tfm:1.0");
 
     [Fact]
     public async Task ResetAsync_RefusesAStrategyItCannotPerform()

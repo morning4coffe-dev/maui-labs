@@ -5208,7 +5208,7 @@ public class DevFlowCommands
             return null;
 
         var owner = new Execution.AppActionFlowLifecycleResetOwner(
-            new Microsoft.Maui.DevFlow.Driver.AgentClient(port: registration.Port),
+            registration.Port,
             appIdentity,
             registration.DeviceId ?? registration.Platform,
             $"{registration.AppName}:{registration.Tfm}:{registration.Version}");

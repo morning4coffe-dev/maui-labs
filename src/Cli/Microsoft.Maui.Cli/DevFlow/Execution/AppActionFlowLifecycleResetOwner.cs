@@ -35,19 +35,23 @@ internal sealed class AppActionFlowLifecycleResetOwner : IFlowLifecycleResetOwne
     /// </summary>
     internal const string ResetStrategy = "app-action-reset";
 
-    private readonly AgentClient _client;
+    /// <summary>Lease holder kind, matching the one the broker uses for its own validation steps.</summary>
+    private const string LeaseHolderKind = "repair-validation";
+    private const string LeaseLabel = "app-state-reset";
+
+    private readonly int _agentPort;
     private readonly string _appIdentity;
     private readonly string _deviceIdentity;
     private readonly string _appBuildIdentity;
     private FlowLifecycleAppliedState? _applied;
 
     internal AppActionFlowLifecycleResetOwner(
-        AgentClient client,
+        int agentPort,
         string appIdentity,
         string deviceIdentity,
         string appBuildIdentity)
     {
-        _client = client ?? throw new ArgumentNullException(nameof(client));
+        _agentPort = agentPort;
         _appIdentity = appIdentity;
         _deviceIdentity = deviceIdentity;
         _appBuildIdentity = appBuildIdentity;
@@ -96,8 +100,7 @@ internal sealed class AppActionFlowLifecycleResetOwner : IFlowLifecycleResetOwne
         InvokeResult? result;
         try
         {
-            var args = new JsonArray { seedIdentity };
-            result = await _client.InvokeActionAsync(ResetActionName, args).ConfigureAwait(false);
+            result = await InvokeResetActionAsync(seedIdentity, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception)
         {
@@ -138,6 +141,50 @@ internal sealed class AppActionFlowLifecycleResetOwner : IFlowLifecycleResetOwne
     }
 
     /// <summary>
+    /// Invokes the app's reset action under an explicit repair-validation lease.
+    /// </summary>
+    /// <remarks>
+    /// While a broker is attached the agent refuses mutations that do not carry the broker's own
+    /// authority, so the owner claims the same kind of short-lived lease the broker uses to restore
+    /// a route during validation, and releases it immediately. The implicit lease is disabled for
+    /// the same reason it is elsewhere: an auto-acquired lease is never released and would collide
+    /// with the replay this reset exists to enable.
+    /// </remarks>
+    private async Task<InvokeResult?> InvokeResetActionAsync(
+        string? seedIdentity,
+        CancellationToken cancellationToken)
+    {
+        var leaseId = $"repair-validation-{Guid.NewGuid():N}";
+        using var client = new AgentClient("localhost", _agentPort)
+        {
+            AutoAcquireMutationLease = false,
+        };
+        using var leaseScope = client.UseMutationLease(leaseId, LeaseHolderKind, LeaseLabel);
+
+        var claim = await client
+            .ControlMutationLeaseAsync("claim", false, leaseId, LeaseHolderKind, LeaseLabel)
+            .WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!claim.YouHold)
+            return null;
+
+        try
+        {
+            var args = new JsonArray { seedIdentity };
+            return await client
+                .InvokeActionAsync(ResetActionName, args)
+                .WaitAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        finally
+        {
+            await client
+                .ControlMutationLeaseAsync("release", false, leaseId, LeaseHolderKind, LeaseLabel)
+                .ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
     /// True when the connected app registers the well-known reset action. Probed per reset rather
     /// than cached, because an app can be rebuilt with the action added or removed while the broker
     /// keeps running.
@@ -146,7 +193,8 @@ internal sealed class AppActionFlowLifecycleResetOwner : IFlowLifecycleResetOwne
     {
         try
         {
-            var actions = await _client.ListActionsAsync().ConfigureAwait(false);
+            using var client = new AgentClient("localhost", _agentPort);
+            var actions = await client.ListActionsAsync().WaitAsync(cancellationToken).ConfigureAwait(false);
             if (!actions.TryGetProperty("actions", out var list) || list.ValueKind != JsonValueKind.Array)
                 return false;
 

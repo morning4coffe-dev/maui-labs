@@ -27,6 +27,16 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
     private readonly IAppSourceIdentityProvider _appSourceIdentityProvider;
     private readonly Func<string>? _agentSessionIdFactory;
 
+    /// <summary>
+    /// Floor for the readiness wait when binding consumed the whole agent budget.
+    /// </summary>
+    /// <remarks>
+    /// Binding can legitimately use most of the allowance on a cold start, which would otherwise
+    /// leave readiness with no time and reintroduce the single-probe race this floor exists to
+    /// prevent. It is a floor, not an extension: a healthy agent answers well inside it.
+    /// </remarks>
+    private static readonly TimeSpan MinimumAgentReadyWait = TimeSpan.FromSeconds(30);
+
     public FlowExecutionCoordinator(
         CommittedFlowBundleLoader bundleLoader,
         IAppArtifactResolver artifactResolver,
@@ -236,6 +246,9 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
                 ProcessId = platformSession.ProcessId,
             };
             currentStage = "bind-agent";
+            // Registration and readiness share one budget, so a slow cold start cannot spend the
+            // operator's wait twice.
+            var agentReadyDeadline = _clock.GetUtcNow() + request.AgentWaitTimeout;
             var registration = await StageAsync(
                 lifecycle,
                 currentStage,
@@ -272,10 +285,19 @@ internal sealed class FlowExecutionCoordinator : IFlowExecutionCoordinator
                 currentStage,
                 async () =>
                 {
-                    var status = await client.GetStatusAsync().ConfigureAwait(false);
-                    ExactAgentBindingResolver.ValidateLiveStatus(status, expectation);
-                    ValidatePlanRequirements(bundle.Plan, status!);
-                    return status!;
+                    // Poll rather than probe once: the app is registered but its own endpoint may
+                    // still be coming up, and the remaining budget is what the operator allowed.
+                    var remaining = agentReadyDeadline - _clock.GetUtcNow();
+                    if (remaining < MinimumAgentReadyWait)
+                        remaining = MinimumAgentReadyWait;
+
+                    var status = await _agentBindingResolver.WaitForLiveStatusAsync(
+                        () => client.GetStatusAsync(),
+                        expectation,
+                        remaining,
+                        cancellationToken).ConfigureAwait(false);
+                    ValidatePlanRequirements(bundle.Plan, status);
+                    return status;
                 },
                 cancellationToken).ConfigureAwait(false);
 

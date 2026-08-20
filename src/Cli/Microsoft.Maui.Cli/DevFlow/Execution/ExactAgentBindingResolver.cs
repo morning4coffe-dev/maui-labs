@@ -99,6 +99,77 @@ internal sealed class ExactAgentBindingResolver
         return new(ExactAgentBindingSelectionKind.Pending, null, matching.Length > 0);
     }
 
+    /// <summary>
+    /// Polls the newly bound agent until it reports itself running, or the budget runs out.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Registration and readiness are not the same event. The agent registers with the broker as
+    /// soon as it starts, but its own HTTP surface answers a moment later, and a freshly installed
+    /// Debug build cold-starting on an emulator can take longer still. A single probe taken right
+    /// after port forwarding therefore fails on a healthy app that is merely slow, which reads as
+    /// a broken product rather than a race.
+    /// </para>
+    /// <para>
+    /// The wait shares the caller's agent budget rather than adding one of its own, so the total
+    /// time spent getting an agent ready stays bounded by what the operator asked for. A read that
+    /// throws is treated as not-yet-ready and retried; only the deadline ends the wait.
+    /// </para>
+    /// </remarks>
+    public async Task<AgentStatus> WaitForLiveStatusAsync(
+        Func<Task<AgentStatus?>> readStatusAsync,
+        ExactAgentBindingExpectation expectation,
+        TimeSpan timeout,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(readStatusAsync);
+
+        var deadline = _clock.GetUtcNow() + timeout;
+        AgentStatus? status = null;
+        var everReachable = false;
+        var attempts = 0;
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            attempts++;
+            try
+            {
+                status = await readStatusAsync().ConfigureAwait(false);
+                if (status is not null)
+                    everReachable = true;
+            }
+            catch (Exception) when (_clock.GetUtcNow() < deadline)
+            {
+                status = null;
+            }
+
+            if (status?.Running == true)
+                break;
+
+            if (_clock.GetUtcNow() >= deadline)
+            {
+                // Name which of the two faults happened. "Not running" sends someone looking at the
+                // app; "never answered" sends them to forwarding and ports, and telling them apart
+                // afterwards costs a reproduction.
+                throw everReachable
+                    ? FlowExecutionException.Infrastructure(
+                        "agent-not-running",
+                        $"The newly bound DevFlow agent answered but never reported itself running " +
+                        $"within {timeout.TotalSeconds:0} seconds ({attempts} probes).")
+                    : FlowExecutionException.Infrastructure(
+                        "agent-not-reachable",
+                        $"The newly bound DevFlow agent never answered its status endpoint within " +
+                        $"{timeout.TotalSeconds:0} seconds ({attempts} probes). Check agent port forwarding.");
+            }
+
+            await Task.Delay(_pollInterval, cancellationToken).ConfigureAwait(false);
+        }
+
+        ValidateLiveStatus(status, expectation);
+        return status!;
+    }
+
     internal static void ValidateLiveStatus(
         AgentStatus? status,
         ExactAgentBindingExpectation expectation)

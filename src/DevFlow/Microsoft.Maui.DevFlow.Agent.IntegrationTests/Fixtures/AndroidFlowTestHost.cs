@@ -1,3 +1,5 @@
+using Microsoft.Maui.Cli.DevFlow.Execution;
+using Microsoft.Maui.Cli.Providers.Android;
 using Microsoft.Maui.DevFlow.Driver;
 using Microsoft.Maui.DevFlow.Testing;
 
@@ -93,6 +95,8 @@ internal sealed class AndroidFlowTestHost : IAsyncDisposable
                 ArtifactRoot = artifactRoot,
             }, request.FailureEvidenceCapture);
             var report = await runner.RunAsync(flow, cancellationToken).ConfigureAwait(false);
+            await EvaluatePostRunOraclesAsync(report, flow, plan, verification, cancellationToken)
+                .ConfigureAwait(false);
             var diagnostics = await CaptureDiagnosticsAsync(artifactRoot, runId, "flow-complete", cancellationToken).ConfigureAwait(false);
             artifacts.AddRange(diagnostics);
             AppendArtifactsAndPersist(report, artifactRoot, diagnostics);
@@ -149,6 +153,91 @@ internal sealed class AndroidFlowTestHost : IAsyncDisposable
         {
             await _lifecycle.DisposeAsync().ConfigureAwait(false);
         }
+    }
+
+    /// <summary>
+    /// Evaluates the plan's declared independent business oracles after the run, then restates the
+    /// run's verification from what they reported.
+    /// </summary>
+    /// <remarks>
+    /// A post-run oracle asks whether the app durably committed the record the flow claims to have
+    /// created, so it cannot be answered from the pre-run checkpoint the harness already gathers.
+    /// Without this the harness supplied only its own seed oracle, the oracle each plan actually
+    /// requires never reported, and every oracle-backed flow stayed unverified no matter how well
+    /// it ran. This deliberately reuses the same provider and the same verification decision the
+    /// <c>flow run</c> path uses rather than restating either, so the two cannot drift apart.
+    /// </remarks>
+    static async Task EvaluatePostRunOraclesAsync(
+        MauiFlowRunReport report,
+        MauiFlow flow,
+        MauiTestPlan plan,
+        PlatformCheckpointVerification verification,
+        CancellationToken cancellationToken)
+    {
+        var target = verification.Target;
+        var serial = target?.DeviceId;
+        var packageId = target?.AppId;
+        if (string.IsNullOrWhiteSpace(serial) || string.IsNullOrWhiteSpace(packageId))
+            return;
+
+        var artifact = new ResolvedAppArtifact
+        {
+            Path = packageId,
+            ProjectPath = packageId,
+            AgentSessionId = target!.AgentInstanceId ?? packageId,
+            TargetFramework = "net10.0-android",
+            TargetPlatformIdentifier = "android",
+            Configuration = "Debug",
+            ArtifactType = "apk",
+            ApplicationId = packageId,
+            PackageDigest = target!.AppBuildFingerprint ?? "not-observed",
+        };
+
+        var provider = new AndroidAppStorageEvidenceProvider(
+            new AndroidProvider(new JdkManager()),
+            new ExecutionProcessRunner());
+        if (!provider.Supports(new FlowStateEvidenceRequest { Plan = plan, Flow = flow, Artifact = artifact }))
+            return;
+
+        var buildFingerprint = target.AppBuildFingerprint ?? "not-observed";
+        var evidence = await provider.EvaluatePostRunAsync(
+            new FlowPostRunOracleEvaluationRequest
+            {
+                Plan = plan,
+                Flow = flow,
+                Artifact = artifact,
+                RunId = report.RunId ?? "run",
+                FlowDigest = report.FlowDigest ?? MauiFlowRunReportSerializer.ComputeFlowDigest(flow),
+                DeviceIdentityFingerprint = AndroidLifecycleDiagnosticRedactor.Fingerprint(serial!),
+                AppBuildFingerprint = buildFingerprint,
+                // The harness verifies the installed APK against this same value, so it identifies
+                // the package as precisely as a separate digest would.
+                PackageDigest = buildFingerprint,
+                Platform = "android",
+                DeviceSerial = serial!,
+                PackageId = packageId!,
+                StartedAt = report.StartedAt ?? DateTimeOffset.UtcNow,
+                EndedAt = report.EndedAt ?? DateTimeOffset.UtcNow,
+                EvaluationDeadline = DateTimeOffset.UtcNow.AddMinutes(1),
+                Report = report,
+            },
+            cancellationToken).ConfigureAwait(false);
+
+        var oracles = verification.RunContext.BusinessOracles.ToList();
+        foreach (var evaluated in evidence.BusinessOracles)
+        {
+            oracles.RemoveAll(existing =>
+                string.Equals(existing.OracleId, evaluated.OracleId, StringComparison.Ordinal));
+            oracles.Add(evaluated);
+        }
+
+        verification.RunContext.BusinessOracles = oracles;
+        FlowExecutionCoordinator.ApplyPostRunVerification(
+            report,
+            plan,
+            flow,
+            verification.RunContext,
+            DateTimeOffset.UtcNow);
     }
 
     async Task<IReadOnlyList<MauiFlowArtifactReference>> CaptureDiagnosticsAsync(

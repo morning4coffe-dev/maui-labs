@@ -465,14 +465,14 @@ jobs:
           emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: |
-            export DEVFLOW_TEST_ANDROID_SERIAL="$(adb devices | awk '/^emulator-[0-9]+[[:space:]]+device$/ { print $1; exit }')"
-            echo "Using Android emulator serial: ${DEVFLOW_TEST_ANDROID_SERIAL:-<none found>}"
-            # Deliberately one line. This script is handed to the emulator-runner action rather
-            # than run as a step, and backslash continuations do not survive that hand-off: the
-            # runner passed a literal "\" through as an argument, the entry point rejected it with
-            # "Unknown option '\'", and the lane exited 2 before replaying anything. It still
-            # reported a red gate, so the lane looked exercised while never running a flow.
-            bash ./eng/devflow/Run-DevFlowFlowQa.sh --platform android --repeat 3 --configuration Debug --results-root "$DEVFLOW_FLOW_PILOT_RESULTS_ROOT"
+            # One command on one line, deliberately. The emulator-runner action hands this script
+            # to the shell a line at a time, each in its own `sh -c`, so an `export` on an earlier
+            # line is gone by the next one and backslash continuations do not survive at all. The
+            # lane previously did both: it exported the serial into a shell that then exited, and
+            # passed a literal "\" through as an argument, which the entry point refused with
+            # "Unknown option '\'" before anything was built, installed, or replayed. Assigning the
+            # variable as a prefix of the same command is what actually reaches the script.
+            DEVFLOW_TEST_ANDROID_SERIAL="$(adb devices | awk '/^emulator-[0-9]+[[:space:]]+device$/ { print $1; exit }')" bash ./eng/devflow/Run-DevFlowFlowQa.sh --platform android --repeat 3 --configuration Debug --results-root "$DEVFLOW_FLOW_PILOT_RESULTS_ROOT"
 
       # The emulator manifest remains not-qualified for the real-device gate. This read-only
       # step publishes the exact missing evidence rather than treating the pilot as a pass.

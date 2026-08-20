@@ -545,7 +545,11 @@ print_status() {
 }
 
 run_test_command() {
-  local attempt=$1 raw="$artifact_root/.flow-qa-command-$attempt-$$.tmp"
+  # Split deliberately. `local` is a builtin, so every word on the line is expanded before any
+  # assignment takes effect; writing `local attempt=$1 raw="...$attempt..."` expands $attempt while
+  # it is still unset and aborts under `set -u` with "attempt: unbound variable".
+  local attempt=$1
+  local raw="$artifact_root/.flow-qa-command-$attempt-$$.tmp"
   local diagnostic="$diagnostic_dir/test-output-attempt-$attempt.txt"
   local -a attempt_arguments=("${test_arguments[@]}")
   local index

@@ -558,7 +558,11 @@ run_test_command() {
   done
   temporary_paths+=("$raw")
   umask 077
-  "${attempt_arguments[@]}" >"$raw" 2>&1
+  # test_arguments starts at the `test` subcommand, so the driver has to be named here, exactly as
+  # run_qualification does. Without it the shell ran its own `test` builtin, which reported
+  # "syntax error: `--configuration' unexpected" and looked like a malformed flow rather than a
+  # missing driver.
+  dotnet "${attempt_arguments[@]}" >"$raw" 2>&1
   command_exit=$?
   redact_diagnostic_file "$raw" "$diagnostic"
   command_output=$(head -c "$MAX_DIAGNOSTIC_BYTES" "$diagnostic" || true)
@@ -841,7 +845,10 @@ run_apple_flow_attempt() {
     return "$EXIT_PREREQUISITE"
   fi
   export DEVFLOW_APPLE_AGENT_ENDPOINT="$endpoint"
-  "${xcode_arguments[@]}" >"$xcode_raw" 2>&1
+  # Same defect as run_test_command: the array starts at the `test` subcommand, so omitting the
+  # driver runs the shell's own `test` builtin against xcodebuild's flags. These lanes carry
+  # continue-on-error, so it degraded silently instead of failing the run.
+  xcodebuild "${xcode_arguments[@]}" >"$xcode_raw" 2>&1
   xcode_exit=$?
   wait "$host_pid"; host_exit=$?
   redact_diagnostic_file "$host_raw" "$diagnostic_dir/apple-flow-host-$flow_name-$repetition.txt"
@@ -1081,7 +1088,8 @@ run_apple_spike() {
   fi
   export DEVFLOW_APPLE_AGENT_ENDPOINT="$endpoint"
 
-  "${xcode_arguments[@]}" >"$xcode_raw" 2>&1
+  # See the flow lane above: the array starts at the `test` subcommand and needs its driver named.
+  xcodebuild "${xcode_arguments[@]}" >"$xcode_raw" 2>&1
   xcode_exit=$?
   wait "$host_pid"; host_exit=$?
   redact_diagnostic_file "$host_raw" "$diagnostic_dir/apple-xctest-host.txt"

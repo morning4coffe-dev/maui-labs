@@ -223,6 +223,10 @@ public sealed class MacCatalystFixture : AppFixtureBase, IPlatformFlowTestLifecy
             SeedFingerprint = state.SeedFingerprint,
             BackendStateFingerprint = state.BackendStateFingerprint,
             Route = status.Route,
+            // See AndroidEmulatorFixture: a host that never reports window/modal makes any plan
+            // declaring them permanently unsatisfiable rather than merely mismatched.
+            Window = status.Window,
+            Modal = status.Modal,
             Locale = CultureInfo.CurrentUICulture.Name,
             Theme = theme?.Theme.ToString().ToLowerInvariant(),
             Orientation = "desktop",

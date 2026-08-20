@@ -359,6 +359,11 @@ public sealed class AndroidEmulatorFixture : AppFixtureBase, IPlatformFlowTestLi
             SeedFingerprint = state.SeedFingerprint,
             BackendStateFingerprint = state.BackendStateFingerprint,
             Route = status.Route,
+            // A plan may declare window/modal as clean-state preconditions. Admission compares the
+            // declared value against what the host observed, so a host that never reports them makes
+            // any plan that declares them permanently unsatisfiable rather than merely mismatched.
+            Window = status.Window,
+            Modal = status.Modal,
             Locale = status.Locale ??
                 await RequireDeviceLifecycle().GetLocaleAsync(cancellationToken).ConfigureAwait(false),
             Theme = status.Theme?.ToLowerInvariant() ??

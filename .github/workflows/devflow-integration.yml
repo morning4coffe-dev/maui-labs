@@ -467,11 +467,12 @@ jobs:
           script: |
             export DEVFLOW_TEST_ANDROID_SERIAL="$(adb devices | awk '/^emulator-[0-9]+[[:space:]]+device$/ { print $1; exit }')"
             echo "Using Android emulator serial: ${DEVFLOW_TEST_ANDROID_SERIAL:-<none found>}"
-            bash ./eng/devflow/Run-DevFlowFlowQa.sh \
-              --platform android \
-              --repeat 3 \
-              --configuration Debug \
-              --results-root "$DEVFLOW_FLOW_PILOT_RESULTS_ROOT"
+            # Deliberately one line. This script is handed to the emulator-runner action rather
+            # than run as a step, and backslash continuations do not survive that hand-off: the
+            # runner passed a literal "\" through as an argument, the entry point rejected it with
+            # "Unknown option '\'", and the lane exited 2 before replaying anything. It still
+            # reported a red gate, so the lane looked exercised while never running a flow.
+            bash ./eng/devflow/Run-DevFlowFlowQa.sh --platform android --repeat 3 --configuration Debug --results-root "$DEVFLOW_FLOW_PILOT_RESULTS_ROOT"
 
       # The emulator manifest remains not-qualified for the real-device gate. This read-only
       # step publishes the exact missing evidence rather than treating the pilot as a pass.

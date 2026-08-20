@@ -54,9 +54,21 @@ than discovered a shorter truth. If your host exposes the tools directly, this
 costs one cheap step and changes nothing.
 
 If a `maui_test_*` call ever returns nothing at all — no result, no error, no
-refusal — do not retry it and do not wait longer. Treat it as an unloaded tool:
-load the inventory again, and say plainly that the host failed to dispatch the
-call rather than reporting the work as blocked on DevFlow.
+refusal — do not retry it and do not wait longer, and do not report the work as
+blocked on DevFlow. There are two causes, and they need different responses.
+
+The common one is a **host permission prompt that nobody answered**. Editor
+hosts confirm tool use per distinct tool, once per session: VS Code shows an
+inline "Allow in this Session / Skip" on the call and then waits indefinitely
+for a click. Nothing times out, the MCP server stays idle, and the broker and
+app remain healthy, so every diagnostic looks fine while the session appears
+frozen. It is not model-specific and it recurs on the first use of each new
+tool, which is why a run can stall after authoring already worked. Say plainly
+that a confirmation is waiting and ask the human to approve it; approving all
+tools before sending avoids the interruption for the rest of the session.
+
+The other is a genuinely unloaded tool. Load the inventory again, and only then
+say the host failed to dispatch the call.
 
 Authoring, approval, commit, and await-approval are **operations of
 `maui_test_author`**, not separate tools; the same is true of `start` and

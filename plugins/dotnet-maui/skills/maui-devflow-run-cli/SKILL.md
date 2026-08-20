@@ -123,6 +123,17 @@ maui devflow flow run maui-tests/promo-reduces-total.md \
 - `--evidence-screenshot` requires `--evidence-on-failure` and is an explicit
   opt-in: **screenshot pixels are never redacted** and may show real on-screen
   data. Ask before adding it.
+- On Android, set `AndroidSdkDirectory` and `JavaSdkDirectory` when the machine
+  holds more than one SDK. Auto-detection resolves through MSBuild, so it can
+  pick up a path another project configured rather than the one the emulator and
+  `adb` on `PATH` belong to. The symptom is not a missing-SDK error: the build
+  succeeds against the wrong SDK and the run fails later at install or launch,
+  which reads as a device problem.
+- `flow run` refuses a package that is already installed
+  (`android-preexisting-app-unsafe`). That is deliberate — it owns installation
+  so app-private storage is empty at launch, which is what lets a post-run
+  oracle claim the run itself wrote the record. Uninstall first rather than
+  reaching for a flag.
 
 ### Diagnose without driving
 

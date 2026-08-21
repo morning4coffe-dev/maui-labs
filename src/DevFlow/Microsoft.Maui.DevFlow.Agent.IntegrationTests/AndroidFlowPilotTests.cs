@@ -680,6 +680,14 @@ internal sealed class AndroidFlowPilotConfiguration
         AndroidAbi = RuntimeInformation.OSArchitecture == Architecture.Arm64 ? "arm64-v8a" : "x86_64",
         AndroidTarget = "google_apis",
         DotNetWorkloadVersion = Environment.GetEnvironmentVariable("DOTNET_WORKLOAD_VERSION"),
+        // Android is a shipping, non-experimental MAUI platform. These are statements about the
+        // platform backend, not about how strong this lane's device evidence is: the AppKit rule in
+        // FlowPilotArtifactManifest reads experimental=true with officialCoverage=false, and that is
+        // the distinction they encode. Leaving them unset published a manifest that declined to say
+        // what platform it covered, which the downstream failure handoff refuses outright, so the
+        // CI failure-to-issue path could not start from the one lane that runs on every pull request.
+        Experimental = false,
+        OfficialCoverage = true,
         DeviceEvidenceKind = Environment.GetEnvironmentVariable("DEVFLOW_FLOW_PILOT_DEVICE_EVIDENCE_KIND") ?? "emulator",
         RealDevice = string.Equals(
             Environment.GetEnvironmentVariable("DEVFLOW_FLOW_PILOT_REAL_DEVICE"),

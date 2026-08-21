@@ -73,12 +73,44 @@ function Get-RepositoryRelativePath {
 function Get-ArtifactKind {
     param([System.IO.FileInfo] $File)
 
+    if ($File.Name -ceq 'flow-run.json') {
+        return 'flow-run-report'
+    }
     switch ($File.Extension.ToLowerInvariant()) {
         '.trx' { return 'test-results' }
         '.mauitrace' { return 'mauitrace' }
         '.json' { return 'json' }
         default { return 'host-diagnostic' }
     }
+}
+
+function Get-ArtifactMediaType {
+    param([string] $Kind, [System.IO.FileInfo] $File)
+
+    switch ($Kind) {
+        'flow-run-report' { return 'application/json' }
+        'mauitrace' { return 'application/vnd.maui.evidence+zip' }
+        'json' { return 'application/json' }
+        default { return $null }
+    }
+}
+
+# The run a piece of evidence belongs to is its containing attempt directory, which is the same
+# runId the manifest records for that attempt. Without it an artifact is only a file in an
+# inventory: consumers that must tie a report and its trace to one attempt cannot do so, and they
+# refuse the manifest rather than guess.
+function Get-ArtifactRunId {
+    param([System.IO.FileInfo] $File, [string] $ArtifactRoot)
+
+    $directory = $File.Directory
+    if ($null -eq $directory) {
+        return $null
+    }
+    $rootFull = [System.IO.Path]::GetFullPath($ArtifactRoot).TrimEnd([char]'\', [char]'/')
+    if ([System.IO.Path]::GetFullPath($directory.FullName).TrimEnd([char]'\', [char]'/') -ceq $rootFull) {
+        return $null
+    }
+    return $directory.Name
 }
 
 $manifestFull = [System.IO.Path]::GetFullPath($ManifestPath)
@@ -159,13 +191,23 @@ foreach ($artifactRoot in $ArtifactRoots) {
         }
 
         $hash = Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256
-        $artifacts.Add([ordered]@{
-                kind = Get-ArtifactKind $_
+        $kind = Get-ArtifactKind $_
+        $reference = [ordered]@{
+                kind = $kind
                 path = $relativePath
                 sha256 = "sha256:$($hash.Hash.ToLowerInvariant())"
                 sizeBytes = [Int64] $_.Length
                 redacted = $true
-            })
+            }
+        $mediaType = Get-ArtifactMediaType $kind $_
+        if ($null -ne $mediaType) {
+            $reference['mediaType'] = $mediaType
+        }
+        $runId = Get-ArtifactRunId $_ $artifactRoot
+        if (-not [string]::IsNullOrWhiteSpace($runId)) {
+            $reference['runId'] = $runId
+        }
+        $artifacts.Add($reference)
         $existingPaths[$relativePath] = $true
     }
 }

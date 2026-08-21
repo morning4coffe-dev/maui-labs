@@ -56,6 +56,13 @@ internal sealed class FlowPilotArtifactManifest
                 Kind = ResolveDeviceEvidenceKind(options),
                 RealDevice = IsRealDeviceEvidence(options),
             },
+            // Stated from facts this manifest owns rather than copied out of a run report. The
+            // report's device profile is a display descriptor such as "411x914@2.6", which the
+            // report redactor treats as an identifier and drops, so reading it back always yielded
+            // null and left the manifest unable to say which device it ran on. Downstream
+            // consumers refuse a manifest with no device profile, so the omission silently
+            // disqualified the whole lane.
+            DeviceProfile = ResolveDeviceProfile(options),
             AndroidSdk = new FlowPilotAndroidSdkManifest
             {
                 ApiLevel = options.AndroidApiLevel,
@@ -617,6 +624,18 @@ internal sealed class FlowPilotArtifactManifest
     static bool IsRealDeviceEvidence(FlowPilotManifestOptions options) =>
         options.RealDevice == true &&
         ResolveDeviceEvidenceKind(options) is "physical-device" or "real-device";
+
+    /// <summary>
+    /// Names the device this manifest covers, using only identifier-safe facts it already holds.
+    /// </summary>
+    static string ResolveDeviceProfile(FlowPilotManifestOptions options)
+    {
+        var kind = ResolveDeviceEvidenceKind(options);
+        var name = options.AndroidAvdName?.Trim();
+        return string.IsNullOrWhiteSpace(name)
+            ? $"{options.Platform}-{kind}"
+            : $"{options.Platform}-{kind}:{name}";
+    }
 
     static readonly JsonSerializerOptions JsonOptions = new()
     {

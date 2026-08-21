@@ -445,13 +445,21 @@ public sealed class FlowPilotArtifactManifestTests
             .ToArray();
         Assert.Contains("labeled", types);
         Assert.Contains("synchronize", types);
-        var paths = RequireSequence(pullRequest, "paths")
-            .Children
-            .OfType<YamlScalarNode>()
-            .Select(static node => node.Value)
-            .ToArray();
-        Assert.Contains("src/DevFlow/**", paths);
-        Assert.Contains("samples/DevFlow.Sample/**", paths);
+
+        // The pull_request trigger deliberately carries no `paths:` filter. A path-filtered
+        // workflow never reports its checks at all, so a required `devflow-flow-gate` would sit at
+        // "Expected" forever on every pull request that does not touch DevFlow, and nobody could
+        // adopt it in branch protection. The scoping moved into the `plan` job instead, which is
+        // how the workflow can always report a conclusion and still refuse to start paid lanes for
+        // an unrelated diff. Asserting the filter here would pin the shape that had to be abandoned.
+        Assert.DoesNotContain(
+            "paths",
+            pullRequest.Children.Keys.OfType<YamlScalarNode>().Select(static node => node.Value));
+
+        // Scoping still has to exist somewhere, so pin it where it actually lives.
+        Assert.Contains("devflow-paths-changed", workflow, StringComparison.Ordinal);
+        Assert.Contains("'src/DevFlow/*'", workflow, StringComparison.Ordinal);
+        Assert.Contains("'samples/DevFlow.Sample/*'", workflow, StringComparison.Ordinal);
 
         var jobs = RequireMapping(root, "jobs");
         Assert.NotNull(RequireNode(jobs, "android-flow-pilot"));

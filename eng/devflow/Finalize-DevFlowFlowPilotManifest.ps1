@@ -171,6 +171,20 @@ foreach ($artifactRoot in $ArtifactRoots) {
 }
 
 $manifest['artifacts'] = @($artifacts)
+
+# The test process validates the manifest before this script exists, so it records "at least one
+# artifact is required" against a manifest whose artifact references are, by design, gathered here
+# afterwards. Left alone that error is permanent and false: the finalized manifest carries the
+# artifacts, but the downstream failure handoff refuses any manifest with a non-empty
+# validationErrors array, so the CI failure-to-issue path could never start. Only the invariant this
+# script has actually satisfied is cleared; every other recorded error is preserved untouched, and
+# nothing is cleared when no artifact was found.
+if ($artifacts.Count -gt 0 -and $manifest['validationErrors'] -is [System.Collections.IEnumerable]) {
+    $manifest['validationErrors'] = @(
+        @($manifest['validationErrors']) |
+            Where-Object { [string] $_ -ne 'At least one artifact is required.' })
+}
+
 $manifest['finalizedAt'] = [DateTimeOffset]::UtcNow.ToString('O')
 
 $temporary = "$manifestFull.$([Guid]::NewGuid().ToString('N')).tmp"

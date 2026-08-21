@@ -444,6 +444,18 @@ jobs:
             ~/.android/adb*
           key: avd-${{ env.DEVFLOW_TEST_ANDROID_API }}-x86_64
 
+      # Creating an AVD needs about 7.4 GB for its userdata partition, and a runner that has just
+      # installed the .NET SDK and MAUI workloads has less than that left, so creation aborts with
+      # "Not enough space to create userdata partition". A repository with a warm cache never
+      # creates one, so this only bites the first run in a new repository or fork, which is exactly
+      # the adoption path. Only toolchains this job does not use are removed.
+      - name: Reclaim runner disk for AVD creation
+        if: steps.flow-pilot-avd-cache.outputs.cache-hit != 'true'
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /opt/hostedtoolcache/CodeQL /usr/local/lib/android/sdk/ndk /usr/share/swift /usr/local/.ghcup || true
+          df -h / | tail -1
+
       - name: Warm up AVD snapshot
         if: steps.flow-pilot-avd-cache.outputs.cache-hit != 'true'
         uses: reactivecircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0

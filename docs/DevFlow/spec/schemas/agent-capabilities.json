@@ -79,7 +79,16 @@
               "tap",
               "fill",
               "scroll",
-              "gesture"
+              "gesture",
+              "properties",
+              "property-descriptors"
+            ]
+          },
+          "ui.events": {
+            "version": 1,
+            "features": [
+              "stream",
+              "subscribe"
             ]
           },
           "ui.screenshot": {
@@ -103,6 +112,32 @@
               "samples",
               "spans",
               "markers"
+            ]
+          },
+          "diagnostics.layout": {
+            "version": 1,
+            "supported": true,
+            "schemaVersion": "1.0",
+            "ruleSetVersion": "1.0",
+            "maxElements": 5000,
+            "features": [
+              "on-demand",
+              "scoped-root",
+              "window-scope",
+              "coverage",
+              "source-location"
+            ],
+            "rules": [
+              "layout.visible-zero-area",
+              "layout.constraint-violation",
+              "layout.outside-window",
+              "layout.desired-size-constrained",
+              "layout.child-outside-parent"
+            ],
+            "limitations": [
+              "Managed MAUI layout state only — no platform clipping, occlusion, transform, or text-truncation data.",
+              "One-shot scan: there is no watch mode, no delta stream, and no automatic re-scan.",
+              "Unavailable geometry is reported as incomplete, never as a pass."
             ]
           },
           "network": {
@@ -184,6 +219,19 @@
               "set"
             ],
             "supported": true
+          },
+          "agent.workflowCommandLedger": {
+            "version": 1,
+            "features": [
+              "begin",
+              "end",
+              "abandon",
+              "agent-instance-binding",
+              "contiguous-sequence",
+              "duplicate-receipts",
+              "unknown-completion"
+            ],
+            "brokerAuthorityRequired": true
           }
         }
       ]

@@ -10,6 +10,25 @@
       -p:MauiDevFlowSessionId=yourId
     The session identity is metadata-only — it never modifies ApplicationId.
   -->
+  <PropertyGroup>
+    <MauiDevFlowProfileMode Condition="'$(MauiDevFlowProfileMode)' == ''">false</MauiDevFlowProfileMode>
+    <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == '' and '$(MauiDevFlowProfileMode)' == 'true'">true</MauiDevFlowEnabled>
+    <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == '' and '$(Configuration)' == 'Debug'">true</MauiDevFlowEnabled>
+    <MauiDevFlowEnabled Condition="'$(MauiDevFlowEnabled)' == ''">false</MauiDevFlowEnabled>
+    <_MauiDevFlowMode Condition="'$(MauiDevFlowProfileMode)' == 'true' and '$(MauiDevFlowEnabled)' == 'true'">profile</_MauiDevFlowMode>
+    <_MauiDevFlowMode Condition="'$(_MauiDevFlowMode)' == '' and '$(MauiDevFlowEnabled)' == 'true'">debug</_MauiDevFlowMode>
+    <_MauiDevFlowMode Condition="'$(_MauiDevFlowMode)' == ''">disabled</_MauiDevFlowMode>
+    <DefineConstants Condition="'$(MauiDevFlowEnabled)' == 'true'">$(DefineConstants);MAUI_DEVFLOW</DefineConstants>
+  </PropertyGroup>
+
+  <Target Name="_ValidateMauiDevFlowBuildSafety" BeforeTargets="PrepareForBuild"
+          Condition="'$(MauiDevFlowEnabled)' == 'true'">
+    <Error Condition="'$(Configuration)' != 'Debug' and '$(MauiDevFlowProfileMode)' != 'true'"
+           Text="MauiDevFlowEnabled is true for an optimized build. Set MauiDevFlowProfileMode=true for an explicit read-only diagnostics build, or disable DevFlow." />
+    <Error Condition="'$(PublishAot)' == 'true' or '$(RunAOTCompilation)' == 'true'"
+           Text="DevFlow Agent is not supported in NativeAOT builds. Disable MauiDevFlowEnabled for this build." />
+  </Target>
+
   <Target Name="_ReadMauiDevFlowConfig" BeforeTargets="_SetMauiDevFlowPort"
           Condition="'$(MauiDevFlowPort)' == '' AND Exists('$(MSBuildProjectDirectory)/.mauidevflow')">
     <PropertyGroup>
@@ -17,6 +36,18 @@
       <_MauiDevFlowConfigPort>$([System.Text.RegularExpressions.Regex]::Match($(_MauiDevFlowConfigContent), '"port"\s*:\s*(\d+)').Groups[1].Value)</_MauiDevFlowConfigPort>
       <MauiDevFlowPort Condition="'$(_MauiDevFlowConfigPort)' != ''">$(_MauiDevFlowConfigPort)</MauiDevFlowPort>
     </PropertyGroup>
+  </Target>
+
+  <Target Name="_ValidateMauiDevFlowPort" BeforeTargets="_SetMauiDevFlowPort;PrepareForBuild"
+          Condition="'$(MauiDevFlowPort)' != ''">
+    <PropertyGroup>
+      <_MauiDevFlowPortHasValidShape>$([System.Text.RegularExpressions.Regex]::IsMatch('$(MauiDevFlowPort)', '^[0-9]{1,5}$'))</_MauiDevFlowPortHasValidShape>
+      <_MauiDevFlowPortValue Condition="'$(_MauiDevFlowPortHasValidShape)' == 'True'">$([System.Int32]::Parse('$(MauiDevFlowPort)'))</_MauiDevFlowPortValue>
+    </PropertyGroup>
+    <Error Condition="'$(_MauiDevFlowPortHasValidShape)' != 'True'"
+           Text="MauiDevFlowPort must be an integer between 1 and 65535." />
+    <Error Condition="'$(_MauiDevFlowPortHasValidShape)' == 'True' and ($(_MauiDevFlowPortValue) &lt; 1 or $(_MauiDevFlowPortValue) &gt; 65535)"
+           Text="MauiDevFlowPort must be between 1 and 65535." />
   </Target>
 
   <Target Name="_SetMauiDevFlowPort" BeforeTargets="PrepareForBuild;CoreCompile">
@@ -36,11 +67,18 @@
       <!-- Pre-compute platform identifier for use in downstream target conditions -->
       <_DevFlowTargetPlatform>$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)'))</_DevFlowTargetPlatform>
       <_MauiDevFlowMetadata></_MauiDevFlowMetadata>
+      <_MauiDevFlowMetadata>$(_MauiDevFlowMetadata)[assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowEnabled", "$(MauiDevFlowEnabled)")]
+[assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowMode", "$(_MauiDevFlowMode)")]</_MauiDevFlowMetadata>
       <_MauiDevFlowMetadata Condition="'$(MauiDevFlowPort)' != ''">$(_MauiDevFlowMetadata)[assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowPort", "$(MauiDevFlowPort)")]
 </_MauiDevFlowMetadata>
-      <_MauiDevFlowProjectPath>$([MSBuild]::ValueOrDefault('$(MSBuildProjectFullPath)','').Replace('\','\\'))</_MauiDevFlowProjectPath>
-      <_MauiDevFlowMetadata>$(_MauiDevFlowMetadata)[assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowProject", "$(_MauiDevFlowProjectPath)")]
-[assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowTfm", "$(TargetFramework)")]</_MauiDevFlowMetadata>
+      <!-- Avoid embedding developer-machine paths in app binaries by default. Full paths remain
+           available as an explicit local-debug opt-in for project-root disambiguation. -->
+      <MauiDevFlowProject Condition="'$(MauiDevFlowProject)' == '' and '$(MauiDevFlowIncludeProjectPath)' == 'true'">$(MSBuildProjectFullPath)</MauiDevFlowProject>
+      <MauiDevFlowProject Condition="'$(MauiDevFlowProject)' == ''">$(MSBuildProjectFile)</MauiDevFlowProject>
+      <_MauiDevFlowProjectIdentity>$([MSBuild]::ValueOrDefault('$(MauiDevFlowProject)','').Replace('\','\\'))</_MauiDevFlowProjectIdentity>
+      <_MauiDevFlowMetadata>$(_MauiDevFlowMetadata)[assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowProject", "$(_MauiDevFlowProjectIdentity)")]
+      [assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowTfm", "$(TargetFramework)")]
+      [assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowPackageId", "$(ApplicationId)")]</_MauiDevFlowMetadata>
       <_MauiDevFlowMetadata Condition="'$(MauiDevFlowSessionId)' != ''">$(_MauiDevFlowMetadata)
 [assembly: System.Reflection.AssemblyMetadataAttribute("Microsoft.Maui.DevFlowSessionId", "$(MauiDevFlowSessionId)")]</_MauiDevFlowMetadata>
     </PropertyGroup>

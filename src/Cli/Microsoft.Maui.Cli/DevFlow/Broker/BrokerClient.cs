@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Diagnostics.CodeAnalysis;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -64,8 +65,122 @@ public static class BrokerClient
         }
     }
 
-    public static AgentRegistration[]? ListAgents(int brokerPort)
+    /// <summary>
+    /// Lists the devices the broker knows about, each paired with the app agent running inside it.
+    /// <para>
+    /// Routed through the broker rather than a device host directly, so there is a single front
+    /// door and one shared idea of which devices exist.
+    /// </para>
+    /// </summary>
+    public static async Task<string?> ListDevicesAsync(int brokerPort)
     {
+        try
+        {
+            return await _http.GetStringAsync($"http://localhost:{brokerPort}/api/devices");
+        }
+        catch
+        {
+            // A broker that is not running is an ordinary state for a device query.
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Runs a device operation through the broker.
+    /// <para>
+    /// A refusal comes back as a described result rather than an exception: on most machines
+    /// "no device host" or "this platform cannot do that" is the expected answer, and the caller
+    /// needs the reason to choose another approach.
+    /// </para>
+    /// </summary>
+    public static async Task<DeviceControlResult> ControlDeviceAsync(
+        int brokerPort,
+        string deviceId,
+        string action,
+        double? x = null,
+        double? y = null,
+        string? leaseId = null,
+        string? holderKind = null,
+        string? holderLabel = null)
+    {
+        try
+        {
+            var url = $"http://localhost:{brokerPort}/api/devices/{Uri.EscapeDataString(deviceId)}/{action}";
+            var query = new List<string>();
+            if (x is not null && y is not null)
+            {
+                var invariant = System.Globalization.CultureInfo.InvariantCulture;
+                query.Add($"x={x.Value.ToString(invariant)}");
+                query.Add($"y={y.Value.ToString(invariant)}");
+            }
+            // The caller's lease travels with the request so the broker can verify the caller IS
+            // the holder, rather than only that somebody is.
+            if (!string.IsNullOrWhiteSpace(leaseId))
+                query.Add($"leaseId={Uri.EscapeDataString(leaseId)}");
+            if (!string.IsNullOrWhiteSpace(holderKind))
+                query.Add($"holderKind={Uri.EscapeDataString(holderKind)}");
+            if (!string.IsNullOrWhiteSpace(holderLabel))
+                query.Add($"label={Uri.EscapeDataString(holderLabel)}");
+
+            if (query.Count > 0)
+                url += "?" + string.Join("&", query);
+
+            using var response = await _http.PostAsync(url, content: null);
+            var body = await response.Content.ReadAsStringAsync();
+
+            if (!response.IsSuccessStatusCode)
+                return new DeviceControlResult(false, $"The broker refused {action} with {(int)response.StatusCode}.");
+
+            return CliJson.Deserialize<DeviceControlResult>(body)
+                ?? new DeviceControlResult(false, "The broker returned an unreadable response.");
+        }
+        catch
+        {
+            return new DeviceControlResult(false, "The DevFlow broker could not be reached.");
+        }
+    }
+
+    /// <summary>
+    /// Resolves the device an agent is running inside, returning the full device node so callers
+    /// can read its capabilities. <c>null</c> when it is not paired with one.
+    /// </summary>
+    public static async Task<System.Text.Json.Nodes.JsonNode?> ResolveDeviceNodeForAgentAsync(int brokerPort, string? agentId)
+    {
+        if (string.IsNullOrWhiteSpace(agentId))
+            return null;
+
+        var payload = await ListDevicesAsync(brokerPort);
+        if (payload is null)
+            return null;
+
+        try
+        {
+            var root = System.Text.Json.Nodes.JsonNode.Parse(payload);
+            if (root?["devices"] is not System.Text.Json.Nodes.JsonArray devices)
+                return null;
+
+            foreach (var device in devices)
+            {
+                if (string.Equals(device?["agentId"]?.GetValue<string>(), agentId, StringComparison.Ordinal))
+                    return device;
+            }
+        }
+        catch (System.Text.Json.JsonException)
+        {
+            // A broker we cannot parse simply means no device layer for this caller.
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Resolves the device id an agent is running inside, or <c>null</c> when it is not paired
+    /// with one. Reads through the broker so there is a single view of pairing.
+    /// </summary>
+    public static async Task<string?> ResolveDeviceForAgentAsync(int brokerPort, string? agentId) =>
+        (await ResolveDeviceNodeForAgentAsync(brokerPort, agentId))?["id"]?.GetValue<string>();
+
+    public static AgentRegistration[]? ListAgents(int brokerPort)    {
         try
         {
             var response = GetString($"http://localhost:{brokerPort}/api/agents");
@@ -85,8 +200,11 @@ public static class BrokerClient
         var agents = await ListAgentsAsync(brokerPort);
         if (agents == null) return null;
 
-        var id = AgentRegistration.ComputeId(project, tfm);
-        return agents.FirstOrDefault(a => a.Id == id);
+        var matches = agents
+            .Where(a => AgentMatchesProject(a, project) &&
+                        a.Tfm.Equals(tfm, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        return matches.Length == 1 ? matches[0] : null;
     }
 
     /// <summary>
@@ -114,6 +232,41 @@ public static class BrokerClient
         if (agents == null || agents.Length == 0) return null;
 
         return ResolveAgent(agents, projectPath, tfm);
+    }
+
+    /// <summary>Reads or explicitly changes a broker-owned route checkpoint for a selected agent.</summary>
+    public static async Task<RouteCheckpointStatus> ControlCheckpointAsync(
+        int brokerPort,
+        string agentId,
+        string action = "status")
+    {
+        try
+        {
+            var url = $"http://localhost:{brokerPort}/api/checkpoints/{Uri.EscapeDataString(agentId)}";
+            using var response = string.Equals(action, "status", StringComparison.OrdinalIgnoreCase)
+                ? await _http.GetAsync(url)
+                : await _http.PostAsync(
+                    url,
+                    new StringContent(CliJson.SerializeUntyped(new { action }, indented: false), Encoding.UTF8, "application/json"));
+            var body = await response.Content.ReadAsStringAsync();
+            var result = CliJson.Deserialize<RouteCheckpointStatus>(body) ?? new RouteCheckpointStatus
+            {
+                Ok = false,
+                Warning = "Broker returned an invalid checkpoint response."
+            };
+            if (!response.IsSuccessStatusCode)
+                result.Ok = false;
+            return result;
+        }
+        catch
+        {
+            return new RouteCheckpointStatus
+            {
+                Ok = false,
+                Connected = false,
+                Warning = "The DevFlow broker is unavailable."
+            };
+        }
     }
 
     internal static AgentRegistration? ResolveAgent(AgentRegistration[] agents, string? projectPath = null, string? tfm = null)
@@ -247,6 +400,57 @@ public static class BrokerClient
     public static int? ReadBrokerPortPublic() => ReadBrokerPort();
 
     /// <summary>
+    /// Indicates whether the current reachable broker has the owner-file-only native-host approval
+    /// authority needed by an Inspector host. This deliberately returns only a boolean; callers
+    /// must never receive the token.
+    /// </summary>
+    internal static bool HasNativeHostApprovalAuthority()
+    {
+        try
+        {
+            if (!File.Exists(BrokerPaths.StateFile))
+                return false;
+            var state = CliJson.Deserialize<BrokerState>(File.ReadAllText(BrokerPaths.StateFile));
+            return state is { Port: > 0, NativeApprovalToken: { Length: > 0 } } &&
+                   IsBrokerAlive(state.Port);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Reads the owner-file-only native-host approval token so an in-process native host surface,
+    /// such as the <c>maui devflow approve</c> command, can present it to the Inspector.
+    /// <para>
+    /// This is NOT an authorization boundary. Reading the token requires nothing more than local
+    /// read access to the broker state file, which every process running as the same OS user
+    /// already has — including an MCP agent. It only proves same-user locality, never that a human
+    /// is at the keyboard.
+    /// </para>
+    /// </summary>
+    internal static bool TryReadNativeApprovalToken([NotNullWhen(true)] out string? token)
+    {
+        token = null;
+        try
+        {
+            if (!File.Exists(BrokerPaths.StateFile))
+                return false;
+            var state = CliJson.Deserialize<BrokerState>(File.ReadAllText(BrokerPaths.StateFile));
+            if (state is not { Port: > 0, NativeApprovalToken: { Length: > 0 } approvalToken })
+                return false;
+            token = approvalToken;
+            return true;
+        }
+        catch
+        {
+            token = null;
+            return false;
+        }
+    }
+
+    /// <summary>
     /// High-level port resolution: ensure broker running → resolve by project → auto-select → config fallback → default.
     /// Returns the resolved agent port.
     /// </summary>
@@ -341,8 +545,14 @@ public static class BrokerClient
             // Try to kill hung process
             try
             {
-                var process = Process.GetProcessById(state.Pid);
-                if (!process.HasExited)
+                using var process = Process.GetProcessById(state.Pid);
+                var processPath = process.MainModule?.FileName;
+                if (!process.HasExited &&
+                    IsBrokerProcessIdentityMatch(
+                        state,
+                        process.StartTime.ToUniversalTime(),
+                        processPath,
+                        Environment.ProcessPath))
                 {
                     process.Kill();
                     process.WaitForExit(2000);
@@ -353,6 +563,49 @@ public static class BrokerClient
             File.Delete(BrokerPaths.StateFile);
         }
         catch { }
+    }
+
+    internal static bool IsBrokerProcessIdentityMatch(
+        BrokerState state,
+        DateTime processStartedUtc,
+        string? candidateExecutable,
+        string? currentCliExecutable)
+    {
+        if (state.Pid <= 0 ||
+            state.StartedAt == default ||
+            string.IsNullOrWhiteSpace(candidateExecutable) ||
+            string.IsNullOrWhiteSpace(currentCliExecutable))
+        {
+            return false;
+        }
+
+        var elapsed = (processStartedUtc - state.StartedAt.ToUniversalTime()).Duration();
+        if (elapsed > TimeSpan.FromSeconds(30))
+            return false;
+
+        try
+        {
+            var comparison = OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal;
+            var candidatePath = Path.GetFullPath(candidateExecutable);
+            var currentPath = Path.GetFullPath(currentCliExecutable);
+            var candidateName = Path.GetFileName(candidatePath);
+            if (candidateName.Equals("dotnet", comparison) ||
+                candidateName.Equals("dotnet.exe", comparison))
+            {
+                // A generic dotnet host cannot be distinguished from an unrelated managed app
+                // without inspecting its command line. Prefer leaving a hung broker behind over
+                // terminating an arbitrary process after PID reuse.
+                return false;
+            }
+            return string.Equals(candidatePath, currentPath, comparison);
+        }
+        catch (Exception ex) when (
+            ex is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
     }
 
     internal static async Task<int?> StartBrokerAsync()
@@ -392,51 +645,19 @@ public static class BrokerClient
                 arguments = "devflow broker start --foreground";
             }
 
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = fileName,
-                Arguments = arguments,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                RedirectStandardInput = true,
-            };
-
-            var process = Process.Start(startInfo);
+            // The daemon must not inherit this invocation's stdout/stderr: a shell pipeline such as
+            // `maui devflow flow run ... | Tee-Object` stays open for as long as any process holds
+            // the pipe, so an inherited handle keeps the caller's pipeline blocked long after the
+            // CLI has exited.
+            var process = DetachedDaemonProcess.Start(fileName, arguments);
             if (process == null)
             {
-                Console.Error.WriteLine("[DevFlow Broker] Process.Start returned null — failed to launch daemon");
+                Console.Error.WriteLine("[DevFlow Broker] The daemon process could not be launched");
                 return null;
             }
 
-            var stderr = new StringBuilder();
-            process.ErrorDataReceived += (_, e) =>
-            {
-                if (string.IsNullOrWhiteSpace(e.Data))
-                    return;
-
-                lock (stderr)
-                {
-                    if (stderr.Length > 0)
-                        stderr.AppendLine();
-                    stderr.Append(e.Data);
-                }
-            };
-            process.BeginErrorReadLine();
-
-            // Close stdout and stdin — the daemon is fully detached and stderr is captured above.
-            process.StandardOutput.Close();
-            process.StandardInput.Close();
-
             try
             {
-                string GetCapturedStderr()
-                {
-                    lock (stderr)
-                        return stderr.ToString().Trim();
-                }
-
                 // Poll until broker is ready
                 var port = BrokerServer.DefaultPort;
                 for (int i = 0; i < 25; i++) // 25 * 200ms = 5s
@@ -446,11 +667,7 @@ public static class BrokerClient
                     // Check if the child process has crashed during startup
                     if (process.HasExited)
                     {
-                        var exitCode = process.ExitCode;
-                        var stderrText = GetCapturedStderr();
-                        Console.Error.WriteLine($"[DevFlow Broker] Daemon process exited prematurely with code {exitCode}");
-                        if (!string.IsNullOrWhiteSpace(stderrText))
-                            Console.Error.WriteLine($"[DevFlow Broker] stderr: {stderrText}");
+                        ReportDaemonExit(process, "exited prematurely");
                         return null;
                     }
 
@@ -465,21 +682,17 @@ public static class BrokerClient
                 // Timeout — check if the child is still running or crashed
                 if (process.HasExited)
                 {
-                    var stderrText = GetCapturedStderr();
-                    Console.Error.WriteLine($"[DevFlow Broker] Daemon exited with code {process.ExitCode} before becoming ready");
-                    if (!string.IsNullOrWhiteSpace(stderrText))
-                        Console.Error.WriteLine($"[DevFlow Broker] stderr: {stderrText}");
+                    ReportDaemonExit(process, "exited before becoming ready");
                 }
                 else
                 {
-                    Console.Error.WriteLine($"[DevFlow Broker] Daemon process started (PID {process.Id}) but TCP listener not reachable after 5s");
+                    Console.Error.WriteLine($"[DevFlow Broker] Daemon process started (PID {process.ProcessId}) but TCP listener not reachable after 5s");
                 }
 
                 return null;
             }
             finally
             {
-                try { process.CancelErrorRead(); } catch { /* process may already be gone */ }
                 process.Dispose();
             }
         }
@@ -488,6 +701,19 @@ public static class BrokerClient
             Console.Error.WriteLine($"[DevFlow Broker] Failed to start daemon: {ex.Message}");
             return null;
         }
+    }
+
+    private static void ReportDaemonExit(DetachedDaemonProcess process, string what)
+    {
+        var exitCode = process.ExitCode;
+        Console.Error.WriteLine(exitCode.HasValue
+            ? $"[DevFlow Broker] Daemon process {what} with code {exitCode.Value}"
+            : $"[DevFlow Broker] Daemon process {what}");
+
+        var stderrText = process.CapturedStandardError;
+        Console.Error.WriteLine(string.IsNullOrWhiteSpace(stderrText)
+            ? "[DevFlow Broker] Run 'maui devflow broker start --foreground' to see the daemon's own diagnostics"
+            : $"[DevFlow Broker] stderr: {stderrText}");
     }
 
     private static string? ResolveManagedEntryAssemblyPath()

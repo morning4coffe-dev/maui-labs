@@ -60,6 +60,59 @@ public class PlatformAgentService : DevFlowAgentService
         }
     }
 
+    /// <summary>
+    /// Where the app window sits on the physical display, in device-independent points.
+    /// <para>
+    /// Reported per platform because only the app can observe it, and it is the value that makes
+    /// a visual-tree overlay line up with a full-screen device video frame. Returning null is
+    /// always safe: consumers then assume the window fills the screen rather than guessing.
+    /// </para>
+    /// </summary>
+    protected override (double x, double y)? GetWindowScreenOrigin(IWindow? window)
+    {
+        try
+        {
+#if IOS || MACCATALYST
+            // A simulator's UIWindow frame is already in points and already relative to the
+            // screen, so its origin is the answer directly.
+            if (window?.Handler?.PlatformView is UIKit.UIWindow uiWindow)
+            {
+                var frame = uiWindow.Frame;
+                return (frame.X, frame.Y);
+            }
+            return null;
+#elif ANDROID
+            if (window?.Handler?.PlatformView is global::Android.App.Activity activity)
+            {
+                var decor = activity.Window?.DecorView;
+                var density = activity.Resources?.DisplayMetrics?.Density ?? 1.0;
+                if (decor is null || density <= 0)
+                    return null;
+
+                // The DECOR view, not the content view. App-space coordinates on Android are
+                // window-relative (the visual tree walker uses GetLocationInWindow), whose origin
+                // is the decor view — so they already include the status bar inset. Measuring the
+                // content view here would add that inset a second time and land every device tap
+                // one status bar too low.
+                var location = new int[2];
+                decor.GetLocationOnScreen(location);
+                return (location[0] / density, location[1] / density);
+            }
+            return null;
+#elif WINDOWS || MACOS
+            // Desktop windows are positioned by the user and there is no device frame to align
+            // with, so the origin has no consumer.
+            return null;
+#else
+            return base.GetWindowScreenOrigin(window);
+#endif
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
     protected override Task<bool> TryNativeScroll(VisualElement element, double deltaX, double deltaY)
     {
         try
@@ -126,6 +179,9 @@ public class PlatformAgentService : DevFlowAgentService
                             null);
                         return Task.FromResult(true);
                     }
+#elif MACOS
+                    if (TryScrollMacOSView(platformView as NSView, deltaX, deltaY))
+                        return Task.FromResult(true);
 #endif
                 }
                 target = target.Parent as VisualElement;
@@ -191,6 +247,9 @@ public class PlatformAgentService : DevFlowAgentService
                     null);
                 return true;
             }
+#elif MACOS
+            if (TryScrollMacOSView(platformView as NSView, deltaX, deltaY))
+                return true;
 #endif
         }
         catch { }
@@ -274,6 +333,57 @@ public class PlatformAgentService : DevFlowAgentService
             if (child is T found) return found;
             var descendant = FindWinUIDescendant<T>(child);
             if (descendant != null) return descendant;
+        }
+        return null;
+    }
+#endif
+
+#if MACOS
+    private static bool TryScrollMacOSView(NSView? view, double deltaX, double deltaY)
+    {
+        var scrollView = view as NSScrollView
+            ?? FindMacOSDescendant<NSScrollView>(view)
+            ?? FindMacOSAncestor<NSScrollView>(view);
+        var documentView = scrollView?.DocumentView;
+        if (scrollView is null || documentView is null)
+            return false;
+
+        var clipView = scrollView.ContentView;
+        var current = clipView.Bounds.Location;
+        var maxX = Math.Max(0d, (double)(documentView.Bounds.Width - clipView.Bounds.Width));
+        var maxY = Math.Max(0d, (double)(documentView.Bounds.Height - clipView.Bounds.Height));
+        var newX = Math.Clamp((double)current.X + deltaX, 0d, maxX);
+        var yDelta = documentView.IsFlipped ? -deltaY : deltaY;
+        var newY = Math.Clamp((double)current.Y + yDelta, 0d, maxY);
+
+        clipView.ScrollToPoint(new CoreGraphics.CGPoint(newX, newY));
+        scrollView.ReflectScrolledClipView(clipView);
+        return true;
+    }
+
+    private static T? FindMacOSAncestor<T>(NSView? view) where T : NSView
+    {
+        var current = view?.Superview;
+        while (current is not null)
+        {
+            if (current is T match)
+                return match;
+            current = current.Superview;
+        }
+        return null;
+    }
+
+    private static T? FindMacOSDescendant<T>(NSView? view) where T : NSView
+    {
+        if (view is null)
+            return null;
+        foreach (var subview in view.Subviews)
+        {
+            if (subview is T match)
+                return match;
+            var nested = FindMacOSDescendant<T>(subview);
+            if (nested is not null)
+                return nested;
         }
         return null;
     }
@@ -513,6 +623,9 @@ public class PlatformAgentService : DevFlowAgentService
                 androidView.PerformClick();
                 return true;
             }
+#elif WINDOWS
+            if (platformView is Microsoft.UI.Xaml.Controls.Control control)
+                return control.Focus(Microsoft.UI.Xaml.FocusState.Programmatic);
 #elif MACOS
             if (platformView is NSButton button)
             {

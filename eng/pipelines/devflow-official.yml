@@ -109,9 +109,19 @@ extends:
             - script: eng\common\dotnet.cmd --info
               displayName: Provision .NET SDK via Arcade
             # DevFlow packages are built on Windows, including Apple library TFMs.
-            - script: .dotnet\dotnet workload install maui maui-android ios maccatalyst macos maui-tizen --version 10.0.203
+            - script: eng\common\dotnet.cmd workload install maui maui-android ios maccatalyst macos maui-tizen --version 10.0.203
               displayName: Install MAUI and Apple workloads
-            - script: .dotnet\dotnet build -t:InstallAndroidDependencies -f net10.0-android -p:AndroidSdkDirectory="%ANDROID_HOME%" -p:AcceptAndroidSDKLicenses=true src\DevFlow\Microsoft.Maui.DevFlow.Agent\Microsoft.Maui.DevFlow.Agent.csproj
+            - pwsh: |
+                $arguments = @(
+                  'build'
+                  '-t:InstallAndroidDependencies'
+                  '-f'
+                  'net10.0-android'
+                  "-p:AndroidSdkDirectory=$env:ANDROID_HOME"
+                  '-p:AcceptAndroidSDKLicenses=true'
+                  'src/DevFlow/Microsoft.Maui.DevFlow.Agent/Microsoft.Maui.DevFlow.Agent.csproj'
+                )
+                & eng/common/dotnet.ps1 @arguments
               displayName: Install Android SDK dependencies
             - script: eng\common\cibuild.cmd
                 -configuration $(_BuildConfig)
@@ -279,9 +289,19 @@ extends:
                 path: '$(Build.SourcesDirectory)/artifacts/bin'
             - script: eng\common\dotnet.cmd --info
               displayName: Provision .NET SDK via Arcade
-            - script: .dotnet\dotnet workload install maui maui-android macos maui-tizen --version 10.0.203
+            - script: eng\common\dotnet.cmd workload install maui maui-android macos maui-tizen --version 10.0.203
               displayName: Install MAUI workloads
-            - script: .dotnet\dotnet build -t:InstallAndroidDependencies -f net10.0-android -p:AndroidSdkDirectory="%ANDROID_HOME%" -p:AcceptAndroidSDKLicenses=true src\AI\Microsoft.Maui.Essentials.AI\Microsoft.Maui.Essentials.AI.csproj
+            - pwsh: |
+                $arguments = @(
+                  'build'
+                  '-t:InstallAndroidDependencies'
+                  '-f'
+                  'net10.0-android'
+                  "-p:AndroidSdkDirectory=$env:ANDROID_HOME"
+                  '-p:AcceptAndroidSDKLicenses=true'
+                  'src/AI/Microsoft.Maui.Essentials.AI/Microsoft.Maui.Essentials.AI.csproj'
+                )
+                & eng/common/dotnet.ps1 @arguments
               displayName: Install Android SDK dependencies
             - script: eng\common\cibuild.cmd
                 -configuration $(_BuildConfig)
@@ -345,7 +365,7 @@ extends:
             steps:
             - script: eng\common\dotnet.cmd --info
               displayName: Provision .NET SDK via Arcade
-            - script: .dotnet\dotnet workload install maui --version 10.0.203
+            - script: eng\common\dotnet.cmd workload install maui --version 10.0.203
               displayName: Install MAUI workload
             - script: eng\common\cibuild.cmd
                 -configuration $(_BuildConfig)
@@ -372,7 +392,7 @@ extends:
             steps:
             - script: eng\common\dotnet.cmd --info
               displayName: Provision .NET SDK via Arcade
-            - script: .dotnet\dotnet workload install maui macos --version 10.0.203
+            - script: eng\common\dotnet.cmd workload install maui macos --version 10.0.203
               displayName: Install MAUI and macOS workloads
             - script: eng\common\cibuild.cmd
                 -configuration $(_BuildConfig)
@@ -414,12 +434,43 @@ extends:
             displayName: Download PackageArtifacts
           - powershell: |
               New-Item -ItemType Directory -Force -Path '$(Pipeline.Workspace)/DevFlowPackages'
-              Copy-Item '$(Pipeline.Workspace)/PackageArtifacts/Microsoft.Maui.DevFlow.*.nupkg' '$(Pipeline.Workspace)/DevFlowPackages/' -Verbose
+              Copy-Item '$(Pipeline.Workspace)/PackageArtifacts/Microsoft.Maui.DevFlow.*.nupkg' '$(Pipeline.Workspace)/DevFlowPackages/' -Verbose -ErrorAction Stop
+              if (-not (Get-ChildItem '$(Pipeline.Workspace)/DevFlowPackages/Microsoft.Maui.DevFlow.Testing.*.nupkg' -File)) {
+                throw 'Microsoft.Maui.DevFlow.Testing was not present in the DevFlow publish artifact set.'
+              }
             displayName: Filter DevFlow packages
+
+        # This is a package-consumer compile gate only. It uses the signed/produced package
+        # artifacts and never launches an app, simulator, or physical device.
+        - job: MacOSPackageConsumer
+          displayName: 'Compile DevFlow Testing package consumers - macOS'
+          timeoutInMinutes: 30
+          pool:
+            name: Azure Pipelines
+            vmImage: macos-latest-internal
+            os: macOS
+          steps:
+          - template: /eng/pipelines/install-dotnet-sdk.yml@self
+          - script: sudo xcode-select -s /Applications/Xcode_26.3.app/Contents/Developer
+            displayName: Select Xcode 26.3
+          - script: ./eng/common/dotnet.sh workload install ios maccatalyst macos --version 10.0.203
+            displayName: Install Apple targeting workloads
+          - download: current
+            artifact: PackageArtifacts
+            displayName: Download PackageArtifacts
+          - pwsh: |
+              ./tests/DevFlow/PackageConsumer/Validate-TestingPackage.ps1 `
+                -PackageDirectory '$(Pipeline.Workspace)/PackageArtifacts' `
+                -WorkingDirectory '$(Build.SourcesDirectory)/artifacts/devflow-testing-package-consumer' `
+                -RequireTargetFrameworks net10.0-ios,net10.0-maccatalyst,net10.0-macos `
+                -SkipCliBuild
+            displayName: Restore packed Testing package and compile Apple consumers
 
         - job: PublishNuGet
           displayName: 'Push DevFlow to NuGet.org'
-          dependsOn: PrepareArtifacts
+          dependsOn:
+          - PrepareArtifacts
+          - MacOSPackageConsumer
           timeoutInMinutes: 30
           pool:
             name: NetCore1ESPool-Internal

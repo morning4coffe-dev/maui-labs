@@ -45,6 +45,103 @@ public class ProtocolSpecTests
     }
 
     [Fact]
+    public async Task BrokerWorkflowRunOpenApi_CanBeParsedByOpenApiTooling()
+    {
+        var openApiPath = Path.Combine(SpecRoot.Value, "broker-workflow-runs-v1.yaml");
+        var openApiJson = ConvertYamlToJson(File.ReadAllText(openApiPath));
+
+        await using var stream = new MemoryStream(Encoding.UTF8.GetBytes(openApiJson));
+        var ruleSet = new ValidationRuleSet(ValidationRuleSet.GetDefaultRuleSet());
+        ruleSet.Remove("OpenApiDocumentReferencesAreValid");
+
+        var result = await OpenApiDocument.LoadAsync(
+            stream,
+            "json",
+            new OpenApiReaderSettings { RuleSet = ruleSet },
+            CancellationToken.None);
+
+        var document = result.Document ?? throw new InvalidOperationException("OpenAPI parser did not return a document.");
+        var diagnostic = result.Diagnostic ?? throw new InvalidOperationException("OpenAPI parser did not return diagnostics.");
+
+        Assert.Equal(OpenApiSpecVersion.OpenApi3_1, diagnostic.SpecificationVersion);
+        Assert.Empty(diagnostic.Errors);
+        Assert.Empty(diagnostic.Warnings);
+        Assert.Equal("DevFlow Broker Workflow Runs", document.Info.Title);
+        Assert.NotNull(document.Paths["/api/workflow-runs/start"]);
+    }
+
+    [Fact]
+    public void OpenApiYaml_KeepsLayoutAndWebViewOperationsOnDistinctPaths()
+    {
+        var document = LoadDocument(Path.Combine(SpecRoot.Value, "openapi.yaml")).AsObject();
+        var paths = document["paths"]!.AsObject();
+
+        Assert.Equal(
+            "getLayoutDiagnostics",
+            paths["/api/v1/ui/diagnostics/layout"]!["get"]!["operationId"]!.GetValue<string>());
+        Assert.Equal(
+            "getWebViewContexts",
+            paths["/api/v1/webview/contexts"]!["get"]!["operationId"]!.GetValue<string>());
+    }
+
+    [Fact]
+    public void ProtocolSpecs_ExposePropertySafetyProblemsAndProblemEvents()
+    {
+        var openApi = LoadDocument(Path.Combine(SpecRoot.Value, "openapi.yaml")).AsObject();
+        var paths = openApi["paths"]!.AsObject();
+        Assert.NotNull(paths["/api/v1/diagnostics/problems"]?["get"]);
+        Assert.NotNull(paths["/api/v1/diagnostics/problems"]?["delete"]);
+
+        var descriptors = LoadDocument(Path.Combine(
+            SpecRoot.Value,
+            "schemas",
+            "element-property-descriptors.json"));
+        var descriptorProperties = descriptors["$defs"]!["PropertyDescriptor"]!["properties"]!.AsObject();
+        foreach (var name in new[]
+        {
+            "forceWritable",
+            "valueSource",
+            "valueSourceConfidence",
+            "mutationSafety",
+            "mutationWarning"
+        })
+        {
+            Assert.True(descriptorProperties.ContainsKey(name), $"Missing property descriptor field '{name}'.");
+        }
+        Assert.NotNull(descriptors["$defs"]!["PropertyMutationRequest"]!["properties"]!["allowUnsafe"]);
+
+        var asyncApi = LoadDocument(Path.Combine(SpecRoot.Value, "asyncapi.yaml"));
+        Assert.NotNull(asyncApi["channels"]!["uiEvents"]!["messages"]!["uiProblemsChange"]);
+        var eventValues = asyncApi["channels"]!["uiEvents"]!["messages"]!["uiSubscribe"]!["payload"]!
+            ["properties"]!["data"]!["properties"]!["events"]!["items"]!["enum"]!.AsArray();
+        Assert.Contains(eventValues, value => value?.GetValue<string>() == "problemsChange");
+    }
+
+    [Fact]
+    public void ProtocolSpecs_RequireProfilerOwnershipAndSeparateProcessMemory()
+    {
+        var openApi = LoadDocument(Path.Combine(SpecRoot.Value, "openapi.yaml")).AsObject();
+        var stopParameters = openApi["paths"]!["/api/v1/profiler/sessions/{id}"]!["delete"]!
+            ["parameters"]!.AsArray();
+        var stopToken = Assert.Single(
+            stopParameters,
+            parameter => parameter?["name"]?.GetValue<string>() == "X-DevFlow-Profiler-Stop-Token");
+        Assert.Equal("header", stopToken!["in"]!.GetValue<string>());
+        Assert.Equal("true", stopToken!["required"]!.GetValue<string>());
+
+        var profiler = LoadDocument(Path.Combine(SpecRoot.Value, "schemas", "profiler.json"));
+        var sampleProperties = profiler["$defs"]!["ProfilerSample"]!["properties"]!.AsObject();
+        Assert.True(sampleProperties.ContainsKey("processMemoryBytes"));
+        Assert.True(sampleProperties.ContainsKey("processMemoryKind"));
+
+        var capabilityRequired = profiler["$defs"]!["ProfilerCapabilities"]!["required"]!.AsArray();
+        Assert.Contains(capabilityRequired, value => value?.GetValue<string>() == "processMemorySupported");
+
+        var startRequired = profiler["$defs"]!["ProfilerStartResponse"]!["required"]!.AsArray();
+        Assert.Contains(startRequired, value => value?.GetValue<string>() == "stopToken");
+    }
+
+    [Fact]
     public void ProtocolSpecFiles_AreValidYamlOrJson()
     {
         var failures = new List<string>();
@@ -100,6 +197,88 @@ public class ProtocolSpecTests
         }
 
         Assert.Empty(failures);
+    }
+
+    [Fact]
+    public void TestingSchemas_HaveStableIdsAndResolvableReferences()
+    {
+        var schemaNames = new[]
+        {
+            "maui-flow-v2.json",
+            "maui-test-plan-v1.json",
+            "maui-flow-run-report-v1.json",
+            "maui-test-execution-manifest-v1.json",
+            "maui-flow-triage-v1.json",
+            "maui-local-reproduction-v1.json",
+            "maui-preview-qualification-v1.json",
+            "broker-workflow-run-v1.json",
+            "maui-artifact-trust-v1.json",
+            "broker-artifact-trust-v1.json",
+            "maui-flow-repair-proposal-v1.json",
+            "maui-flow-repair-outcome-v1.json",
+            "maui-xaml-source-proposal-v1.json",
+            "maui-csharp-source-proposal-v1.json",
+            "maui-test-agent-protocol-v1.json",
+            "device-surface-v1.json",
+        };
+
+        foreach (var schemaName in schemaNames)
+        {
+            var schemaPath = Path.Combine(SpecRoot.Value, "schemas", schemaName);
+            var schema = LoadDocument(schemaPath);
+            var expectedId = $"https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/{schemaName}";
+
+            Assert.Equal(expectedId, schema["$id"]!.GetValue<string>());
+            Assert.Equal("https://json-schema.org/draft/2020-12/schema", schema["$schema"]!.GetValue<string>());
+
+            foreach (var reference in EnumerateReferences(schema))
+            {
+                var (targetPath, pointer) = ResolveReference(schemaPath, reference.Value);
+                Assert.True(
+                    File.Exists(targetPath),
+                    $"{schemaName} {reference.JsonPath}: '{reference.Value}' targets missing file '{RelativeSpecPath(targetPath)}'.");
+                Assert.True(
+                    PointerExists(LoadDocument(targetPath), pointer),
+                    $"{schemaName} {reference.JsonPath}: '{reference.Value}' targets a missing JSON pointer.");
+            }
+        }
+    }
+
+    [Fact]
+    public void FlowSchemas_EncodePreflightAndPositiveSequenceContracts()
+    {
+        var flowSchema = LoadDocument(Path.Combine(SpecRoot.Value, "schemas", "maui-flow-v2.json"));
+        var step = flowSchema["$defs"]!["FlowStep"]!;
+        Assert.Equal(1, step["properties"]!["seq"]!["minimum"]!.GetValue<int>());
+        Assert.Contains("seq", step["required"]!.AsArray().Select(static value => value!.GetValue<string>()));
+        Assert.NotNull(step["properties"]!["acceptanceCriterionIds"]);
+        var assertions = flowSchema["$defs"]!["FlowAssert"]!;
+        var hardKinds = assertions["allOf"]![0]!["then"]!["properties"]!["kind"]!["enum"]!.AsArray();
+        Assert.Contains(hardKinds, value => value?.GetValue<string>() == "notExists");
+        var notExistsRule = assertions["allOf"]!.AsArray().Single(rule =>
+            rule?["if"]?["properties"]?["kind"]?["const"]?.GetValue<string>() == "notExists");
+        Assert.Equal(
+            "#/$defs/FlowSelector",
+            notExistsRule!["then"]!["properties"]!["selector"]!["$ref"]!.GetValue<string>());
+        Assert.Contains(
+            notExistsRule["then"]!["required"]!.AsArray(),
+            value => value?.GetValue<string>() == "selector");
+
+        var reportSchema = LoadDocument(
+            Path.Combine(SpecRoot.Value, "schemas", "maui-flow-run-report-v1.json"));
+        var required = reportSchema["required"]!
+            .AsArray()
+            .Select(static value => value!.GetValue<string>())
+            .ToArray();
+        Assert.DoesNotContain("flowDigest", required);
+
+        var manifestSchema = LoadDocument(
+            Path.Combine(SpecRoot.Value, "schemas", "maui-test-execution-manifest-v1.json"));
+        Assert.Equal(
+            1,
+            manifestSchema["$defs"]!["LifecycleStage"]!["properties"]!["sequence"]!["minimum"]!
+                .GetValue<int>());
+        Assert.NotNull(manifestSchema["$defs"]!["DeviceFacts"]!["properties"]!["apiLevel"]);
     }
 
     [Fact]

@@ -1,10 +1,17 @@
 name: CI - DevFlow
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
     paths:
       - 'src/DevFlow/**'
+      - 'tests/DevFlow/**'
+      - 'src/Cli/Microsoft.Maui.Cli/DevFlow/**'
+      - '.github/extensions/maui-devflow-canvas/**'
+      - '.github/workflows/ci-devflow.yml'
+      - 'docs/DevFlow/**'
+      - 'README.md'
       - 'eng/**'
       - 'Directory.Build.props'
       - 'Directory.Build.targets'
@@ -16,6 +23,12 @@ on:
     branches: [main]
     paths:
       - 'src/DevFlow/**'
+      - 'tests/DevFlow/**'
+      - 'src/Cli/Microsoft.Maui.Cli/DevFlow/**'
+      - '.github/extensions/maui-devflow-canvas/**'
+      - '.github/workflows/ci-devflow.yml'
+      - 'docs/DevFlow/**'
+      - 'README.md'
       - 'eng/**'
       - 'Directory.Build.props'
       - 'Directory.Build.targets'
@@ -31,4 +44,64 @@ jobs:
       project-name: devflow
       run-tests: true
       pack: true
+      pack-driver: true
       os: '["windows-latest"]'
+      collect-coverage: true
+      coverage-threshold: '30'
+
+  qualification-baseline:
+    name: Qualification baseline diff
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v5
+        with:
+          global-json-file: global.json
+
+      - name: Build CLI
+        run: dotnet build src/Cli/Microsoft.Maui.Cli/Microsoft.Maui.Cli.csproj -f net10.0 -v q --nologo
+
+      # Fails when repair precision, selector stability, classification accuracy, first-attempt
+      # stability, or false-heal cleanliness drops below the committed baseline, or when a gate
+      # that passed in the baseline stops passing. Improvements never fail.
+      - name: Diff qualification against committed baseline
+        run: >
+          dotnet run --project src/Cli/Microsoft.Maui.Cli/Microsoft.Maui.Cli.csproj
+          --framework net10.0 --no-build --
+          devflow flow qualify
+          --corpus tests/DevFlow/InspectorCorpus
+          --platform android
+          --baseline tests/DevFlow/InspectorCorpus/baselines/qualification.json
+          --no-json
+
+  hosts:
+    name: JavaScript hosts and VSIX
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            src/DevFlow/js/package-lock.json
+            .github/extensions/maui-devflow-canvas/package-lock.json
+
+      - name: Build and test shared client and VS Code host
+        working-directory: src/DevFlow/js
+        run: |
+          npm ci
+          npm test
+          npm run build
+          npm run package:vsix
+
+      - name: Test Copilot Canvas host
+        working-directory: .github/extensions/maui-devflow-canvas
+        run: |
+          npm ci
+          npm test
+          npm run selftest:recorder

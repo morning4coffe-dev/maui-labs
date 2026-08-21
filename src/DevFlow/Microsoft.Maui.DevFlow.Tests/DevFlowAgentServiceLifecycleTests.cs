@@ -34,6 +34,28 @@ public class DevFlowAgentServiceLifecycleTests
     }
 
     [Fact]
+    public async Task RecordingStatus_IsReadableByNonOwner_ButStopIsLeaseProtected()
+    {
+        var port = GetFreePort();
+        using var service = new DevFlowAgentService(new AgentOptions { Port = port });
+        using var owner = new AgentClient("localhost", port) { MutationLeaseId = "owner" };
+        using var observer = new AgentClient("localhost", port) { MutationLeaseId = "observer" };
+
+        service.StartServerOnly(new ImmediateDispatcher());
+        await WaitForStatusAsync(owner);
+        var claim = await owner.ControlMutationLeaseAsync("claim");
+        Assert.True(claim.YouHold);
+
+        var status = await observer.ControlMutationRecordingAsync("status");
+        Assert.False(status.Ok);
+        Assert.Contains("broker", status.Error, StringComparison.OrdinalIgnoreCase);
+
+        var stopError = await Assert.ThrowsAsync<MutationLeaseException>(() =>
+            observer.ControlMutationRecordingAsync("stop", null, null, null, null, "recording"));
+        Assert.Contains("driving", stopError.Message, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Fact]
     public async Task BaseAgent_ReportsJobsUnsupportedConsistently()
     {
         var port = GetFreePort();
@@ -46,12 +68,16 @@ public class DevFlowAgentServiceLifecycleTests
         Assert.NotNull(status);
         Assert.NotNull(status!.Capabilities);
         Assert.False(status.Capabilities!.Jobs);
+        Assert.Equal(Environment.ProcessId, status.App?.ProcessId);
         Assert.NotNull(status.Extensions);
         Assert.Equal(0, status.Extensions!.Count);
         Assert.Matches("^[a-f0-9]{64}$", status.Extensions.Hash);
 
         var capabilities = await client.GetCapabilitiesAsync();
-        var jobsCapabilities = capabilities.GetProperty("capabilities").GetProperty("device.jobs");
+        var capabilityMap = capabilities.GetProperty("capabilities");
+        Assert.Contains("property-descriptors", capabilityMap.GetProperty("ui.actions").GetProperty("features").EnumerateArray().Select(feature => feature.GetString()));
+        Assert.Contains("subscribe", capabilityMap.GetProperty("ui.events").GetProperty("features").EnumerateArray().Select(feature => feature.GetString()));
+        var jobsCapabilities = capabilityMap.GetProperty("device.jobs");
         Assert.False(jobsCapabilities.GetProperty("supported").GetBoolean());
         Assert.Empty(jobsCapabilities.GetProperty("features").EnumerateArray());
 
@@ -161,6 +187,41 @@ public class DevFlowAgentServiceLifecycleTests
     }
 
     [Fact]
+    public async Task ProfileMode_AllowsReadOnlyProfilerSessionControl()
+    {
+        var port = GetFreePort();
+        using var service = new DevFlowAgentService(new AgentOptions
+        {
+            Port = port,
+            Mode = "profile",
+            ReadOnly = true,
+            EnableProfiler = true
+        });
+        using var client = new AgentClient("localhost", port);
+
+        service.StartServerOnly(new ImmediateDispatcher());
+        await WaitForStatusAsync(client);
+
+        var started = await client.StartPerformanceSessionAsync(60_000);
+        Assert.NotNull(started);
+        Assert.True(started.Session.Active);
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            client.StartPerformanceSessionAsync(60_000));
+        Assert.Null(await client.StopProfilerAsync(
+            started.Session.SessionId!,
+            "wrong-stop-token"));
+        Assert.True((await client.GetProfilerSessionAsync())!.IsActive);
+        await Task.Delay(50);
+
+        var stopped = await client.StopPerformanceSessionAsync(
+            started.Session.SessionId!,
+            started.Session.StopToken!);
+        Assert.False(stopped.Session.Active);
+        Assert.True(stopped.Session.SampleCount >= 2);
+        Assert.True(stopped.Session.SampledDurationMs > 0);
+    }
+
+    [Fact]
     public void RegisterExtension_RejectsInvalidNamespace()
     {
         var options = new AgentOptions();
@@ -207,6 +268,66 @@ public class DevFlowAgentServiceLifecycleTests
         Assert.Throws<InvalidOperationException>(() => new DevFlowAgentService(options));
     }
 
+    [Fact]
+    public async Task Tap_ShellItem_NavigatesSemanticallyViaHttp()
+    {
+        var port = GetFreePort();
+        using var service = new DevFlowAgentService(new AgentOptions { Port = port });
+        using var client = new AgentClient("localhost", port);
+
+        var shell = new Shell();
+        var nativeItem = BuildShellItem("Native", "native");
+        var dialogsItem = BuildShellItem("Dialogs", "dialogs");
+        shell.Items.Add(nativeItem);
+        shell.Items.Add(dialogsItem);
+        shell.CurrentItem = nativeItem;
+
+        var currentItemChanged = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        shell.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName == nameof(Shell.CurrentItem) && ReferenceEquals(shell.CurrentItem, dialogsItem))
+                currentItemChanged.TrySetResult();
+        };
+
+        var app = new TestApplication([shell]);
+#pragma warning disable CS0618
+        app.MainPage = shell;
+#pragma warning restore CS0618
+        service.StartServerOnly(new ImmediateDispatcher());
+        service.BindApp(app);
+
+        var shellItem = Assert.Single(await client.QueryAsync(type: "ShellItem", text: "Dialogs"));
+        Assert.Equal("ShellItem", shellItem.Type);
+        Assert.Equal("Microsoft.Maui.Controls.ShellItem", shellItem.FullType);
+
+        var tapTask = client.TapAsync(shellItem.Id);
+        await currentItemChanged.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(tapTask.IsCompleted);
+        Assert.True(await tapTask);
+        Assert.Same(dialogsItem, shell.CurrentItem);
+    }
+
+    private static ShellItem BuildShellItem(string title, string route)
+    {
+        var item = new ShellItem { Title = title, Route = route };
+        var section = new ShellSection { Title = title, Route = route };
+        section.Items.Add(new ShellContent
+        {
+            ContentTemplate = new DataTemplate(() => new ContentPage { Title = title }),
+        });
+        item.Items.Add(section);
+        return item;
+    }
+
+    private sealed class TestApplication(IEnumerable<IVisualTreeElement> children)
+        : Application, IVisualTreeElement
+    {
+        private readonly IReadOnlyList<IVisualTreeElement> _children = new List<IVisualTreeElement>(children);
+
+        IReadOnlyList<IVisualTreeElement> IVisualTreeElement.GetVisualChildren() => _children;
+
+        IVisualTreeElement? IVisualTreeElement.GetVisualParent() => null;
+    }
     private static async Task<AgentStatus?> WaitForStatusAsync(AgentClient client)
     {
         for (int i = 0; i < 10; i++)
@@ -221,12 +342,7 @@ public class DevFlowAgentServiceLifecycleTests
         return null;
     }
 
-    private static int GetFreePort()
-    {
-        using var listener = new TcpListener(IPAddress.Loopback, 0);
-        listener.Start();
-        return ((IPEndPoint)listener.LocalEndpoint).Port;
-    }
+    private static int GetFreePort() => TestPorts.Reserve();
 
     private sealed class ListOnlyJobsAgentService(AgentOptions options) : DevFlowAgentService(options)
     {

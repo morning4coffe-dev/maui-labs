@@ -32,6 +32,24 @@ Verify the MCP command is available:
 ./artifacts/bin/Microsoft.Maui.Cli/Release/net10.0/maui devflow mcp --help
 ```
 
+## MCP profiles
+
+`maui devflow mcp` starts the backward-compatible **full** profile by default. It keeps the
+existing automation inventory for established MCP clients.
+
+For provider-neutral, reviewable test authoring, start the restricted profile instead:
+
+```bash
+./artifacts/bin/Microsoft.Maui.Cli/Release/net10.0/maui devflow mcp --profile test-agent
+```
+
+The `test-agent` profile exposes only `maui_test_*` authoring/run tools plus explicit target
+discovery/status. It omits SecureStorage/preferences mutation, files, raw network detail, CDP
+evaluation/source, generic invoke/extension actions, arbitrary property mutation, evidence/source
+operations, shell/process access, repair apply, and source apply. Mutating tools require an
+opaque human-issued grant bound to one target process, build/seed, plan/flow revision/digest, and
+bounded action scope. See [Restricted test-agent protocol](test-agent.md).
+
 ## Testing with the MCP Inspector
 
 The [MCP Inspector](https://github.com/modelcontextprotocol/inspector) is a web-based tool for interactively testing MCP servers. It connects to the server over stdio and lets you browse and invoke tools.
@@ -52,6 +70,12 @@ This opens a web UI at **http://localhost:6274**.
 2. **Tools list** — Click **List Tools** to see all `maui_*` tools. You should see tools like `maui_list_agents`, `maui_tree`, `maui_screenshot`, `maui_tap`, etc.
 3. **Tool invocation** — Select a tool (e.g., `maui_list_agents`) and click **Run** to invoke it. Without a running MAUI app the call will return an error or empty list, which is expected — the goal is to confirm the MCP server responds.
 4. **History** — The History panel at the bottom tracks all MCP protocol messages (`initialize`, `tools/list`, tool calls), which is useful for debugging.
+
+For `--profile test-agent`, verify that the list contains `maui_test_agents`,
+`maui_test_author`, `maui_test_action`, `maui_test_assertion`, `maui_test_validate`,
+`maui_test_run`, `maui_test_trace`, `maui_test_failure`, `maui_test_patch`, and
+`maui_test_improvements`, but no `maui_secure_storage_*`, `maui_files_*`,
+`maui_cdp_evaluate`, `maui_extension_call`, `maui_invoke_action`, or `maui_set_property`.
 
 ## Testing with a running MAUI app
 
@@ -88,6 +112,21 @@ You can also test by configuring the MCP server in an AI tool that supports MCP 
   }
 }
 ```
+
+## Copilot host integration
+
+The full MCP profile also exposes:
+
+- structured results for `maui_tree`, `maui_problems`, `maui_layout_diagnostics`, and
+  `maui_evidence_preview`;
+- a negotiated compact MCP App at `ui://maui-devflow/compact-view/v1` for clients that advertise
+  `io.modelcontextprotocol/ui` with `text/html;profile=mcp-app`; and
+- `maui_artifact_inspect`, a read-only hostile-input projection for an explicit local
+  `flow-run.json` or `.mauitrace` artifact.
+
+Clients that do not negotiate MCP Apps receive the normal text result and no UI metadata.
+`maui_artifact_inspect` never searches for a latest artifact, replays a flow, imports into the
+broker, writes source, or mutates GitHub or the running app.
 
 > **Note:** This assumes the `maui` CLI is installed as a global tool (`dotnet tool install -g Microsoft.Maui.Cli`). For a local build, use the full path to the built executable.
 

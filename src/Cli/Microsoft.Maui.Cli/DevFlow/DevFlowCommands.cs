@@ -1,15 +1,19 @@
 using System.CommandLine;
 using System.CommandLine.Parsing;
+using System.Diagnostics;
 using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.Maui.Cli.DevFlow.Android;
+using Microsoft.Maui.Cli.DevFlow.Execution;
+using Microsoft.Maui.Cli.DevFlow.Inspector;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Maui.Cli.DevFlow.Skills;
 using Microsoft.Maui.Cli.Providers.Apple;
 using Microsoft.Maui.Cli.Utils;
 using Microsoft.Maui.DevFlow.Driver;
+using Testing = Microsoft.Maui.DevFlow.Testing;
 
 namespace Microsoft.Maui.Cli.DevFlow;
 
@@ -31,18 +35,37 @@ public class DevFlowCommands
 
     private static IDevFlowOutputWriter? s_output;
     internal static Func<Task<int?>> ResolveRunningBrokerPortAsync { get; set; } = Broker.BrokerClient.GetRunningBrokerPortAsync;
+    internal static Func<Task<int?>> EnsureBrokerRunningAsync { get; set; } = Broker.BrokerClient.EnsureBrokerRunningAsync;
     internal static Func<int, Task<Broker.AgentRegistration[]?>> ListBrokerAgentsAsync { get; set; } = Broker.BrokerClient.ListAgentsAsync;
+    internal static Func<int, string, string, Task<Broker.RouteCheckpointStatus>> ControlBrokerCheckpointAsync { get; set; } =
+        Broker.BrokerClient.ControlCheckpointAsync;
     internal static Func<AndroidDevFlowPortForwarder> CreateAndroidPortForwarder { get; set; } = AndroidDevFlowPortForwarder.CreateDefault;
     internal static Func<bool> IsAndroidAdbLikelyAvailable { get; set; } = AndroidDevFlowPortForwarder.IsAdbLikelyAvailable;
+    internal static Func<string, bool> LaunchInspectorUrl { get; set; } = LaunchInspectorUrlInSystemBrowser;
+    internal static Func<IFlowExecutionCoordinator> CreateFlowExecutionCoordinator { get; set; } =
+        static () => Program.Services.GetRequiredService<IFlowExecutionCoordinator>();
+    internal static Func<IFlowReproductionCoordinator> CreateFlowReproductionCoordinator { get; set; } =
+        static () => Program.Services.GetRequiredService<IFlowReproductionCoordinator>();
+    internal static Func<IFlowTriageCoordinator> CreateFlowTriageCoordinator { get; set; } =
+        static () => Program.Services.GetRequiredService<IFlowTriageCoordinator>();
 
     private static IDevFlowOutputWriter Output => s_output ?? throw new InvalidOperationException("DevFlowCommands not initialized. Call CreateDevFlowCommand first.");
 
     internal static void ResetBrokerClientForTests()
     {
         ResolveRunningBrokerPortAsync = Broker.BrokerClient.GetRunningBrokerPortAsync;
+        EnsureBrokerRunningAsync = Broker.BrokerClient.EnsureBrokerRunningAsync;
         ListBrokerAgentsAsync = Broker.BrokerClient.ListAgentsAsync;
+        ControlBrokerCheckpointAsync = Broker.BrokerClient.ControlCheckpointAsync;
         CreateAndroidPortForwarder = AndroidDevFlowPortForwarder.CreateDefault;
         IsAndroidAdbLikelyAvailable = AndroidDevFlowPortForwarder.IsAdbLikelyAvailable;
+        LaunchInspectorUrl = LaunchInspectorUrlInSystemBrowser;
+        CreateFlowExecutionCoordinator =
+            static () => Program.Services.GetRequiredService<IFlowExecutionCoordinator>();
+        CreateFlowReproductionCoordinator =
+            static () => Program.Services.GetRequiredService<IFlowReproductionCoordinator>();
+        CreateFlowTriageCoordinator =
+            static () => Program.Services.GetRequiredService<IFlowTriageCoordinator>();
         _errorOccurred = false;
         _agentLabelEmitted = false;
     }
@@ -66,8 +89,8 @@ public class DevFlowCommands
         // ambiguity/refusal sentinel (issue #343) must be skipped when targeting a remote host.
         var agentHostOption = new Option<string>("--agent-host", "-ah") { Description = "Agent HTTP host", DefaultValueFactory = _ => "localhost" };
         var agentPortOption = new Option<int>("--agent-port", "-ap") { Description = "Agent HTTP port (auto-discovered via broker, .mauidevflow, or default 9223)", DefaultValueFactory = ar => ResolveAgentPort(ar.GetValue(agentHostOption)) };
-        var deviceOption = new Option<string?>("--device") { Description = "Device/emulator/simulator identifier for platform-specific DevFlow setup (currently used as an Android serial for ADB forwarding)" };
-        var platformOption = new Option<string>("--platform", "-p") { Description = "Target platform (maccatalyst, android, ios, windows)", DefaultValueFactory = _ => "maccatalyst" };
+        var deviceOption = new Option<string?>("--device") { Description = "Exact device serial or simulator UDID for platform-specific DevFlow setup" };
+        var platformOption = new Option<string>("--platform", "-p") { Description = "Target platform (android, ios, maccatalyst, windows; experimental: macos, wpf)", DefaultValueFactory = _ => "maccatalyst" };
         var noJsonOption = new Option<bool>("--no-json") { Description = "Force human-readable output even when piped", DefaultValueFactory = _ => false };
 
         agentPortOption.Recursive = true;
@@ -331,6 +354,8 @@ public class DevFlowCommands
         themeCommand.Add(themeSetCmd);
 
         devflowCommand.Add(themeCommand);
+
+        devflowCommand.Add(DeviceCommands.Create(jsonOption, noJsonOption, output));
         
         // ===== UI commands =====
 
@@ -357,7 +382,12 @@ public class DevFlowCommands
         var treeDepthOption = new Option<int>("--depth") { Description = "Max tree depth (0=unlimited)", DefaultValueFactory = _ => 0 };
         var treeFieldsOption = new Option<string?>("--fields") { Description = "Comma-separated fields to include (e.g. id,type,text,automationId,bounds)" };
         var treeFormatOption = new Option<string?>("--format") { Description = "Output format: compact (id,type,text,automationId,bounds only)" };
-        var mauiTreeCmd = new Command("tree", "Dump visual tree") { treeDepthOption, treeFieldsOption, treeFormatOption, windowOption };
+        var treeProjectionOption = new Option<string>("--projection")
+        {
+            Description = "Tree projection: activeVisual (same as Inspector hosts) or raw (low-level agent tree)",
+            DefaultValueFactory = _ => "activeVisual"
+        };
+        var mauiTreeCmd = new Command("tree", "Dump visual tree") { treeDepthOption, treeFieldsOption, treeFormatOption, treeProjectionOption, windowOption };
         mauiTreeCmd.SetAction(async (ctx, ct) =>
         {
             var host = ctx.GetValue(agentHostOption)!;
@@ -368,7 +398,8 @@ public class DevFlowCommands
             var window = ctx.GetValue(windowOption);
             var fields = ctx.GetValue(treeFieldsOption);
             var format = ctx.GetValue(treeFormatOption);
-            await MauiTreeAsync(host, port, output.ResolveJsonMode(json, noJson), depth, window, fields, format);
+            var projection = ctx.GetValue(treeProjectionOption)!;
+            await MauiTreeAsync(host, port, output.ResolveJsonMode(json, noJson), depth, window, fields, format, projection);
         });
         mauiCommand.Add(mauiTreeCmd);
 
@@ -684,16 +715,17 @@ public class DevFlowCommands
         });
         mauiCommand.Add(mauiResizeCmd);
 
-        // MAUI alert subcommands — supports iOS simulator (apple CLI) and Mac Catalyst (macOS AX API)
+        // System/app alert subcommands — platform drivers cover Android, iOS simulator,
+        // Mac Catalyst, and Windows.
         var alertCommand = new Command("alert", "Detect and dismiss system/app dialogs");
 
         // detect
-        var detectUdid = new Option<string?>("--udid") { Description = "Simulator UDID (auto-detects booted simulator if omitted)" };
+        var detectUdid = new Option<string?>("--udid") { Description = "iOS simulator UDID or Android serial (also accepts global --device)" };
         var detectPid = new Option<int?>("--pid") { Description = "Mac Catalyst app PID (auto-detects if omitted)" };
         var alertDetectCmd = new Command("detect", "Check if an alert/dialog is visible") { detectUdid, detectPid };
         alertDetectCmd.SetAction(async (ctx, ct) =>
         {
-            var udid = ctx.GetValue(detectUdid);
+            var udid = ctx.GetValue(detectUdid) ?? ctx.GetValue(deviceOption);
             var pid = ctx.GetValue(detectPid);
             var host = ctx.GetValue(agentHostOption)!;
             var port = ctx.GetValue(agentPortOption);
@@ -704,13 +736,13 @@ public class DevFlowCommands
         alertCommand.Add(alertDetectCmd);
 
         // dismiss
-        var dismissUdid = new Option<string?>("--udid") { Description = "Simulator UDID (auto-detects booted simulator if omitted)" };
+        var dismissUdid = new Option<string?>("--udid") { Description = "iOS simulator UDID or Android serial (also accepts global --device)" };
         var dismissPid = new Option<int?>("--pid") { Description = "Mac Catalyst app PID (auto-detects if omitted)" };
         var dismissButtonArg = new Argument<string?>("button") { Description = "Button label to tap (default: first accept-style button)", DefaultValueFactory = _ => null };
         var alertDismissCmd = new Command("dismiss", "Dismiss the current alert/dialog") { dismissButtonArg, dismissUdid, dismissPid };
         alertDismissCmd.SetAction(async (ctx, ct) =>
         {
-            var udid = ctx.GetValue(dismissUdid);
+            var udid = ctx.GetValue(dismissUdid) ?? ctx.GetValue(deviceOption);
             var pid = ctx.GetValue(dismissPid);
             var host = ctx.GetValue(agentHostOption)!;
             var port = ctx.GetValue(agentPortOption);
@@ -722,12 +754,12 @@ public class DevFlowCommands
         alertCommand.Add(alertDismissCmd);
 
         // tree
-        var treeUdid = new Option<string?>("--udid") { Description = "Simulator UDID (auto-detects booted simulator if omitted)" };
+        var treeUdid = new Option<string?>("--udid") { Description = "iOS simulator UDID or Android serial (also accepts global --device)" };
         var treePid = new Option<int?>("--pid") { Description = "Mac Catalyst app PID (auto-detects if omitted)" };
         var alertTreeCmd = new Command("tree", "Show raw accessibility tree") { treeUdid, treePid };
         alertTreeCmd.SetAction(async (ctx, ct) =>
         {
-            var udid = ctx.GetValue(treeUdid);
+            var udid = ctx.GetValue(treeUdid) ?? ctx.GetValue(deviceOption);
             var pid = ctx.GetValue(treePid);
             var host = ctx.GetValue(agentHostOption)!;
             var port = ctx.GetValue(agentPortOption);
@@ -1345,6 +1377,325 @@ public class DevFlowCommands
 
         devflowCommand.Add(mauiCommand);
 
+        // ===== evidence commands (shareable .mauitrace bundles) =====
+        devflowCommand.Add(Evidence.EvidenceCommands.Create(
+            jsonOption,
+            noJsonOption,
+            agentHostOption,
+            agentPortOption,
+            output,
+            CreateAgentClientAsync,
+            static () => _errorOccurred = true));
+
+        // ===== on-demand diagnostics (layout scan, performance triage) =====
+        devflowCommand.Add(Diagnostics.DiagnosticsCommands.Create(
+            jsonOption,
+            noJsonOption,
+            agentHostOption,
+            agentPortOption,
+            output,
+            CreateAgentClientAsync,
+            static () => _errorOccurred = true));
+
+        // ===== replayable workflow commands =====
+        var flowCommand = new Command("flow", "Validate, replay, and execute recorded Markdown workflow tests");
+        var flowValidateFile = new Argument<string>("file") { Description = "Path to a .md workflow test containing a maui-test block" };
+        var flowValidate = new Command("validate", "Parse and validate a workflow without connecting to or driving an app")
+        {
+            flowValidateFile
+        };
+        flowValidate.SetAction(async (ctx, ct) =>
+        {
+            var json = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+            var file = ctx.GetValue(flowValidateFile)!;
+            if (!File.Exists(file) || !file.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+            {
+                Output.WriteError("Workflow validation requires an existing .md file.", json, "InvalidArgument");
+                _errorOccurred = true;
+                return;
+            }
+
+            var parsed = Testing.FlowMarkdown.Parse(await File.ReadAllTextAsync(file, ct), file);
+            if (!parsed.Ok || parsed.Flow is null)
+            {
+                Output.WriteError(parsed.Error ?? "Workflow could not be parsed.", json, "InvalidFlow");
+                _errorOccurred = true;
+                return;
+            }
+
+            var validation = Testing.FlowValidator.Validate(parsed.Flow);
+            var result = new FlowValidationCliResult
+            {
+                Ok = validation.Ok,
+                Name = parsed.Flow.Name,
+                Steps = parsed.Flow.Steps.Count,
+                Errors = validation.Errors,
+                Warnings = validation.Warnings,
+            };
+            Output.WriteResult(result, json, static value =>
+            {
+                Console.WriteLine(value.Ok
+                    ? $"Valid: {value.Name} ({value.Steps} steps)"
+                    : $"Invalid: {value.Name} ({value.Steps} steps)");
+                foreach (var error in value.Errors)
+                    Console.WriteLine($"Error: {error}");
+                foreach (var warning in value.Warnings)
+                    Console.WriteLine($"Warning: {warning}");
+            });
+            if (!validation.Ok)
+                _errorOccurred = true;
+        });
+
+        var flowReplayFile = new Argument<string>("file") { Description = "Path to a .md workflow test containing a maui-test block" };
+        var evidenceOnFailure = new Option<string?>("--evidence-on-failure")
+        {
+            Description = "Capture a redacted .mauitrace only after the first replay failure; optionally provide its output path",
+            Arity = ArgumentArity.ZeroOrOne
+        };
+        var continueOnFailure = new Option<bool>("--continue-on-failure")
+        {
+            Description = "Continue driving later steps after a failure (default stops at the first divergence)"
+        };
+        var flowReplay = new Command("replay", "Replay a workflow against the selected live app")
+        {
+            flowReplayFile, evidenceOnFailure, continueOnFailure
+        };
+        flowReplay.SetAction(async (ctx, ct) =>
+        {
+            var json = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+            var file = ctx.GetValue(flowReplayFile)!;
+            if (!File.Exists(file) || !file.EndsWith(".md", StringComparison.OrdinalIgnoreCase))
+            {
+                Output.WriteError("Workflow replay requires an existing .md file.", json, "InvalidArgument");
+                _errorOccurred = true;
+                return;
+            }
+            var parsed = Testing.FlowMarkdown.Parse(await File.ReadAllTextAsync(file, ct), file);
+            var validation = parsed.Ok && parsed.Flow is not null ? Testing.FlowValidator.Validate(parsed.Flow) : null;
+            if (!parsed.Ok || validation is null || !validation.Ok)
+            {
+                Output.WriteError(parsed.Error ?? "Flow failed validation: " + string.Join("; ", validation?.Errors ?? []), json, "InvalidFlow");
+                _errorOccurred = true;
+                return;
+            }
+            try
+            {
+                using var client = await CreateAgentClientAsync(
+                    ctx.GetValue(agentHostOption)!,
+                    ctx.GetValue(agentPortOption),
+                    emitAgentLabel: !json);
+                var evidenceRequested = ctx.GetResult(evidenceOnFailure) is not null;
+                var capture = evidenceRequested
+                    ? new Evidence.FlowReplayEvidenceCapture(client, ctx.GetValue(evidenceOnFailure), Path.GetDirectoryName(Path.GetFullPath(file)), "cli")
+                    : null;
+                var replay = new Testing.FlowReplayer(
+                    client,
+                    continueOnFailure: ctx.GetValue(continueOnFailure),
+                    evidenceCapture: capture);
+                var result = await replay.ReplayAsync(parsed.Flow!, file, ct);
+                Output.WriteResult(new FlowReplayCliResult
+                {
+                    Ok = result.Ok,
+                    Name = result.Name,
+                    Total = result.Total,
+                    Passed = result.Passed,
+                    Failed = result.Failed,
+                    DivergencePoint = result.DivergencePoint,
+                    StoppedEarly = result.StoppedEarly,
+                    Results = result.Results,
+                    EvidencePath = capture?.CapturedPath,
+                    Report = result.StructuredReport,
+                    ReportPath = result.ReportPath,
+                    ReportDigest = result.ReportDigest
+                }, json);
+                if (!result.Ok) _errorOccurred = true;
+            }
+            catch (Exception ex)
+            {
+                Output.WriteError($"Workflow replay failed: {ex.Message}", json);
+                _errorOccurred = true;
+            }
+        });
+
+        var flowRunFile = new Argument<string>("file")
+        {
+            Description = "Committed Markdown flow path; the matching .maui-plan.json sidecar is required"
+        };
+        var flowRunPlan = new Option<string?>("--plan")
+        {
+            Description = "Matching plan sidecar path (defaults to <flow-base>.maui-plan.json beside the flow)"
+        };
+        var flowRunProject = new Option<string?>("--project")
+        {
+            Description = "MAUI app .csproj to build, deploy, and bind exactly"
+        };
+        var flowRunFramework = new Option<string?>("--framework", "-f")
+        {
+            Description = "Platform target framework (required only when the project has multiple matching TFMs)"
+        };
+        var flowRunConfiguration = new Option<string>("--configuration", "-c")
+        {
+            Description = "App build configuration",
+            DefaultValueFactory = _ => "Debug"
+        };
+        var flowRunOutput = new Option<string?>("--output", "-o")
+        {
+            Description = "New or empty immutable first-attempt output directory"
+        };
+        var flowRunCleanup = new Option<string>("--cleanup")
+        {
+            Description = "Owned app cleanup: none, stop, or uninstall (package removal applies only to a package newly installed by this invocation)",
+            DefaultValueFactory = _ => FlowExecutionCleanupPolicies.Stop
+        };
+        var flowRunAgentWait = new Option<int>("--agent-wait-seconds")
+        {
+            Description = "Maximum time to wait for a matching new agent instance",
+            DefaultValueFactory = _ => 90
+        };
+        var flowRunEvidence = new Option<bool>("--evidence-on-failure")
+        {
+            Description = "Capture the existing redacted failure .mauitrace into the output directory"
+        };
+        var flowRunEvidenceScreenshot = new Option<bool>("--evidence-screenshot")
+        {
+            Description = "Include a screenshot in the failure .mauitrace. Screenshot pixels are never redacted and may show on-screen data, so this requires --evidence-on-failure and explicit opt-in"
+        };
+        var flowRun = new Command(
+            "run",
+            "Build, launch, exactly bind, and execute a committed flow plus matching plan on supported local platform adapters")
+        {
+            flowRunFile,
+            flowRunPlan,
+            flowRunProject,
+            flowRunFramework,
+            flowRunConfiguration,
+            flowRunOutput,
+            flowRunCleanup,
+            flowRunAgentWait,
+            flowRunEvidence,
+            flowRunEvidenceScreenshot,
+        };
+        flowRun.SetAction(async (ctx, ct) =>
+        {
+            var json = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+            try
+            {
+                var result = await CreateFlowExecutionCoordinator().RunAsync(new FlowExecutionRequest
+                {
+                    FlowPath = ctx.GetValue(flowRunFile)!,
+                    PlanPath = ctx.GetValue(flowRunPlan),
+                    ProjectPath = ctx.GetValue(flowRunProject) ?? "",
+                    Platform = ctx.GetResult(platformOption)?.Tokens.Count > 0
+                        ? ctx.GetValue(platformOption)!
+                        : "android",
+                    TargetFramework = ctx.GetValue(flowRunFramework),
+                    Configuration = ctx.GetValue(flowRunConfiguration)!,
+                    AgentHost = ctx.GetValue(agentHostOption)!,
+                    DeviceSerial = ctx.GetValue(deviceOption),
+                    OutputDirectory = ctx.GetValue(flowRunOutput),
+                    CleanupPolicy = ctx.GetValue(flowRunCleanup)!,
+                    CaptureFailureEvidence = ctx.GetValue(flowRunEvidence),
+                    CaptureFailureEvidenceScreenshot = ctx.GetValue(flowRunEvidenceScreenshot),
+                    AgentWaitTimeout = TimeSpan.FromSeconds(ctx.GetValue(flowRunAgentWait)),
+                }, ct);
+                var cliResult = FlowRunCliResult.From(result);
+                Output.WriteResult(cliResult, json, static value =>
+                {
+                    Console.WriteLine($"Flow run: {value.ExitCategory}");
+                    if (!string.IsNullOrWhiteSpace(value.Message))
+                        Console.WriteLine(value.Message);
+                    if (!string.IsNullOrWhiteSpace(value.OutputDirectory))
+                        Console.WriteLine($"Output: {value.OutputDirectory}");
+                });
+                if (!result.Ok)
+                    _errorOccurred = true;
+            }
+            catch (FlowExecutionException ex)
+            {
+                Output.WriteError(ex.Message, json, ex.ExitCategory);
+                _errorOccurred = true;
+            }
+            catch (Exception ex)
+            {
+                Output.WriteError($"Flow execution failed: {ex.Message}", json);
+                _errorOccurred = true;
+            }
+        });
+        flowCommand.Add(flowValidate);
+        flowCommand.Add(flowReplay);
+        flowCommand.Add(flowRun);
+        flowCommand.Add(FlowHandoffCommands.CreateReproduce(
+            jsonOption,
+            noJsonOption,
+            agentHostOption,
+            deviceOption,
+            platformOption,
+            output,
+            static () => CreateFlowReproductionCoordinator(),
+            static () => _errorOccurred = true));
+        flowCommand.Add(FlowHandoffCommands.CreateTriage(
+            jsonOption,
+            noJsonOption,
+            output,
+            static () => CreateFlowTriageCoordinator(),
+            static () => _errorOccurred = true));
+        flowCommand.Add(Flows.FlowQualificationCommands.Create(
+            jsonOption,
+            noJsonOption,
+            platformOption,
+            output,
+            static () => _errorOccurred = true));
+        flowCommand.Add(Flows.FlowStudyCommands.Create(
+            jsonOption,
+            noJsonOption,
+            output,
+            static () => _errorOccurred = true));
+        flowCommand.Add(Flows.FlowCommitCommands.Create(
+            jsonOption,
+            noJsonOption,
+            output,
+            static () => _errorOccurred = true));
+        flowCommand.Add(Flows.FlowIdentityCommands.Create(
+            jsonOption,
+            noJsonOption,
+            output,
+            static () => _errorOccurred = true));
+        devflowCommand.Add(flowCommand);
+
+        // ===== shared Inspector / Test Workbench =====
+        var inspectCommand = new Command("inspect", "Open the shared DevFlow Inspector and Test Workbench for one connected app");
+        var inspectAgentOption = new Option<string?>("--agent")
+        {
+            Description = "Connected broker agent ID to inspect. Required when more than one app is connected."
+        };
+        var inspectNoLaunchOption = new Option<bool>("--no-launch")
+        {
+            Description = "Print the authenticated per-agent Inspector URL without opening a browser."
+        };
+        var inspectTestOption = new Option<string?>("--test")
+        {
+            Description = "Workflow Markdown path to pass only as a Test Workbench startup hint; it is not loaded or executed."
+        };
+        var inspectTraceOption = new Option<string?>("--trace")
+        {
+            Description = "Run report or evidence artifact path to pass only as a Test Workbench startup hint; it is not imported."
+        };
+        inspectCommand.Add(inspectAgentOption);
+        inspectCommand.Add(inspectNoLaunchOption);
+        inspectCommand.Add(inspectTestOption);
+        inspectCommand.Add(inspectTraceOption);
+        inspectCommand.SetAction(async (ctx, ct) =>
+        {
+            var json = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+            await InspectAsync(
+                ctx.GetValue(inspectAgentOption),
+                ctx.GetValue(inspectNoLaunchOption),
+                ctx.GetValue(inspectTestOption),
+                ctx.GetValue(inspectTraceOption),
+                json);
+        });
+        devflowCommand.Add(inspectCommand);
+
         // ===== init / skills commands =====
         var initCommand = DevFlowSkillCommands.CreateInitCommand(jsonOption, noJsonOption, output);
         initCommand.Aliases.Add("onboard");
@@ -1353,6 +1704,51 @@ public class DevFlowCommands
 
         // Hidden compatibility alias for the old standalone skill updater.
         devflowCommand.Add(DevFlowSkillCommands.CreateUpdateCommand("update-skill", hidden: true, jsonOption, noJsonOption, output));
+
+        // ===== explicit route resume commands (broker-owned local checkpoints) =====
+        var resumeCommand = new Command("resume", "Save, inspect, restore, or clear a broker-owned Shell route checkpoint");
+        foreach (var action in new[] { "status", "save", "restore", "clear" })
+        {
+            var resumeAction = action;
+            var command = new Command(resumeAction, $"{char.ToUpperInvariant(resumeAction[0])}{resumeAction[1..]} the selected app's route checkpoint");
+            command.SetAction(async (ctx, ct) =>
+            {
+                var json = output.ResolveJsonMode(ctx.GetValue(jsonOption), ctx.GetValue(noJsonOption));
+                var brokerPort = await ResolveRunningBrokerPortAsync();
+                if (brokerPort is null)
+                {
+                    Output.WriteError("No running DevFlow broker was found.", json, "BrokerUnavailable");
+                    _errorOccurred = true;
+                    return;
+                }
+                var agents = await ListBrokerAgentsAsync(brokerPort.Value);
+                var requestedPort = ctx.GetValue(agentPortOption);
+                var agent = agents?.FirstOrDefault(candidate => candidate.Port == requestedPort)
+                    ?? (agents is null ? null : Broker.BrokerClient.ResolveAgent(agents));
+                if (agent is null)
+                {
+                    Output.WriteError("Select one connected agent with --agent-port; route checkpoints are never keyed by a transient port.", json, "AgentAmbiguous");
+                    _errorOccurred = true;
+                    return;
+                }
+                var result = await ControlBrokerCheckpointAsync(
+                    brokerPort.Value,
+                    agent.Id,
+                    resumeAction);
+                var displayResult = RedactCheckpointStatusForOutput(result);
+                Output.WriteResult(displayResult, json, static status =>
+                {
+                    if (!status.Ok) Console.WriteLine(status.Warning ?? "Checkpoint operation failed.");
+                    else if (!status.HasCheckpoint) Console.WriteLine("No saved route checkpoint.");
+                    else Console.WriteLine(status.Checkpoint?.LastRestore?.Success == true
+                        ? "Route checkpoint restored."
+                        : $"Route checkpoint saved: {status.Checkpoint?.SavedUtc:u}");
+                });
+                if (!result.Ok) _errorOccurred = true;
+            });
+            resumeCommand.Add(command);
+        }
+        devflowCommand.Add(resumeCommand);
 
         // ===== broker commands =====
         var brokerCommand = new Command("broker", "Manage the Microsoft.Maui.DevFlow broker daemon");
@@ -1384,6 +1780,14 @@ public class DevFlowCommands
         brokerCommand.Add(brokerLogCmd);
 
         devflowCommand.Add(brokerCommand);
+
+        // ===== human approval command (operator convenience; not an authorization boundary) =====
+        devflowCommand.Add(Approvals.ApprovalCommands.Create(
+            jsonOption,
+            noJsonOption,
+            agentPortOption,
+            output,
+            static () => _errorOccurred = true));
 
         // ===== list command (agent discovery) =====
         var listCmd = new Command("list", "List all connected agents");
@@ -1566,7 +1970,7 @@ public class DevFlowCommands
             var json = ctx.GetValue(jsonOption);
             var noJson = ctx.GetValue(noJsonOption);
             var isJson = output.ResolveJsonMode(json, noJson);
-            var cmds = GetCommandDescriptions();
+            var cmds = GetCommandDescriptions(devflowCommand);
             output.WriteResult(cmds, isJson, list =>
             {
                 Console.WriteLine($"{"Command",-35} {"Mutating",-10} {"Description"}");
@@ -1580,7 +1984,32 @@ public class DevFlowCommands
         // ===== MCP server command =====
         var mcpCmd = new Command("mcp", "Start MCP (Model Context Protocol) server for AI agent integration via stdio");
         mcpCmd.Aliases.Add("mcp-serve");
-        mcpCmd.SetAction(async (ctx, ct) => { await Mcp.McpServerHost.RunAsync(); });
+        var mcpProfileOption = new Option<string>("--profile")
+        {
+            Description = "MCP capability profile: full (default) or test-agent (restricted preview; requires DEVFLOW_PREVIEW_AGENT_AUTHORING)",
+            DefaultValueFactory = _ => "full",
+        };
+        mcpCmd.Add(mcpProfileOption);
+        mcpCmd.SetAction(async (ctx, ct) =>
+        {
+            var profileValue = ctx.GetValue(mcpProfileOption);
+            if (!Mcp.McpServerHost.TryParseProfile(profileValue, out var profile))
+            {
+                WriteError($"--profile must be either 'full' or 'test-agent'. Received '{profileValue}'.");
+                return;
+            }
+
+            try
+            {
+                await Mcp.McpServerHost.RunAsync(profile);
+            }
+            catch (Mcp.McpProfileDisabledException ex)
+            {
+                // A gated preview profile is an operator choice with a documented remedy. Let the
+                // message carry the remedy instead of a stack trace with build-machine paths.
+                WriteError(ex.Message);
+            }
+        });
         devflowCommand.Add(mcpCmd);
 
         _devflowCommand = devflowCommand;
@@ -1718,7 +2147,179 @@ public class DevFlowCommands
     
     // ===== CDP Helper: Send command via AgentClient =====
 
-    private static async Task<Microsoft.Maui.DevFlow.Driver.AgentClient> CreateAgentClientAsync(string host, int port)
+    private static readonly string s_cliMutationLeaseId = Guid.NewGuid().ToString("N");
+
+    private static async Task InspectAsync(
+        string? requestedAgentId,
+        bool noLaunch,
+        string? testHint,
+        string? traceHint,
+        bool json)
+    {
+        if (!AreInspectorHintsValid(testHint, traceHint))
+        {
+            Output.WriteError("Inspector startup hints must be 4,096 characters or fewer.", json, "InvalidArgument");
+            _errorOccurred = true;
+            return;
+        }
+
+        var brokerPort = await EnsureBrokerRunningAsync();
+        if (!brokerPort.HasValue)
+        {
+            Output.WriteError("The DevFlow broker could not be started.", json, "BrokerUnavailable", retryable: true);
+            _errorOccurred = true;
+            return;
+        }
+
+        var agents = await ListBrokerAgentsAsync(brokerPort.Value);
+        string? projectPath = null;
+        try
+        {
+            var project = Directory.GetFiles(Directory.GetCurrentDirectory(), "*.csproj").FirstOrDefault();
+            projectPath = project is null ? null : Path.GetFullPath(project);
+        }
+        catch
+        {
+            // Project affinity is optional. The selection still fails closed if it is ambiguous.
+        }
+
+        var agent = ResolveInspectorAgent(agents, requestedAgentId, projectPath, out var selectionError);
+        if (agent is null)
+        {
+            Output.WriteError(selectionError, json, "AgentAmbiguous");
+            _errorOccurred = true;
+            return;
+        }
+
+        var url = BuildInspectorUrl(brokerPort.Value, agent.Id, testHint, traceHint);
+        var launched = false;
+        if (!noLaunch)
+        {
+            launched = LaunchInspectorUrl(url);
+            if (!launched)
+            {
+                Output.WriteError($"Could not open a browser. Open this DevFlow Inspector URL manually: {url}", json, "BrowserLaunchFailed");
+                _errorOccurred = true;
+                return;
+            }
+        }
+
+        Output.WriteResult(new InspectorLaunchCliResult
+        {
+            Url = url,
+            AgentId = agent.Id,
+            AgentPort = agent.Port,
+            AppName = agent.AppName,
+            Platform = agent.Platform,
+            Launched = launched,
+            TestHint = testHint,
+            TraceHint = traceHint,
+        }, json, static result => Console.WriteLine(result.Url));
+    }
+
+    internal static Broker.AgentRegistration? ResolveInspectorAgent(
+        Broker.AgentRegistration[]? agents,
+        string? requestedAgentId,
+        string? projectPath,
+        out string error)
+    {
+        if (agents is not { Length: > 0 })
+        {
+            error = "No DevFlow agents are connected. Launch the app with DevFlow enabled, then retry.";
+            return null;
+        }
+
+        var explicitId = requestedAgentId?.Trim();
+        if (requestedAgentId is not null)
+        {
+            if (string.IsNullOrEmpty(explicitId))
+            {
+                error = "The --agent value must be a connected broker agent ID.";
+                return null;
+            }
+
+            var matches = agents.Where(agent =>
+                string.Equals(agent.Id, explicitId, StringComparison.Ordinal)).ToArray();
+            if (matches.Length != 1 || matches[0].Port <= 0)
+            {
+                error = $"Agent '{explicitId}' is stale or is not connected to the current DevFlow broker.";
+                return null;
+            }
+
+            error = string.Empty;
+            return matches[0];
+        }
+
+        var resolved = Broker.BrokerClient.ResolveAgent(agents, projectPath);
+        if (resolved is not null && resolved.Port > 0)
+        {
+            error = string.Empty;
+            return resolved;
+        }
+
+        error = agents.Length == 1
+            ? "The connected DevFlow agent has no valid Inspector endpoint."
+            : "More than one DevFlow agent is connected. Re-run with --agent <agent-id> to select one explicitly."
+                + Environment.NewLine + Broker.BrokerClient.BuildMultiAgentTargetingMessage(agents);
+        return null;
+    }
+
+    internal static string BuildInspectorUrl(
+        int brokerPort,
+        string agentId,
+        string? testHint = null,
+        string? traceHint = null)
+    {
+        if (brokerPort is < 1 or > 65535)
+            throw new ArgumentOutOfRangeException(nameof(brokerPort));
+        if (string.IsNullOrWhiteSpace(agentId))
+            throw new ArgumentException("An agent ID is required.", nameof(agentId));
+
+        var query = new List<string>();
+        if (!string.IsNullOrWhiteSpace(testHint))
+            query.Add("test=" + Uri.EscapeDataString(testHint));
+        if (!string.IsNullOrWhiteSpace(traceHint))
+            query.Add("trace=" + Uri.EscapeDataString(traceHint));
+
+        var path = $"http://localhost:{brokerPort}/inspector/{Uri.EscapeDataString(agentId)}/";
+        return query.Count == 0 ? path : path + "?" + string.Join("&", query);
+    }
+
+    private static bool AreInspectorHintsValid(string? testHint, string? traceHint)
+        => (testHint?.Length ?? 0) <= 4096 && (traceHint?.Length ?? 0) <= 4096;
+
+    private static bool LaunchInspectorUrlInSystemBrowser(string url)
+    {
+        try
+        {
+            if (OperatingSystem.IsWindows())
+            {
+                return Process.Start(new ProcessStartInfo
+                {
+                    FileName = url,
+                    UseShellExecute = true,
+                }) is not null;
+            }
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = OperatingSystem.IsMacOS() ? "open" : "xdg-open",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            };
+            startInfo.ArgumentList.Add(url);
+            return Process.Start(startInfo) is not null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static async Task<Microsoft.Maui.DevFlow.Driver.AgentClient> CreateAgentClientAsync(
+        string host,
+        int port,
+        bool emitAgentLabel = true)
     {
         EnsureAgentPortResolved(port);
 
@@ -1732,11 +2333,17 @@ public class DevFlowCommands
                 if (agent is not null && IsAndroidAgent(agent))
                     await EnsureAndroidForwardingForAgentsAsync([agent], deviceId: null, repair: true, emitWarnings: false, CancellationToken.None, brokerPort: brokerPort.Value);
 
-                EmitAgentLabel(host, port, agents);
+                if (emitAgentLabel)
+                    EmitAgentLabel(host, port, agents);
             }
         }
 
-        return new Microsoft.Maui.DevFlow.Driver.AgentClient(host, port);
+        return new Microsoft.Maui.DevFlow.Driver.AgentClient(host, port)
+        {
+            MutationLeaseId = s_cliMutationLeaseId,
+            MutationLeaseHolderKind = "cli",
+            MutationLeaseLabel = "MAUI CLI"
+        };
     }
 
     private static async Task<JsonElement?> SendCdpCommandAsync(string host, int port, string method, JsonNode? parameters = null, string? webview = null)
@@ -2371,8 +2978,16 @@ public class DevFlowCommands
         EnsureAgentPortResolved(port);
         try
         {
+            using var agent = new AgentClient(host, port);
+            if (!await agent.StartSensorAsync(sensor, speed, throttleMs))
+            {
+                Output.WriteError($"Failed to start sensor '{sensor}'.", json);
+                _errorOccurred = true;
+                return;
+            }
+
             using var client = new System.Net.WebSockets.ClientWebSocket();
-            var uri = new Uri($"ws://{host}:{port}/ws/v1/sensors?sensor={Uri.EscapeDataString(sensor)}&speed={Uri.EscapeDataString(speed)}&throttleMs={throttleMs}");
+            var uri = new Uri($"ws://{host}:{port}/ws/v1/sensors?sensor={Uri.EscapeDataString(sensor)}");
             using var cts = duration > 0
                 ? new CancellationTokenSource(TimeSpan.FromSeconds(duration))
                 : new CancellationTokenSource();
@@ -2499,7 +3114,7 @@ public class DevFlowCommands
         }
         if (andTree)
         {
-            await MauiTreeAsync(host, port, json, andTreeDepth, null, null, null);
+            await MauiTreeAsync(host, port, json, andTreeDepth, null, null, null, "activeVisual");
         }
     }
 
@@ -2544,95 +3159,103 @@ public class DevFlowCommands
 
     // ===== Command Descriptions (Schema Discovery) =====
 
-    private static List<CommandDescription> GetCommandDescriptions() => new()
+    /// <summary>
+    /// Command paths whose mutating classification cannot be inferred from the verb alone.
+    /// "Mutating" means the command can change the app or device under test; writing a local
+    /// artifact does not count. Everything not listed is derived by <see cref="IsMutatingCommand"/>.
+    /// </summary>
+    private static readonly Dictionary<string, bool> MutatingOverrides = new(StringComparer.Ordinal)
     {
-        new("ui status", "Check agent connection and app info", false),
-        new("ui tree", "Dump visual element tree", false),
-        new("ui query", "Find elements by type, automationId, text, or CSS selector", false),
-        new("ui element", "Get detailed element info by ID", false),
-        new("ui hit-test", "Find elements at screen coordinates", false),
-        new("ui tap", "Tap a UI element", true),
-        new("ui fill", "Fill text into an input element", true),
-        new("ui clear", "Clear text from an input element", true),
-        new("ui focus", "Set focus to an element", true),
-        new("ui navigate", "Navigate to a Shell route", true),
-        new("ui scroll", "Scroll content or scroll element into view", true),
-        new("ui resize", "Resize app window", true),
-        new("ui property", "Get element property value", false),
-        new("ui set-property", "Set element property value", true),
-        new("ui screenshot", "Take screenshot of app or element", false),
-        new("ui assert", "Assert element property equals expected value", false),
-        new("recording start", "Start screen recording", true),
-        new("recording stop", "Stop screen recording", true),
-        new("recording status", "Check recording status", false),
-        new("ui alert detect", "Check if a system dialog is visible", false),
-        new("ui alert dismiss", "Dismiss a system dialog", true),
-        new("ui alert tree", "Show accessibility tree for dialog detection", false),
-        new("ui permission grant", "Grant iOS simulator permission", true),
-        new("ui permission revoke", "Revoke iOS simulator permission", true),
-        new("ui permission reset", "Reset iOS simulator permission", true),
-        new("logs", "Fetch or stream application logs", false),
-        new("network", "Monitor HTTP network requests (live)", false),
-        new("network list", "List recent network requests", false),
-        new("network detail", "Show full network request details", false),
-        new("network clear", "Clear network request buffer", true),
-        new("storage preferences list", "List all known preference keys", false),
-        new("storage preferences get", "Get a preference value by key", false),
-        new("storage preferences set", "Set a preference value", true),
-        new("storage preferences delete", "Remove a preference", true),
-        new("storage preferences clear", "Clear all preferences", true),
-        new("storage secure-storage get", "Get a secure storage value", false),
-        new("storage secure-storage set", "Set a secure storage value", true),
-        new("storage secure-storage delete", "Remove a secure storage entry", true),
-        new("storage secure-storage clear", "Clear all secure storage", true),
-        new("device app-info", "Get app name, version, theme", false),
-        new("device device-info", "Get device manufacturer, model, OS", false),
-        new("device display", "Get screen density, size, orientation", false),
-        new("device battery", "Get battery level, state, power source", false),
-        new("device connectivity", "Get network access and profiles", false),
-        new("device version-tracking", "Get version history and launch info", false),
-        new("device permissions", "Check permission status", false),
-        new("device geolocation", "Get current GPS coordinates", false),
-        new("device sensors list", "List available sensors and status", false),
-        new("device sensors start", "Start a device sensor", true),
-        new("device sensors stop", "Stop a device sensor", true),
-        new("device sensors stream", "Stream sensor readings via WebSocket", false),
-        new("webview webviews", "List available CDP WebViews", false),
-        new("webview status", "Check CDP connection status", false),
-        new("webview Browser getVersion", "Get browser version", false),
-        new("webview Runtime evaluate", "Evaluate JavaScript expression", false),
-        new("webview DOM getDocument", "Get DOM document tree", false),
-        new("webview DOM querySelector", "Find element by CSS selector", false),
-        new("webview DOM querySelectorAll", "Find all elements by CSS selector", false),
-        new("webview DOM getOuterHTML", "Get element outer HTML", false),
-        new("webview Input click", "Click element by CSS selector", true),
-        new("webview Input insertText", "Insert text at cursor", true),
-        new("webview Input fill", "Fill form field by CSS selector", true),
-        new("webview Page navigate", "Navigate WebView to URL", true),
-        new("webview Page reload", "Reload WebView page", true),
-        new("webview Page captureScreenshot", "Take WebView screenshot", false),
-        new("webview snapshot", "Get simplified DOM snapshot", false),
-        new("webview source", "Get page HTML source", false),
-        new("theme get", "Get the current app theme", false),
-        new("theme set", "Set the app or system light-dark theme", true),
-        new("agent list", "List all connected agents", false),
-        new("agent wait", "Wait for an agent to connect", false),
-        new("batch", "Execute commands from stdin", true),
-        new("broker start", "Start the broker daemon", true),
-        new("broker stop", "Stop the broker daemon", true),
-        new("broker status", "Show broker status", false),
-        new("broker log", "Show broker log", false),
-        new("init", "Install DevFlow onboarding skills for this workspace", true),
-        new("skills install", "Install bundled DevFlow skills", true),
-        new("skills list", "List DevFlow skill install status", false),
-        new("skills check", "Check installed DevFlow skills", false),
-        new("skills update", "Update DevFlow skills from the current CLI bundle", true),
-        new("skills remove", "Remove an installed DevFlow skill", true),
-        new("skills doctor", "Validate DevFlow skills and CLI drift", false),
-        new("mcp", "Start the MCP server", false),
-        new("commands", "List all available commands", false),
-        new("version", "Show CLI version", false),
+        ["approve"] = true,
+        ["batch"] = true,
+        ["extensions call"] = true,
+        // `flow reproduce` reads like a diagnostic verb but drives a full build, install, launch
+        // and replay on the device under test.
+        ["flow reproduce"] = true,
+        ["init"] = true,
+        ["ui navigate"] = true,
+        ["ui resize"] = true,
+        ["ui scroll"] = true,
+        ["webview Input dispatchClickEvent"] = true,
+        ["webview Input insertText"] = true,
+        ["webview Runtime evaluate"] = true,
+        // Read-only despite a mutating-sounding verb.
+        ["device sensors stream"] = false,
+        ["devices setup"] = false,
+        ["diagnostics performance"] = false,
+        ["evidence capture"] = false,
+        ["evidence view"] = false,
+        // `flow commit` rewrites a local plan sidecar and never touches the app or device.
+        ["flow commit"] = false,
+        ["flow qualify"] = false,
+        ["mcp"] = false,
+        ["recording status"] = false,
+        ["resume status"] = false,
+        ["storage files download"] = false,
     };
+
+    private static readonly string[] MutatingVerbs =
+    [
+        "add", "approve", "boot", "clear", "clear-all", "click", "commit", "delete", "dismiss",
+        "download", "erase", "fill", "focus", "grant", "install", "invoke", "launch", "navigate",
+        "record", "release", "reload", "remove", "replay", "reset", "resize", "restore", "revoke",
+        "run", "save", "scroll", "set", "set-property", "shutdown", "start", "stop", "tap",
+        "uninstall", "update", "upload", "write",
+    ];
+
+    /// <summary>
+    /// Walks the live command tree instead of restating it. A hand-maintained list silently
+    /// omitted whole families (<c>flow</c>, <c>approve</c>, <c>inspect</c>) as they were added,
+    /// which made this verb - the one an agent uses for discovery - actively misleading.
+    /// </summary>
+    internal static List<CommandDescription> GetCommandDescriptions(Command devflowCommand)
+    {
+        var descriptions = new List<CommandDescription>();
+        Collect(devflowCommand, string.Empty);
+        descriptions.Sort(static (left, right) => string.CompareOrdinal(left.Command, right.Command));
+        return descriptions;
+
+        void Collect(Command command, string prefix)
+        {
+            foreach (var child in command.Subcommands)
+            {
+                if (IsHiddenCommand(child))
+                    continue;
+
+                var path = string.IsNullOrEmpty(prefix) ? child.Name : $"{prefix} {child.Name}";
+                // A group with an action of its own (for example `network`) is invocable and is
+                // listed; a pure grouping node is not, but its children still are.
+                if (child.Action is not null)
+                {
+                    descriptions.Add(new CommandDescription(
+                        path,
+                        string.IsNullOrWhiteSpace(child.Description) ? path : child.Description!,
+                        IsMutatingCommand(path)));
+                }
+                Collect(child, path);
+            }
+        }
+    }
+
+    private static bool IsHiddenCommand(Command command)
+        => command.Hidden || string.Equals(command.Name, "help", StringComparison.Ordinal);
+
+    private static bool IsMutatingCommand(string path)
+    {
+        if (MutatingOverrides.TryGetValue(path, out var known))
+            return known;
+
+        var segments = path.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        for (var index = segments.Length - 1; index >= 0; index--)
+        {
+            var segment = segments[index];
+            if (MutatingVerbs.Contains(segment, StringComparer.OrdinalIgnoreCase))
+                return true;
+            if (segment.StartsWith("set-", StringComparison.OrdinalIgnoreCase))
+                return true;
+        }
+        return false;
+    }
 
     // ===== MAUI Agent Commands =====
 
@@ -2756,12 +3379,41 @@ public class DevFlowCommands
         });
     }
 
-    private static async Task MauiTreeAsync(string host, int port, bool json, int depth, int? window, string? fields, string? format)
+    private static async Task MauiTreeAsync(
+        string host,
+        int port,
+        bool json,
+        int depth,
+        int? window,
+        string? fields,
+        string? format,
+        string projection)
     {
         try
         {
-            using var client = await CreateAgentClientAsync(host, port);
-            var tree = await client.GetTreeAsync(depth, window);
+            EnsureAgentPortResolved(port);
+            List<ElementInfo>? tree;
+            if (projection.Equals("activeVisual", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!host.Equals("localhost", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("activeVisual projection requires the local DevFlow broker. Use --projection raw for a remote host.");
+                if (window is not null)
+                    throw new InvalidOperationException("activeVisual projection does not accept --window. Use --projection raw for a window-specific tree.");
+                tree = await InspectorSnapshotClient.GetActiveVisualTreeAsync(port);
+                if (tree is null)
+                    throw new InvalidOperationException("No canonical Inspector tree is available for the selected agent.");
+                InspectorSnapshotService.TrimDepth(tree, depth);
+            }
+            else if (projection.Equals("raw", StringComparison.OrdinalIgnoreCase))
+            {
+                using var client = await CreateAgentClientAsync(host, port);
+                tree = await client.GetTreeAsync(depth, window);
+            }
+            else
+            {
+                throw new InvalidOperationException("--projection must be activeVisual or raw.");
+            }
+
             if (json)
             {
                 var projected = ProjectElements(tree, fields, format);
@@ -4266,6 +4918,44 @@ public class DevFlowCommands
         return 0;
     }
 
+    internal static Broker.RouteCheckpointStatus RedactCheckpointStatusForOutput(
+        Broker.RouteCheckpointStatus status)
+    {
+        var checkpoint = status.Checkpoint;
+        var restore = checkpoint?.LastRestore;
+        return new Broker.RouteCheckpointStatus
+        {
+            Ok = status.Ok,
+            HasCheckpoint = status.HasCheckpoint,
+            Connected = status.Connected,
+            Stale = status.Stale,
+            Warning = status.Warning,
+            Checkpoint = checkpoint is null
+                ? null
+                : new Broker.RouteCheckpoint
+                {
+                    Schema = checkpoint.Schema,
+                    AgentId = checkpoint.AgentId,
+                    SessionId = checkpoint.SessionId,
+                    Route = Evidence.EvidenceRedaction.ScrubRoute(checkpoint.Route) ?? "",
+                    AppName = checkpoint.AppName,
+                    Platform = checkpoint.Platform,
+                    Project = checkpoint.Project,
+                    SavedUtc = checkpoint.SavedUtc,
+                    LastRestore = restore is null
+                        ? null
+                        : new Broker.RouteRestoreResult
+                        {
+                            AttemptedUtc = restore.AttemptedUtc,
+                            Success = restore.Success,
+                            Kind = restore.Kind,
+                            Message = restore.Message,
+                            ObservedRoute = Evidence.EvidenceRedaction.ScrubRoute(restore.ObservedRoute)
+                        }
+                }
+        };
+    }
+
     /// <summary>
     /// Refuses to proceed when the agent port could not be unambiguously resolved.
     /// Called at the top of every agent-targeting connection helper so that, when multiple
@@ -4471,7 +5161,12 @@ public class DevFlowCommands
             Console.CancelKeyPress += (_, _) => cts.Cancel();
 
             using var server = new Broker.BrokerServer(
-                log: msg => Console.WriteLine(msg));
+                Broker.BrokerServer.DefaultPort,
+                idleTimeout: null,
+                log: msg => Console.WriteLine(msg),
+                repairResetAttesterResolver: CreateRepairResetAttester,
+                attachedRunOracles: Program.Services
+                    .GetService<Execution.IAttachedRunOracleEvaluator>());
             await server.RunAsync(cts.Token);
             return;
         }
@@ -4488,6 +5183,23 @@ public class DevFlowCommands
             Console.Error.WriteLine(errorMessage);
             throw new InvalidOperationException(errorMessage);
         }
+    }
+
+    /// <summary>
+    /// Supplies the reset owner a repair validation needs, for apps that opt in by registering the
+    /// well-known DevFlow reset action.
+    /// </summary>
+    /// <remarks>
+    /// Returning null is the normal answer, and it is the safe one: without an owner the broker
+    /// refuses repair validation instead of resetting an app it cannot restore. Only an app that
+    /// registers an in-process reset action gets an owner, because only that app can be reset
+    /// without restarting the process the validation is fenced to.
+    /// </remarks>
+    private static Broker.IWorkflowRepairResetAttester? CreateRepairResetAttester(
+        Broker.AgentRegistration registration)
+    {
+        var owner = Broker.BrokerServer.CreateAppActionResetOwnerFor(registration);
+        return owner is null ? null : new Broker.WorkflowRepairLifecycleResetAttester(owner);
     }
 
     private static async Task BrokerStopAsync()

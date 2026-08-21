@@ -1,6 +1,7 @@
 using System.CommandLine;
 using Microsoft.Maui.Cli.Commands;
 using Microsoft.Maui.Cli.DevFlow;
+using Microsoft.Maui.Cli.DevFlow.Execution;
 using Xunit;
 
 namespace Microsoft.Maui.Cli.UnitTests;
@@ -96,6 +97,250 @@ public class CommandConstructionTests
 
 		Assert.Empty(parseResult.Errors);
 		Assert.Equal("auto", parseResult.GetValue(scopeOption));
+	}
+
+	[Fact]
+	public void DevFlowCommand_IncludesDiagnosticsCommands()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+
+		var diagnostics = Assert.Single(devflowCommand.Subcommands, c => c.Name == "diagnostics");
+
+		var layout = Assert.Single(diagnostics.Subcommands, c => c.Name == "layout");
+		Assert.Contains(layout.Options, option => option.Name == "--element");
+		Assert.Contains(layout.Options, option => option.Name == "--max-elements");
+		Assert.Empty(layout.Parse("--element MyList --max-elements 500").Errors);
+
+		var performance = Assert.Single(diagnostics.Subcommands, c => c.Name == "performance");
+		var durationOption = (Option<int>)Assert.Single(performance.Options, option => option.Name == "--duration");
+		Assert.Contains(performance.Options, option => option.Name == "--sample-interval");
+		Assert.Contains(performance.Options, option => option.Name == "--attach");
+
+		var parseResult = performance.Parse("--duration 12");
+		Assert.Empty(parseResult.Errors);
+		Assert.Equal(12, parseResult.GetValue(durationOption));
+		Assert.Equal(5, performance.Parse("").GetValue(durationOption));
+	}
+
+	[Fact]
+	public void UiTree_DefaultsToActiveVisualProjection()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var uiCommand = Assert.Single(devflowCommand.Subcommands, command => command.Name == "ui");
+		var treeCommand = Assert.Single(uiCommand.Subcommands, command => command.Name == "tree");
+		var projectionOption = (Option<string>)Assert.Single(
+			treeCommand.Options,
+			option => option.Name == "--projection");
+
+		var parseResult = treeCommand.Parse("");
+
+		Assert.Empty(parseResult.Errors);
+		Assert.Equal("activeVisual", parseResult.GetValue(projectionOption));
+	}
+
+	[Fact]
+	public void FlowReplay_BareEvidenceOnFailureOptionIsPresent()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var flow = Assert.Single(devflowCommand.Subcommands, command => command.Name == "flow");
+		var replay = Assert.Single(flow.Subcommands, command => command.Name == "replay");
+		var evidence = (Option<string?>)Assert.Single(
+			replay.Options,
+			option => option.Name == "--evidence-on-failure");
+
+		var omitted = replay.Parse("scenario.md");
+		var bare = replay.Parse("scenario.md --evidence-on-failure");
+		var valued = replay.Parse("scenario.md --evidence-on-failure failure.mauitrace");
+
+		Assert.Null(omitted.GetResult(evidence));
+		Assert.NotNull(bare.GetResult(evidence));
+		Assert.Empty(bare.GetResult(evidence)!.Tokens);
+		Assert.Equal("failure.mauitrace", valued.GetValue(evidence));
+	}
+
+	[Fact]
+	public void FlowValidateCommand_IsPresentAndAcceptsAFlowPath()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var flow = Assert.Single(devflowCommand.Subcommands, command => command.Name == "flow");
+		var validate = Assert.Single(flow.Subcommands, command => command.Name == "validate");
+
+		Assert.Empty(validate.Parse("scenario.md").Errors);
+	}
+
+	[Fact]
+	public void FlowReproduceAndTriageCommands_ExposeBoundedHandoffOptions()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var flow = Assert.Single(devflowCommand.Subcommands, command => command.Name == "flow");
+		var run = Assert.Single(flow.Subcommands, command => command.Name == "run");
+		var reproduce = Assert.Single(flow.Subcommands, command => command.Name == "reproduce");
+		var triage = Assert.Single(flow.Subcommands, command => command.Name == "triage");
+
+		foreach (var optionName in new[]
+		{
+			"--plan",
+			"--project",
+			"--framework",
+			"--configuration",
+			"--output",
+			"--cleanup",
+			"--agent-wait-seconds",
+			"--evidence-on-failure",
+		})
+		{
+			Assert.Contains(run.Options, option => option.Name == optionName);
+			Assert.Contains(reproduce.Options, option => option.Name == optionName);
+		}
+
+		Assert.Contains(reproduce.Options, option => option.Name == "--import");
+		Assert.Contains(reproduce.Options, option => option.Name == "--kind");
+		Assert.Empty(reproduce.Parse(
+			"scenario.md --import failure.json --project App.csproj --output artifacts/reproduction").Errors);
+
+		Assert.Contains(triage.Options, option => option.Name == "--manifest");
+		Assert.Contains(triage.Options, option => option.Name == "--report");
+		Assert.Contains(triage.Options, option => option.Name == "--format");
+		Assert.Empty(triage.Parse(
+			"--manifest execution-manifest.json --report flow-run.json --format markdown").Errors);
+		Assert.NotEmpty(triage.Parse(
+			"--manifest execution-manifest.json --report flow-run.json --format html").Errors);
+	}
+
+	[Fact]
+	public void FlowCommitCommand_IsPresentAndAcceptsAFlowPath()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var flow = Assert.Single(devflowCommand.Subcommands, command => command.Name == "flow");
+		var commit = Assert.Single(flow.Subcommands, command => command.Name == "commit");
+
+		Assert.Empty(commit.Parse("scenario.md").Errors);
+		Assert.Empty(commit.Parse("scenario.md --check").Errors);
+		Assert.Contains(commit.Options, option => option.Name == "--plan");
+		Assert.Contains(commit.Options, option => option.Name == "--check");
+	}
+
+	[Fact]
+	public void FlowIdentityCommand_IsPresentAndAcceptsBothComputeAndResolveForms()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var flow = Assert.Single(devflowCommand.Subcommands, command => command.Name == "flow");
+		var identity = Assert.Single(flow.Subcommands, command => command.Name == "identity");
+
+		Assert.Empty(identity.Parse("maui-tests").Errors);
+		Assert.Empty(identity.Parse("maui-tests --platform android --tier tier-1").Errors);
+		Assert.Empty(identity.Parse($"--resolve sha256:{new string('0', 64)} --search maui-tests").Errors);
+		foreach (var optionName in new[] { "--resolve", "--search", "--platform", "--tier" })
+			Assert.Contains(identity.Options, option => option.Name == optionName);
+	}
+
+	[Fact]
+	public void DevFlowCommandsInventory_ListsEveryInvocableCommandInTheTree()
+	{
+		// Regression: the inventory was a hand-maintained list and had drifted, omitting the whole
+		// `flow` family plus `approve` and `inspect`. Anything an operator can actually invoke has
+		// to appear, or the discovery surface silently lies about what the tool can do.
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var listed = DevFlowCommands
+			.GetCommandDescriptions(devflowCommand)
+			.Select(entry => entry.Command)
+			.ToHashSet(StringComparer.Ordinal);
+
+		var expected = new List<string>();
+		Walk(devflowCommand, "", expected);
+
+		Assert.NotEmpty(expected);
+		foreach (var name in expected)
+			Assert.Contains(name, listed);
+		Assert.Equal(expected.Count, listed.Count);
+
+		static void Walk(Command command, string prefix, List<string> into)
+		{
+			foreach (var child in command.Subcommands)
+			{
+				if (child.Hidden || child.Name == "help")
+					continue;
+				var name = prefix.Length == 0 ? child.Name : prefix + " " + child.Name;
+				if (child.Action is not null)
+					into.Add(name);
+				Walk(child, name, into);
+			}
+		}
+	}
+
+	/// <summary>
+	/// The inventory's <c>mutating</c> flag is what an agent gates on before touching a device, so
+	/// it is pinned explicitly rather than left to verb inference. <c>flow reproduce</c> is the
+	/// case that motivated this: its verb reads diagnostic, but it drives a full build, install,
+	/// launch and replay, and the old hand-maintained list hid the problem by omitting the command
+	/// entirely.
+	/// </summary>
+	[Theory]
+	[InlineData("flow run", true)]
+	[InlineData("flow replay", true)]
+	[InlineData("flow reproduce", true)]
+	[InlineData("flow commit", false)]
+	[InlineData("flow identity", false)]
+	[InlineData("flow qualify", false)]
+	[InlineData("flow triage", false)]
+	[InlineData("flow validate", false)]
+	public void DevFlowCommandsInventory_ClassifiesEveryFlowVerbsDeviceImpact(string command, bool mutating)
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+
+		var entry = Assert.Single(
+			DevFlowCommands.GetCommandDescriptions(devflowCommand),
+			candidate => candidate.Command == command);
+
+		Assert.Equal(mutating, entry.Mutating);
+	}
+
+	[Fact]
+	public void DevFlowCommandsInventory_IncludesThePreviouslyMissingFamilies()
+	{
+		var jsonOption = new Option<bool>("--json");
+		var devflowCommand = DevFlowCommands.CreateDevFlowCommand(jsonOption);
+		var listed = DevFlowCommands
+			.GetCommandDescriptions(devflowCommand)
+			.Select(entry => entry.Command)
+			.ToHashSet(StringComparer.Ordinal);
+
+		foreach (var name in new[]
+		{
+			"flow qualify",
+			"flow replay",
+			"flow validate",
+			"flow run",
+			"flow reproduce",
+			"flow triage",
+			"flow commit",
+			"approve",
+			"inspect",
+			"mcp",
+		})
+		{
+			Assert.Contains(name, listed);
+		}
+	}
+
+	[Fact]
+	public void FlowPlatformTags_NullOrNullBearingSequence_ParsesToEmptyInsteadOfThrowing()
+	{
+		// Regression: this threw ArgumentNullException, which the coordinator reported as
+		// `unexpected-execution-error` with class `infrastructure` -- a user authoring mistake
+		// presented as a tool fault, with nothing actionable in the message.
+		Assert.Empty(FlowPlatformTags.Parse((IEnumerable<string>?)null));
+		Assert.Empty(FlowPlatformTags.Parse(new string?[] { null, null }!));
+		Assert.Equal(["android"], FlowPlatformTags.Parse(new string?[] { null, "Android" }!));
 	}
 
 	[Fact]

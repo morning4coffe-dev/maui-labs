@@ -18,6 +18,11 @@ on:
         required: false
         type: boolean
         default: false
+      pack-driver:
+        required: false
+        type: boolean
+        default: false
+        description: 'Pack Microsoft.Maui.DevFlow.Driver when the DevFlow package consumer needs its local dependency.'
       install-workloads:
         required: false
         type: boolean
@@ -53,6 +58,21 @@ on:
         type: string
         default: 'src/DevFlow/Microsoft.Maui.DevFlow.Agent/Microsoft.Maui.DevFlow.Agent.csproj'
         description: 'Project path for InstallAndroidDependencies target. Must target net10.0-android.'
+      collect-coverage:
+        required: false
+        type: boolean
+        default: false
+        description: 'Collect code coverage during the Arcade test run. Requires coverlet.collector on the test projects.'
+      coverage-threshold:
+        required: false
+        type: string
+        default: '0'
+        description: 'Minimum total line and branch coverage percent. 0 disables the gate. Only projects that set EnforceCoverageThreshold are held to it.'
+      coverage-os:
+        required: false
+        type: string
+        default: 'windows-latest'
+        description: 'The single matrix leg that collects and gates coverage. Every leg still runs the tests; only this one measures them, because the thresholds are calibrated against one OS and this code has many OS-conditional branches.'
 
 env:
   CI_PACKAGE_VERSION_SUFFIX: ci.${{ github.run_number }}.${{ github.run_attempt }}
@@ -114,6 +134,9 @@ jobs:
           -prepareMachine
           -projects %CD%\${{ inputs.project-path }}
           /p:VersionSuffix=%CI_PACKAGE_VERSION_SUFFIX%
+          /p:PackDriverNuGet=${{ inputs.pack-driver }}
+          /p:CollectCoverage=${{ inputs.collect-coverage && matrix.os == inputs.coverage-os }}
+          /p:Threshold=${{ inputs.coverage-threshold }}
         shell: cmd
 
       - name: Build and Test (macOS)
@@ -124,6 +147,9 @@ jobs:
           --prepareMachine
           --projects $(pwd)/${{ inputs.project-path }}
           /p:VersionSuffix=$CI_PACKAGE_VERSION_SUFFIX
+          /p:PackDriverNuGet=${{ inputs.pack-driver }}
+          /p:CollectCoverage=${{ inputs.collect-coverage && matrix.os == inputs.coverage-os }}
+          /p:Threshold=${{ inputs.coverage-threshold }}
 
       - name: Build and Test (Linux)
         if: startsWith(matrix.os, 'ubuntu')
@@ -133,6 +159,9 @@ jobs:
           --prepareMachine
           --projects $(pwd)/${{ inputs.project-path }}
           /p:VersionSuffix=$CI_PACKAGE_VERSION_SUFFIX
+          /p:PackDriverNuGet=${{ inputs.pack-driver }}
+          /p:CollectCoverage=${{ inputs.collect-coverage && matrix.os == inputs.coverage-os }}
+          /p:Threshold=${{ inputs.coverage-threshold }}
 
       - name: NativeAOT publish smoke test (macOS)
         if: matrix.os == 'macos-latest' && inputs.project-name == 'cli'
@@ -193,7 +222,14 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: test-results-${{ inputs.project-name }}-${{ matrix.os }}
-          path: artifacts/TestResults/**/*.xml
+          # .xml is the xunit console runner's report and also coverlet's
+          # coverage.cobertura.xml; .trx is what Arcade's VSTest runner emits on the
+          # coverage legs, where the xunit .xml report does not exist. The trx logger also
+          # copies the coverage report under In/, so exclude that duplicate.
+          path: |
+            artifacts/TestResults/**/*.xml
+            artifacts/TestResults/**/*.trx
+            !artifacts/TestResults/**/In/**
 
       - name: Validate packages
         if: inputs.pack
@@ -211,6 +247,8 @@ jobs:
             expected_package_ids=(
               Microsoft.Maui.DevFlow.Agent
               Microsoft.Maui.DevFlow.Blazor
+              Microsoft.Maui.DevFlow.Driver
+              Microsoft.Maui.DevFlow.Testing
             )
 
             for package_id in "${expected_package_ids[@]}"; do
@@ -222,6 +260,13 @@ jobs:
           fi
 
           printf '%s\n' "$produced_packages"
+
+      - name: Validate DevFlow Testing package
+        if: inputs.pack && inputs.project-name == 'devflow'
+        shell: pwsh
+        run: |
+          ./tests/DevFlow/PackageConsumer/Validate-TestingPackage.ps1 `
+            -PackageDirectory "${{ github.workspace }}/artifacts/packages"
 
       - name: Upload packages
         if: inputs.pack

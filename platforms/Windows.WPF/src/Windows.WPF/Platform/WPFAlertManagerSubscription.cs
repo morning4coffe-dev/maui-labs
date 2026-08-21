@@ -60,14 +60,14 @@ namespace Microsoft.Maui.Platforms.Windows.WPF
 		{
 			if (arguments == null) return;
 
-			if (arguments.Cancel == null)
+			if (arguments.Accept == null)
 			{
 				System.Windows.MessageBox.Show(
 					arguments.Message ?? string.Empty,
 					arguments.Title ?? string.Empty,
 					System.Windows.MessageBoxButton.OK,
 					System.Windows.MessageBoxImage.Information);
-				arguments.SetResult(true);
+				arguments.SetResult(false);
 			}
 			else
 			{

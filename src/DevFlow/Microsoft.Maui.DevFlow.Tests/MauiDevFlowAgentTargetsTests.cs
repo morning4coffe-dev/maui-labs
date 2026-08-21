@@ -122,6 +122,33 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
     [Theory]
     [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
     [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void SetMauiDevFlowPort_DoesNotEmbedFullProjectPath_ByDefault(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        RunSetMauiDevFlowPortTarget();
+
+        var contents = File.ReadAllText(GeneratedFilePath);
+        Assert.Contains("\"Microsoft.Maui.DevFlowProject\", \"Test.csproj\"", contents);
+        Assert.DoesNotContain(_projectDirectory, contents, StringComparison.OrdinalIgnoreCase);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void SetMauiDevFlowPort_EmbedsFullProjectPath_WhenExplicitlyEnabled(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        RunSetMauiDevFlowPortTarget("/p:MauiDevFlowIncludeProjectPath=true");
+
+        var escapedPath = ProjectFilePath.Replace("\\", "\\\\", StringComparison.Ordinal);
+        Assert.Contains($"\"Microsoft.Maui.DevFlowProject\", \"{escapedPath}\"", File.ReadAllText(GeneratedFilePath));
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
     public void SetMauiDevFlowPort_EmitsSessionId_ForReleaseBuilds(string relativeTargetPath)
     {
         CreateTestProject(relativeTargetPath);
@@ -131,6 +158,143 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
         var contents = File.ReadAllText(GetGeneratedFilePath("Release"));
         var expectedSessionId = ComputeExpectedSessionId(ProjectFilePath);
         Assert.Contains($"\"Microsoft.Maui.DevFlowSessionId\", \"{expectedSessionId}\"", contents);
+        Assert.Contains("\"Microsoft.Maui.DevFlowEnabled\", \"false\"", contents);
+        Assert.Contains("\"Microsoft.Maui.DevFlowMode\", \"disabled\"", contents);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void SetMauiDevFlowPort_EmitsEnabledDebugMode_ByDefault(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        RunSetMauiDevFlowPortTarget();
+
+        var contents = File.ReadAllText(GeneratedFilePath);
+        Assert.Contains("\"Microsoft.Maui.DevFlowEnabled\", \"true\"", contents);
+        Assert.Contains("\"Microsoft.Maui.DevFlowMode\", \"debug\"", contents);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void ValidateBuildSafety_RejectsImplicitOptimizedAgent(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        var result = RunTarget(
+            "_ValidateMauiDevFlowBuildSafety",
+            "/p:Configuration=Release",
+            "/p:MauiDevFlowEnabled=true");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("MauiDevFlowProfileMode=true", result.Output + result.Error);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void ValidateBuildSafety_AllowsExplicitProfileMode(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        var result = RunTarget(
+            "_ValidateMauiDevFlowBuildSafety",
+            "/p:Configuration=Release",
+            "/p:MauiDevFlowProfileMode=true");
+
+        Assert.Equal(0, result.ExitCode);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void ExplicitDisabledMode_WinsOverProfileMode(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        RunSetMauiDevFlowPortTarget(
+            "/p:MauiDevFlowProfileMode=true",
+            "/p:MauiDevFlowEnabled=false");
+
+        var contents = File.ReadAllText(GeneratedFilePath);
+        Assert.Contains("\"Microsoft.Maui.DevFlowEnabled\", \"false\"", contents);
+        Assert.Contains("\"Microsoft.Maui.DevFlowMode\", \"disabled\"", contents);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets", "0")]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets", "65536")]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets", "abc")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets", "0")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets", "65536")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets", "abc")]
+    public void SetMauiDevFlowPort_RejectsInvalidPorts(
+        string relativeTargetPath,
+        string port)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        var result = RunTarget(
+            "_SetMauiDevFlowPort",
+            $"/p:MauiDevFlowPort={port}");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("between 1 and 65535", result.Output + result.Error);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets", "1")]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets", "65535")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets", "1")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets", "65535")]
+    public void SetMauiDevFlowPort_AcceptsBoundaryPorts(
+        string relativeTargetPath,
+        string port)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        RunSetMauiDevFlowPortTarget($"/p:MauiDevFlowPort={port}");
+
+        Assert.Contains(
+            $"\"Microsoft.Maui.DevFlowPort\", \"{port}\"",
+            File.ReadAllText(GeneratedFilePath));
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void ExplicitProfileMode_DefinesMauiDevFlowCompilationSymbol(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        var result = RunTarget(
+            "_WriteDefineConstants",
+            "/p:Configuration=Release",
+            "/p:MauiDevFlowProfileMode=true");
+
+        Assert.Equal(0, result.ExitCode);
+        Assert.Contains(
+            "MAUI_DEVFLOW",
+            File.ReadAllText(Path.Combine(_projectDirectory, "defines.txt")),
+            StringComparison.Ordinal);
+    }
+
+    [Theory]
+    [InlineData("build/Microsoft.Maui.DevFlow.Agent.targets")]
+    [InlineData("buildTransitive/Microsoft.Maui.DevFlow.Agent.targets")]
+    public void ValidateBuildSafety_RejectsNativeAot(string relativeTargetPath)
+    {
+        CreateTestProject(relativeTargetPath);
+
+        var result = RunTarget(
+            "_ValidateMauiDevFlowBuildSafety",
+            "/p:MauiDevFlowProfileMode=true",
+            "/p:PublishAot=true");
+
+        Assert.NotEqual(0, result.ExitCode);
+        Assert.Contains("not supported in NativeAOT builds", result.Output + result.Error);
     }
 
     [Theory]
@@ -150,6 +314,38 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
         // ApplicationId must NOT be rewritten — no identity isolation metadata
         Assert.DoesNotContain("Microsoft.Maui.DevFlowBaseApplicationId", contents);
         Assert.DoesNotContain("Microsoft.Maui.DevFlowApplicationId", contents);
+        Assert.Contains("\"Microsoft.Maui.DevFlowPackageId\", \"com.example.myapp\"", contents);
+    }
+
+    [Theory]
+    [InlineData(
+        "Microsoft.Maui.DevFlow.Agent.Gtk/Microsoft.Maui.DevFlow.Agent.Gtk.csproj",
+        "Microsoft.Maui.DevFlow.Agent.Gtk.targets")]
+    [InlineData(
+        "Microsoft.Maui.DevFlow.Agent.WPF/Microsoft.Maui.DevFlow.Agent.WPF.csproj",
+        "Microsoft.Maui.DevFlow.Agent.WPF.targets")]
+    public void AlternateHostPackages_IncludeTheSharedBuildContract(
+        string relativeProjectPath,
+        string packagedTargetName)
+    {
+        var project = File.ReadAllText(Path.Combine(
+            RepoRoot,
+            "src",
+            "DevFlow",
+            relativeProjectPath.Replace('/', Path.DirectorySeparatorChar)));
+
+        Assert.Contains(
+            @"..\Microsoft.Maui.DevFlow.Agent\build\Microsoft.Maui.DevFlow.Agent.targets",
+            project,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $@"PackagePath=""build\{packagedTargetName}""",
+            project,
+            StringComparison.Ordinal);
+        Assert.Contains(
+            $@"PackagePath=""buildTransitive\{packagedTargetName}""",
+            project,
+            StringComparison.Ordinal);
     }
 
     private string ProjectFilePath => Path.Combine(_projectDirectory, "Test.csproj");
@@ -181,6 +377,11 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
             {{additionalProperties}}
               </PropertyGroup>
               <Import Project="{{escapedTargetFilePath}}" />
+              <Target Name="_WriteDefineConstants">
+                <WriteLinesToFile File="$(MSBuildProjectDirectory)/defines.txt"
+                                  Lines="$(DefineConstants)"
+                                  Overwrite="true" />
+              </Target>
             </Project>
             """);
     }
@@ -201,6 +402,16 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
 
     private void RunSetMauiDevFlowPortTarget(params string[] properties)
     {
+        var result = RunTarget("_SetMauiDevFlowPort", properties);
+        Assert.True(
+            result.ExitCode == 0,
+            $"dotnet msbuild failed with exit code {result.ExitCode}.{Environment.NewLine}{result.Output}{result.Error}");
+    }
+
+    private (int ExitCode, string Output, string Error) RunTarget(
+        string target,
+        params string[] properties)
+    {
         var startInfo = new ProcessStartInfo("dotnet")
         {
             WorkingDirectory = _projectDirectory,
@@ -211,7 +422,7 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
 
         startInfo.ArgumentList.Add("msbuild");
         startInfo.ArgumentList.Add(ProjectFilePath);
-        startInfo.ArgumentList.Add("/t:_SetMauiDevFlowPort");
+        startInfo.ArgumentList.Add($"/t:{target}");
         startInfo.ArgumentList.Add("/nologo");
         startInfo.ArgumentList.Add("/v:minimal");
 
@@ -226,9 +437,7 @@ public sealed class MauiDevFlowAgentTargetsTests : IDisposable
 
         process.WaitForExit();
 
-        Assert.True(
-            process.ExitCode == 0,
-            $"dotnet msbuild failed with exit code {process.ExitCode}.{Environment.NewLine}{output}{error}");
+        return (process.ExitCode, output, error);
     }
 
     private static string FindRepoRoot()

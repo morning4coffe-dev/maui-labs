@@ -1,8 +1,21 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
     <IsPackable>false</IsPackable>
+    <!-- Always runs unattended, so it is held to the coverage threshold. See eng/Tests.targets.
+         Measured through Arcade with eng/test.runsettings, Release on windows-latest (the leg
+         _build.yml pins the gate to via coverage-os, and the only leg ci-devflow.yml runs):
+         line 49.03%, branch 47.33% over 51885 lines, across every first-party assembly this
+         suite loads. Debug measures 48.94% / 46.87% over 60531 lines; Release emits fewer
+         sequence points, which is why the lines-valid floor below is set from the Release
+         number. Branch is the binding half, so 44 leaves 3.33 points of headroom. The aggregate
+         is dragged down by maui.dll (35.18% line), which this suite only touches through the
+         broker; the DevFlow assemblies it targets run far higher, for example Devices 93.77%,
+         Testing 83.92%, Analyzers 88.17%, Agent.Core 59.62%. -->
+    <EnforceCoverageThreshold>true</EnforceCoverageThreshold>
+    <CoverageThreshold>44</CoverageThreshold>
+    <CoverageMinimumLinesValid>46000</CoverageMinimumLinesValid>
   </PropertyGroup>
 
   <ItemGroup>
@@ -17,12 +30,34 @@
     <ProjectReference Include="..\..\Cli\Microsoft.Maui.Cli\Microsoft.Maui.Cli.csproj" />
     <ProjectReference Include="..\Microsoft.Maui.DevFlow.Agent.Core\Microsoft.Maui.DevFlow.Agent.Core.csproj" />
     <ProjectReference Include="..\Microsoft.Maui.DevFlow.Analyzers\Microsoft.Maui.DevFlow.Analyzers.csproj" />
+    <ProjectReference Include="..\Microsoft.Maui.DevFlow.Devices\Microsoft.Maui.DevFlow.Devices.csproj" />
     <ProjectReference Include="..\Microsoft.Maui.DevFlow.Driver\Microsoft.Maui.DevFlow.Driver.csproj" />
     <ProjectReference Include="..\Microsoft.Maui.DevFlow.Logging\Microsoft.Maui.DevFlow.Logging.csproj" />
+    <ProjectReference Include="..\Microsoft.Maui.DevFlow.TestAgent.Core\Microsoft.Maui.DevFlow.TestAgent.Core.csproj" />
+    <ProjectReference Include="..\Microsoft.Maui.DevFlow.TestAgent.Host\Microsoft.Maui.DevFlow.TestAgent.Host.csproj" />
+    <ProjectReference Include="..\Microsoft.Maui.DevFlow.Testing\Microsoft.Maui.DevFlow.Testing.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!--
+      Microsoft.Maui.DevFlow.Agent.IntegrationTests is classified by Arcade as an integration
+      test project, and cibuild never passes -integrationTest, so nothing in it executes in CI.
+      The lane gate decides whether the environment-gated QA suites run at all, so its
+      verification has to live in a suite that does run. The gate itself stays in the project
+      that consumes it; only the source is shared.
+    -->
+    <Compile Include="..\Microsoft.Maui.DevFlow.Agent.IntegrationTests\FlowQaLaneGate.cs"
+             Link="FlowQaLaneGate.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <Using Include="Xunit" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\Microsoft.Maui.DevFlow.Testing\PublicApiBaseline.txt"
+          Link="TestData\Microsoft.Maui.DevFlow.Testing.PublicApiBaseline.txt"
+          CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
 </Project>

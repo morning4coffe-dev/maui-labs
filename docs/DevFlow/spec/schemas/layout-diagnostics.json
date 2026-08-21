@@ -1,0 +1,238 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/dotnet/maui-labs/main/docs/DevFlow/spec/schemas/layout-diagnostics.json",
+  "title": "Layout diagnostics",
+  "description": "On-demand, one-shot report describing an application's managed layout state. The report is deliberately narrow: it never asserts clipping, occlusion, text truncation, or accessibility mismatches, because none of those can be proven without authoritative platform data. Geometry the agent could not read is reported as 'incomplete' and MUST NOT be interpreted as a pass.",
+  "type": "object",
+  "required": ["schemaVersion", "ruleSetVersion", "capturedUtc", "scope", "coverage", "summary", "findings"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "description": "Payload shape version. Incremented when a field is removed or changes meaning."
+    },
+    "ruleSetVersion": {
+      "type": "string",
+      "description": "Rule semantics version. Incremented when a rule's outcome or threshold changes."
+    },
+    "capturedUtc": {
+      "type": "string",
+      "description": "UTC timestamp of the scan."
+    },
+    "platform": {
+      "type": "string",
+      "description": "Platform the agent is running on."
+    },
+    "scope": { "$ref": "#/$defs/LayoutScope" },
+    "coverage": { "$ref": "#/$defs/LayoutCoverage" },
+    "summary": { "$ref": "#/$defs/LayoutSummary" },
+    "findings": {
+      "type": "array",
+      "description": "Findings in a deterministic order: violations, then observations, then incomplete results; then rule order; then finding id.",
+      "items": { "$ref": "#/$defs/LayoutFinding" }
+    }
+  },
+  "$defs": {
+    "LayoutRect": {
+      "type": "object",
+      "required": ["x", "y", "width", "height"],
+      "properties": {
+        "x": { "type": "number" },
+        "y": { "type": "number" },
+        "width": { "type": "number" },
+        "height": { "type": "number" }
+      }
+    },
+    "LayoutSize": {
+      "type": "object",
+      "required": ["width", "height"],
+      "properties": {
+        "width": { "type": "number" },
+        "height": { "type": "number" }
+      }
+    },
+    "LayoutScope": {
+      "type": "object",
+      "required": ["maxElements", "elementsExamined", "truncated"],
+      "properties": {
+        "rootElementId": {
+          "type": "string",
+          "description": "Present when the scan was restricted to one element's subtree."
+        },
+        "window": {
+          "type": "integer",
+          "description": "0-based window index, when the scan targeted a single window."
+        },
+        "maxElements": {
+          "type": "integer",
+          "description": "Element budget applied to this scan (capped at 5000 by the agent)."
+        },
+        "elementsExamined": { "type": "integer" },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when the element budget stopped the walk before the tree was exhausted."
+        },
+        "windowBounds": {
+          "$ref": "#/$defs/LayoutRect",
+          "description": "Window rectangle used by window-relative rules. Absent when the platform could not report a usable window size."
+        }
+      }
+    },
+    "LayoutCoverage": {
+      "type": "object",
+      "required": ["overall", "rules", "limitations", "neverCaptured"],
+      "properties": {
+        "overall": {
+          "type": "string",
+          "enum": ["full", "partial", "unavailable"]
+        },
+        "rules": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/LayoutRuleCoverage" }
+        },
+        "limitations": {
+          "type": "array",
+          "description": "What this report structurally cannot tell you.",
+          "items": { "type": "string" }
+        },
+        "neverCaptured": {
+          "type": "array",
+          "description": "Data classes the subsystem never reads, such as element text and property dictionaries.",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "LayoutRuleCoverage": {
+      "type": "object",
+      "required": ["ruleId", "support", "confidence", "evaluated", "skipped"],
+      "properties": {
+        "ruleId": { "$ref": "#/$defs/LayoutRuleId" },
+        "support": {
+          "type": "string",
+          "enum": ["full", "partial", "unavailable"],
+          "description": "How completely the rule could be evaluated over the captured scope."
+        },
+        "confidence": { "$ref": "#/$defs/LayoutConfidence" },
+        "evaluated": { "type": "integer" },
+        "skipped": {
+          "type": "integer",
+          "description": "Elements the rule could not be evaluated for. These are reported as 'incomplete', never as passing."
+        },
+        "limitations": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "LayoutSummary": {
+      "type": "object",
+      "required": ["violations", "observations", "incomplete"],
+      "properties": {
+        "violations": { "type": "integer" },
+        "observations": { "type": "integer" },
+        "incomplete": { "type": "integer" }
+      }
+    },
+    "LayoutRuleId": {
+      "type": "string",
+      "enum": [
+        "layout.visible-zero-area",
+        "layout.constraint-violation",
+        "layout.outside-window",
+        "layout.desired-size-constrained",
+        "layout.child-outside-parent"
+      ],
+      "description": "layout.visible-zero-area: a visible, realized element was arranged with no drawable area (violation, high confidence). layout.constraint-violation: a finite arranged dimension breaks a declared minimum/maximum request (violation, high confidence). layout.outside-window: a visible element with positive area lies entirely outside the known window (observation, medium confidence — off-canvas, scrolled, or recycled content may be intentional). layout.desired-size-constrained: the measured size materially exceeds the arranged size (observation, medium confidence — normal parent constraint behaviour). layout.child-outside-parent: a child's rectangle is not contained by its parent's (observation, low confidence — parents may intentionally allow overflow, and clipping is not observable)."
+    },
+    "LayoutConfidence": {
+      "type": "string",
+      "enum": ["high", "medium", "low"]
+    },
+    "LayoutElementReference": {
+      "type": "object",
+      "required": ["id", "type"],
+      "description": "Identity and source location only. Element text, values, and property dictionaries are never included.",
+      "properties": {
+        "id": { "type": "string" },
+        "type": { "type": "string" },
+        "automationId": { "type": "string" },
+        "sourceFile": { "type": "string" },
+        "sourceLine": { "type": "integer" },
+        "sourceColumn": { "type": "integer" }
+      }
+    },
+    "LayoutFindingEvidence": {
+      "type": "object",
+      "description": "The measurements the finding is derived from, so a reader can check the arithmetic.",
+      "properties": {
+        "frame": { "$ref": "#/$defs/LayoutRect" },
+        "windowBounds": { "$ref": "#/$defs/LayoutRect" },
+        "parentWindowBounds": { "$ref": "#/$defs/LayoutRect" },
+        "desiredSize": { "$ref": "#/$defs/LayoutSize" },
+        "explicitWidth": { "type": "number" },
+        "explicitHeight": { "type": "number" },
+        "constraint": { "type": "string" },
+        "constraintValue": { "type": "number" },
+        "actualValue": { "type": "number" },
+        "overflowWidth": { "type": "number" },
+        "overflowHeight": { "type": "number" },
+        "affectedElements": {
+          "type": "integer",
+          "description": "Set on an aggregate 'incomplete' finding: how many elements the rule could not be evaluated for."
+        }
+      }
+    },
+    "LayoutFinding": {
+      "type": "object",
+      "required": ["id", "ruleId", "outcome", "confidence", "message", "explanation", "limitations"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Stable within one report; derived from rule, element, and axis."
+        },
+        "ruleId": { "$ref": "#/$defs/LayoutRuleId" },
+        "outcome": {
+          "type": "string",
+          "enum": ["violation", "observation", "incomplete"],
+          "description": "violation: the reported geometry cannot be correct as authored. observation: worth a human look, may be entirely intentional. incomplete: the rule could not be evaluated because the required geometry was unavailable."
+        },
+        "confidence": { "$ref": "#/$defs/LayoutConfidence" },
+        "message": {
+          "type": "string",
+          "description": "The observed fact, stated without inference."
+        },
+        "explanation": {
+          "type": "string",
+          "description": "Why it may or may not be a bug, including the benign explanations that produce the same geometry."
+        },
+        "element": { "$ref": "#/$defs/LayoutElementReference" },
+        "parent": { "$ref": "#/$defs/LayoutElementReference" },
+        "evidence": { "$ref": "#/$defs/LayoutFindingEvidence" },
+        "limitations": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      }
+    },
+    "LayoutDiagnosticsRequest": {
+      "type": "object",
+      "description": "Optional scope for a layout scan. Every field is optional.",
+      "properties": {
+        "elementId": {
+          "type": "string",
+          "description": "Restrict the scan to this element and its descendants."
+        },
+        "window": {
+          "type": "integer",
+          "description": "0-based window index. Defaults to every window."
+        },
+        "maxElements": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 5000,
+          "default": 2000,
+          "description": "Element budget, clamped by the agent."
+        }
+      }
+    }
+  }
+}

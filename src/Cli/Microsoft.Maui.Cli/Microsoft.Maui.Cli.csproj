@@ -11,6 +11,9 @@
     <ToolCommandName>maui</ToolCommandName>
     <PackageId>Microsoft.Maui.Cli</PackageId>
     <Description>CLI for .NET MAUI development environment setup and device management</Description>
+    <PackageTags>maui;dotnet;cli;android;apple;devflow;diagnostics;tool</PackageTags>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackRepoRootReadme>false</PackRepoRootReadme>
     <IsPackable>true</IsPackable>
     <IsShipping>true</IsShipping>
     <IsAotCompatible>true</IsAotCompatible>
@@ -36,6 +39,9 @@
     <PackageReference Include="Websocket.Client" />
     <PackageReference Include="Xamarin.Android.Tools.AndroidSdk" />
     <PackageReference Include="Xamarin.Apple.Tools.MaciOS" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp.Workspaces" />
+    <PackageReference Include="Microsoft.CodeAnalysis.Workspaces.MSBuild" />
+    <PackageReference Include="Microsoft.Build.Locator" />
     <!-- XenoAtom.Terminal.UI requires .NET 10 (uses C# 14 extension members).
          On net9.0 we fall back to JSON output for the network monitor. -->
     <PackageReference Include="XenoAtom.Terminal.UI" Condition="'$(TargetFramework)' == 'net10.0'" />
@@ -62,18 +68,28 @@
   <ItemGroup>
     <ProjectReference Include="..\Microsoft.Maui.ProfilingHelper\Microsoft.Maui.ProfilingHelper.csproj" />
     <ProjectReference Include="..\..\DevFlow\Microsoft.Maui.DevFlow.Driver\Microsoft.Maui.DevFlow.Driver.csproj" />
+    <ProjectReference Include="..\..\DevFlow\Microsoft.Maui.DevFlow.Devices\Microsoft.Maui.DevFlow.Devices.csproj" />
+    <ProjectReference Include="..\..\DevFlow\Microsoft.Maui.DevFlow.Testing\Microsoft.Maui.DevFlow.Testing.csproj" />
+    <ProjectReference Include="..\..\DevFlow\Microsoft.Maui.DevFlow.Analyzers\Microsoft.Maui.DevFlow.Analyzers.csproj" />
     <ProjectReference Include="..\..\Go\Server\Microsoft.Maui.Go.Server.csproj" Condition="'$(TargetFramework)' == 'net10.0'" />
   </ItemGroup>
 
   <ItemGroup>
     <InternalsVisibleTo Include="Microsoft.Maui.Cli.UnitTests" />
     <InternalsVisibleTo Include="Microsoft.Maui.DevFlow.Tests" />
+    <InternalsVisibleTo Include="Microsoft.Maui.DevFlow.Agent.IntegrationTests" />
   </ItemGroup>
 
   <ItemGroup>
     <Compile Remove="Build\MauiProfilingHelper.AutoInitialize.cs" />
     <Content Include="Build\MauiProfilingHelperInjection.targets" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
     <Content Include="Build\MauiProfilingHelper.AutoInitialize.cs" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    <None Include="..\README.md" Link="README.md" Pack="true" PackagePath="/" />
+    <None Include="..\..\AppProjectReference\Microsoft.Maui.Build.AppProjectReference\build\**\*"
+             Link="Build\AppProjectReference\%(RecursiveDir)%(Filename)%(Extension)"
+             Pack="false"
+             CopyToOutputDirectory="PreserveNewest"
+             CopyToPublishDirectory="PreserveNewest" />
   </ItemGroup>
 
   <ItemGroup>
@@ -84,6 +100,15 @@
       <WithCulture>false</WithCulture>
     </EmbeddedResource>
     <EmbeddedResource Include="..\..\..\plugins\dotnet-maui\skills\maui-devflow-session-review\**\*" LogicalName="devflow.skills/maui-devflow-session-review/%(RecursiveDir)%(Filename)%(Extension)">
+      <WithCulture>false</WithCulture>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\..\plugins\dotnet-maui\skills\maui-devflow-test\**\*" LogicalName="devflow.skills/maui-devflow-test/%(RecursiveDir)%(Filename)%(Extension)">
+      <WithCulture>false</WithCulture>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\..\plugins\dotnet-maui\skills\maui-devflow-artifact\**\*" LogicalName="devflow.skills/maui-devflow-artifact/%(RecursiveDir)%(Filename)%(Extension)">
+      <WithCulture>false</WithCulture>
+    </EmbeddedResource>
+    <EmbeddedResource Include="..\..\..\plugins\dotnet-maui\skills\maui-devflow-ci-triage\**\*" LogicalName="devflow.skills/maui-devflow-ci-triage/%(RecursiveDir)%(Filename)%(Extension)">
       <WithCulture>false</WithCulture>
     </EmbeddedResource>
   </ItemGroup>

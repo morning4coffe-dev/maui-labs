@@ -356,7 +356,11 @@ jobs:
           api-level: ${{ env.DEVFLOW_TEST_ANDROID_API }}
           arch: x86_64
           target: google_apis
-          force-avd-creation: false
+          # This step only runs when the cache missed, which is exactly when the AVD does not
+          # exist yet, so it has to be allowed to create one. Refusing creation here made the
+          # step impossible to satisfy: it booted an AVD that was never created and timed out.
+          # A repository with a warm cache never noticed, because the step was skipped.
+          force-avd-creation: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: echo "Generated AVD snapshot."
@@ -448,7 +452,9 @@ jobs:
           api-level: ${{ env.DEVFLOW_TEST_ANDROID_API }}
           arch: x86_64
           target: google_apis
-          force-avd-creation: false
+          # See the integration lane's warm-up: creation has to be permitted on a cache miss,
+          # which is the only condition under which this step runs at all.
+          force-avd-creation: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: echo "Generated AVD snapshot."

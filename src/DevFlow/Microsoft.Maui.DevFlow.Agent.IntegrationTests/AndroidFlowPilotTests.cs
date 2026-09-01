@@ -14,6 +14,11 @@ public sealed class AndroidFlowPilotTests
 {
     const int DefaultCleanRepetitions = 3;
     const string PilotCheckpointRoute = AndroidFlowTestHost.DefaultCheckpointRoute;
+    const string FragileFlowExclusionReason =
+        "The committed flow contains a fragile selector and is not admissible in the required passing corpus.";
+    internal const string DemoFlowEnvironmentVariable = "DEVFLOW_FLOW_PILOT_DEMO_FLOW";
+    internal const string DemoFlowPrefix = "demo-";
+    internal static readonly string[] DeliberateFailureFlowPrefixes = [DemoFlowPrefix, "drifted-"];
     readonly ITestOutputHelper _output;
 
     public AndroidFlowPilotTests(ITestOutputHelper output)
@@ -32,10 +37,96 @@ public sealed class AndroidFlowPilotTests
     [Fact]
     public async Task TierOneFlows_LoadCommittedPlanBundles()
     {
-        var flows = await LoadTierOneFlowsAsync(AppFixtureBase.FindRepoRoot());
+        var exclusions = new List<(string Path, string Reason)>();
+        var flows = await LoadTierOneFlowsAsync(
+            AppFixtureBase.FindRepoRoot(),
+            (path, reason) => exclusions.Add((path, reason)));
 
         Assert.All(flows, flow => Assert.NotNull(flow.Plan));
         Assert.All(flows, flow => Assert.Equal(MauiFlowSideEffectPolicies.None, flow.Plan!.SideEffectPolicy));
+        Assert.All(flows, flow => Assert.False(ContainsFragileSelector(flow.Flow)));
+        Assert.DoesNotContain(
+            flows,
+            flow => IsDeliberateFailureFlow(flow.SourcePath));
+        var exclusion = Assert.Single(exclusions);
+        Assert.Equal("recording-2026-08-04T07-33-09.md", exclusion.Path);
+        Assert.Equal(FragileFlowExclusionReason, exclusion.Reason);
+    }
+
+    [Fact]
+    public void SelectTierOneFlowFiles_DefaultSelection_ExcludesDemoFlows()
+    {
+        var paths = new[]
+        {
+            Path.Combine("flows", "README.md"),
+            Path.Combine("flows", "demo-ci-fix-drift.md"),
+            Path.Combine("flows", "drifted-add-todo.md"),
+            Path.Combine("flows", "drifted-assert-after-commit.md"),
+            Path.Combine("flows", "native-baseline.md"),
+            Path.Combine("flows", "verified-add-todo.md"),
+        };
+
+        var selected = SelectTierOneFlowFiles(paths, demoFlowSelection: null);
+
+        Assert.Equal(
+            ["native-baseline.md", "verified-add-todo.md"],
+            selected.Select(static path =>
+                Path.GetFileName(path)
+                ?? throw new InvalidOperationException("A selected flow path had no file name.")).ToArray());
+    }
+
+    [Fact]
+    public void SelectTierOneFlowFiles_DemoSelection_LoadsExactlyTheNamedDemoFlow()
+    {
+        var paths = new[]
+        {
+            Path.Combine("flows", "demo-ci-fix-drift.md"),
+            Path.Combine("flows", "native-baseline.md"),
+        };
+
+        var selected = SelectTierOneFlowFiles(paths, "demo-ci-fix-drift.md");
+
+        Assert.Equal("demo-ci-fix-drift.md", Path.GetFileName(Assert.Single(selected)));
+    }
+
+    [Theory]
+    [InlineData("native-baseline.md")]
+    [InlineData("../demo-ci-fix-drift.md")]
+    [InlineData("demo-ci-fix-drift")]
+    [InlineData("demo-missing.md")]
+    public void SelectTierOneFlowFiles_UnsafeOrUnknownDemoSelection_IsRefused(string selection)
+    {
+        var paths = new[]
+        {
+            Path.Combine("flows", "demo-ci-fix-drift.md"),
+            Path.Combine("flows", "native-baseline.md"),
+        };
+
+        Assert.Throws<InvalidOperationException>(() => SelectTierOneFlowFiles(paths, selection));
+    }
+
+    [Fact]
+    public void TierOneFlowCorpus_ContainsTheCommittedDemoFlowOutsideTheDefaultSelection()
+    {
+        var directory = Path.Combine(
+            AppFixtureBase.FindRepoRoot(), "samples", "DevFlow.Sample", "maui-tests");
+        var files = Directory.GetFiles(directory, "*.md");
+
+        Assert.Contains(
+            files,
+            path => string.Equals(Path.GetFileName(path), "demo-ci-fix-drift.md", StringComparison.Ordinal));
+        Assert.Contains(
+            files,
+            path => string.Equals(Path.GetFileName(path), "drifted-add-todo.md", StringComparison.Ordinal));
+        Assert.Contains(
+            files,
+            path => string.Equals(Path.GetFileName(path), "drifted-assert-after-commit.md", StringComparison.Ordinal));
+        Assert.DoesNotContain(
+            SelectTierOneFlowFiles(files, demoFlowSelection: null),
+            IsDeliberateFailureFlow);
+        Assert.Equal(
+            "demo-ci-fix-drift.md",
+            Path.GetFileName(Assert.Single(SelectTierOneFlowFiles(files, "demo-ci-fix-drift.md"))));
     }
 
     [AndroidFlowPilotFact]
@@ -53,7 +144,13 @@ public sealed class AndroidFlowPilotTests
 
         try
         {
-            flows = await LoadTierOneFlowsAsync(repositoryRoot);
+            flows = await LoadTierOneFlowsAsync(
+                repositoryRoot,
+                (path, reason) =>
+                {
+                    _output.WriteLine($"Android flow-pilot excluded {path}: {reason}");
+                    manifest.AddOmission("tier1-flow-excluded", $"{path}: {reason}");
+                });
             fixture = new AndroidEmulatorFixture();
             await fixture.InitializeAsync();
             host = fixture.CreateFlowTestHost();
@@ -89,6 +186,24 @@ public sealed class AndroidFlowPilotTests
                         });
 
                     manifest.RecordCleanAttempt(flow.Flow, flow.SourcePath, repetition, result.Report);
+                    foreach (var artifact in result.Artifacts.Where(static artifact =>
+                                 !string.IsNullOrWhiteSpace(artifact.Path)))
+                    {
+                        manifest.RecordArtifact(artifact);
+                    }
+
+                    var failureEvidencePath = Path.Combine(runDirectory, "failure.mauitrace");
+                    if (File.Exists(failureEvidencePath))
+                    {
+                        manifest.RecordArtifact(new MauiFlowArtifactReference
+                        {
+                            Kind = "mauitrace",
+                            Path = failureEvidencePath,
+                            Redacted = true,
+                            CreatedAt = result.Report.EndedAt ?? DateTimeOffset.UtcNow,
+                        });
+                    }
+
                     if (!string.Equals(result.Report.Outcome?.Status, MauiFlowRunOutcomes.Passed, StringComparison.Ordinal))
                     {
                         failures.Add(
@@ -175,16 +290,73 @@ public sealed class AndroidFlowPilotTests
             ? value
             : DefaultCleanRepetitions;
 
+    /// <summary>
+    /// Selects the flow files the Tier-1 pilot loads. The default is the ordinary Tier-1 corpus and
+    /// never includes a deliberately failing fixture: those document repair scenarios and cannot
+    /// satisfy a gate that requires every loaded flow to pass. Demo mode is a single explicit
+    /// <c>demo-</c>-prefixed file name; it loads that flow and nothing else, so a demo run can never
+    /// quietly widen into the ordinary corpus either.
+    /// </summary>
+    internal static IReadOnlyList<string> SelectTierOneFlowFiles(
+        IEnumerable<string> flowPaths,
+        string? demoFlowSelection)
+    {
+        ArgumentNullException.ThrowIfNull(flowPaths);
+
+        var ordered = flowPaths
+            .Where(static path => !string.Equals(Path.GetFileName(path), "README.md", StringComparison.OrdinalIgnoreCase))
+            .OrderBy(static path => path, StringComparer.Ordinal)
+            .ToList();
+        var selection = demoFlowSelection?.Trim();
+        if (string.IsNullOrEmpty(selection))
+        {
+            return ordered
+                .Where(static path => !IsDeliberateFailureFlow(path))
+                .ToList();
+        }
+
+        if (!string.Equals(Path.GetFileName(selection), selection, StringComparison.Ordinal) ||
+            !selection.StartsWith(DemoFlowPrefix, StringComparison.Ordinal) ||
+            !selection.EndsWith(".md", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{DemoFlowEnvironmentVariable} must name a single '{DemoFlowPrefix}' prefixed Markdown flow file, " +
+                $"not '{selection}'.");
+        }
+
+        var matches = ordered
+            .Where(path => string.Equals(Path.GetFileName(path), selection, StringComparison.Ordinal))
+            .ToList();
+        if (matches.Count != 1)
+        {
+            throw new InvalidOperationException(
+                $"{DemoFlowEnvironmentVariable} selected '{selection}', but {matches.Count} matching flows were found.");
+        }
+
+        return matches;
+    }
+
+    internal static bool IsDeliberateFailureFlow(string path)
+        => DeliberateFailureFlowPrefixes.Any(prefix =>
+            Path.GetFileName(path).StartsWith(prefix, StringComparison.Ordinal));
+
+    internal static bool ContainsFragileSelector(MauiFlow flow)
+        => flow.Steps.Any(static step =>
+            step.Fragile ||
+            FlowSelector.IsFragile(step.Target) ||
+            FlowSelector.IsFragile(step.Args?.Selector));
+
     internal static async Task<List<FlowPilotFlowSource>> LoadTierOneFlowsAsync(
         string repositoryRoot,
+        Action<string, string>? reportExclusion = null,
         CancellationToken cancellationToken = default)
     {
         var directory = Path.Combine(repositoryRoot, "samples", "DevFlow.Sample", "maui-tests");
         var loader = new CommittedFlowBundleLoader();
         var sources = new List<FlowPilotFlowSource>();
-        foreach (var path in Directory.GetFiles(directory, "*.md")
-                     .Where(static path => !string.Equals(Path.GetFileName(path), "README.md", StringComparison.OrdinalIgnoreCase))
-                     .OrderBy(static path => path, StringComparer.Ordinal))
+        var demoSelection = Environment.GetEnvironmentVariable(DemoFlowEnvironmentVariable);
+        var demoMode = !string.IsNullOrWhiteSpace(demoSelection);
+        foreach (var path in SelectTierOneFlowFiles(Directory.GetFiles(directory, "*.md"), demoSelection))
         {
             var bundle = await loader.LoadAsync(path, planPath: null, cancellationToken);
 
@@ -209,7 +381,20 @@ public sealed class AndroidFlowPilotTests
                     $"but the Android flow pilot verifies '{PilotCheckpointRoute}'.");
             }
 
+            if (!demoMode && ContainsFragileSelector(bundle.Flow))
+            {
+                reportExclusion?.Invoke(Path.GetFileName(path), FragileFlowExclusionReason);
+                continue;
+            }
+
             sources.Add(new FlowPilotFlowSource(path, bundle.Flow, bundle.Plan));
+        }
+
+        if (demoMode)
+        {
+            if (sources.Count != 1)
+                throw new InvalidOperationException($"Expected exactly 1 demo flow, found {sources.Count}.");
+            return sources;
         }
 
         if (sources.Count is < 6 or > 12)
@@ -304,6 +489,72 @@ public sealed class FlowPilotArtifactManifestTests
                 "screenshots",
                 rootElement.GetProperty("privacy").GetProperty("excludedByDefault").EnumerateArray()
                     .Select(static item => item.GetString()));
+        }
+        finally
+        {
+            DeleteArtifactRoot(root);
+        }
+    }
+
+    [Fact]
+    public void WriteAtomic_UsesReportPathWhenSerializedArtifactPathsWereRedacted()
+    {
+        var root = CreateArtifactRoot();
+        try
+        {
+            var manifest = CreateManifest(root);
+            var report = Report(root, "attempt-1", MauiFlowRunOutcomes.Passed, null);
+            report.Artifacts.Clear();
+            report.Artifacts.Add(new MauiFlowArtifactReference
+            {
+                Kind = "flow-run-report",
+                Redacted = true,
+            });
+
+            manifest.RecordCleanAttempt(Flow(), SourcePath(), 1, report);
+            var write = manifest.WriteAtomic();
+
+            Assert.True(write.Ok, write.Error);
+            using var document = JsonDocument.Parse(File.ReadAllText(write.Path!));
+            var artifact = Assert.Single(
+                document.RootElement.GetProperty("artifacts").EnumerateArray(),
+                entry => entry.GetProperty("kind").GetString() == "flow-run-report");
+            Assert.EndsWith(
+                "attempt-1/flow-run.json",
+                artifact.GetProperty("path").GetString(),
+                StringComparison.Ordinal);
+            Assert.True(artifact.GetProperty("redacted").GetBoolean());
+            Assert.DoesNotContain(
+                document.RootElement.GetProperty("omissions").EnumerateArray(),
+                entry => entry.GetProperty("kind").GetString() == "artifact-path");
+        }
+        finally
+        {
+            DeleteArtifactRoot(root);
+        }
+    }
+
+    [Fact]
+    public void WriteAtomic_PathlessUnknownArtifactIsReportedAsAnOmission()
+    {
+        var root = CreateArtifactRoot();
+        try
+        {
+            var manifest = CreateManifest(root);
+            var report = Report(root, "attempt-1", MauiFlowRunOutcomes.Passed, null);
+            report.Artifacts.Add(new MauiFlowArtifactReference
+            {
+                Kind = "custom-diagnostic",
+                Redacted = true,
+            });
+
+            manifest.RecordCleanAttempt(Flow(), SourcePath(), 1, report);
+            var write = manifest.WriteAtomic();
+
+            Assert.True(write.Ok, write.Error);
+            Assert.Contains(
+                manifest.Omissions,
+                omission => omission.Kind == "artifact-path");
         }
         finally
         {

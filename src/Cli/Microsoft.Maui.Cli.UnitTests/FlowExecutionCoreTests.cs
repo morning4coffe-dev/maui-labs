@@ -1313,15 +1313,15 @@ public sealed class FlowExecutionCoreTests
         Assert.Equal(FlowExecutionExitCategories.Unverified, result.PrimaryExitCategory);
         Assert.Equal(
             [MauiFlowSecondaryFailurePhases.ArtifactCleanup, MauiFlowSecondaryFailurePhases.Cleanup],
-            result.Report!.SecondaryFailures.Select(static failure => failure.Phase).ToArray());
+            result.Report!.SecondaryFailures.Select(static failure => failure.Phase!).ToArray());
         // The manifest is a redacted projection, not the report's own list, so it is compared on
         // values rather than by reference.
         Assert.Equal(
             [MauiFlowSecondaryFailurePhases.ArtifactCleanup, MauiFlowSecondaryFailurePhases.Cleanup],
-            result.Manifest!.Outcome!.SecondaryFailures.Select(static failure => failure.Phase).ToArray());
+            result.Manifest!.Outcome!.SecondaryFailures.Select(static failure => failure.Phase!).ToArray());
         Assert.Equal(
             ["artifact-cleanup-failed", "fake-cleanup-failed"],
-            result.Manifest.Outcome.SecondaryFailures.Select(static failure => failure.Code).ToArray());
+            result.Manifest.Outcome.SecondaryFailures.Select(static failure => failure.Code!).ToArray());
         Assert.Contains(
             result.Manifest.Lifecycle!.Stages,
             stage => stage.Name == "artifact-cleanup" && stage.Status == "failed");
@@ -2818,6 +2818,19 @@ public sealed class FlowExecutionCoreTests
             Assert.Equal(FlowExecutionCleanupPolicies.Uninstall, fake.Request?.Execution.CleanupPolicy);
             Assert.True(result.ParseJsonOutput().GetProperty("matched").GetBoolean());
             Assert.False(result.ParseJsonOutput().GetProperty("approvalGranted").GetBoolean());
+
+            var human = await cli.InvokeRawAsync(
+                "devflow", "flow", "reproduce", "maui-tests\\checkout.md",
+                "--import", "downloaded\\flow-run.json",
+                "--project", "src\\App\\App.csproj",
+                "--device", "emulator-5554",
+                "--output", "artifacts\\reproduction-human",
+                "--no-json");
+
+            Assert.Equal(0, human.ExitCode);
+            Assert.Contains("Failure correspondence: same-failure", human.StdOut, StringComparison.Ordinal);
+            Assert.Contains("Developer lane:", human.StdOut, StringComparison.Ordinal);
+            Assert.Contains("leave the worktree uncommitted", human.StdOut, StringComparison.Ordinal);
         }
         finally
         {

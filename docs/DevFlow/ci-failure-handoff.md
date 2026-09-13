@@ -382,13 +382,17 @@ to fix the failure, use the `maui-devflow-ci-fix` skill:
 2. download only the deterministic handoff and platform evidence artifacts;
 3. resolve the one-way test identity to exactly one current committed flow;
 4. run `maui devflow flow reproduce` on the exact local project and device before editing;
-5. require `failureCorrespondence: same-failure` with no separate flow/source/platform/runtime,
-   evidence, completion, or cleanup blocker, then classify the fresh local result as test drift,
-   app regression, infrastructure, or inconclusive;
+5. require either `failureCorrespondence: same-failure` with no separate blocker, or the
+   independent local edit gate: an exact current flow, clean relevant paths, terminal local
+   `test-failure`, aligned local checkpoints, explicit successful required independent oracles,
+   complete cleanup, and no truncation or secondary failure. An independent local gate does not
+   upgrade CI correspondence; the PR must keep that linkage limitation explicit;
 6. for test drift, make the narrow proven flow edit and run `maui devflow flow commit`; for an app
    regression, fix the app and leave the test unchanged;
 7. run `maui devflow flow run` again on the same target and report its actual verification state;
-8. leave the ordinary worktree diff uncommitted for review in Source Control.
+8. after a terminal verified pass with complete cleanup, create one bounded conventional commit,
+   push a new non-force branch, and open a draft PR linked to the issue. The developer reviews and
+   merges the PR; the agent never auto-merges or closes the issue.
 
 Imported evidence alone never permits an edit. Infrastructure, inconclusive, superseded, ambiguous,
 unknown-completion, truncated, or non-reproducing cases stop without a source change. The Inspector

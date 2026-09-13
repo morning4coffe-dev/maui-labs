@@ -337,12 +337,16 @@ Imported CI `flow-run.json` reports and `.mauitrace` evidence are diagnostic
 only. Even independently attested provenance cannot authorize execution,
 repair, source changes, platform qualification, or a physical-device claim. A
 new local run must match current flow, app, target, failure, and checkpoint
-facts before imported failure evidence can enter the human repair path.
+facts before imported failure evidence can establish CI correspondence. When
+cross-environment facts remain unavailable, a fresh terminal verified local
+failure may independently justify an ordinary edit without upgrading that CI
+linkage.
 
 When the developer asks Copilot to take a `devflow-ci-failure` issue all the
 way through a local source fix, use the separate `maui-devflow-ci-fix` skill.
 That route uses the operator CLI for a fresh device-backed reproduction, then
 normal Copilot workspace editing and `maui devflow flow run` for the post-fix
-check. It leaves an uncommitted Source Control diff. This does not add source
-authority to the restricted `test-agent` MCP profile or make imported evidence
-authoritative.
+check. After a terminal verified pass, it creates a bounded commit and draft
+pull request automatically; the developer retains review and merge authority.
+This does not add source authority to the restricted `test-agent` MCP profile
+or make imported evidence authoritative.

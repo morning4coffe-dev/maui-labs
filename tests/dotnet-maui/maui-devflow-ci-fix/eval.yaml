@@ -1,12 +1,13 @@
 scenarios:
-  - name: "Take a trusted DevFlow issue through a local uncommitted fix"
+  - name: "Take a trusted DevFlow issue through an automatic draft PR"
     prompt: |
       I want to fix this DevFlow CI failure locally, but this is a plan review,
       so do not execute commands. List the exact ordered actions for
       https://github.com/contoso/shop/issues/42 locally. It is a
       bot-authored issue labeled devflow-ci-failure. I have one Android
       emulator and the Shop MAUI project. Take it from the issue through local
-      reproduction, fix the right file, rerun it, and let me review the diff.
+      reproduction, fix the right file, rerun it, and open the draft PR for my
+      review.
     assertions:
       - type: "output_matches"
         pattern: "(?i)Resolve-DevFlowCiFailureIssue|issue.{0,40}(validat|resolver)"
@@ -19,15 +20,17 @@ scenarios:
       - type: "output_matches"
         pattern: "(?i)flow run.{0,120}(rerun|verify|post-fix)|(rerun|post-fix).{0,120}flow run"
       - type: "output_matches"
-        pattern: "(?i)(uncommitted|not committed).{0,100}(diff|Source Control)|(diff|Source Control).{0,100}(uncommitted|not committed)"
+        pattern: "(?i)(conventional commit|git commit).{0,100}(push|branch)|(push|branch).{0,100}(conventional commit|git commit)"
+      - type: "output_matches"
+        pattern: "(?i)(draft PR|draft pull request|gh pr create.{0,30}--draft)"
       - type: "output_not_matches"
-        pattern: "(?i)(?:I(?:'ll| will)|we(?:'ll| will)) +(commit|push|merge|close the issue)"
+        pattern: "(?i)(?:I(?:'ll| will)|we(?:'ll| will)) +(force[- ]?push|merge|close the issue)"
       - type: "output_not_matches"
         pattern: "(?i)(custom|bespoke).{0,40}(approval|test management|diff).{0,20}(UI|panel)"
     rubric:
       - "Validates the publisher-owned issue and exact run before consuming artifact facts."
       - "Resolves the exact flow, performs a fresh device-backed local reproduction, and classifies before editing."
-      - "Uses ordinary workspace editing, reruns locally, and leaves an uncommitted Source Control diff."
+      - "Uses ordinary workspace editing, reruns locally, then creates a bounded commit and draft PR."
     timeout: 300
 
   - name: "Do not edit when the CI failure does not reproduce"
@@ -46,6 +49,8 @@ scenarios:
         pattern: "(?i)(diagnostic|CI evidence).{0,80}(not|never).{0,40}(authority|enough)"
       - type: "output_not_matches"
         pattern: "(?i)(?:I(?:'ll| will)|we(?:'ll| will)) +(change|update|repair|edit) the selector"
+      - type: "output_not_matches"
+        pattern: "(?i)(?:I(?:'ll| will)|we(?:'ll| will)) +(commit|push|open).{0,30}(branch|PR|pull request)"
     rubric:
       - "Treats the local non-reproduction as a stop rather than repairing from CI alone."
       - "Does not change the flow or app."
@@ -68,6 +73,8 @@ scenarios:
         pattern: "(?i)(app|application|domain|payment).{0,80}(source|fix)"
       - type: "output_matches"
         pattern: "(?i)independent.{0,40}(oracle|receipt).{0,80}(rerun|verify)"
+      - type: "output_matches"
+        pattern: "(?i)(draft PR|draft pull request)"
       - type: "output_not_matches"
         pattern: "(?i)(verify.{0,20}false|remove.{0,30}assert|relax.{0,30}expected|add.{0,20}(sleep|retry))"
     rubric:
@@ -88,6 +95,8 @@ scenarios:
         pattern: "(?i)(stop|cannot proceed|stale)"
       - type: "output_not_matches"
         pattern: "(?i)(?:I(?:'ll| will)|we(?:'ll| will)) +(pick|choose|fix).{0,50}(closest|current) flow"
+      - type: "output_not_matches"
+        pattern: "(?i)(?:I(?:'ll| will)|we(?:'ll| will)) +(commit|push|open).{0,30}(branch|PR|pull request)"
     rubric:
       - "Treats matched-superseded as an honest stop."
       - "Does not guess a replacement flow or edit current source."
@@ -101,7 +110,8 @@ scenarios:
       resolved to one flow. A fresh local run reproduces a pre-dispatch
       locator-not-found on a trailing action after the independent business
       oracle passed. Live inspection finds one unique replacement AutomationId
-      for the same control. State how to apply and verify the local fix.
+      for the same control. State how to apply, verify, and publish the local
+      fix for review.
     assertions:
       - type: "output_matches"
         pattern: "(?i)test-drift|selector drift"
@@ -113,14 +123,16 @@ scenarios:
         pattern: "(?i)flow run"
       - type: "output_matches"
         pattern: "(?i)(assertions|expected values|action order).{0,80}(unchanged|preserv)"
+      - type: "output_matches"
+        pattern: "(?i)(conventional commit|git commit).{0,100}(draft PR|draft pull request)|(draft PR|draft pull request).{0,100}(commit|push)"
       - type: "output_not_matches"
         pattern: "(?i)maui_test_patch.{0,60}(apply|approve)"
       - type: "output_not_matches"
-        pattern: "(?i)(?:I(?:'ll| will)|we(?:'ll| will)) +(commit|push)"
+        pattern: "(?i)(?:I(?:'ll| will)|we(?:'ll| will)) +(force[- ]?push|auto[- ]?merge|close the issue)"
     rubric:
-      - "Permits a normal uncommitted flow edit only after current local selector proof."
+      - "Permits a normal flow edit only after current local selector proof."
       - "Rebinds the plan digest and reruns the flow on the same target."
-      - "Preserves assertions and leaves commit/push to the developer."
+      - "Preserves assertions, then creates the bounded commit and draft PR automatically."
     timeout: 240
 
   - name: "Use explicit failure correspondence when Android trust cannot match"
@@ -147,3 +159,24 @@ scenarios:
       - "Allows only the ordinary developer lane because all separate blockers are absent."
       - "Does not upgrade artifact trust or claim broker repair authority."
     timeout: 240
+
+  - name: "Do not publish a replay pass that is not independently verified"
+    prompt: |
+      I asked Copilot to fix a trusted DevFlow CI issue locally. The source
+      change made the rerun report status=passed and terminal=true, but
+      verified=false with exitCategory=unverified because the flow declares no
+      independent business oracle. Should it create the commit and PR anyway?
+    assertions:
+      - type: "output_matches"
+        pattern: "(?i)replay passed.{0,50}not independently verified|verified.?false"
+      - type: "output_matches"
+        pattern: "(?i)(do not|must not|cannot).{0,60}(commit|push|draft PR|pull request)"
+      - type: "output_matches"
+        pattern: "(?i)(leave|preserve).{0,50}(local diff|worktree|Source Control)"
+      - type: "output_not_matches"
+        pattern: "(?i)(?:I(?:'ll| will)|we(?:'ll| will)) +(commit|push|open).{0,30}(branch|PR|pull request)"
+    rubric:
+      - "Distinguishes a replay pass from a verified pass."
+      - "Refuses automatic publication without the required independent oracle."
+      - "Preserves the local diff and reports the missing verification fact."
+    timeout: 180

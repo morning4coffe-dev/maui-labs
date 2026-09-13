@@ -8,7 +8,7 @@ description: >-
   producing a deterministic triage report; preparing a repro command for a
   human. DO NOT USE FOR: authoring CI workflows or permissions (use
   maui-devflow-ci); running or repairing flows locally (use
-  maui-devflow-ci-fix for the complete issue-to-local-diff workflow, or
+  maui-devflow-ci-fix for the complete issue-to-draft-PR workflow, or
   maui-devflow-test for broker-owned conversational testing); promoting a recording (use
   maui-devflow-record); inspecting one already-downloaded artifact in isolation
   through the read-only trust projection (use maui-devflow-artifact); applying

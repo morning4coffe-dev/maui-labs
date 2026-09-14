@@ -4,14 +4,14 @@
   "revision": 1,
   "flow": {
     "path": "demo-ci-fix-drift.md",
-    "digest": "63fc09ecbef82a33f1cb62a07889e0a7c0829064d32754b9a218322eb318006b"
+    "digest": "0cbfe20100601dfc0b1e230ec4b865bd27659ab7e39d14724dddbe6b5f81ec47"
   },
   "title": "demo-ci-fix-drift",
-  "goal": "Demo-only. Produce a deliberately failing run whose business outcome is independently verified and whose only defect is an unresolved trailing action selector, so the manager-facing CI-to-local-fix demo has a real, repair-eligible input. This plan never qualifies anything.",
+  "goal": "Demo-only. Exercise the locally repaired trailing action selector while preserving the independently verified business outcome, so the manager-facing CI-to-local-fix demo reaches its draft review gate. This plan never qualifies anything, and merging the repair would disable the intentionally failing showcase.",
   "scenarios": [
     {
       "scenarioId": "add-todo-is-committed",
-      "description": "A user adds a todo from the native page and the app commits it, but a trailing demo action addresses a control the app does not expose.",
+      "description": "A user adds a todo from the native page, the app commits it, and a trailing demo action opens the modal through the app-owned AutomationId.",
       "acceptanceCriterionIds": [
         "todo-committed"
       ]
@@ -19,7 +19,7 @@
   ],
   "assumptions": [],
   "risks": [
-    "This flow is demo-only and is intended to fail. The trailing action deliberately addresses an AutomationId the app does not expose."
+    "This flow is demo-only and does not qualify the app. Merging the repaired selector would disable the intentionally failing android-demo-ci-fix showcase."
   ],
   "preconditions": [],
   "checkpoint": {
@@ -32,7 +32,7 @@
   "acceptanceCriteria": [
     {
       "criterionId": "todo-committed",
-      "description": "The added todo is committed to the app\u0027s durable ledger, not merely rendered in the list.",
+      "description": "The added todo is committed to the app's durable ledger, not merely rendered in the list.",
       "required": true,
       "businessOracleId": "todo-ledger-record"
     }
@@ -57,17 +57,17 @@
   "independentBusinessOracles": [
     {
       "oracleId": "todo-ledger-record",
-      "description": "Read the app\u0027s private todo ledger over adb and confirm it holds the exact record for the todo the flow added, and no removal. The ledger is written by the domain layer and read by no page, so this evidence is produced outside the UI the flow drove.",
+      "description": "Read the app's private todo ledger over adb and confirm it holds the exact record for the todo the flow added, and no removal. The ledger is written by the domain layer and read by no page, so this evidence is produced outside the UI the flow drove.",
       "required": true,
       "independent": true,
       "evidenceKind": "android-app-storage",
       "reference": "files/todo-ledger.jsonl",
       "expect": {
         "contains": [
-          "{\u0022event\u0022:\u0022todo-added\u0022,\u0022id\u0022:\u0022todo-0001\u0022,\u0022title\u0022:\u0022Ledger verified item\u0022,\u0022completed\u0022:false}"
+          "{\"event\":\"todo-added\",\"id\":\"todo-0001\",\"title\":\"Ledger verified item\",\"completed\":false}"
         ],
         "absent": [
-          "{\u0022event\u0022:\u0022todo-removed\u0022"
+          "{\"event\":\"todo-removed\""
         ]
       }
     }

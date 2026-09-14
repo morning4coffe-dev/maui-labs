@@ -15,7 +15,7 @@ DevFlow runtime skills are bundled with the `maui` CLI from `plugins/dotnet-maui
 | | [maui-devflow-record](dotnet-maui/skills/maui-devflow-record/) | Prepare a human-driven Inspector recording and promote the capture into a reviewable flow. |
 | | [maui-devflow-ci](dotnet-maui/skills/maui-devflow-ci/) | Wire DevFlow flow execution into GitHub Actions with least-privilege, label-gated jobs. |
 | | [maui-devflow-ci-triage](dotnet-maui/skills/maui-devflow-ci-triage/) | Diagnose a red DevFlow CI run from its artifacts and hand off a bounded local reproduction. |
-| | [maui-devflow-ci-fix](dotnet-maui/skills/maui-devflow-ci-fix/) | Take a trusted DevFlow failure issue through local reproduction, an ordinary worktree fix, rerun, and uncommitted diff handoff. |
+| | [maui-devflow-ci-fix](dotnet-maui/skills/maui-devflow-ci-fix/) | Take a trusted DevFlow failure issue through local reproduction, a verified fix, and an automatic draft PR for developer review. |
 | | [maui-devflow-artifact](dotnet-maui/skills/maui-devflow-artifact/) | Diagnose explicit DevFlow flow-run and `.mauitrace` artifacts through a read-only trust projection. |
 | | [devflow-connect](dotnet-maui/skills/devflow-connect/) | Diagnose and fix DevFlow agent connectivity issues between the `maui` CLI and running .NET MAUI apps. |
 | | [maui-ai-debugging](dotnet-maui/skills/maui-ai-debugging/) | Legacy compatibility skill for older DevFlow clients. |

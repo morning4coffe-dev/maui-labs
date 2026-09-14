@@ -30,7 +30,17 @@ public sealed class DevFlowSkillReferenceTests
         Assert.Contains("independent local edit gate", skill, StringComparison.Ordinal);
         Assert.Contains("keep the CI linkage unproven", skill, StringComparison.Ordinal);
         Assert.Contains("Never weaken a test", skill, StringComparison.Ordinal);
-        Assert.Contains("Never stage, commit, push", skill, StringComparison.Ordinal);
+        Assert.Contains("automatic bounded commit plus draft pull request", skill, StringComparison.Ordinal);
+        Assert.Contains("Never force-push, rewrite history, merge", skill, StringComparison.Ordinal);
+
+        var publish = File.ReadAllText(Path.Combine(pluginRoot, "references", "publish.md"));
+        Assert.Contains("git push --set-upstream", publish, StringComparison.Ordinal);
+        Assert.Contains("gh pr create --draft", publish, StringComparison.Ordinal);
+        Assert.Contains("git remote get-url origin", publish, StringComparison.Ordinal);
+        Assert.Contains("--repo $incident.repository", publish, StringComparison.Ordinal);
+        Assert.Contains("exitCategory: unverified", publish, StringComparison.Ordinal);
+        Assert.Contains("no body or trailers", publish, StringComparison.Ordinal);
+        Assert.Contains("The PR is draft; it was not merged and the issue remains open.", publish, StringComparison.Ordinal);
     }
 
     [Fact]

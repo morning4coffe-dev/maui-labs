@@ -182,7 +182,7 @@ Interpret the terminal result precisely:
 Do not repeatedly mutate the test to chase a green result. After two
 substantively different failed fixes, stop and present the evidence.
 
-## Final handoff
+## Prepare publication
 
 Run:
 
@@ -192,15 +192,10 @@ git diff --stat
 git status --short
 ```
 
-Show a bounded diff for the changed files. Report:
+Show a bounded diff for the changed files and verify that no unrelated dirty
+or staged path exists. Then continue to
+[publish the verified fix](publish.md), unless the developer explicitly asked
+for a local-only handoff.
 
-- classification and confidence;
-- original local run id/output;
-- root cause;
-- exact files and behavior changed;
-- post-fix run id/output and verification state;
-- remaining evidence or platform limitations;
-- `Worktree changes are uncommitted; review them in Source Control.`
-
-Do not stage, commit, push, open a pull request, or close the issue as part of
-this workflow.
+Do not publish when the post-fix run is unverified, cleanup is incomplete,
+secondary failures remain, or unrelated changes would enter the commit.

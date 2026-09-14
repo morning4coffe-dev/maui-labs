@@ -78,16 +78,16 @@ scenarios:
     prompt: |
       Here is a bot-authored devflow-ci-failure issue. I have the matching
       Android emulator locally. Do not just summarize it: reproduce it, fix the
-      app or test, rerun it, and leave me the diff.
+      app or test, rerun it, and open the draft PR for my review.
     assertions:
       - type: "output_matches"
         pattern: "(?i)maui-devflow-ci-fix"
       - type: "output_matches"
         pattern: "(?i)(local reproduction|flow reproduce)"
       - type: "output_matches"
-        pattern: "(?i)(uncommitted|Source Control|worktree diff)"
+        pattern: "(?i)(draft PR|draft pull request|commit.{0,40}push)"
     rubric:
       - "Recognizes that CI-only triage is not the requested completion route."
-      - "Routes the device-backed issue-to-diff request to maui-devflow-ci-fix."
+      - "Routes the device-backed issue-to-draft-PR request to maui-devflow-ci-fix."
       - "Does not invent a helper skill for operator-run flow execution."
     timeout: 180

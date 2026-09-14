@@ -1,10 +1,11 @@
-# Demo-only scenario: a trailing action selector that does not exist
+# Demo-only scenario: a repaired trailing action selector
 
-**This flow is demo-only and is intended to fail.** It exists to drive the
+**This flow is demo-only and must not be used for production qualification.** It exists to drive the
 `demo-ci-fix` lane of `.github/workflows/devflow-integration.yml` end to end, so a
 manager-facing walkthrough can show a real red CI run, a real bounded evidence upload, a real
-nonqualified demo issue, and the local `maui-devflow-ci-fix` route. Nothing about a failure of
-this flow says the sample application regressed.
+nonqualified demo issue, and the local `maui-devflow-ci-fix` route. This draft repair demonstrates
+the final local-fix and review gate; merging it would disable the intentionally failing showcase.
+Nothing about this flow qualifies the sample application.
 
 The `demo-` filename prefix is load-bearing. `AndroidFlowPilotTests.LoadTierOneFlowsAsync` never
 loads a `demo-`-prefixed flow into the ordinary Android Tier-1 pilot, so this file cannot turn the
@@ -19,16 +20,11 @@ The shape is copied from `drifted-assert-after-commit.md`, the repository's work
 - The flow asserts the real `CountLabel`, so the assertion is intact and unchanged.
 - The independent `android-app-storage` oracle reads the app's private todo ledger over adb, so
   the outcome is verified outside the UI the flow drove.
-- Only the trailing **action** addresses `ShowModalButtonRenamed`, a drifted AutomationId whose
-  real counterpart is the app's `ShowModalButton`.
+- The trailing **action** now addresses the app-owned `ShowModalButton` AutomationId identified by
+  the bounded local repair workflow.
 
-Business outcome independently verified, assertion intact, one trailing **action** selector
-unresolved: that is a `locator-not-found` failure the selector self-repair pipeline is meant to
-act on, and it is exactly the failure the local CI-fix route is meant to diagnose. It is not an
-application defect and it is not infrastructure.
-
-Do not "fix" this flow by re-pointing the trailing selector at a real control. The failure is the
-point. If this file ever stops failing, the demo lane stops demonstrating anything.
+The business outcome, assertion, action order, and independent oracle remain unchanged. The
+demo-only filename and explicit opt-in filter remain load-bearing safeguards.
 
 ```json maui-test
 {
@@ -67,7 +63,7 @@ point. If this file ever stops failing, the demo lane stops demonstrating anythi
       "seq": 3,
       "action": "tap",
       "args": {
-        "selector": { "automationId": "ShowModalButtonRenamed" }
+        "selector": { "automationId": "ShowModalButton" }
       }
     }
   ]

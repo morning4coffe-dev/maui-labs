@@ -67,7 +67,7 @@ point. If this file ever stops failing, the demo lane stops demonstrating anythi
       "seq": 3,
       "action": "tap",
       "args": {
-        "selector": { "automationId": "ShowModalButtonRecording20260919" }
+        "selector": { "automationId": "ShowModalButton" }
       }
     }
   ]

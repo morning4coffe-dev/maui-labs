@@ -4,7 +4,7 @@
   "revision": 1,
   "flow": {
     "path": "demo-ci-fix-drift.md",
-    "digest": "d643f215f12b956e146800c603092c0fe665607a1b1b99babee2efc3991eb8c6"
+    "digest": "0cbfe20100601dfc0b1e230ec4b865bd27659ab7e39d14724dddbe6b5f81ec47"
   },
   "title": "demo-ci-fix-drift",
   "goal": "Demo-only. Produce a deliberately failing run whose business outcome is independently verified and whose only defect is an unresolved trailing action selector, so the manager-facing CI-to-local-fix demo has a real, repair-eligible input. This plan never qualifies anything.",

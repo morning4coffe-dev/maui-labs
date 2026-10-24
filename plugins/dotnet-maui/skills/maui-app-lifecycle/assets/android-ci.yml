@@ -79,8 +79,13 @@ jobs:
             adb reverse tcp:19223 tcp:19223
             dotnet build "$APP_PROJECT" -f "$TFM" -c Debug -t:Install -p:TargetFrameworks="$TFM"
             adb shell monkey -p "$APP_PACKAGE" 1
-            maui devflow wait --timeout 120
-            python3 eng/maui-agent/devflow_check.py --app "$APP_NAME" --platform android --flow maui-tests/smoke.md --output .maui-agent/ui/report.json
+            adb forward tcp:9223 tcp:9223
+            for attempt in $(seq 1 60); do
+              if maui devflow agent status --agent-port 9223 --json; then break; fi
+              if [ "$attempt" = 60 ]; then exit 1; fi
+              sleep 1
+            done
+            python3 eng/maui-agent/devflow_check.py --app "$APP_NAME" --platform android --agent-port 9223 --flow maui-tests/smoke.md --output .maui-agent/ui/report.json
       - name: Record environment
         if: always()
         run: |

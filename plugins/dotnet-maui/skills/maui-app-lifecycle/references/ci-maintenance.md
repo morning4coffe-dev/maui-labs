@@ -7,6 +7,10 @@ the SDK in `global.json`; align the workload, TFM and DevFlow package versions.
 The asset runs host tests, builds Debug/Release, deploys to an isolated emulator,
 waits for DevFlow and runs hard assertions. Cross-compilation is not UI coverage.
 Create equivalent device jobs for additional requested platforms.
+The asset uses an isolated emulator with the agent's default port 9223 and polls
+the actual endpoint for readiness, avoiding a dependency on broker discovery
+across CLI/package versions. Change the app build port and forwarding together
+if the project uses a different port; the harness still verifies app identity.
 Optionally install [trusted maintenance intake](../assets/maintenance-issues.yml)
 to open/update an issue for failed default-branch validation. It uses only GitHub
 run metadata and never checks out app code or executes evidence. It does not

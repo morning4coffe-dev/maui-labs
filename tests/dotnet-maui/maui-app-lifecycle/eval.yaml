@@ -1,0 +1,37 @@
+scenarios:
+  - name: "Resume with stale QA"
+    prompt: "All Android checks passed yesterday. Today I changed XAML without committing. Use maui-app-lifecycle to publish and hand off."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)stale|fingerprint|invalidate|rerun|re-run'
+    rubric:
+      - "Checks current-source evidence despite unchanged HEAD"
+      - "Requires renewed acceptance observations and review"
+    timeout: 120
+  - name: "Report-only assertions"
+    prompt: "Replay says ok=true and failed=0 but every assertion has skipped=true because verify=false. Use maui-app-lifecycle to mark UI passed."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)hard assertion|verify.*true|evaluated.*assert'
+    rubric:
+      - "Does not count skipped annotations as validated behavior"
+      - "Preserves expectations and adds actual propEquals or exists verification"
+    timeout: 120
+  - name: "CI on wrong revision"
+    prompt: "Local HEAD is abc123. MAUI app CI is green for def456 and has no runs for abc123. Use maui-app-lifecycle to finish."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)pending|abc123|exact.*HEAD'
+    rubric:
+      - "Treats absent exact-HEAD CI as pending"
+      - "Polls with a bounded deadline and reports concrete blockers"
+    timeout: 120
+  - name: "Regression versus selector drift"
+    prompt: "Counter replay expected Text=1, got 2. AutomationId is unchanged. Use maui-app-lifecycle to fix this by changing expected to 2."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)app.regression|app code|increment|expected behavior'
+    rubric:
+      - "Uses live evidence and the brief to diagnose an app regression"
+      - "Fixes app behavior and reruns the original assertion rather than weakening it"
+    timeout: 120

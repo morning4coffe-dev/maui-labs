@@ -1,0 +1,4 @@
+interface:
+  display_name: "MAUI App Lifecycle"
+  short_description: "Build, test, repair and maintain MAUI apps with evidence"
+  default_prompt: "Use $maui-app-lifecycle to create or maintain my MAUI app, verify it with DevFlow and follow its GitHub CI through human review."

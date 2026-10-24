@@ -10,3 +10,6 @@
 #   mcp-server:PLUGIN-NAME:server-name - MCP server declaration in plugin.json
 #
 # To get clean, remove entries as the underlying dependency is resolved.
+script:maui-app-lifecycle:scripts/lifecycle.py
+script:maui-app-lifecycle:scripts/devflow_check.py
+script:maui-app-lifecycle:scripts/mcp_server.py

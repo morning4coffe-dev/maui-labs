@@ -30,6 +30,10 @@ runs fail. A green older commit cannot satisfy the gate. Poll between user
 updates with an overall deadline (e.g. 30 minutes), then report pending run
 URLs or runner/maintainer approval blockers. Fix, rerun local QA, push and follow
 the new HEAD. Never automatically merge or sign/store-publish releases.
+When GitHub fails a job before any steps run, logs may not exist. The tool saves
+check-run annotations in `startupDiagnostics` and returns `startupAnnotations`;
+read these before blaming app code or retrying the build. Account/runner policy
+and billing blocks require the appropriate human owner to resolve them.
 
 For maintenance, keep acceptance criteria, plan, tests and dependency settings
 in Git. The asset schedules weekly validation on the default branch. Use the

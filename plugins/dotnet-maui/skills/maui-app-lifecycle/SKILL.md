@@ -38,7 +38,8 @@ behind testable interfaces. Consult `maui-app-architecture`, `maui-ui-patterns`,
 `maui-accessibility`, or `maui-unit-testing` only for the corresponding work.
 `maui go create` / `maui go` can accelerate an explicitly chosen Comet prototype;
 Go's companion runtime and SDK requirements are separate from an installed MAUI
-app. Validate the final deliverable in its own project and Release build.
+app. Use `maui go upgrade --help` for graduation to a full project when appropriate.
+Validate the final deliverable in its own project and Release build.
 
 ```bash
 python3 "$TOOLKIT/scripts/lifecycle.py" init --name MyApp --platform android \

@@ -462,6 +462,29 @@ class Workflow:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text(log["output"], encoding="utf-8")
                 run["failureLog"] = str(path.relative_to(self.root))
+                if log["exitCode"]:
+                    # Runner startup failures have no step logs; GitHub exposes the cause
+                    # as check-run annotations (billing, permissions, runner availability).
+                    details = execute(["gh", "run", "view", str(run["databaseId"]), "--repo", repository,
+                                       "--json", "jobs"], self.root)
+                    diagnostics = {"jobs": [], "errors": []}
+                    if details["exitCode"] == 0:
+                        for job in json.loads(details["output"]).get("jobs", []):
+                            if job.get("conclusion") != "failure":
+                                continue
+                            annotations = execute(["gh", "api", f"repos/{repository}/check-runs/{job['databaseId']}/annotations"], self.root)
+                            if annotations["exitCode"] == 0:
+                                diagnostics["jobs"].append({"name": job["name"], "steps": job.get("steps", []),
+                                                            "annotations": json.loads(annotations["output"])})
+                            else:
+                                diagnostics["errors"].append(annotations["output"])
+                    else:
+                        diagnostics["errors"].append(details["output"])
+                    diagnostic_path = path.with_suffix(".startup.json")
+                    write_json(diagnostic_path, diagnostics)
+                    run["startupDiagnostics"] = str(diagnostic_path.relative_to(self.root))
+                    run["startupAnnotations"] = [a.get("message", "") for job in diagnostics["jobs"]
+                                                 for a in job["annotations"] if a.get("annotation_level") == "failure"]
             state["ci"].append(report)
             self.save(state)
             return report

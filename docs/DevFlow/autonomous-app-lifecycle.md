@@ -65,6 +65,7 @@ The device qualification creates a separate MAUI counter app, reproduces an
 intentional `+2` increment through both xUnit and Android DevFlow replay, fixes
 the app to `+1` while preserving assertions, and reruns QA. Environment and
 coverage results are recorded in the qualification report accompanying the PR.
+See [the qualification results and remaining limits](autonomous-app-lifecycle-qa.md).
 
 The workflow does not automatically infer that a failure is test drift, weaken
 tests, approve its own work, merge PRs or deploy production. Local state is an

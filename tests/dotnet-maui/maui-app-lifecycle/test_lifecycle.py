@@ -247,6 +247,29 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertEqual(result["runs"][0]["databaseId"], 2)
 
+    def test_ci_collects_runner_startup_annotations_when_logs_are_missing(self):
+        self.configure_ci()
+        head = self.git("rev-parse", "HEAD")
+        run = {"headSha": head, "workflowName": "App CI", "status": "completed", "conclusion": "failure",
+               "createdAt": "2026", "databaseId": 123}
+        def fake(command, root, timeout=120):
+            if command[0] == "git":
+                return execute(command, root, timeout)
+            if "--log-failed" in command:
+                return {"exitCode": 1, "output": "log not found", "timedOut": False}
+            if command[1:3] == ["run", "list"]:
+                data = [run]
+            elif command[1:3] == ["run", "view"]:
+                data = {"jobs": [{"databaseId": 456, "name": "android", "conclusion": "failure", "steps": []}]}
+            else:
+                data = [{"annotation_level": "failure", "message": "Runner allocation was denied by account policy"}]
+            return {"exitCode": 0, "output": json.dumps(data), "timedOut": False}
+        with patch("lifecycle.execute", side_effect=fake):
+            result = self.workflow.ci()
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("account policy", result["runs"][0]["startupAnnotations"][0])
+        self.assertTrue((self.root / result["runs"][0]["startupDiagnostics"]).exists())
+
     def test_publish_rejects_missing_qa_before_any_network_mutation(self):
         with self.assertRaisesRegex(ValueError, "QA gates"):
             self.workflow.github("App", ".maui-agent/body.md")

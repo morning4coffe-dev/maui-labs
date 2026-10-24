@@ -194,6 +194,23 @@ class WorkflowTests(unittest.TestCase):
         self.assertFalse(status["ok"])
         self.assertTrue(any("ui check for ios" in b for b in status["blockers"]))
 
+    def test_acceptance_evidence_must_remain_intact_after_a_later_pass(self):
+        self.passing_plan()
+        self.pass_checks()
+        old = self.workflow.load()["attempts"][-1]
+        self.workflow.check("ui")
+        (self.root / next(iter(old["evidence"]))).write_text("tampered")
+        status = self.workflow.status()
+        self.assertEqual(next(c for c in status["coverage"] if c["name"] == "ui")["status"], "passed")
+        self.assertTrue(any("Acceptance 0" in b for b in status["blockers"]))
+
+    def test_incomplete_review_cannot_be_used_for_publication(self):
+        self.passing_plan()
+        self.assertFalse(self.workflow.review()["ready"])
+        self.pass_checks()
+        with self.assertRaisesRegex(ValueError, "current review"):
+            self.workflow.github("App", ".maui-agent/body.md")
+
     def test_no_ci_runs_is_pending(self):
         self.configure_ci()
         with patch("lifecycle.execute", side_effect=self.fake_gh([])):

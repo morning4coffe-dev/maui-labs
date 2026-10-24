@@ -211,7 +211,9 @@ class Workflow:
         for index, criterion in enumerate(plan["acceptance"]):
             observations = [o for o in state.get("observations", []) if o["criterion"] == index
                             and o["source"] == source]
-            if not observations:
+            intact = any(any(r["id"] == o["attempt"] and r["ok"] and r["source"] == source
+                             and self.verify(r) for r in state["attempts"]) for o in observations)
+            if not intact:
                 blockers.append(f"Acceptance {index} has no current evidence: {criterion}")
         return {"ok": not blockers, "cycle": state["cycle"], "source": source,
                 "coverage": coverage, "blockers": blockers,
@@ -375,7 +377,8 @@ class Workflow:
             if not status["ok"]:
                 raise ValueError("QA gates are incomplete: " + "; ".join(status["blockers"]))
             state = self.load()
-            if not state["reviews"] or state["reviews"][-1]["source"] != status["source"]:
+            if (not state["reviews"] or not state["reviews"][-1]["ready"]
+                    or state["reviews"][-1]["source"] != status["source"]):
                 raise ValueError("Generate a current review before publishing")
             if git(self.root, "status", "--porcelain"):
                 raise ValueError("Commit the reviewed app changes before publishing")

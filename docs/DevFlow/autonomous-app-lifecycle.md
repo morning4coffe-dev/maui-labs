@@ -25,6 +25,8 @@ The new layer supplies the missing durable lifecycle: source fingerprints,
 sealed attempt evidence, meaningful test-result gates, acceptance assessments,
 failure classification, retry budgets, resumability and human handoff. It does
 not introduce a replacement device driver or a second LLM orchestration service.
+Independent Android Release checks use Appium/UIAutomator2 alongside DevFlow's
+Debug inspection; a small adapter records native evidence in the same lifecycle.
 
 ## Use
 
@@ -66,6 +68,10 @@ intentional `+2` increment through both xUnit and Android DevFlow replay, fixes
 the app to `+1` while preserving assertions, and reruns QA. Environment and
 coverage results are recorded in the qualification report accompanying the PR.
 See [the qualification results and remaining limits](autonomous-app-lifecycle-qa.md).
+The [broader app qualification](autonomous-app-lifecycle-qa-2026-10-25.md) adds an
+offline task app, native dialogs, process persistence, repeated Release tests
+and appearance/font/orientation variants. Its research and reusable test recipe
+live in the skill's [testing strategy](../../plugins/dotnet-maui/skills/maui-app-lifecycle/references/testing-strategy.md).
 
 The workflow does not automatically infer that a failure is test drift, weaken
 tests, approve its own work, merge PRs or deploy production. Local state is an

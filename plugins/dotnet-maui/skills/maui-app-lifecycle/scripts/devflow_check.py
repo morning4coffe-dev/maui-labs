@@ -120,6 +120,15 @@ def assertion_count(report):
     return count
 
 
+def validate_layout(report, minimum="serious"):
+    severities = ["info", "minor", "moderate", "serious", "critical"]
+    failures = [f for f in report.get("findings", []) if not f.get("suppressed")
+                and f.get("outcome") == "violation" and f.get("severity") in severities
+                and severities.index(f["severity"]) >= severities.index(minimum)]
+    if failures:
+        raise ValueError(f"Layout diagnostics found {len(failures)} unsuppressed {minimum}-or-higher violations")
+
+
 def run(args):
     root = Path(args.root).resolve()
     output = inside(root, args.output)
@@ -204,12 +213,15 @@ def run(args):
             report["assertions"] += count
             report["flows"].append({"file": flow, "assertions": count})
             try:
-                save(f"layout-{index}.json", client.data("maui_layout_diagnostics", agentPort=port,
-                                                       profile="ci", includeEvidence=True))
+                layout = client.data("maui_layout_diagnostics", agentPort=port, profile="ci", includeEvidence=True)
+                save(f"layout-{index}.json", layout)
             except ValueError as exc:
                 report["limitations"].append(str(exc))
                 if args.require_layout:
                     raise
+            else:
+                report.setdefault("layoutCoverage", []).append(layout.get("coverage", {}))
+                validate_layout(layout, getattr(args, "fail_layout_severity", "serious"))
         if "maui_logs" in available:
             try:
                 save("logs.json", client.data("maui_logs", agentPort=port))
@@ -220,6 +232,9 @@ def run(args):
         report["error"] = redact(str(exc))
     finally:
         if port is not None:
+            if "logs.json" not in [Path(p).name for p in report["artifacts"]]:
+                with contextlib.suppress(Exception):
+                    save("logs.json", client.data("maui_logs", agentPort=port))
             with contextlib.suppress(Exception):
                 client.call("maui_release_control", agentPort=port)
         client.close()
@@ -239,6 +254,7 @@ def main():
     parser.add_argument("--output", default=".maui-agent/ui/report.json")
     parser.add_argument("--timeout", type=float, default=90)
     parser.add_argument("--require-layout", action="store_true")
+    parser.add_argument("--fail-layout-severity", choices=["minor", "moderate", "serious", "critical"], default="serious")
     args = parser.parse_args()
     try:
         report = run(args)

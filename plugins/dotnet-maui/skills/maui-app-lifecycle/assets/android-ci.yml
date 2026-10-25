@@ -20,6 +20,8 @@ env:
   APP_NAME: TaskApp
   APP_PACKAGE: com.example.taskapp
   TFM: net10.0-android
+  ANDROID_RID: android-x64
+  NATIVE_SUITE: maui-tests/native.json
 jobs:
   android:
     runs-on: ubuntu-latest
@@ -44,6 +46,9 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
       - uses: actions/setup-java@v5
         with:
           distribution: microsoft
@@ -56,6 +61,10 @@ jobs:
           sudo udevadm trigger --name-match=kvm
       - name: Install toolchain
         run: dotnet workload install maui-android
+      - name: Install independent native UI driver
+        run: |
+          npm install --global appium@3.6.0
+          appium driver install --source=npm appium-uiautomator2-driver@8.7.0
       - name: Build pinned MAUI CLI
         working-directory: .maui-tools/maui-labs
         run: |
@@ -65,27 +74,17 @@ jobs:
         run: dotnet test "$TEST_PROJECT" -c Release --logger 'trx;LogFileName=unit.trx' --results-directory .maui-agent/test-results
       - name: Build Debug and Release
         run: |
-          dotnet build "$APP_PROJECT" -f "$TFM" -c Debug -p:TargetFrameworks="$TFM"
-          dotnet build "$APP_PROJECT" -f "$TFM" -c Release -p:TargetFrameworks="$TFM"
+          dotnet build "$APP_PROJECT" -f "$TFM" -r "$ANDROID_RID" -c Debug -p:EmbedAssembliesIntoApk=true
+          dotnet build "$APP_PROJECT" -f "$TFM" -r "$ANDROID_RID" -c Release
       - name: Android UI tests
         uses: reactivecircus/android-emulator-runner@v2
         with:
           api-level: 35
           arch: x86_64
           profile: pixel_6
+          ram-size: 4096M
           disable-animations: true
-          script: |
-            maui devflow broker start
-            adb reverse tcp:19223 tcp:19223
-            dotnet build "$APP_PROJECT" -f "$TFM" -c Debug -t:Install -p:TargetFrameworks="$TFM"
-            adb shell monkey -p "$APP_PACKAGE" 1
-            adb forward tcp:9223 tcp:9223
-            for attempt in $(seq 1 60); do
-              if maui devflow agent status --agent-port 9223 --json; then break; fi
-              if [ "$attempt" = 60 ]; then exit 1; fi
-              sleep 1
-            done
-            python3 eng/maui-agent/devflow_check.py --app "$APP_NAME" --platform android --agent-port 9223 --flow maui-tests/smoke.md --output .maui-agent/ui/report.json
+          script: bash eng/maui-agent/ci-android.sh
       - name: Record environment
         if: always()
         run: |

@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# Run only against an isolated test emulator. Copy to eng/maui-agent/.
+set -euo pipefail
+: "${APP_PROJECT:?Set APP_PROJECT}"
+: "${APP_PACKAGE:?Set APP_PACKAGE}"
+: "${APP_NAME:?Set APP_NAME}"
+TFM="${TFM:-net10.0-android}"
+RID="${ANDROID_RID:-android-x64}"
+DEVICE="${ANDROID_SERIAL:-emulator-5554}"
+PORT="${DEVFLOW_PORT:-9223}"
+APPIUM_PORT="${APPIUM_PORT:-4725}"
+DEBUG_FLOW="${DEBUG_FLOW:-maui-tests/smoke.md}"
+NATIVE_SUITE="${NATIVE_SUITE:-maui-tests/native.json}"
+APP_DIRECTORY="$(dirname "$APP_PROJECT")"
+DEBUG_APK="$APP_DIRECTORY/bin/Debug/$TFM/$RID/$APP_PACKAGE-Signed.apk"
+RELEASE_APK="$APP_DIRECTORY/bin/Release/$TFM/$RID/$APP_PACKAGE-Signed.apk"
+mkdir -p .maui-agent
+if [ "$(adb -s "$DEVICE" shell getprop ro.kernel.qemu | tr -d '\r')" != 1 ]; then
+  echo "CI reset requires an isolated emulator" >&2
+  exit 1
+fi
+adb -s "$DEVICE" install --no-incremental -r "$DEBUG_APK"
+adb -s "$DEVICE" shell pm clear "$APP_PACKAGE"
+ACTIVITY="$(adb -s "$DEVICE" shell cmd package resolve-activity --brief "$APP_PACKAGE" | tail -n 1 | tr -d '\r' | cut -d/ -f2)"
+maui devflow broker start
+adb -s "$DEVICE" reverse tcp:19223 tcp:19223
+adb -s "$DEVICE" forward "tcp:$PORT" "tcp:$PORT"
+adb -s "$DEVICE" shell monkey -p "$APP_PACKAGE" 1
+for attempt in $(seq 1 60); do
+  if maui devflow agent status --agent-port "$PORT" --json; then break; fi
+  if [ "$attempt" = 60 ]; then exit 1; fi
+  sleep 1
+done
+python3 eng/maui-agent/devflow_check.py --app "$APP_NAME" --platform android --agent-port "$PORT" \
+  --flow "$DEBUG_FLOW" --require-layout --output .maui-agent/debug/report.json
+appium --address 127.0.0.1 --port "$APPIUM_PORT" --log .maui-agent/appium-server.log &
+appium_pid=$!
+trap 'kill "$appium_pid" 2>/dev/null || true' EXIT
+for attempt in $(seq 1 60); do
+  if curl --fail --silent "http://127.0.0.1:$APPIUM_PORT/status" > /dev/null; then break; fi
+  if [ "$attempt" = 60 ]; then exit 1; fi
+  sleep 1
+done
+for run in 1 2; do
+  python3 eng/maui-agent/android_check.py --device "$DEVICE" --app "$APP_NAME" --package "$APP_PACKAGE" \
+    --activity "$ACTIVITY" --apk "$RELEASE_APK" --suite "$NATIVE_SUITE" --clear-test-data \
+    --server "http://127.0.0.1:$APPIUM_PORT" --orientation PORTRAIT --output ".maui-agent/native-$run/report.json"
+done
+python3 eng/maui-agent/android_check.py --device "$DEVICE" --app "$APP_NAME" --package "$APP_PACKAGE" \
+  --activity "$ACTIVITY" --apk "$RELEASE_APK" --suite "$NATIVE_SUITE" --clear-test-data \
+  --server "http://127.0.0.1:$APPIUM_PORT" --orientation LANDSCAPE --font-scale 1.3 --night-mode yes \
+  --output .maui-agent/large-font-landscape/report.json

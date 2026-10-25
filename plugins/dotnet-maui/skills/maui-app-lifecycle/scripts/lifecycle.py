@@ -135,10 +135,25 @@ def plan_for(root):
             raise ValueError(f"Invalid timeout for {name}")
         if check["kind"] == "unit" and check.get("format") != "trx":
             raise ValueError("Unit checks must consume a nonempty TRX test report")
-        if check["kind"] == "ui" and check.get("format") != "devflow":
-            raise ValueError("UI checks must consume assertion-bearing DevFlow replay evidence")
-        if check.get("format") in {"trx", "devflow"}:
-            inside(root, check["result"])
+        if check["kind"] == "ui" and check.get("format") not in {"devflow", "appium"}:
+            raise ValueError("UI checks must consume assertion-bearing DevFlow or independent Appium evidence")
+        if check.get("format") in {"trx", "devflow", "appium"}:
+            if not inside(root, check["result"]).is_relative_to(root / STATE):
+                raise ValueError("Check result paths must be under .maui-agent/")
+        if type(check.get("runs", 1)) is not int or not 1 <= check.get("runs", 1) <= 10:
+            raise ValueError("Check runs must be between 1 and 10")
+        if check.get("artifact"):
+            inside(root, check["artifact"])
+    checks = {c["name"]: c for c in plan.get("checks", [])}
+    def dependencies(name, visiting):
+        if name in visiting:
+            raise ValueError("Check dependencies contain a cycle")
+        for dependency in checks[name].get("dependsOn", []):
+            if dependency not in checks:
+                raise ValueError(f"Unknown check dependency: {dependency}")
+            dependencies(dependency, visiting | {name})
+    for name in checks:
+        dependencies(name, set())
     return plan
 
 
@@ -202,12 +217,34 @@ class Workflow:
         for check in checks:
             records = [r for r in state["attempts"] if r["check"] == check["name"]]
             record = records[-1] if records else None
-            valid = bool(record and record["ok"] and record["source"] == source and self.verify(record))
+            valid = self.passing(check, state, source)
+            latest_valid = bool(record and record["ok"] and record["source"] == source and self.verify(record))
             coverage.append({"name": check["name"], "platform": check["platform"], "kind": check["kind"],
+                             "requiredRuns": check.get("runs", 1),
                              "status": "passed" if valid else "missing" if not record else
-                             "stale" if record["source"] != source else "failed"})
+                             "stale" if record["source"] != source else "insufficient-runs" if latest_valid else "failed"})
             if not valid:
                 blockers.append(f"{check['name']}: {coverage[-1]['status']}")
+            if plan.get("quality", {}).get("requireClassifiedFailures"):
+                for failure in [r for r in records if r["source"] == source and not r["ok"]]:
+                    if not any(c["attempt"] == failure["id"] and c["category"] == "infrastructure"
+                               for c in state["classifications"]):
+                        blockers.append(f"Unresolved current-source failure: {check['name']} ({failure['id']})")
+        quality = plan.get("quality", {})
+        for platform in plan["platforms"]:
+            native = [c for c in checks if c.get("format") == "appium" and c["platform"] == platform
+                      and self.passing(c, state, source)]
+            if quality.get("independentUi") and not native:
+                blockers.append(f"No independent native UI evidence for {platform}")
+            if quality.get("releaseUi") and not any(c.get("configuration") == "Release" for c in native):
+                blockers.append(f"No Release runtime evidence for {platform}")
+            tags = set()
+            for check in native:
+                latest = [r for r in state["attempts"] if r["check"] == check["name"]][-1]
+                tags.update(latest.get("scenarios", []))
+            for tag in quality.get("scenarios", []):
+                if tag not in tags:
+                    blockers.append(f"No verified {tag} scenario for {platform}")
         for index, criterion in enumerate(plan["acceptance"]):
             observations = [o for o in state.get("observations", []) if o["criterion"] == index
                             and o["source"] == source]
@@ -215,7 +252,18 @@ class Workflow:
                              and self.verify(r) for r in state["attempts"]) for o in observations)
             if not intact:
                 blockers.append(f"Acceptance {index} has no current evidence: {criterion}")
-        return {"ok": not blockers, "cycle": state["cycle"], "source": source,
+        head_result = execute(["git", "rev-parse", "--verify", "HEAD"], self.root)
+        head = head_result["output"].strip() if head_result["exitCode"] == 0 else None
+        config = plan.get("github", {})
+        required_ci = bool(config.get("repository") and config.get("requiredWorkflows"))
+        ci_reports = [r for r in state.get("ci", []) if r.get("head") == head]
+        ci_status = ci_reports[-1]["status"] if ci_reports else "pending" if required_ci else "not-configured"
+        if required_ci and ci_status == "passed" and git(self.root, "status", "--porcelain"):
+            ci_status = "stale"
+        return {"ok": not blockers, "localQaReady": not blockers,
+                "validationComplete": not blockers and (not required_ci or ci_status == "passed"),
+                "ci": {"required": required_ci, "status": ci_status, "head": head},
+                "cycle": state["cycle"], "source": source,
                 "coverage": coverage, "blockers": blockers,
                 "next": "review" if not blockers else "configure or repair the listed checks; run check"}
 
@@ -236,11 +284,21 @@ class Workflow:
 
     def verify(self, record):
         try:
+            if record.get("binary"):
+                binary = record["binary"]
+                if digest(inside(self.root, binary["path"]).read_bytes()) != binary["sha256"]:
+                    return False
             return bool(record.get("evidence")) and all(
                 digest(inside(self.root, name).read_bytes()) == expected
                 for name, expected in record["evidence"].items())
         except (OSError, ValueError):
             return False
+
+    def passing(self, check, state, source):
+        records = [r for r in state["attempts"] if r["check"] == check["name"]]
+        required = check.get("runs", 1)
+        return len(records) >= required and all(
+            r["ok"] and r["source"] == source and self.verify(r) for r in records[-required:])
 
     def check(self, name):
         with self.locked():
@@ -257,6 +315,10 @@ class Workflow:
                 if not any(c["attempt"] == latest for c in state["classifications"]):
                     raise ValueError("Repeated identical failure. Classify and inspect evidence before retrying")
             source = snapshot(self.root)
+            for dependency_name in check.get("dependsOn", []):
+                dependency = next(c for c in plan["checks"] if c["name"] == dependency_name)
+                if not self.passing(dependency, state, source):
+                    raise ValueError(f"Run current passing dependency {dependency_name} before {check['name']}")
             attempt_id = uuid.uuid4().hex
             directory = self.directory / "evidence" / attempt_id
             directory.mkdir(parents=True)
@@ -271,7 +333,7 @@ class Workflow:
             log = directory / "command.log"
             log.write_text(result["output"], encoding="utf-8")
             ok = result["exitCode"] == 0 and not result["timedOut"] and not result.get("truncated")
-            reason, artifacts = "", [log]
+            reason, artifacts, binary, scenarios = "", [log], None, []
             try:
                 if ok and check.get("format") == "trx":
                     tree = ET.parse(result_file)
@@ -283,7 +345,7 @@ class Workflow:
                     if int(counters.get("passed", "0")) != int(counters.get("executed", "0")):
                         raise ValueError("Not all executed tests passed")
                     artifacts.append(result_file)
-                elif ok and check.get("format") == "devflow":
+                elif ok and check.get("format") in {"devflow", "appium"}:
                     report = json.loads(result_file.read_text())
                     if report.get("ok") is not True or report.get("assertions", 0) <= 0:
                         raise ValueError("UI report has no successful hard assertions")
@@ -293,6 +355,25 @@ class Workflow:
                         raise ValueError("UI report is missing app identity or captured evidence")
                     artifacts.extend(inside(self.root, p) for p in report["artifacts"])
                     artifacts.append(result_file)
+                    if check.get("format") == "appium":
+                        if report.get("driver") != "appium-uiautomator2" or report.get("source") != source:
+                            raise ValueError("Independent UI report has wrong driver or stale source")
+                        assertions = [s for s in report.get("trace", []) if s.get("action") in {"assert", "assertAbsent"}]
+                        if (not any(s.get("action") == "assert" for s in assertions)
+                                or any(s.get("ok") is not True for s in report.get("trace", []))
+                                or len(assertions) != report["assertions"]):
+                            raise ValueError("Independent UI report has inconsistent assertion evidence")
+                        if report.get("configuration") != check.get("configuration") or report.get("package") != check.get("appPackage"):
+                            raise ValueError("Independent UI report configuration/package mismatch")
+                        binary = report.get("binary")
+                        if not binary or binary.get("path") != check.get("artifact"):
+                            raise ValueError("Independent UI report needs the configured APK identity")
+                        if digest(inside(self.root, binary["path"]).read_bytes()) != binary.get("sha256"):
+                            raise ValueError("Tested APK differs from the current build artifact")
+                        scenarios = list({tag for scenario in report.get("scenarios", []) if scenario.get("assertions", 0) > 0
+                                          for tag in scenario.get("tags", [])})
+                if ok and check.get("artifact"):
+                    binary = {"path": check["artifact"], "sha256": digest(inside(self.root, check["artifact"]).read_bytes())}
                 if snapshot(self.root) != source:
                     raise ValueError("Source changed during the check; rerun against a stable revision")
             except (ValueError, OSError, ET.ParseError, TypeError) as exc:
@@ -300,7 +381,7 @@ class Workflow:
             # Failed runs need their TRX/replay/screenshots as much as successful ones.
             if result_file and result_file.is_file():
                 artifacts.append(result_file)
-                if check.get("format") == "devflow":
+                if check.get("format") in {"devflow", "appium"}:
                     try:
                         failure_report = json.loads(result_file.read_text())
                         for relative in failure_report.get("artifacts", []):
@@ -327,6 +408,7 @@ class Workflow:
                       "startedAt": started, "finishedAt": now(), "ok": ok,
                       "exitCode": result["exitCode"], "timedOut": result["timedOut"],
                       "reason": reason, "evidence": evidence,
+                      "binary": binary, "scenarios": scenarios,
                       "signature": digest((str(result["exitCode"]) + reason + result["output"][-4000:]).encode())}
             state["attempts"].append(record)
             self.save(state)
@@ -360,6 +442,8 @@ class Workflow:
             status = self.status()
             plan, state = plan_for(self.root), self.load()
             review = {"at": now(), "source": status["source"], "ready": status["ok"],
+                      "localQaReady": status["localQaReady"], "validationComplete": status["validationComplete"],
+                      "ci": status["ci"],
                       "acceptance": plan["acceptance"], "coverage": status["coverage"],
                       "observations": state.get("observations", []),
                       "blockers": status["blockers"], "classifications": state["classifications"],

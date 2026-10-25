@@ -14,7 +14,8 @@ from unittest.mock import patch
 SCRIPTS = Path(__file__).resolve().parents[3] / "plugins/dotnet-maui/skills/maui-app-lifecycle/scripts"
 sys.path.insert(0, str(SCRIPTS))
 from lifecycle import Workflow, digest, execute, redact, snapshot, write_json
-from devflow_check import McpClient, assertion_count
+from devflow_check import McpClient, assertion_count, validate_layout
+from android_check import Driver
 from mcp_server import serve
 
 
@@ -101,6 +102,86 @@ class WorkflowTests(unittest.TestCase):
         result = self.workflow.check("build")
         self.assertFalse(result["ok"])
         self.assertIn("Source changed", result["reason"])
+
+    def test_repeated_runs_require_consecutive_current_passes(self):
+        self.plan([self.command(runs=2)])
+        self.workflow.check("build")
+        self.assertNotEqual(self.workflow.status()["coverage"][0]["status"], "passed")
+        self.workflow.check("build")
+        self.assertEqual(self.workflow.status()["coverage"][0]["status"], "passed")
+
+    def test_dependency_must_pass_before_check_executes(self):
+        self.plan([self.command(), self.command(name="dependent", dependsOn=["build"])])
+        with self.assertRaisesRegex(ValueError, "dependency build"):
+            self.workflow.check("dependent")
+        self.assertEqual(len(self.workflow.load()["attempts"]), 0)
+        self.workflow.check("build")
+        result = self.workflow.check("dependent")
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["check"], "dependent")
+        self.assertEqual(self.workflow.load()["attempts"][-1]["check"], "dependent")
+
+    def test_dependency_cycles_are_rejected(self):
+        self.plan([self.command(dependsOn=["second"]), self.command(name="second", dependsOn=["build"])])
+        with self.assertRaisesRegex(ValueError, "cycle"):
+            self.workflow.status()
+
+    def test_later_pass_does_not_hide_an_unclassified_same_source_failure(self):
+        self.plan([self.command(code="from pathlib import Path; raise SystemExit(1 if Path('.maui-agent/fail').exists() else 0)")])
+        p = self.root / "maui-agent.json"
+        plan = json.loads(p.read_text()); plan["quality"] = {"requireClassifiedFailures": True}; write_json(p, plan)
+        flag = self.root / ".maui-agent/fail"; flag.write_text("fail")
+        failure = self.workflow.check("build")
+        flag.unlink()
+        self.workflow.check("build")
+        self.assertTrue(any("Unresolved current-source failure" in b for b in self.workflow.status()["blockers"]))
+        self.workflow.classify(failure["id"], "infrastructure", "Verified the isolated runner was not ready; recovered without changing app expectations")
+        self.assertFalse(any("Unresolved current-source failure" in b for b in self.workflow.status()["blockers"]))
+
+    def test_replacing_tested_binary_invalidates_a_pass(self):
+        path = self.root / ".maui-agent/app.apk"
+        path.write_bytes(b"binary one")
+        self.plan([self.command(artifact=".maui-agent/app.apk")])
+        self.workflow.check("build")
+        self.assertEqual(self.workflow.status()["coverage"][0]["status"], "passed")
+        path.write_bytes(b"binary two")
+        self.assertNotEqual(self.workflow.status()["coverage"][0]["status"], "passed")
+
+    def test_quality_contract_does_not_count_devflow_as_independent_release_qa(self):
+        self.passing_plan()
+        p = self.root / "maui-agent.json"
+        plan = json.loads(p.read_text())
+        plan["quality"] = {"independentUi": True, "releaseUi": True, "scenarios": ["persistence"]}
+        write_json(p, plan)
+        self.pass_checks()
+        status = self.workflow.status()
+        self.assertFalse(status["ok"])
+        self.assertTrue(any("Release runtime" in b for b in status["blockers"]))
+        self.assertTrue(any("persistence" in b for b in status["blockers"]))
+
+    def test_independent_report_checks_counts_source_configuration_and_binary(self):
+        binary = self.root / ".maui-agent/app.apk"
+        binary.write_bytes(b"test binary")
+        for index, change in enumerate([{}, {"source": "old-source"}, {"assertions": 2},
+                                        {"configuration": "Debug"}, {"binary": {"path": ".maui-agent/app.apk", "sha256": "wrong"}}]):
+            with self.subTest(change=change):
+                code = f"""import sys,json
+from pathlib import Path
+sys.path.insert(0,{str(SCRIPTS)!r})
+from lifecycle import snapshot,digest
+Path('.maui-agent/tree.xml').write_text('<hierarchy/>')
+r={{'ok':True,'app':'App','package':'example.app','platform':'android','configuration':'Release',
+'driver':'appium-uiautomator2','source':snapshot(Path.cwd()),'assertions':1,
+'trace':[{{'action':'assert','ok':True}}],
+'binary':{{'path':'.maui-agent/app.apk','sha256':digest(Path('.maui-agent/app.apk').read_bytes())}},
+'scenarios':[{{'tags':['navigation'],'assertions':1}}],'artifacts':['.maui-agent/tree.xml']}}
+r.update({change!r})
+Path('.maui-agent/native.json').write_text(json.dumps(r))
+"""
+                name = f"native-{index}"
+                self.plan([self.command(name=name, code=code, kind="ui", format="appium", configuration="Release",
+                                        appPackage="example.app", artifact=".maui-agent/app.apk", result=".maui-agent/native.json")])
+                self.assertEqual(self.workflow.check(name)["ok"], not bool(change))
 
     def test_repeated_failure_requires_classification_then_budget_stops(self):
         self.plan([self.command(code="raise SystemExit(1)")])
@@ -218,6 +299,23 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(result["status"], "pending")
         self.assertFalse(result["ok"])
 
+    def test_local_pass_does_not_claim_complete_validation_with_stale_or_missing_ci(self):
+        self.passing_plan()
+        self.configure_ci()
+        self.pass_checks()
+        state = self.workflow.load()
+        state["ci"].append({"head": self.git("rev-parse", "HEAD"), "status": "passed"})
+        self.workflow.save(state)
+        status = self.workflow.status()
+        self.assertTrue(status["localQaReady"])
+        self.assertFalse(status["validationComplete"])
+        self.assertEqual(status["ci"]["status"], "stale")
+        self.git("add", "."); self.git("commit", "-m", "verified app")
+        self.assertEqual(self.workflow.status()["ci"]["status"], "pending")
+        state["ci"].append({"head": self.git("rev-parse", "HEAD"), "status": "passed"})
+        self.workflow.save(state)
+        self.assertTrue(self.workflow.status()["validationComplete"])
+
     def configure_ci(self):
         path = self.root / "maui-agent.json"
         plan = json.loads(path.read_text())
@@ -309,6 +407,31 @@ class WorkflowTests(unittest.TestCase):
 
 
 class DevFlowTests(unittest.TestCase):
+    def test_native_session_start_can_outlive_ordinary_command_timeout(self):
+        import http.server
+        import threading
+        import time
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                time.sleep(0.05)
+                body = json.dumps({"value": {"sessionId": "native-test", "capabilities": {"platformName": "Android"}}}).encode()
+                self.send_response(200); self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+            def log_message(self, *args):
+                pass
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True); thread.start()
+        try:
+            driver = Driver(f"http://127.0.0.1:{server.server_port}", timeout=0.01)
+            self.assertEqual(driver.start("emulator", "app.test", ".MainActivity")["platformName"], "Android")
+            self.assertEqual(driver.timeout, 0.01)
+        finally:
+            server.shutdown(); server.server_close(); thread.join()
+    def test_serious_layout_violations_fail_while_suppressions_and_observations_do_not(self):
+        with self.assertRaisesRegex(ValueError, "Layout diagnostics"):
+            validate_layout({"findings": [{"outcome": "violation", "severity": "serious", "suppressed": False}]})
+        validate_layout({"findings": [{"outcome": "violation", "severity": "critical", "suppressed": True},
+                                     {"outcome": "observation", "severity": "serious"}]})
     def report(self, assertions):
         return {"ok": True, "total": 1, "passed": 1, "failed": 0,
                 "results": [{"ok": True, "asserts": assertions}]}

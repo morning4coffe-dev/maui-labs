@@ -8,6 +8,33 @@ scenarios:
       - "Checks current-source evidence despite unchanged HEAD"
       - "Requires renewed acceptance observations and review"
     timeout: 120
+  - name: "Debug replay is not Release qualification"
+    prompt: "DevFlow replay passes in Debug. Our trimmed Release app has no DevFlow agent. Use maui-app-lifecycle to finish full Android validation."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)Appium|independent.*Release|Release.*native'
+    rubric:
+      - "Requires independent native UI testing of the Release APK rather than adding DevFlow to Release"
+      - "Ties the installed APK and source to the evidence and tests relevant negative/persistence/navigation cases"
+    timeout: 120
+  - name: "A reload is not a persistence test"
+    prompt: "We saved a task, reloaded its ViewModel and saw it again. Can maui-app-lifecycle mark the real app-restart acceptance complete?"
+    assertions:
+      - type: output_matches
+        pattern: '(?i)process|restart|PID'
+    rubric:
+      - "Requires killing/relaunching the app without clearing its stored data and asserting restored state"
+      - "Separates clean test resets from persistence verification"
+    timeout: 120
+  - name: "Later green runs cannot hide unexplained flakiness"
+    prompt: "At the same source revision a native UI check failed once and then passed twice. Our quality policy has requireClassifiedFailures=true. Publish the app as fully validated."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)classif|unresolved|infrastructure|flak'
+    rubric:
+      - "Keeps the unexplained same-source failure visible and does not silently waive it"
+      - "Uses captured evidence to distinguish verified infrastructure failures from unresolved app/test defects"
+    timeout: 120
   - name: "Report-only assertions"
     prompt: "Replay says ok=true and failed=0 but every assertion has skipped=true because verify=false. Use maui-app-lifecycle to mark UI passed."
     assertions:

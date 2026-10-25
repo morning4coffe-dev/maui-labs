@@ -86,6 +86,13 @@ Run configured checks with `lifecycle.py check CHECK-NAME`. The UI check invokes
 `scripts/devflow_check.py`, which uses one real DevFlow MCP session for selection,
 lease, replay and evidence. Run build, unit, UI and Release checks for every
 requested platform. Separate unavailable platform coverage from completed work.
+For broader native Android qualification, read
+[testing-strategy.md](references/testing-strategy.md): require meaningful negative,
+persistence and navigation scenarios, independent Release UI evidence, repeated
+current-source passes and exact installed-APK identity. Use native Appium checks
+for OS dialogs and rendered behavior outside the in-app agent. Test size/font/
+appearance variants relevant to the brief. A Debug replay alone does not prove
+that a trimmed Release app works. Keep unavailable platforms explicit.
 
 On failure, read `.maui-agent/state.json` and the attempt's sealed evidence.
 Classify with `lifecycle.py classify ATTEMPT CATEGORY --reason EVIDENCE`:
@@ -108,6 +115,10 @@ failures require an evidence-backed classification before another attempt.
 After the budget is exhausted, present findings and the smallest decision needed.
 Do not reset the budget yourself. `cycle --reason ...` starts a maintenance cycle
 for a new human request or explicitly authorized continuation, preserving history.
+Plan checks can declare `dependsOn`, `artifact` and `runs`. Build dependencies
+must pass for the current source before device checks; replacing a binary makes
+its earlier evidence stale. When strict quality policy is enabled, a later pass
+does not erase an unexplained failure at the same source.
 
 ## Review, GitHub and CI
 

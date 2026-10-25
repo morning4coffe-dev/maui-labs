@@ -1,11 +1,18 @@
 # CI and maintenance
 
 Copy the skill scripts together to `eng/maui-agent/` in the generated app.
+Also copy [ci-android.sh](../assets/ci-android.sh) there. The emulator action calls
+one Bash file, preserving loop/process lifetime instead of splitting its lines.
 Create platform workflows from [the Android asset](../assets/android-ci.yml),
 setting the actual project paths, app identity and verified CLI version. Pin
 the SDK in `global.json`; align the workload, TFM and DevFlow package versions.
 The asset runs host tests, builds Debug/Release, deploys to an isolated emulator,
 waits for DevFlow and runs hard assertions. Cross-compilation is not UI coverage.
+It additionally runs independent Release Appium scenarios twice, plus a dark,
+large-font landscape variant. Author `maui-tests/native.json` and set the correct
+suite/project/package values. Select the RID for the actual emulator architecture.
+Avoid a global `-p:TargetFrameworks` override: it can corrupt restore targets for
+referenced portable class libraries. Use the app's platform-aware TFMs and `-f`.
 Create equivalent device jobs for additional requested platforms.
 The asset uses an isolated emulator with the agent's default port 9223 and polls
 the actual endpoint for readiness, avoiding a dependency on broker discovery

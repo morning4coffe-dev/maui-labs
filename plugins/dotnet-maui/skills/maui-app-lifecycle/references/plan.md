@@ -68,6 +68,23 @@ best-effort sanitization, not a privacy guarantee: screenshots and app data can
 contain personal information. Evidence stays ignored locally. Upload only the
 artifacts appropriate for the repository's visibility, with a bounded retention.
 
+Checks can specify `dependsOn` (other check names), `artifact` (a build output
+whose SHA-256 must stay unchanged) and `runs` (1–10 consecutive current-source
+passes). Dependencies must be acyclic and passing before dependent commands
+execute. Unit results and UI reports must be under `.maui-agent/`.
+
+For independent Android Release validation, use `format: appium`,
+`configuration: Release`, `appPackage` and the exact APK `artifact` on a UI check.
+The native report must match the app, package, source and installed binary and
+contain positive assertions, successful traces and captured evidence. See
+[broader qualification](testing-strategy.md) for executable helper usage and the
+optional `quality` policy governing native coverage and unexplained failures.
+
+`localQaReady` means checks and acceptance assessments pass. With required CI,
+`validationComplete` additionally needs passing workflows for exactly HEAD and
+a clean committed worktree. Local readiness permits a draft PR so CI can run;
+it does not imply cloud validation or human approval.
+
 This is a local audit trail, not a security boundary against an agent/user able
 to edit source and state. CI/merge protection and trusted comparison must enforce
 organizational policy outside untrusted app execution.

@@ -13,3 +13,4 @@
 script:maui-app-lifecycle:scripts/lifecycle.py
 script:maui-app-lifecycle:scripts/devflow_check.py
 script:maui-app-lifecycle:scripts/mcp_server.py
+script:maui-app-lifecycle:scripts/android_check.py

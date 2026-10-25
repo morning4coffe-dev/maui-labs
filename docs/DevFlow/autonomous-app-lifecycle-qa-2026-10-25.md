@@ -22,6 +22,7 @@ Invalid saved data is preserved; failed saves keep the user's draft.
 | Persistence | Force-stop/relaunch changes PIDs and preserves asserted task state without clearing storage. |
 | Native dialog | Asserted Android confirmation title, Cancel preserving data and Delete removing it. |
 | Binary identity | Installed base APK SHA-256 matches the selected Release artifact; no DevFlow APK entries. |
+| Complete CI UI recipe on local emulator | Pass: its own Appium startup/cleanup, Debug replay, two native runs and the appearance variant. |
 
 All six planned checks pass at source fingerprint
 `87fc0e954821a92c3e5fbfa6ccddc1765201c157ea3deaf7a8d7d8b7f76dc85a`.

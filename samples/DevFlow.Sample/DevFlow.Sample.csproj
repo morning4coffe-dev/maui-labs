@@ -16,6 +16,8 @@
         <ApplicationVersion>1</ApplicationVersion>
 
         <WindowsPackageType>None</WindowsPackageType>
+        <!-- Pages only this head compiles; AppShell, which other heads link, registers them under it. -->
+        <DefineConstants>$(DefineConstants);DEVFLOW_TOUCH_PAGES</DefineConstants>
 
         <TargetPlatformMinVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</TargetPlatformMinVersion>
     </PropertyGroup>
@@ -33,6 +35,8 @@
         <PackageReference Include="Microsoft.Maui.Controls" />
         <PackageReference Include="Microsoft.AspNetCore.Components.WebView.Maui" />
         <PackageReference Include="Microsoft.Extensions.Logging.Debug" />
+        <PackageReference Include="SkiaSharp.Views.Maui.Controls" />
+        <PackageReference Include="Syncfusion.Maui.Toolkit" />
     </ItemGroup>
 
     <ItemGroup>

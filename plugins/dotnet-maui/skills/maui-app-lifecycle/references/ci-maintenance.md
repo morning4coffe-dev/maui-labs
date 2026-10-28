@@ -14,10 +14,11 @@ suite/project/package values. Select the RID for the actual emulator architectur
 Avoid a global `-p:TargetFrameworks` override: it can corrupt restore targets for
 referenced portable class libraries. Use the app's platform-aware TFMs and `-f`.
 Create equivalent device jobs for additional requested platforms.
-The asset uses an isolated emulator with the agent's default port 9223 and polls
-the actual endpoint for readiness, avoiding a dependency on broker discovery
-across CLI/package versions. Change the app build port and forwarding together
-if the project uses a different port; the harness still verifies app identity.
+The asset uses `android_launch.py` to resolve the launcher activity, discover the
+selected process's agent port and verify its live identity. `DEVFLOW_PORT` selects
+the host tunnel (default 9223); choose an unused port when sharing a host. It
+does not require broker discovery to succeed. `NATIVE_BOUNDARY_SUITE` optionally
+adds two clean runs of an app-specific input/Unicode/boundary suite.
 Optionally install [trusted maintenance intake](../assets/maintenance-issues.yml)
 to open/update an issue for failed default-branch validation. It uses only GitHub
 run metadata and never checks out app code or executes evidence. It does not

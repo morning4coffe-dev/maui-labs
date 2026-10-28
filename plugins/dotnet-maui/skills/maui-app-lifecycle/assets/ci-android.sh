@@ -21,16 +21,10 @@ if [ "$(adb -s "$DEVICE" shell getprop ro.kernel.qemu | tr -d '\r')" != 1 ]; the
 fi
 adb -s "$DEVICE" install --no-incremental -r "$DEBUG_APK"
 adb -s "$DEVICE" shell pm clear "$APP_PACKAGE"
-ACTIVITY="$(adb -s "$DEVICE" shell cmd package resolve-activity --brief "$APP_PACKAGE" | tail -n 1 | tr -d '\r' | cut -d/ -f2)"
 maui devflow broker start
-adb -s "$DEVICE" reverse tcp:19223 tcp:19223
-adb -s "$DEVICE" forward "tcp:$PORT" "tcp:$PORT"
-adb -s "$DEVICE" shell monkey -p "$APP_PACKAGE" 1
-for attempt in $(seq 1 60); do
-  if maui devflow agent status --agent-port "$PORT" --json; then break; fi
-  if [ "$attempt" = 60 ]; then exit 1; fi
-  sleep 1
-done
+python3 eng/maui-agent/android_launch.py --device "$DEVICE" --app "$APP_NAME" --package "$APP_PACKAGE" \
+  --host-port "$PORT" --output .maui-agent/debug-launch/report.json
+ACTIVITY="$(python3 -c 'import json; print(json.load(open(".maui-agent/debug-launch/report.json"))["activity"])')"
 python3 eng/maui-agent/devflow_check.py --app "$APP_NAME" --platform android --agent-port "$PORT" \
   --flow "$DEBUG_FLOW" --require-layout --output .maui-agent/debug/report.json
 appium --address 127.0.0.1 --port "$APPIUM_PORT" --log .maui-agent/appium-server.log &
@@ -50,3 +44,10 @@ python3 eng/maui-agent/android_check.py --device "$DEVICE" --app "$APP_NAME" --p
   --activity "$ACTIVITY" --apk "$RELEASE_APK" --suite "$NATIVE_SUITE" --clear-test-data \
   --server "http://127.0.0.1:$APPIUM_PORT" --orientation LANDSCAPE --font-scale 1.3 --night-mode yes \
   --output .maui-agent/large-font-landscape/report.json
+if [ -n "${NATIVE_BOUNDARY_SUITE:-}" ]; then
+  for run in 1 2; do
+    python3 eng/maui-agent/android_check.py --device "$DEVICE" --app "$APP_NAME" --package "$APP_PACKAGE" \
+      --activity "$ACTIVITY" --apk "$RELEASE_APK" --suite "$NATIVE_BOUNDARY_SUITE" --clear-test-data \
+      --server "http://127.0.0.1:$APPIUM_PORT" --orientation PORTRAIT --output ".maui-agent/boundary-$run/report.json"
+  done
+fi

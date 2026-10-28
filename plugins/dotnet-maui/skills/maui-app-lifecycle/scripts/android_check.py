@@ -207,7 +207,7 @@ def run(args):
                 elif action == "restart":
                     before = adb("shell", "pidof", args.package)
                     adb("shell", "am", "force-stop", args.package)
-                    adb("shell", "monkey", "-p", args.package, "1")
+                    adb("shell", "am", "start", "-W", "-n", f"{args.package}/{args.activity}")
                     after = wait_for(lambda: adb("shell", "pidof", args.package), 20)
                     if not before or before == after:
                         raise ValueError("Restart did not replace the app process")

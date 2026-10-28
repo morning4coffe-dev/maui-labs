@@ -80,6 +80,11 @@ workflow in Git; `.maui-agent/` is ignored local state and potentially private e
    See [the flow example](references/flows.md). Reset app state before each
    flow where required and check persistence by actually restarting the app.
 
+For a user-visible development session, keep Inspector open while editing and
+follow [live development](references/live-development.md). Prove a source hot
+reload with before/after runtime values and the same process ID. A successful
+live preview still needs a fresh build and final-source QA before publication.
+
 ## Run, classify, fix and retry
 
 Run configured checks with `lifecycle.py check CHECK-NAME`. The UI check invokes

@@ -17,6 +17,135 @@ from lifecycle import Workflow, digest, execute, redact, snapshot, write_json
 from devflow_check import McpClient, assertion_count, validate_layout
 from android_check import Driver
 from mcp_server import serve
+from live_setup import prepare
+from xaml_watch import literal_changes, equivalent, refresh
+from android_launch import component_for, agent_port, verify_status
+
+
+class AndroidLaunchTests(unittest.TestCase):
+    def test_component_resolution_does_not_select_another_package(self):
+        self.assertEqual("com.example/.MainActivity", component_for("com.example", "priority=0\ncom.other/.Other\ncom.example/.MainActivity"))
+        with self.assertRaises(ValueError): component_for("com.example", "com.other/.Other")
+        with self.assertRaises(ValueError): component_for("com.example", "com.example/.One\ncom.example/.Two")
+
+    def test_port_discovery_supports_broker_assigned_ports_and_rejects_invalid_numbers(self):
+        self.assertEqual(10223, agent_port("[Microsoft.Maui.DevFlow] Agent started on port 10223"))
+        self.assertEqual(9231, agent_port("HTTP server started on port 9231"))
+        self.assertIsNone(agent_port("HTTP server started on port 99999"))
+        self.assertIsNone(agent_port("Unrelated server port 9223"))
+
+    def test_live_identity_is_required_in_addition_to_a_log_port(self):
+        status = {"running": True, "app": {"name": "TaskApp", "packageId": "com.example", "processId": 42}, "device": {"platform": "Android"}}
+        verify_status(status, "TaskApp", "com.example", "42")
+        for app, package, pid in [("Other", "com.example", "42"), ("TaskApp", "com.other", "42"), ("TaskApp", "com.example", "43")]:
+            with self.subTest(app=app, package=package, pid=pid), self.assertRaises(ValueError):
+                verify_status(status, app, package, pid)
+
+
+class LiteralRefreshTests(unittest.TestCase):
+    def test_source_changes_include_only_verified_existing_literals(self):
+        old = b'<ContentPage><Button AutomationId="Add" Text="Add task" FontSize="14" /></ContentPage>'
+        new = old.replace(b'Add task', b'Add a task').replace(b'FontSize="14"', b'FontSize="16"')
+        changes = literal_changes(old, new)
+        self.assertEqual(["Text", "FontSize"], [c["property"] for c in changes])
+        self.assertEqual("Add task", changes[0]["before"])
+        self.assertEqual("Add a task", changes[0]["after"])
+
+    def test_unsafe_or_ambiguous_source_edits_require_rebuild(self):
+        old = b'<ContentPage><Button AutomationId="Add" Text="Add task" /></ContentPage>'
+        cases = [
+            (old, old.replace(b'<Button ', b'<Label ')),
+            (old, old.replace(b'Text="Add task"', b'Text="{Binding Title}"')),
+            (old, old.replace(b'Text="Add task"', b'Text="Add task" FontSize="16"')),
+            (b'<Button AutomationId="Add" Clicked="OnAdd" />', b'<Button AutomationId="Add" Clicked="OnOther" />'),
+            (b'<DataTemplate><Button AutomationId="Add" Text="Old" /></DataTemplate>', b'<DataTemplate><Button AutomationId="Add" Text="New" /></DataTemplate>'),
+            (b'<Grid><Button AutomationId="Add" Text="Old"/><Button AutomationId="Add" Text="Old"/></Grid>', b'<Grid><Button AutomationId="Add" Text="New"/><Button AutomationId="Add" Text="Old"/></Grid>')]
+        for before, after in cases:
+            with self.subTest(after=after), self.assertRaises(ValueError):
+                literal_changes(before, after)
+
+    def test_normalization_does_not_accept_invalid_numbers(self):
+        self.assertTrue(equivalent("FontSize", 14.0, "14"))
+        self.assertTrue(equivalent("IsVisible", True, "True"))
+        with self.assertRaises(ValueError): equivalent("Opacity", "NaN", "1")
+
+    def test_partial_transport_failure_rolls_back_the_entire_attempted_batch(self):
+        class Client:
+            values = {"Text": "Old", "FontSize": "14"}
+            failed = False
+            released = False
+            def data(self, tool, **args):
+                if tool == "maui_take_control":
+                    self.force = args["force"]
+                    return {"allowed": True}
+                return [{"id": "Add", "automationId": "Add", "type": "Button"}]
+            def call(self, tool, **args):
+                if tool == "maui_release_control": self.released = True; return {}
+                if tool == "maui_get_property": return {"content": [{"type": "text", "text": json.dumps(self.values[args["property"]])}]}
+                self.values[args["property"]] = args["value"]
+                if args["property"] == "FontSize" and not self.failed:
+                    self.failed = True
+                    raise ValueError("Transport lost the reply after applying the value")
+                return {}
+        client = Client()
+        changes = [{"automationId": "Add", "type": "Button", "property": name, "before": before, "after": after}
+                   for name, before, after in [("Text", "Old", "New"), ("FontSize", "14", "16")]]
+        with self.assertRaisesRegex(ValueError, "Transport lost"):
+            refresh(client, 9223, changes, 42, lambda: {"app": {"processId": 42}}, lambda: None)
+        self.assertEqual({"Text": "Old", "FontSize": "14"}, client.values)
+        self.assertFalse(client.force)
+        self.assertTrue(client.released)
+
+    def test_another_holders_lease_is_not_released_or_taken_over(self):
+        class Client:
+            def data(self, tool, **args): return {"allowed": False, "heldByOther": True}
+            def call(self, *args, **kwargs): raise AssertionError("Do not mutate another holder's session")
+        with self.assertRaisesRegex(ValueError, "no forced takeover"):
+            refresh(Client(), 9223, [], 42, lambda: {}, lambda: None)
+
+    def test_stale_source_metadata_is_rejected_before_property_mutation(self):
+        class Client:
+            def data(self, tool, **args):
+                return {"allowed": True} if tool == "maui_take_control" else [{"id": "Add", "automationId": "Add", "type": "Button", "sourceFile": "Other.xaml", "sourceHash": "stale"}]
+            def call(self, tool, **args):
+                if tool != "maui_release_control": raise AssertionError("Stale source must not be read as a valid mutation target")
+        change = {"automationId": "Add", "type": "Button", "property": "Text", "before": "Old", "after": "New"}
+        with self.assertRaisesRegex(ValueError, "source metadata"):
+            refresh(Client(), 9223, [change], 42, lambda: {"app": {"processId": 42}}, lambda: None, "MainPage.xaml", "valid-hash")
+
+
+class LiveSetupTests(unittest.TestCase):
+    def test_generates_resolved_local_paths_without_modifying_editor_configuration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            (root / "App.csproj").write_text("<Project />")
+            result = prepare(root, "App.csproj", "net10.0-android", "emulator-5556")
+            launch = json.loads((root / ".maui-agent/live-config/launch.json").read_text())
+            self.assertEqual(str(root / "App.csproj"), launch["configurations"][0]["project"])
+            self.assertEqual("emulator-5556", launch["configurations"][0]["device"])
+            settings = json.loads((root / ".maui-agent/live-config/settings.json").read_text())
+            self.assertTrue(settings["dotnet.debug.hotReloadXAML"])
+            self.assertFalse((root / ".vscode").exists())
+            self.assertFalse(result["installed"])
+
+    def test_install_preserves_existing_jsonc_and_does_not_partially_write(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            (root / "App.csproj").write_text("<Project />")
+            (root / ".vscode").mkdir()
+            settings = root / ".vscode/settings.json"
+            settings.write_text('{ // user settings\n "custom": true\n}')
+            original = settings.read_bytes()
+            with self.assertRaisesRegex(ValueError, "no files were replaced"):
+                prepare(root, "App.csproj", "net10.0-android", "emulator-5556", install=True)
+            self.assertEqual(original, settings.read_bytes())
+            self.assertFalse((root / ".vscode/launch.json").exists())
+
+    def test_rejects_missing_project_before_writing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            with self.assertRaisesRegex(ValueError, "existing app"):
+                prepare(folder, "missing.csproj", "net10.0-android", "emulator-5556", install=True)
+            self.assertFalse((Path(folder) / ".vscode").exists())
 
 
 class WorkflowTests(unittest.TestCase):

@@ -37,7 +37,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           repository: dotnet/maui-labs
-          ref: 391101d3f39c747cf6c23253e669382309083618
+          ref: ab32d8bd40006088b8a2378162fa7a7a98e71ba7
           path: .maui-tools/maui-labs
           persist-credentials: false
       - uses: actions/setup-dotnet@v5

@@ -110,3 +110,16 @@ from that process's logs, then verifies the live app/package/PID/platform over H
 A log line alone never proves readiness. It refuses to replace another device's
 host tunnel. Pass an explicit isolated device and host port when running parallel
 work; do not reset or stop a device owned by another task.
+
+## Resume after host sleep or resource stalls
+
+Keep timeout failures and attempt budgets. Read the sealed build log before
+classifying a stalled run. On macOS, `uptime`, process state and `pmset -g log`
+can distinguish host pressure/sleep from an app assertion failure. Stop only
+owned test processes; never kill another task's apps or devices to free memory.
+Build without the emulator when needed, limit worker counts at process scope,
+and use a temporary process-bound idle-sleep assertion for long checks. Restart
+the explicitly selected test device and reverify live identity afterward. A
+process in an uninterruptible kernel wait may not exit after a signal; do not
+report it as stopped or launch conflicting instances over its locks. If recovery
+cannot complete, preserve the blocker instead of substituting an older binary.

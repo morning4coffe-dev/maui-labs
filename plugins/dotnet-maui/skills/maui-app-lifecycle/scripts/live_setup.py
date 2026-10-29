@@ -17,8 +17,8 @@ def prepare(root, project, framework, device, jdk=None, install=False):
                 "maui.configuration.useLaunchJsonConfigurations": True}
     if jdk:
         java_home = Path(jdk).expanduser().resolve()
-        if not (java_home / "bin" / "java").is_file():
-            raise ValueError("JDK must contain bin/java")
+        if not any((java_home / "bin" / name).is_file() for name in ("java", "java.exe")):
+            raise ValueError("JDK must contain bin/java or bin/java.exe")
         settings["maui.configuration.javaSdkPreferredPath"] = str(java_home)
     files = {
         "launch.json": {"version": "0.2.0", "configurations": [{

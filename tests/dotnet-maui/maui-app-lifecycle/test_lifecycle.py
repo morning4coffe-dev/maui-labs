@@ -115,6 +115,20 @@ class LiteralRefreshTests(unittest.TestCase):
 
 
 class LiveSetupTests(unittest.TestCase):
+    def test_windows_jdk_layout_and_invalid_jdk(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            (root / "App.csproj").write_text("<Project />")
+            jdk = root / "jdk"
+            (jdk / "bin").mkdir(parents=True)
+            with self.assertRaisesRegex(ValueError, "JDK must contain"):
+                prepare(root, "App.csproj", "net10.0-android", "emulator-5556", str(jdk))
+            self.assertFalse((root / ".maui-agent/live-config").exists())
+            (jdk / "bin/java.exe").write_bytes(b"fixture")
+            prepare(root, "App.csproj", "net10.0-android", "emulator-5556", str(jdk))
+            settings = json.loads((root / ".maui-agent/live-config/settings.json").read_text())
+            self.assertEqual(str(jdk), settings["maui.configuration.javaSdkPreferredPath"])
+
     def test_generates_resolved_local_paths_without_modifying_editor_configuration(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder).resolve()

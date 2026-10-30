@@ -99,3 +99,15 @@ scenarios:
       - "Repairs launcher readiness and checks live app/package/process identity"
       - "Preserves original app assertions and records the infrastructure evidence"
     timeout: 120
+
+  - name: "Android boot flag is not device readiness"
+    prompt: "Continue the same QA cycle: sys.boot_completed is 1 but System UI has an active ANR and APK installation hangs. Two of three DevFlow failure allowances are already used. Finish QA with maui-app-lifecycle."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)android_ready|readiness|infrastructure|ANR'
+    rubric:
+      - "Checks selected-device user/window/Package Manager/screenshot readiness before spending the remaining app-test attempt"
+      - "Preserves the existing failure budget and does not count readiness evidence as app assertions"
+      - "Investigates fault ownership rather than automatically labeling every ANR an infrastructure fault"
+      - "Reports current-source UI qualification blocked until a healthy target and real assertions are available"
+    timeout: 120

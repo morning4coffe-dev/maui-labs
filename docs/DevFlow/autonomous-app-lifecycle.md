@@ -83,3 +83,7 @@ Scheduled CI provides recurring validation after installation on a default
 branch. Unattended issue-to-fix work requires a separately configured coding-agent
 host and its authorization. Do not describe an unconfigured scheduler, unavailable
 device or untested platform as completed coverage.
+
+The [October 28 qualification](autonomous-app-lifecycle-qa-2026-10-28.md) adds visible
+Inspector hosting, guarded source literal refresh, deterministic Android startup
+and repeated Unicode/input-boundary scenarios.

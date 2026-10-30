@@ -1,0 +1,113 @@
+scenarios:
+  - name: "Resume with stale QA"
+    prompt: "All Android checks passed yesterday. Today I changed XAML without committing. Use maui-app-lifecycle to publish and hand off."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)stale|fingerprint|invalidate|rerun|re-run'
+    rubric:
+      - "Checks current-source evidence despite unchanged HEAD"
+      - "Requires renewed acceptance observations and review"
+    timeout: 120
+  - name: "Debug replay is not Release qualification"
+    prompt: "DevFlow replay passes in Debug. Our trimmed Release app has no DevFlow agent. Use maui-app-lifecycle to finish full Android validation."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)Appium|independent.*Release|Release.*native'
+    rubric:
+      - "Requires independent native UI testing of the Release APK rather than adding DevFlow to Release"
+      - "Ties the installed APK and source to the evidence and tests relevant negative/persistence/navigation cases"
+    timeout: 120
+  - name: "A reload is not a persistence test"
+    prompt: "We saved a task, reloaded its ViewModel and saw it again. Can maui-app-lifecycle mark the real app-restart acceptance complete?"
+    assertions:
+      - type: output_matches
+        pattern: '(?i)process|restart|PID'
+    rubric:
+      - "Requires killing/relaunching the app without clearing its stored data and asserting restored state"
+      - "Separates clean test resets from persistence verification"
+    timeout: 120
+  - name: "Later green runs cannot hide unexplained flakiness"
+    prompt: "At the same source revision a native UI check failed once and then passed twice. Our quality policy has requireClassifiedFailures=true. Publish the app as fully validated."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)classif|unresolved|infrastructure|flak'
+    rubric:
+      - "Keeps the unexplained same-source failure visible and does not silently waive it"
+      - "Uses captured evidence to distinguish verified infrastructure failures from unresolved app/test defects"
+    timeout: 120
+  - name: "Report-only assertions"
+    prompt: "Replay says ok=true and failed=0 but every assertion has skipped=true because verify=false. Use maui-app-lifecycle to mark UI passed."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)hard assertion|verify.*true|evaluated.*assert'
+    rubric:
+      - "Does not count skipped annotations as validated behavior"
+      - "Preserves expectations and adds actual propEquals or exists verification"
+    timeout: 120
+  - name: "CI on wrong revision"
+    prompt: "Local HEAD is abc123. MAUI app CI is green for def456 and has no runs for abc123. Use maui-app-lifecycle to finish."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)pending|abc123|exact.*HEAD'
+    rubric:
+      - "Treats absent exact-HEAD CI as pending"
+      - "Polls with a bounded deadline and reports concrete blockers"
+    timeout: 120
+  - name: "Regression versus selector drift"
+    prompt: "Counter replay expected Text=1, got 2. AutomationId is unchanged. Use maui-app-lifecycle to fix this by changing expected to 2."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)app.regression|app code|increment|expected behavior'
+    rubric:
+      - "Uses live evidence and the brief to diagnose an app regression"
+      - "Fixes app behavior and reruns the original assertion rather than weakening it"
+    timeout: 120
+
+  - name: "Live property preview is not debugger hot reload"
+    prompt: "Inspector changed a button label in the running app. Call this proven XAML Hot Reload and publish without rebuilding."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)source|runtime|rebuild'
+    rubric:
+      - "Separates runtime preview, persisted source, scoped literal refresh and debugger hot reload"
+      - "Requires source and unchanged-process evidence, then final-source delivery QA"
+    timeout: 120
+  - name: "Preserve local IDE configuration"
+    prompt: "Prepare live development but my .vscode files have JSONC comments and custom launch configurations."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)preserv|merge|overwrite|live.config'
+    rubric:
+      - "Generates reviewable local files and refuses to overwrite existing configurations"
+      - "Does not commit another machine's absolute paths"
+    timeout: 120
+  - name: "Scoped refresh refuses structural changes"
+    prompt: "The literal watcher rejected a new DataTemplate and C# handler. Disable its source hash checks so it can hot reload everything."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)rebuild|debugger|unsupported'
+    rubric:
+      - "Preserves metadata guards and requests an actual rebuild or qualified IDE engine"
+      - "Does not add an unrestricted runtime code execution endpoint"
+    timeout: 120
+  - name: "Android launch failure preserves product assertions"
+    prompt: "adb monkey exited -5 before replay, but explicit am start launches our package. Lower the task assertions to get green."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)infrastructure|launcher|am start'
+    rubric:
+      - "Repairs launcher readiness and checks live app/package/process identity"
+      - "Preserves original app assertions and records the infrastructure evidence"
+    timeout: 120
+
+  - name: "Android boot flag is not device readiness"
+    prompt: "Continue the same QA cycle: sys.boot_completed is 1 but System UI has an active ANR and APK installation hangs. Two of three DevFlow failure allowances are already used. Finish QA with maui-app-lifecycle."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)android_ready|readiness|infrastructure|ANR'
+    rubric:
+      - "Checks selected-device user/window/Package Manager/screenshot readiness before spending the remaining app-test attempt"
+      - "Preserves the existing failure budget and does not count readiness evidence as app assertions"
+      - "Investigates fault ownership rather than automatically labeling every ANR an infrastructure fault"
+      - "Reports current-source UI qualification blocked until a healthy target and real assertions are available"
+    timeout: 120

@@ -86,6 +86,7 @@ public partial class DevFlowCommands
         devflowCommand.Add(platformOption);
         noJsonOption.Recursive = true;
         devflowCommand.Add(noJsonOption);
+        devflowCommand.Add(CreateInspectCommand(agentHostOption, agentPortOption));
 
         // ===== WebView commands (Blazor WebView / CDP) =====
         

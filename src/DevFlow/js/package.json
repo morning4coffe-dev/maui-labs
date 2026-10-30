@@ -15,5 +15,8 @@
     "test": "npm run test:inspector && npm run test --workspaces --if-present",
     "test:inspector": "node --test \"test/**/*.test.mjs\"",
     "package:vsix": "npm run package:vsix -w maui-devflow-inspector"
+  },
+  "overrides": {
+    "@azure/msal-node": "^7.1.2"
   }
 }

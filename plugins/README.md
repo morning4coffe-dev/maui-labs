@@ -47,6 +47,7 @@ Alternatively, install the complete plugin in an agent that supports marketplace
 
 | Area | Skill | Description |
 |------|-------|-------------|
+| App lifecycle | [maui-app-lifecycle](dotnet-maui/skills/maui-app-lifecycle/) | Create, inspect, test, repair, publish draft PRs and follow CI with durable evidence and human review. |
 | App fundamentals | [maui-app-architecture](dotnet-maui/skills/maui-app-architecture/) | Structure MAUI apps with DI, MVVM, Shell routing, compiled bindings, and trim-safe navigation. |
 | App fundamentals | [maui-current-apis](dotnet-maui/skills/maui-current-apis/) | Give target-framework-aware guidance for current MAUI APIs and avoid Xamarin.Forms-era suggestions. |
 | App fundamentals | [maui-project-structure](dotnet-maui/skills/maui-project-structure/) | Organize single-project resources, app metadata, Central Package Management, fonts, images, and assets. |

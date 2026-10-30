@@ -143,6 +143,21 @@ http://localhost:19223/inspector/
 The page lists every connected app. Select the app and platform you want to inspect. The per-agent
 URL is `http://localhost:19223/inspector/{agent-id}/`.
 
+If the agent is reachable at an explicit endpoint but broker discovery is
+unavailable, serve the same Inspector directly from the CLI:
+
+```bash
+maui devflow inspect --app MyApp --project path/to/MyApp.csproj \
+  --agent-host 127.0.0.1 --agent-port 9225 --listen-port 19225
+```
+
+For Android, first forward the selected device's actual agent port, for example
+`adb -s emulator-5556 forward tcp:9225 tcp:9223`. The command verifies the live
+app name before listening, prints a loopback URL, and keeps running until
+cancelled. It does not install, reset or restart the app, register a substitute
+agent, or take over another Inspector's mutation lease. The project supplies
+the local source context; source writes still require current matching metadata.
+
 ## Open in Visual Studio Code
 
 The VS Code extension is currently a source-built preview and is not published to the Marketplace.

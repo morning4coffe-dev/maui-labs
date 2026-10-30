@@ -1,0 +1,640 @@
+#!/usr/bin/env python3
+"""Durable, evidence-gated MAUI agent workflow. Python 3.10+, standard library only."""
+from __future__ import annotations
+
+import argparse
+import contextlib
+import datetime as dt
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import tempfile
+import uuid
+import xml.etree.ElementTree as ET
+
+PLAN = "maui-agent.json"
+STATE = ".maui-agent"
+KINDS = {"build", "unit", "ui", "release"}
+CLASSIFICATIONS = {"app-regression", "test-drift", "infrastructure", "inconclusive"}
+
+
+def now():
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def redact(text):
+    text = re.sub(r"(?i)(authorization\s*[:=]\s*(?:bearer\s+)?)[^\s\"']+", r"\1[REDACTED]", text)
+    text = re.sub(r"(?i)((?:password|token|secret|api[_-]?key)\s*[\"']?\s*[:=]\s*[\"']?)[^\s\"',}]+", r"\1[REDACTED]", text)
+    text = re.sub(r"\b(?:gh[pousr]_[A-Za-z0-9_]+|github_pat_[A-Za-z0-9_]+)\b", "[REDACTED]", text)
+    for key, value in os.environ.items():
+        if len(value) >= 8 and re.search(r"TOKEN|SECRET|PASSWORD|API_KEY", key, re.I):
+            text = text.replace(value, "[REDACTED]")
+    return text
+
+
+def write_json(path, value):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".tmp")
+    temporary.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+    os.replace(temporary, path)
+
+
+def execute(argv, root, timeout=120):
+    """No shell, bounded lifetime, kill the process tree on timeout."""
+    if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
+        raise ValueError("Commands must be nonempty arrays of strings; shell strings are not supported")
+    with tempfile.TemporaryFile() as output:
+        try:
+            child = subprocess.Popen(argv, cwd=root, stdout=output, stderr=subprocess.STDOUT,
+                                     start_new_session=os.name != "nt")
+        except OSError as exc:
+            return {"exitCode": 127, "output": redact(str(exc)), "timedOut": False}
+        timed_out = False
+        try:
+            child.wait(timeout=timeout)
+        except (subprocess.TimeoutExpired, KeyboardInterrupt):
+            timed_out = True
+            if os.name == "nt":
+                subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"], capture_output=True)
+            else:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(child.pid, signal.SIGKILL)
+            child.wait()
+        output.seek(0)
+        data = output.read(2 * 1024 * 1024 + 1)
+        truncated = len(data) > 2 * 1024 * 1024
+        return {"exitCode": 124 if timed_out else child.returncode,
+                "output": redact(data[:2 * 1024 * 1024].decode("utf-8", errors="replace")),
+                "timedOut": timed_out, "truncated": truncated}
+
+
+def git(root, *args):
+    result = execute(["git", *args], root)
+    if result["exitCode"]:
+        raise ValueError(result["output"])
+    return result["output"].strip()
+
+
+def inside(root, relative):
+    path = (root / relative).resolve()
+    if not path.is_relative_to(root):
+        raise ValueError(f"Path leaves the application repository: {relative}")
+    return path
+
+
+def snapshot(root):
+    result = subprocess.run(["git", "ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                            cwd=root, capture_output=True, check=True)
+    files = {}
+    for name in sorted(set(result.stdout.decode().split("\0")) - {""}):
+        if name.startswith(STATE + "/"):
+            continue
+        path = root / name
+        if path.is_symlink():
+            data = ("symlink:" + os.readlink(path)).encode()
+        elif path.is_file():
+            data = path.read_bytes()
+        elif not path.exists():
+            data = b"<deleted>"
+        else:
+            raise ValueError(f"Unsupported source entry (including submodules): {name}")
+        files[name] = digest(data)
+    return digest(json.dumps(files, sort_keys=True).encode())
+
+
+def plan_for(root):
+    plan = json.loads((root / PLAN).read_text(encoding="utf-8"))
+    if plan.get("schema") != 1:
+        raise ValueError("Unsupported plan schema")
+    if not plan.get("acceptance") or not plan.get("platforms"):
+        raise ValueError("Plan needs acceptance criteria and target platforms")
+    if not isinstance(plan.get("maxAttempts"), int) or not 1 <= plan["maxAttempts"] <= 10:
+        raise ValueError("maxAttempts must be between 1 and 10")
+    names = set()
+    for check in plan.get("checks", []):
+        name = check.get("name", "")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,79}", name) or name in names:
+            raise ValueError("Check names must be unique lowercase identifiers")
+        names.add(name)
+        if check.get("kind") not in KINDS or check.get("platform") not in ["host", *plan["platforms"]]:
+            raise ValueError(f"Invalid kind/platform for {name}")
+        command = check.get("command")
+        if not isinstance(command, list) or not command or not all(isinstance(a, str) for a in command):
+            raise ValueError(f"Check {name} requires a command argument array")
+        timeout = check.get("timeout", 600)
+        if not isinstance(timeout, (int, float)) or not 0 < timeout <= 3600:
+            raise ValueError(f"Invalid timeout for {name}")
+        if check["kind"] == "unit" and check.get("format") != "trx":
+            raise ValueError("Unit checks must consume a nonempty TRX test report")
+        if check["kind"] == "ui" and check.get("format") not in {"devflow", "appium"}:
+            raise ValueError("UI checks must consume assertion-bearing DevFlow or independent Appium evidence")
+        if check.get("format") in {"trx", "devflow", "appium"}:
+            if not inside(root, check["result"]).is_relative_to(root / STATE):
+                raise ValueError("Check result paths must be under .maui-agent/")
+        if type(check.get("runs", 1)) is not int or not 1 <= check.get("runs", 1) <= 10:
+            raise ValueError("Check runs must be between 1 and 10")
+        if check.get("artifact"):
+            inside(root, check["artifact"])
+    checks = {c["name"]: c for c in plan.get("checks", [])}
+    def dependencies(name, visiting):
+        if name in visiting:
+            raise ValueError("Check dependencies contain a cycle")
+        for dependency in checks[name].get("dependsOn", []):
+            if dependency not in checks:
+                raise ValueError(f"Unknown check dependency: {dependency}")
+            dependencies(dependency, visiting | {name})
+    for name in checks:
+        dependencies(name, set())
+    return plan
+
+
+class Workflow:
+    def __init__(self, root):
+        self.root = Path(root).resolve()
+        self.directory = self.root / STATE
+        self.state_path = self.directory / "state.json"
+
+    @contextlib.contextmanager
+    def locked(self):
+        self.directory.mkdir(parents=True, exist_ok=True)
+        lock = self.directory / "lock"
+        try:
+            fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            raise ValueError(f"Another operation holds {lock}; inspect its PID before removing a stale lock")
+        try:
+            os.write(fd, str(os.getpid()).encode())
+            os.close(fd)
+            yield
+        finally:
+            lock.unlink(missing_ok=True)
+
+    def load(self):
+        return json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def save(self, state):
+        write_json(self.state_path, state)
+
+    def init(self, name, platforms, acceptance):
+        git(self.root, "rev-parse", "--show-toplevel")
+        if Path(git(self.root, "rev-parse", "--show-toplevel")).resolve() != self.root:
+            raise ValueError("Use the Git repository root")
+        if (self.root / PLAN).exists() or self.state_path.exists():
+            raise ValueError("Workflow already exists; use status or cycle to resume")
+        with self.locked():
+            ignore = self.root / ".gitignore"
+            text = ignore.read_text() if ignore.exists() else ""
+            if "/.maui-agent/" not in text.splitlines():
+                ignore.write_text(text.rstrip() + "\n/.maui-agent/\n")
+            plan = {"schema": 1, "name": name, "platforms": platforms,
+                    "acceptance": acceptance, "maxAttempts": 3, "checks": [],
+                    "github": {"repository": "", "base": "main", "requiredWorkflows": []}}
+            write_json(self.root / PLAN, plan)
+            self.save({"schema": 1, "cycle": 1, "reason": "initial creation", "createdAt": now(),
+                       "attempts": [], "classifications": [], "reviews": [], "ci": []})
+        return self.status()
+
+    def status(self):
+        plan, state, source = plan_for(self.root), self.load(), snapshot(self.root)
+        blockers = []
+        checks = plan["checks"]
+        if not any(c["kind"] == "unit" for c in checks):
+            blockers.append("No unit test check configured")
+        for platform in plan["platforms"]:
+            for kind in ("build", "ui", "release"):
+                if not any(c["kind"] == kind and c["platform"] == platform for c in checks):
+                    blockers.append(f"No {kind} check for {platform}")
+        coverage = []
+        for check in checks:
+            records = [r for r in state["attempts"] if r["check"] == check["name"]]
+            record = records[-1] if records else None
+            valid = self.passing(check, state, source)
+            latest_valid = bool(record and record["ok"] and record["source"] == source and self.verify(record))
+            coverage.append({"name": check["name"], "platform": check["platform"], "kind": check["kind"],
+                             "requiredRuns": check.get("runs", 1),
+                             "status": "passed" if valid else "missing" if not record else
+                             "stale" if record["source"] != source else "insufficient-runs" if latest_valid else "failed"})
+            if not valid:
+                blockers.append(f"{check['name']}: {coverage[-1]['status']}")
+            if plan.get("quality", {}).get("requireClassifiedFailures"):
+                for failure in [r for r in records if r["source"] == source and not r["ok"]]:
+                    if not any(c["attempt"] == failure["id"] and c["category"] == "infrastructure"
+                               for c in state["classifications"]):
+                        blockers.append(f"Unresolved current-source failure: {check['name']} ({failure['id']})")
+        quality = plan.get("quality", {})
+        for platform in plan["platforms"]:
+            native = [c for c in checks if c.get("format") == "appium" and c["platform"] == platform
+                      and self.passing(c, state, source)]
+            if quality.get("independentUi") and not native:
+                blockers.append(f"No independent native UI evidence for {platform}")
+            if quality.get("releaseUi") and not any(c.get("configuration") == "Release" for c in native):
+                blockers.append(f"No Release runtime evidence for {platform}")
+            tags = set()
+            for check in native:
+                latest = [r for r in state["attempts"] if r["check"] == check["name"]][-1]
+                tags.update(latest.get("scenarios", []))
+            for tag in quality.get("scenarios", []):
+                if tag not in tags:
+                    blockers.append(f"No verified {tag} scenario for {platform}")
+        for index, criterion in enumerate(plan["acceptance"]):
+            observations = [o for o in state.get("observations", []) if o["criterion"] == index
+                            and o["source"] == source]
+            intact = any(any(r["id"] == o["attempt"] and r["ok"] and r["source"] == source
+                             and self.verify(r) for r in state["attempts"]) for o in observations)
+            if not intact:
+                blockers.append(f"Acceptance {index} has no current evidence: {criterion}")
+        head_result = execute(["git", "rev-parse", "--verify", "HEAD"], self.root)
+        head = head_result["output"].strip() if head_result["exitCode"] == 0 else None
+        config = plan.get("github", {})
+        required_ci = bool(config.get("repository") and config.get("requiredWorkflows"))
+        ci_reports = [r for r in state.get("ci", []) if r.get("head") == head]
+        ci_status = ci_reports[-1]["status"] if ci_reports else "pending" if required_ci else "not-configured"
+        if required_ci and ci_status == "passed" and git(self.root, "status", "--porcelain"):
+            ci_status = "stale"
+        return {"ok": not blockers, "localQaReady": not blockers,
+                "validationComplete": not blockers and (not required_ci or ci_status == "passed"),
+                "ci": {"required": required_ci, "status": ci_status, "head": head},
+                "cycle": state["cycle"], "source": source,
+                "coverage": coverage, "blockers": blockers,
+                "next": "review" if not blockers else "configure or repair the listed checks; run check"}
+
+    def observe(self, criterion, attempt, note):
+        """Record the agent's acceptance assessment; never impersonate human approval."""
+        with self.locked():
+            plan, state, source = plan_for(self.root), self.load(), snapshot(self.root)
+            if type(criterion) is not int or not 0 <= criterion < len(plan["acceptance"]) or not note.strip():
+                raise ValueError("Provide a valid zero-based acceptance index and evidence assessment")
+            record = next((r for r in state["attempts"] if r["id"] == attempt), None)
+            if not record or not record["ok"] or record["source"] != source or not self.verify(record):
+                raise ValueError("Acceptance observations need intact passing evidence for current source")
+            observation = {"criterion": criterion, "attempt": attempt, "source": source,
+                           "note": redact(note), "reviewer": "agent", "at": now()}
+            state.setdefault("observations", []).append(observation)
+            self.save(state)
+            return observation
+
+    def verify(self, record):
+        try:
+            if record.get("binary"):
+                binary = record["binary"]
+                if digest(inside(self.root, binary["path"]).read_bytes()) != binary["sha256"]:
+                    return False
+            return bool(record.get("evidence")) and all(
+                digest(inside(self.root, name).read_bytes()) == expected
+                for name, expected in record["evidence"].items())
+        except (OSError, ValueError):
+            return False
+
+    def passing(self, check, state, source):
+        records = [r for r in state["attempts"] if r["check"] == check["name"]]
+        required = check.get("runs", 1)
+        return len(records) >= required and all(
+            r["ok"] and r["source"] == source and self.verify(r) for r in records[-required:])
+
+    def check(self, name):
+        with self.locked():
+            plan, state = plan_for(self.root), self.load()
+            check = next((c for c in plan["checks"] if c["name"] == name), None)
+            if check is None:
+                raise ValueError(f"Unknown check: {name}")
+            failures = [r for r in state["attempts"] if r["check"] == name and not r["ok"]
+                        and r["cycle"] == state["cycle"]]
+            if len(failures) >= plan["maxAttempts"]:
+                raise ValueError("Repair budget exhausted. Present evidence to the human before starting another cycle")
+            if len(failures) >= 2 and failures[-1]["signature"] == failures[-2]["signature"]:
+                latest = failures[-1]["id"]
+                if not any(c["attempt"] == latest for c in state["classifications"]):
+                    raise ValueError("Repeated identical failure. Classify and inspect evidence before retrying")
+            source = snapshot(self.root)
+            for dependency_name in check.get("dependsOn", []):
+                dependency = next(c for c in plan["checks"] if c["name"] == dependency_name)
+                if not self.passing(dependency, state, source):
+                    raise ValueError(f"Run current passing dependency {dependency_name} before {check['name']}")
+            attempt_id = uuid.uuid4().hex
+            directory = self.directory / "evidence" / attempt_id
+            directory.mkdir(parents=True)
+            result_file = inside(self.root, check["result"]) if check.get("result") else None
+            if result_file and result_file.exists():
+                # A successful command cannot accidentally reuse yesterday's report.
+                if not result_file.is_relative_to(self.directory):
+                    raise ValueError("Check result paths must be under .maui-agent/ so stale reports can be removed safely")
+                result_file.unlink()
+            started = now()
+            result = execute(check["command"], self.root, check.get("timeout", 600))
+            log = directory / "command.log"
+            log.write_text(result["output"], encoding="utf-8")
+            ok = result["exitCode"] == 0 and not result["timedOut"] and not result.get("truncated")
+            reason, artifacts, binary, scenarios = "", [log], None, []
+            try:
+                if ok and check.get("format") == "trx":
+                    tree = ET.parse(result_file)
+                    counters = next((e for e in tree.iter() if e.tag.split("}")[-1] == "Counters"), None)
+                    if counters is None or int(counters.get("executed", "0")) <= 0:
+                        raise ValueError("TRX contains no executed tests")
+                    if int(counters.get("failed", "0")) or int(counters.get("error", "0")):
+                        raise ValueError("TRX contains failed tests")
+                    if int(counters.get("passed", "0")) != int(counters.get("executed", "0")):
+                        raise ValueError("Not all executed tests passed")
+                    artifacts.append(result_file)
+                elif ok and check.get("format") in {"devflow", "appium"}:
+                    report = json.loads(result_file.read_text())
+                    if report.get("ok") is not True or report.get("assertions", 0) <= 0:
+                        raise ValueError("UI report has no successful hard assertions")
+                    if report.get("platform", "").lower() != check["platform"].lower():
+                        raise ValueError("UI report platform does not match the check")
+                    if not report.get("app") or not report.get("artifacts"):
+                        raise ValueError("UI report is missing app identity or captured evidence")
+                    artifacts.extend(inside(self.root, p) for p in report["artifacts"])
+                    artifacts.append(result_file)
+                    if check.get("format") == "appium":
+                        if report.get("driver") != "appium-uiautomator2" or report.get("source") != source:
+                            raise ValueError("Independent UI report has wrong driver or stale source")
+                        assertions = [s for s in report.get("trace", []) if s.get("action") in {"assert", "assertAbsent"}]
+                        if (not any(s.get("action") == "assert" for s in assertions)
+                                or any(s.get("ok") is not True for s in report.get("trace", []))
+                                or len(assertions) != report["assertions"]):
+                            raise ValueError("Independent UI report has inconsistent assertion evidence")
+                        if report.get("configuration") != check.get("configuration") or report.get("package") != check.get("appPackage"):
+                            raise ValueError("Independent UI report configuration/package mismatch")
+                        binary = report.get("binary")
+                        if not binary or binary.get("path") != check.get("artifact"):
+                            raise ValueError("Independent UI report needs the configured APK identity")
+                        if digest(inside(self.root, binary["path"]).read_bytes()) != binary.get("sha256"):
+                            raise ValueError("Tested APK differs from the current build artifact")
+                        scenarios = list({tag for scenario in report.get("scenarios", []) if scenario.get("assertions", 0) > 0
+                                          for tag in scenario.get("tags", [])})
+                if ok and check.get("artifact"):
+                    binary = {"path": check["artifact"], "sha256": digest(inside(self.root, check["artifact"]).read_bytes())}
+                if snapshot(self.root) != source:
+                    raise ValueError("Source changed during the check; rerun against a stable revision")
+            except (ValueError, OSError, ET.ParseError, TypeError) as exc:
+                ok, reason = False, str(exc)
+            # Failed runs need their TRX/replay/screenshots as much as successful ones.
+            if result_file and result_file.is_file():
+                artifacts.append(result_file)
+                if check.get("format") in {"devflow", "appium"}:
+                    try:
+                        failure_report = json.loads(result_file.read_text())
+                        for relative in failure_report.get("artifacts", []):
+                            artifact = inside(self.root, relative)
+                            if not artifact.is_relative_to(self.directory):
+                                raise ValueError("UI artifacts must stay under .maui-agent/")
+                            artifacts.append(artifact)
+                    except (ValueError, OSError, TypeError) as exc:
+                        ok, reason = False, str(exc)
+            evidence = {}
+            try:
+                for index, artifact in enumerate(dict.fromkeys(artifacts)):
+                    data = artifact.read_bytes()
+                    # Seal copies so a subsequent check cannot overwrite previous evidence.
+                    sealed = directory / f"{index}-{artifact.name}"
+                    if artifact != log:
+                        sealed.write_bytes(data)
+                    else:
+                        sealed = log
+                    evidence[str(sealed.relative_to(self.root))] = digest(data)
+            except OSError as exc:
+                ok, reason = False, str(exc)
+            record = {"id": attempt_id, "cycle": state["cycle"], "check": name, "source": source,
+                      "startedAt": started, "finishedAt": now(), "ok": ok,
+                      "exitCode": result["exitCode"], "timedOut": result["timedOut"],
+                      "reason": reason, "evidence": evidence,
+                      "binary": binary, "scenarios": scenarios,
+                      "signature": digest((str(result["exitCode"]) + reason + result["output"][-4000:]).encode())}
+            state["attempts"].append(record)
+            self.save(state)
+            return record
+
+    def classify(self, attempt, category, reason):
+        if category not in CLASSIFICATIONS or not reason.strip():
+            raise ValueError("Provide an evidence-backed classification and reason")
+        with self.locked():
+            state = self.load()
+            record = next((r for r in state["attempts"] if r["id"] == attempt), None)
+            if not record or record["ok"] or not self.verify(record):
+                raise ValueError("Classification requires an intact failed attempt")
+            entry = {"attempt": attempt, "category": category, "reason": redact(reason), "at": now()}
+            state["classifications"].append(entry)
+            self.save(state)
+            return entry
+
+    def cycle(self, reason):
+        if not reason.strip():
+            raise ValueError("A new cycle needs the human's new request or authorization as its reason")
+        with self.locked():
+            state = self.load()
+            state["cycle"] += 1
+            state["reason"] = redact(reason)
+            self.save(state)
+            return {"ok": True, "cycle": state["cycle"], "reason": state["reason"]}
+
+    def review(self):
+        with self.locked():
+            status = self.status()
+            plan, state = plan_for(self.root), self.load()
+            review = {"at": now(), "source": status["source"], "ready": status["ok"],
+                      "localQaReady": status["localQaReady"], "validationComplete": status["validationComplete"],
+                      "ci": status["ci"],
+                      "acceptance": plan["acceptance"], "coverage": status["coverage"],
+                      "observations": state.get("observations", []),
+                      "blockers": status["blockers"], "classifications": state["classifications"],
+                      "diffStat": git(self.root, "diff", "--stat", "HEAD"),
+                      "untracked": git(self.root, "ls-files", "--others", "--exclude-standard")}
+            write_json(self.directory / "review.json", review)
+            state["reviews"].append(review)
+            self.save(state)
+            return review
+
+    def github(self, title, body_file):
+        """User-authorized push and draft PR; never merges or enables auto-merge."""
+        with self.locked():
+            status, plan = self.status(), plan_for(self.root)
+            if not status["ok"]:
+                raise ValueError("QA gates are incomplete: " + "; ".join(status["blockers"]))
+            state = self.load()
+            if (not state["reviews"] or not state["reviews"][-1]["ready"]
+                    or state["reviews"][-1]["source"] != status["source"]):
+                raise ValueError("Generate a current review before publishing")
+            if git(self.root, "status", "--porcelain"):
+                raise ValueError("Commit the reviewed app changes before publishing")
+            config = plan["github"]
+            repository = config.get("repository", "")
+            if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
+                raise ValueError("Set github.repository to an authorized owner/repository")
+            branch = git(self.root, "branch", "--show-current")
+            if not branch or branch in {"main", "master", config.get("base", "main")}:
+                raise ValueError("Publish from a feature branch")
+            body = inside(self.root, body_file)
+            if not body.is_file():
+                raise ValueError("PR body file does not exist")
+            remote = git(self.root, "remote", "get-url", "origin").removesuffix(".git")
+            if remote not in {f"https://github.com/{repository}", f"git@github.com:{repository}"}:
+                raise ValueError("origin does not match github.repository")
+            git(self.root, "push", "--set-upstream", "origin", branch)
+            existing = execute(["gh", "pr", "list", "--repo", repository, "--head", branch,
+                                "--state", "open", "--json", "url"], self.root)
+            if existing["exitCode"]:
+                raise ValueError(existing["output"])
+            prs = json.loads(existing["output"])
+            if prs:
+                return {"ok": True, "url": prs[0]["url"], "head": git(self.root, "rev-parse", "HEAD")}
+            result = execute(["gh", "pr", "create", "--repo", repository, "--draft", "--base",
+                              config.get("base", "main"), "--head", branch, "--title", title,
+                              "--body-file", str(body)], self.root)
+            if result["exitCode"]:
+                raise ValueError(result["output"])
+            return {"ok": True, "url": result["output"].strip(), "head": git(self.root, "rev-parse", "HEAD")}
+
+    def maintenance(self):
+        config = plan_for(self.root)["github"]
+        repository = config.get("repository", "")
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
+            raise ValueError("Configure github.repository before maintenance intake")
+        commands = {
+            "issues": ["gh", "issue", "list", "--repo", repository, "--state", "open", "--limit", "100",
+                       "--search", '"MAUI maintenance:" in:title', "--json", "number,title,url,body,updatedAt"],
+            "runs": ["gh", "run", "list", "--repo", repository, "--branch", config.get("base", "main"),
+                     "--limit", "20", "--json", "databaseId,headSha,workflowName,status,conclusion,url"]}
+        report = {"at": now(), "repository": repository}
+        for name, command in commands.items():
+            result = execute(command, self.root)
+            if result["exitCode"]:
+                raise ValueError(result["output"])
+            report[name] = json.loads(result["output"])
+        return report
+
+    def ci(self):
+        """One polling step. The agent can communicate while waiting between steps."""
+        with self.locked():
+            plan, state = plan_for(self.root), self.load()
+            repository = plan["github"]["repository"]
+            required = plan["github"].get("requiredWorkflows", [])
+            if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository) or not required:
+                raise ValueError("Configure github.repository and explicit requiredWorkflows; zero runs cannot pass")
+            head = git(self.root, "rev-parse", "HEAD")
+            result = execute(["gh", "run", "list", "--repo", repository, "--commit", head,
+                              "--limit", "100", "--json",
+                              "databaseId,headSha,workflowName,status,conclusion,url,createdAt,attempt"], self.root)
+            if result["exitCode"]:
+                raise ValueError(result["output"])
+            runs = json.loads(result["output"])
+            selected, missing = [], []
+            for workflow in required:
+                candidates = [r for r in runs if r["headSha"] == head and r["workflowName"] == workflow]
+                candidates.sort(key=lambda r: (r["createdAt"], r["databaseId"], r.get("attempt", 1)), reverse=True)
+                if candidates:
+                    selected.append(candidates[0])
+                else:
+                    missing.append(workflow)
+            failed = [r for r in selected if r["status"] == "completed" and r["conclusion"] != "success"]
+            pending = missing or any(r["status"] != "completed" for r in selected)
+            report = {"ok": not pending and not failed, "status": "failed" if failed else "pending" if pending else "passed",
+                      "head": head, "at": now(), "missing": missing, "runs": selected}
+            for run in failed:
+                log = execute(["gh", "run", "view", str(run["databaseId"]), "--repo", repository,
+                               "--log-failed"], self.root)
+                path = self.directory / "ci" / f"{run['databaseId']}-{run.get('attempt', 1)}.log"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(log["output"], encoding="utf-8")
+                run["failureLog"] = str(path.relative_to(self.root))
+                if log["exitCode"]:
+                    # Runner startup failures have no step logs; GitHub exposes the cause
+                    # as check-run annotations (billing, permissions, runner availability).
+                    details = execute(["gh", "run", "view", str(run["databaseId"]), "--repo", repository,
+                                       "--json", "jobs"], self.root)
+                    diagnostics = {"jobs": [], "errors": []}
+                    if details["exitCode"] == 0:
+                        for job in json.loads(details["output"]).get("jobs", []):
+                            if job.get("conclusion") != "failure":
+                                continue
+                            annotations = execute(["gh", "api", f"repos/{repository}/check-runs/{job['databaseId']}/annotations"], self.root)
+                            if annotations["exitCode"] == 0:
+                                diagnostics["jobs"].append({"name": job["name"], "steps": job.get("steps", []),
+                                                            "annotations": json.loads(annotations["output"])})
+                            else:
+                                diagnostics["errors"].append(annotations["output"])
+                    else:
+                        diagnostics["errors"].append(details["output"])
+                    diagnostic_path = path.with_suffix(".startup.json")
+                    write_json(diagnostic_path, diagnostics)
+                    run["startupDiagnostics"] = str(diagnostic_path.relative_to(self.root))
+                    run["startupAnnotations"] = [a.get("message", "") for job in diagnostics["jobs"]
+                                                 for a in job["annotations"] if a.get("annotation_level") == "failure"]
+            state["ci"].append(report)
+            self.save(state)
+            return report
+
+
+def doctor(root):
+    commands = {"python": [sys.executable, "--version"], "dotnet": ["dotnet", "--info"],
+                "workloads": ["dotnet", "workload", "list"], "maui": ["maui", "--version"],
+                "devflow": ["maui", "devflow", "--help"], "go": ["maui", "go", "--help"],
+                "github": ["gh", "auth", "status"]}
+    return {"at": now(), "tools": {name: execute(command, root, 60) for name, command in commands.items()}}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", default=".", help="Application Git repository root")
+    sub = parser.add_subparsers(dest="action", required=True)
+    sub.add_parser("doctor")
+    init = sub.add_parser("init")
+    init.add_argument("--name", required=True)
+    init.add_argument("--platform", action="append", required=True)
+    init.add_argument("--acceptance", action="append", required=True)
+    sub.add_parser("status")
+    observe = sub.add_parser("observe")
+    observe.add_argument("criterion", type=int)
+    observe.add_argument("attempt")
+    observe.add_argument("--note", required=True)
+    check = sub.add_parser("check")
+    check.add_argument("name")
+    classify = sub.add_parser("classify")
+    classify.add_argument("attempt")
+    classify.add_argument("category", choices=sorted(CLASSIFICATIONS))
+    classify.add_argument("--reason", required=True)
+    cycle = sub.add_parser("cycle")
+    cycle.add_argument("--reason", required=True)
+    sub.add_parser("review")
+    publish = sub.add_parser("github", help="Push current reviewed branch and create/reuse a draft PR")
+    publish.add_argument("--title", required=True)
+    publish.add_argument("--body-file", required=True)
+    sub.add_parser("ci")
+    sub.add_parser("maintenance")
+    args = parser.parse_args()
+    workflow = Workflow(args.root)
+    try:
+        if args.action == "doctor":
+            result = doctor(workflow.root)
+        elif args.action == "init":
+            result = workflow.init(args.name, args.platform, args.acceptance)
+        elif args.action == "check":
+            result = workflow.check(args.name)
+        elif args.action == "observe":
+            result = workflow.observe(args.criterion, args.attempt, args.note)
+        elif args.action == "classify":
+            result = workflow.classify(args.attempt, args.category, args.reason)
+        elif args.action == "cycle":
+            result = workflow.cycle(args.reason)
+        elif args.action == "github":
+            result = workflow.github(args.title, args.body_file)
+        else:
+            result = getattr(workflow, args.action)()
+        print(json.dumps(result, indent=2))
+        return 1 if result.get("ok") is False or result.get("ready") is False else 0
+    except (ValueError, OSError, KeyError, subprocess.SubprocessError) as exc:
+        print(json.dumps({"ok": False, "error": redact(str(exc))}, indent=2))
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

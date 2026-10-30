@@ -5,6 +5,7 @@ import json
 import sys
 
 from lifecycle import Workflow, doctor, redact
+from android_ready import check as android_readiness
 
 
 def schema(properties=None, required=None):
@@ -15,6 +16,8 @@ STRING = {"type": "string"}
 STRINGS = {"type": "array", "items": STRING, "minItems": 1}
 TOOLS = [
     ("doctor", "Inspect installed MAUI, Go, DevFlow, .NET and GitHub capabilities without installing anything.", schema()),
+    ("android_ready", "Read-only, bounded health evidence for one explicit Android device. Rejects locked/startup/ANR states; cannot satisfy app UI QA or classify fault ownership.",
+     schema({"device": STRING, "timeout": {"type": "integer", "minimum": 1, "maximum": 120}, "output": STRING}, ["device"])),
     ("init", "Initialize an authorized app repository's durable plan. Configure real checks afterward.",
      schema({"name": STRING, "platforms": STRINGS, "acceptance": STRINGS}, ["name", "platforms", "acceptance"])),
     ("status", "Resume the app lifecycle; report fresh QA coverage, blockers and the next action.", schema()),
@@ -45,7 +48,7 @@ def serve(workflow, source=sys.stdin, destination=sys.stdout):
             method = request.get("method")
             if method == "initialize":
                 result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
-                          "serverInfo": {"name": "maui-app-lifecycle", "version": "1.0.0"}}
+                          "serverInfo": {"name": "maui-app-lifecycle", "version": "1.1.0"}}
             elif method == "ping":
                 result = {}
             elif method == "tools/list":
@@ -70,9 +73,14 @@ def serve(workflow, source=sys.stdin, destination=sys.stdout):
                     if kind == "integer" and (type(value) is not int or value < 0):
                         raise ValueError(f"{key} must be a nonnegative integer")
                 try:
-                    value = doctor(workflow.root) if name == "doctor" else getattr(workflow, name)(**arguments)
+                    if name == "doctor":
+                        value = doctor(workflow.root)
+                    elif name == "android_ready":
+                        value = android_readiness(workflow.root, **arguments)
+                    else:
+                        value = getattr(workflow, name)(**arguments)
                     result = {"content": [{"type": "text", "text": json.dumps(value)}],
-                              "isError": value.get("ok") is False and name not in {"status", "init", "ci"}}
+                              "isError": value.get("ok") is False and name not in {"status", "init", "ci", "android_ready"}}
                 except Exception as exc:
                     result = {"content": [{"type": "text", "text": json.dumps({"ok": False, "error": redact(str(exc))})}], "isError": True}
             else:

@@ -69,6 +69,9 @@ workflow in Git; `.maui-agent/` is ignored local state and potentially private e
    installing a Debug APK with plain `adb install` requires
    `-p:EmbedAssembliesIntoApk=true` when building. Otherwise startup can abort
    with "No assemblies found ... .__override__" before DevFlow starts.
+   Before spending Android UI-check attempts, run `scripts/android_ready.py`
+   with the selected `--device`. It rejects locked/startup/ANR states and stalled
+   Package Manager or screen capture; its report cannot count as delivery QA.
 4. Inspect with the shared Inspector or DevFlow MCP: tree, screenshot, runtime
    properties, logs, capabilities and layout diagnostics. For Hybrid web content
    use WebView/CDP in addition to native inspection. Source edits must be real
@@ -179,7 +182,7 @@ tool calls, add a separate server alongside the existing `maui devflow mcp`:
 }
 ```
 
-The `maui_lifecycle_*` tools expose doctor, init, status, check, classify, observe, review,
+The `maui_lifecycle_*` tools expose doctor, android_ready, init, status, check, classify, observe, review,
 github, ci, maintenance and cycle. The fixed root scopes each MCP server to one app. Configured
 check commands are executable trusted project configuration: review changes to
 the plan like build scripts. Do not execute plans from untrusted issue text.

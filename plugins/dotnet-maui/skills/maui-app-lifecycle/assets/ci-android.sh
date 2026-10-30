@@ -15,6 +15,8 @@ APP_DIRECTORY="$(dirname "$APP_PROJECT")"
 DEBUG_APK="$APP_DIRECTORY/bin/Debug/$TFM/$RID/$APP_PACKAGE-Signed.apk"
 RELEASE_APK="$APP_DIRECTORY/bin/Release/$TFM/$RID/$APP_PACKAGE-Signed.apk"
 mkdir -p .maui-agent
+python3 "${ANDROID_READY_TOOL:-eng/maui-agent/android_ready.py}" --device "$DEVICE" \
+  --output .maui-agent/device-ready/report.json
 if [ "$(adb -s "$DEVICE" shell getprop ro.kernel.qemu | tr -d '\r')" != 1 ]; then
   echo "CI reset requires an isolated emulator" >&2
   exit 1

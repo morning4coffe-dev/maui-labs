@@ -17,3 +17,4 @@ script:maui-app-lifecycle:scripts/android_check.py
 script:maui-app-lifecycle:scripts/live_setup.py
 script:maui-app-lifecycle:scripts/xaml_watch.py
 script:maui-app-lifecycle:scripts/android_launch.py
+script:maui-app-lifecycle:scripts/android_ready.py

@@ -123,3 +123,20 @@ the explicitly selected test device and reverify live identity afterward. A
 process in an uninterruptible kernel wait may not exit after a signal; do not
 report it as stopped or launch conflicting instances over its locks. If recovery
 cannot complete, preserve the blocker instead of substituting an older binary.
+
+Use the reusable read-only preflight before installation or a budgeted UI run:
+
+```bash
+python3 /absolute/skill/scripts/android_ready.py --device emulator-5558 \
+  --output .maui-agent/readiness-attempt-1/report.json
+```
+
+It bounds all commands, requires an explicit device, checks boot completion,
+primary-user unlock, System UI, Package Manager, focused window and a complete
+screen capture. Boot properties alone missed a real "Pixel is starting" screen;
+ANR windows and startup fallback must block readiness. Review the captured image
+as well. A failure identifies an observation stage, not fault ownership: an
+app-owned ANR requires app investigation. The report has no app assertions and
+cannot pass a delivery UI gate. Fix proven infrastructure first and preserve the
+original check budget. CI copies all scripts together; `ANDROID_READY_TOOL` can
+select an installed helper when exercising the CI asset against an older fixture.

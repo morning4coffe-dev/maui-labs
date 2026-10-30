@@ -1,5 +1,6 @@
 """Behavioral acceptance tests: real temporary Git repos and child processes."""
 import argparse
+import base64
 import contextlib
 import io
 import json
@@ -20,6 +21,75 @@ from mcp_server import serve
 from live_setup import prepare
 from xaml_watch import literal_changes, equivalent, refresh
 from android_launch import component_for, agent_port, verify_status
+from android_ready import check as android_ready
+
+
+class AndroidReadyTests(unittest.TestCase):
+    def fixture(self, root, replacements=None):
+        png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aK1sAAAAASUVORK5CYII=")
+        replies = {("get-state",): b"device\n",
+                   ("shell", "getprop", "sys.boot_completed"): b"1\n",
+                   ("shell", "am", "get-started-user-state", "0"): b"RUNNING_UNLOCKED\n",
+                   ("shell", "pidof", "com.android.systemui"): b"1208\n",
+                   ("shell", "cmd", "package", "path", "android"): b"package:/system/framework/framework-res.apk\n",
+                   ("shell", "dumpsys", "window", "displays"): b"mCurrentFocus=Window{u0 com.android.launcher3/.Launcher}\n",
+                   ("exec-out", "screencap", "-p"): png}
+        replies.update(replacements or {})
+        seen = []
+        def runner(command, **kwargs):
+            self.assertEqual(["adb", "-s", "emulator-5558"], command[:3])
+            key = tuple(command[3:]);seen.append(key)
+            reply = replies[key]  # Any unexpected mutation/installation command fails the test.
+            if isinstance(reply, Exception): raise reply
+            return subprocess.CompletedProcess(command, 0, stdout=reply, stderr=b"")
+        return android_ready(root, "emulator-5558", runner=runner), seen
+
+    def test_readiness_is_scoped_read_only_and_cannot_satisfy_delivery_qa(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, _ = self.fixture(folder)
+            self.assertTrue(result["ok"])
+            self.assertEqual("android-infrastructure", result["mode"])
+            self.assertNotIn("assertions", result)
+            self.assertTrue((Path(folder) / result["artifacts"][0]).is_file())
+
+    def test_boot_property_alone_cannot_hide_locked_user_fallback_or_anr(self):
+        variants = [(("shell", "am", "get-started-user-state", "0"), b"RUNNING_LOCKED\n"),
+                    (("shell", "dumpsys", "window", "displays"), b"mCurrentFocus=Window{com.android.settings/.FallbackHome}\n"),
+                    (("shell", "dumpsys", "window", "displays"), b"mCurrentFocus=Window{Application Not Responding: com.android.systemui}\n")]
+        for key, value in variants:
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as folder:
+                result, seen = self.fixture(folder, {key: value})
+                self.assertFalse(result["ok"])
+                self.assertNotIn(("exec-out", "screencap", "-p"), seen)
+
+    def test_package_manager_timeout_stops_before_screen_or_app_operations(self):
+        with tempfile.TemporaryDirectory() as folder:
+            key = ("shell", "cmd", "package", "path", "android")
+            result, seen = self.fixture(folder, {key: subprocess.TimeoutExpired("adb", 15)})
+            self.assertFalse(result["ok"])
+            self.assertEqual("package-manager", result["stage"])
+            self.assertNotIn(("exec-out", "screencap", "-p"), seen)
+
+    def test_truncated_screenshot_does_not_mark_device_ready(self):
+        with tempfile.TemporaryDirectory() as folder:
+            result, _ = self.fixture(folder, {("exec-out", "screencap", "-p"): b"\x89PNG\r\n\x1a\n"})
+            self.assertFalse(result["ok"])
+            self.assertEqual([], result["artifacts"])
+
+    def test_screenshot_link_cannot_overwrite_app_source(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder).resolve()
+            source = root / "App.csproj";source.write_text("<Project />")
+            evidence = root / ".maui-agent/android-ready";evidence.mkdir(parents=True)
+            try:
+                (evidence / "screen.png").symlink_to(source)
+            except OSError as exc:
+                if os.name == "nt" and getattr(exc, "winerror", None) == 1314:
+                    self.skipTest("Windows host does not permit creation of test symbolic links")
+                raise
+            with self.assertRaisesRegex(ValueError, "screenshots must stay"):
+                self.fixture(root)
+            self.assertEqual("<Project />", source.read_text())
 
 
 class AndroidLaunchTests(unittest.TestCase):
@@ -541,12 +611,30 @@ Path('.maui-agent/native.json').write_text(json.dumps(r))
         try:
             tools = client.initialize()["tools"]
             self.assertIn("maui_lifecycle_maintenance", {tool["name"] for tool in tools})
+            self.assertIn("maui_lifecycle_android_ready", {tool["name"] for tool in tools})
+            with self.assertRaisesRegex(ValueError, "Path leaves"):
+                client.data("maui_lifecycle_android_ready", device="not-contacted", output="../escape.json", allow_failure=True)
             status = client.data("maui_lifecycle_status", allow_failure=True)
             self.assertEqual(status["cycle"], 1)
             self.assertEqual(status["source"], snapshot(self.root))
             self.assertFalse(status["ok"])
         finally:
             client.close()
+
+    def test_android_readiness_mcp_keeps_fixed_root_and_nonpassing_health_visible(self):
+        requests = [
+            {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {
+                "name": "maui_lifecycle_android_ready", "arguments": {"device": "emulator-5558", "timeout": 30}}},
+            {"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+                "name": "maui_lifecycle_android_ready", "arguments": {"device": "emulator-5558", "root": "/other"}}}]
+        output = io.StringIO()
+        with patch("mcp_server.android_readiness", return_value={"ok": False, "mode": "android-infrastructure", "stage": "window"}) as ready:
+            serve(self.workflow, io.StringIO("\n".join(json.dumps(r) for r in requests)), output)
+            ready.assert_called_once_with(self.root, device="emulator-5558", timeout=30)
+        messages = [json.loads(line) for line in output.getvalue().splitlines()]
+        self.assertFalse(messages[0]["result"]["isError"])
+        self.assertFalse(json.loads(messages[0]["result"]["content"][0]["text"])["ok"])
+        self.assertIn("error", messages[1])
 
 
 class DevFlowTests(unittest.TestCase):

@@ -2354,9 +2354,9 @@ public partial class MauiDevFlowAgentService : DevFlowAgentService
 
     /// <summary>
     /// Describes why a screenshot capture returned null, when the platform can determine an
-    /// actionable, often-retryable cause (e.g. the app window is not the frontmost application
-    /// on macOS). Returns <c>null</c> when no specific cause is known, in which case the caller
-    /// falls back to a generic error.
+    /// actionable, often-retryable cause (e.g. the app window is minimized). Returns
+    /// <c>null</c> when no specific cause is known, in which case the caller falls back to a
+    /// generic error.
     /// <para>
     /// Invoked on the UI thread within the same dispatch as the failed capture (see
     /// <see cref="ScreenshotCaptureOutcome"/>), so the probed window/app state reflects the
@@ -2677,6 +2677,10 @@ public partial class MauiDevFlowAgentService : DevFlowAgentService
             try
             {
                 var converted = ConvertPropertyValue(prop.PropertyType, body.Value);
+                var sourceBeforeTextEdit = prop.Name == "Text" && _treeWalker.HasActiveSourceMaps
+                    ? VisualTreeWalker.FlattenElementInfos(_treeWalker.WalkTree(_app, 0, null))
+                        .FirstOrDefault(info => ReferenceEquals(info.IdentityToken, _treeWalker.GetElementIdentity(el)))
+                    : null;
 
                 // Use BindableObject.SetValue when possible so the handler mapper
                 // propagates the change to the native platform view.
@@ -2684,10 +2688,12 @@ public partial class MauiDevFlowAgentService : DevFlowAgentService
                     FindBindableProperty(type, prop) is BindableProperty bp)
                 {
                     bindable.SetValue(bp, converted);
-                    return "ok";
                 }
-
-                prop.SetValue(el, converted);
+                else
+                {
+                    prop.SetValue(el, converted);
+                }
+                _treeWalker.RetainSourceForTextEdit(el, sourceBeforeTextEdit);
                 return "ok";
             }
             catch (Exception ex)

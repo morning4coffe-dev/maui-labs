@@ -47,6 +47,9 @@ public class NativeDevFlowAgentService : DevFlowAgentService
     protected override string DeviceTypeName => NativeUi.DeviceTypeName;
 
     /// <inheritdoc />
+    protected override string? DeviceIdentifier => NativeUi.DeviceIdentifier;
+
+    /// <inheritdoc />
     protected override bool IsUiSupported => true;
 
     /// <inheritdoc />
@@ -457,7 +460,7 @@ public class NativeDevFlowAgentService : DevFlowAgentService
 
         try
         {
-            var result = await DispatchAsync(() =>
+            var result = await DispatchAsync(async () =>
             {
                 byte[]? png;
                 if (hasElementId && !string.IsNullOrEmpty(elementId))
@@ -467,13 +470,13 @@ public class NativeDevFlowAgentService : DevFlowAgentService
                 }
                 else
                 {
-                    png = NativeUi.CaptureScreen();
+                    png = await NativeUi.CaptureScreen();
                 }
 
                 return new ScreenshotCaptureResult(png, NativeUi.DisplayDensity);
             });
 
-            if (result.Png == null)
+            if (result?.Png == null)
             {
                 return hasElementId
                     ? HttpResponse.NotFound($"Element '{elementId}' not found or has no size")

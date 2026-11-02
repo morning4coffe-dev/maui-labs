@@ -37,8 +37,8 @@ Ask the agent to use
 to create an app from a brief or repair an existing app/CI issue.
 
 The skill includes command-line tools and an optional stdio MCP server exposing
-`maui_lifecycle_doctor`, `init`, `status`, `check`, `classify`, `observe`, `review`,
-`github`, `ci`, `maintenance` and `cycle` (each with the `maui_lifecycle_` prefix). The agent
+`doctor`, `android_ready`, `init`, `status`, `check`, `classify`, `observe`, `review`,
+`next`, `advance`, `github`, `ci`, `maintenance` and `cycle` (each with the `maui_lifecycle_` prefix). The agent
 uses normal source editing and the existing DevFlow tools to perform the work.
 Python 3.10+ is the only extra tool runtime; no pip packages are required.
 

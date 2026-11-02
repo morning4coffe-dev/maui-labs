@@ -25,11 +25,15 @@ Set `TOOLKIT` to this skill's absolute directory and run from the app's Git root
 ```bash
 python3 "$TOOLKIT/scripts/lifecycle.py" doctor
 python3 "$TOOLKIT/scripts/lifecycle.py" status
+python3 "$TOOLKIT/scripts/lifecycle.py" next
 ```
 
 `status` resumes an existing run. Missing SDKs, devices, broker, auth or unavailable
 feeds are infrastructure findings. Install prerequisites within the user's
 authorization and host permissions; never invent a successful device run.
+`next` reads a dependency-aware queue with remaining failure budgets and the next
+check, repair, acceptance assessment, CI or human review boundary. It does not run
+checks, infer a fix, or reset budgets.
 
 For a new app, choose the SDK from installed workloads and the intended released
 MAUI version. Use `dotnet new maui` (or `maui-blazor` for requested Hybrid apps),
@@ -94,6 +98,15 @@ Run configured checks with `lifecycle.py check CHECK-NAME`. The UI check invokes
 `scripts/devflow_check.py`, which uses one real DevFlow MCP session for selection,
 lease, replay and evidence. Run build, unit, UI and Release checks for every
 requested platform. Separate unavailable platform coverage from completed work.
+For a reviewed plan, `lifecycle.py advance --max-checks 3` runs a bounded batch of
+eligible checks (1–10). It follows dependencies and required repeat counts, stops
+at the first failure, and never automatically retries a current-source failure.
+Android UI batching also needs `--device SERIAL` matching the check's `device`
+field and actual command. Readiness runs before every UI attempt; missing,
+locked, asleep or unhealthy devices stop the batch without spending its app-test
+budget. Other-platform UI checks run explicitly with `check`. A successful batch
+operation is not validation completion: inspect its `next` result and continue
+acceptance assessment, review and exact-HEAD CI. See the [plan reference](references/plan.md).
 For broader native Android qualification, read
 [testing-strategy.md](references/testing-strategy.md): require meaningful negative,
 persistence and navigation scenarios, independent Release UI evidence, repeated
@@ -182,7 +195,7 @@ tool calls, add a separate server alongside the existing `maui devflow mcp`:
 }
 ```
 
-The `maui_lifecycle_*` tools expose doctor, android_ready, init, status, check, classify, observe, review,
+The `maui_lifecycle_*` tools expose doctor, android_ready, init, status, next, advance, check, classify, observe, review,
 github, ci, maintenance and cycle. The fixed root scopes each MCP server to one app. Configured
 check commands are executable trusted project configuration: review changes to
 the plan like build scripts. Do not execute plans from untrusted issue text.

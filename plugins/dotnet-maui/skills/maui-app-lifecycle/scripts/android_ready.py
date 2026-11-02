@@ -62,6 +62,19 @@ def check(root, device, output=".maui-agent/android-ready/report.json", adb="adb
             raise ValueError("No focused window is observable; inspect device startup")
         if "Application Not Responding" in windows or "FallbackHome" in focus.group(1):
             raise ValueError("Android is showing an ANR or startup fallback; investigate the cause before app QA")
+        policy = call("screen-policy", "shell", "dumpsys", "window", "policy").decode(errors="replace")
+        # RUNNING_UNLOCKED describes credential-encrypted storage, not whether
+        # keyguard currently obscures the app. Require independent policy evidence.
+        fields = {"awake": "mAwake", "screenOnFully": "mScreenOnFully",
+                  "keyguardShowing": "(?:showing|mIsShowing|isKeyguardShowing)",
+                  "inputRestricted": "(?:inputRestricted|mInputRestricted)"}
+        values = {name: re.findall(r"(?<!\w)" + pattern + r"\s*=\s*(true|false)\b", policy)
+                  for name, pattern in fields.items()}
+        report["checks"]["screenPolicy"] = values
+        for name, actual in values.items():
+            expected = "true" if name in {"awake", "screenOnFully"} else "false"
+            if not actual or any(value != expected for value in actual):
+                raise ValueError(f"Screen/keyguard readiness is not verified at {name}: {actual}; inspect the selected device")
         screen = call("screen", "exec-out", "screencap", "-p")
         if (not screen.startswith(b"\x89PNG\r\n\x1a\n")
                 or not screen.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82")):

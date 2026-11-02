@@ -73,6 +73,33 @@ whose SHA-256 must stay unchanged) and `runs` (1–10 consecutive current-source
 passes). Dependencies must be acyclic and passing before dependent commands
 execute. Unit results and UI reports must be under `.maui-agent/`.
 
+## Resumable check batches
+
+`lifecycle.py next` returns a read-only queue: each check includes its current
+coverage, verified consecutive pass count, remaining failure allowance and
+blocking dependencies/failures. `action` identifies the next executable check or
+the configure/repair/assess/review/commit/CI/human boundary. It never writes state,
+starts a maintenance cycle or treats a classification as proof of a repair.
+
+`lifecycle.py advance --max-checks 3` executes up to three eligible checks and
+returns every sealed attempt plus the next queue. It stops on the first failure;
+an existing current-source failure needs evidence inspection and an explicit
+`check NAME` retry after repair. Counts and budgets survive process restarts and
+source edits. `ok: true` means the requested batch completed without a new check
+failure; use `next.localQaReady` and `next.validationComplete` for delivery status.
+Neither command classifies failures, changes source/tests, records acceptance,
+publishes a PR, merges or releases. The coding agent performs the reasoning loop.
+
+For Android UI batching, declare `"device": "emulator-5558"` on each UI check and
+make its actual command select that same target. Pass `--device emulator-5558`
+to `advance`. A missing/mismatched declaration stops before readiness or UI
+execution. The read-only readiness helper runs before each UI check, rejecting
+startup/ANR, unavailable services, asleep screens, visible keyguard and unknown
+screen policy. This uses AOSP-style policy fields; unrecognized OEM dumps need
+investigation rather than a guessed pass. The declaration is trusted plan
+configuration, like the command itself; review them together. Existing explicit
+`check` calls retain their behavior. Other-platform UI execution remains explicit.
+
 For independent Android Release validation, use `format: appium`,
 `configuration: Release`, `appPackage` and the exact APK `artifact` on a UI check.
 The native report must match the app, package, source and installed binary and

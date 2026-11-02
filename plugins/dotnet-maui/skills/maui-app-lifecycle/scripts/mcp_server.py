@@ -21,6 +21,9 @@ TOOLS = [
     ("init", "Initialize an authorized app repository's durable plan. Configure real checks afterward.",
      schema({"name": STRING, "platforms": STRINGS, "acceptance": STRINGS}, ["name", "platforms", "acceptance"])),
     ("status", "Resume the app lifecycle; report fresh QA coverage, blockers and the next action.", schema()),
+    ("next", "Read the dependency-aware work queue, remaining retry budgets, and the next check, repair, acceptance assessment or human review boundary. Does not execute anything.", schema()),
+    ("advance", "Execute up to ten eligible trusted checks, stopping at the first failure or assessment boundary. Never retries a current-source failure automatically, publishes or approves. Android UI requires a matching declared device and readiness; other UI checks run explicitly.",
+     schema({"max_checks": {"type": "integer", "minimum": 1, "maximum": 10}, "device": STRING})),
     ("check", "Run one configured trusted QA command with timeout, retry budget and sealed evidence. UI checks mutate the selected test app.",
      schema({"name": STRING}, ["name"])),
     ("classify", "Annotate an intact failed attempt using runtime evidence; does not silently change tests.",
@@ -48,7 +51,7 @@ def serve(workflow, source=sys.stdin, destination=sys.stdout):
             method = request.get("method")
             if method == "initialize":
                 result = {"protocolVersion": "2024-11-05", "capabilities": {"tools": {}},
-                          "serverInfo": {"name": "maui-app-lifecycle", "version": "1.1.0"}}
+                          "serverInfo": {"name": "maui-app-lifecycle", "version": "1.2.0"}}
             elif method == "ping":
                 result = {}
             elif method == "tools/list":
@@ -80,7 +83,7 @@ def serve(workflow, source=sys.stdin, destination=sys.stdout):
                     else:
                         value = getattr(workflow, name)(**arguments)
                     result = {"content": [{"type": "text", "text": json.dumps(value)}],
-                              "isError": value.get("ok") is False and name not in {"status", "init", "ci", "android_ready"}}
+                              "isError": value.get("ok") is False and name not in {"status", "init", "ci", "android_ready", "advance"}}
                 except Exception as exc:
                     result = {"content": [{"type": "text", "text": json.dumps({"ok": False, "error": redact(str(exc))})}], "isError": True}
             else:

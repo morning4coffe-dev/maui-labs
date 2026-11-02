@@ -144,6 +144,9 @@ def plan_for(root):
             raise ValueError("Check runs must be between 1 and 10")
         if check.get("artifact"):
             inside(root, check["artifact"])
+        if "device" in check and (not isinstance(check["device"], str) or not check["device"]
+                                  or any(c.isspace() for c in check["device"])):
+            raise ValueError(f"Check {name} needs one explicit device identifier")
     checks = {c["name"]: c for c in plan.get("checks", [])}
     def dependencies(name, visiting):
         if name in visiting:
@@ -281,6 +284,108 @@ class Workflow:
             state.setdefault("observations", []).append(observation)
             self.save(state)
             return observation
+
+    def next(self):
+        """Read-only queue for an agent; never infer repairs or human approval."""
+        plan, state = plan_for(self.root), self.load()
+        status = self.status()
+        source = status["source"]
+        coverage = {c["name"]: c for c in status["coverage"]}
+        queue = []
+        for check in plan["checks"]:
+            records = [r for r in state["attempts"] if r["check"] == check["name"]]
+            failures = [r for r in records if not r["ok"] and r["cycle"] == state["cycle"]]
+            remaining = max(0, plan["maxAttempts"] - len(failures))
+            passed = self.passing(check, state, source)
+            consecutive = 0
+            for record in reversed(records):
+                if not record["ok"] or record["source"] != source or not self.verify(record):
+                    break
+                consecutive += 1
+            item = {**coverage[check["name"]], "remainingFailures": remaining,
+                    "completedRuns": min(consecutive, check.get("runs", 1)),
+                    "dependsOn": check.get("dependsOn", []), "blockedBy": []}
+            if not passed:
+                if not remaining:
+                    item["blockedBy"].append("failure-budget-exhausted")
+                if (len(failures) >= 2 and failures[-1]["signature"] == failures[-2]["signature"]
+                        and not any(c["attempt"] == failures[-1]["id"] for c in state["classifications"])):
+                    item["blockedBy"].append("classify-failure:" + failures[-1]["id"])
+                for dependency in item["dependsOn"]:
+                    if coverage[dependency]["status"] != "passed":
+                        item["blockedBy"].append("dependency:" + dependency)
+                # A classification documents a finding; it is not a repair. An agent
+                # must inspect/fix and explicitly retry a current-source failure.
+                if records and not records[-1]["ok"] and records[-1]["source"] == source:
+                    item["blockedBy"].append("inspect-failure:" + records[-1]["id"])
+                if plan.get("quality", {}).get("requireClassifiedFailures"):
+                    for failure in records:
+                        if failure["source"] == source and not failure["ok"] and not any(
+                                c["attempt"] == failure["id"] and c["category"] == "infrastructure"
+                                for c in state["classifications"]):
+                            item["blockedBy"].append("resolve-failure:" + failure["id"])
+            item["runnable"] = not passed and not item["blockedBy"]
+            queue.append(item)
+        missing_config = [b for b in status["blockers"] if b.startswith("No ") and "check" in b]
+        runnable = next((c for c in queue if c["runnable"]), None)
+        if missing_config:
+            action = {"kind": "configure", "reasons": missing_config}
+        elif runnable:
+            action = {"kind": "check", "name": runnable["name"], "platform": runnable["platform"],
+                      "requiresRuntime": runnable["kind"] == "ui",
+                      "device": next(c for c in plan["checks"] if c["name"] == runnable["name"]).get("device")}
+        elif any(c["status"] != "passed" for c in queue):
+            exhausted = [c["name"] for c in queue if "failure-budget-exhausted" in c["blockedBy"]]
+            action = {"kind": "human-decision" if exhausted else "repair",
+                      "reason": "Failure budget exhausted; present findings without resetting it" if exhausted else
+                      "Inspect blocked checks and their evidence before an explicit retry"}
+        elif not status["localQaReady"]:
+            action = {"kind": "assess", "reasons": status["blockers"]}
+        else:
+            reviews = state.get("reviews", [])
+            current_review = reviews and reviews[-1]["source"] == source and reviews[-1]["ready"]
+            if not current_review:
+                action = {"kind": "review"}
+            elif git(self.root, "status", "--porcelain"):
+                action = {"kind": "commit", "reason": "Inspect and commit the reviewed changes"}
+            elif status["ci"]["required"] and status["ci"]["status"] != "passed":
+                action = {"kind": "repair-ci" if status["ci"]["status"] == "failed" else "ci",
+                          "reason": "Inspect failed exact-HEAD CI evidence" if status["ci"]["status"] == "failed" else
+                          "Publish the authorized draft PR if needed, then poll exact-HEAD CI"}
+            else:
+                action = {"kind": "human-review", "reason": "Present evidence; merge and release remain human decisions"}
+        return {"ok": True, "cycle": state["cycle"], "source": source,
+                "localQaReady": status["localQaReady"], "validationComplete": status["validationComplete"],
+                "action": action, "checks": queue, "blockers": status["blockers"], "ci": status["ci"]}
+
+    def advance(self, max_checks=1, device=None):
+        """Bounded trusted-check execution; stop at failure or an assessment boundary."""
+        if type(max_checks) is not int or not 1 <= max_checks <= 10:
+            raise ValueError("max_checks must be between 1 and 10")
+        attempts = []
+        readiness = None
+        for _ in range(max_checks):
+            pending = self.next()
+            action = pending["action"]
+            if action["kind"] != "check":
+                break
+            if action["requiresRuntime"]:
+                if action["platform"].lower() != "android" or not device or action["device"] != device:
+                    return {"ok": False, "stopped": "prepare-runtime", "attempts": attempts,
+                            "next": pending, "reason": "Select a healthy Android device matching the check's device field and command; run other-platform UI checks explicitly"}
+                from android_ready import check as android_readiness
+                readiness = android_readiness(self.root, device)
+                if not readiness["ok"]:
+                    return {"ok": False, "stopped": "android-not-ready", "attempts": attempts,
+                            "readiness": readiness, "next": pending}
+            record = self.check(action["name"])
+            attempts.append(record)
+            if not record["ok"]:
+                return {"ok": False, "stopped": "check-failed", "attempts": attempts,
+                        "next": self.next()}
+        pending = self.next()
+        return {"ok": True, "stopped": "batch-limit" if pending["action"]["kind"] == "check" else pending["action"]["kind"],
+                "attempts": attempts, "next": pending}
 
     def verify(self, record):
         try:
@@ -592,6 +697,10 @@ def main():
     init.add_argument("--platform", action="append", required=True)
     init.add_argument("--acceptance", action="append", required=True)
     sub.add_parser("status")
+    sub.add_parser("next", help="Read the dependency-aware work queue and remaining retry budgets")
+    advance = sub.add_parser("advance", help="Run a bounded batch of trusted checks; stop on failure")
+    advance.add_argument("--max-checks", type=int, default=1)
+    advance.add_argument("--device", help="Explicit Android device for UI readiness; must match the configured checks")
     observe = sub.add_parser("observe")
     observe.add_argument("criterion", type=int)
     observe.add_argument("attempt")
@@ -619,6 +728,8 @@ def main():
             result = workflow.init(args.name, args.platform, args.acceptance)
         elif args.action == "check":
             result = workflow.check(args.name)
+        elif args.action == "advance":
+            result = workflow.advance(args.max_checks, args.device)
         elif args.action == "observe":
             result = workflow.observe(args.criterion, args.attempt, args.note)
         elif args.action == "classify":

@@ -33,6 +33,7 @@ class AndroidReadyTests(unittest.TestCase):
                    ("shell", "pidof", "com.android.systemui"): b"1208\n",
                    ("shell", "cmd", "package", "path", "android"): b"package:/system/framework/framework-res.apk\n",
                    ("shell", "dumpsys", "window", "displays"): b"mCurrentFocus=Window{u0 com.android.launcher3/.Launcher}\n",
+                   ("shell", "dumpsys", "window", "policy"): b"mAwake=true mScreenOnFully=true\nKeyguardServiceDelegate\n showing=false\n inputRestricted=false\n",
                    ("exec-out", "screencap", "-p"): png}
         replies.update(replacements or {})
         seen = []
@@ -75,6 +76,31 @@ class AndroidReadyTests(unittest.TestCase):
             result, _ = self.fixture(folder, {("exec-out", "screencap", "-p"): b"\x89PNG\r\n\x1a\n"})
             self.assertFalse(result["ok"])
             self.assertEqual([], result["artifacts"])
+
+    def test_unlocked_user_storage_does_not_hide_visible_keyguard(self):
+        with tempfile.TemporaryDirectory() as folder:
+            policy = b"mAwake=true mScreenOnFully=true\nshowing=true\ninputRestricted=true\n"
+            result, seen = self.fixture(folder, {("shell", "dumpsys", "window", "policy"): policy})
+            self.assertFalse(result["ok"])
+            self.assertEqual("screen-policy", result["stage"])
+            self.assertEqual("RUNNING_UNLOCKED", result["checks"]["user"])
+            self.assertNotIn(("exec-out", "screencap", "-p"), seen)
+
+    def test_asleep_unknown_and_conflicting_policy_do_not_pass_readiness(self):
+        variants = [b"mAwake=false mScreenOnFully=false\nshowing=false\ninputRestricted=false\n",
+                    b"unrecognized OEM policy output\n",
+                    b"mAwake=true mScreenOnFully=true\nshowing=false\nmIsShowing=true\ninputRestricted=false\n",
+                    b"mAwake=true mScreenOnFully=true\nshowing=false\n"]
+        for policy in variants:
+            with self.subTest(policy=policy), tempfile.TemporaryDirectory() as folder:
+                result, _ = self.fixture(folder, {("shell", "dumpsys", "window", "policy"): policy})
+                self.assertFalse(result["ok"])
+
+    def test_state_monitor_field_names_are_accepted_when_explicit_and_consistent(self):
+        with tempfile.TemporaryDirectory() as folder:
+            policy = b"mAwake=true mScreenOnFully=true\nmIsShowing=false\nmInputRestricted=false\n"
+            result, _ = self.fixture(folder, {("shell", "dumpsys", "window", "policy"): policy})
+            self.assertTrue(result["ok"])
 
     def test_screenshot_link_cannot_overwrite_app_source(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -463,6 +489,151 @@ Path('.maui-agent/native.json').write_text(json.dumps(r))
         records = [self.workflow.check(name) for name in ["build", "release", "unit", "ui"]]
         self.assertTrue(all(r["ok"] for r in records))
         self.workflow.observe(0, records[-1]["id"], "Assertion and tree show count 1")
+
+    def update_checks(self, change):
+        path = self.root / "maui-agent.json"
+        plan = json.loads(path.read_text())
+        change(plan["checks"])
+        write_json(path, plan)
+
+    def test_queue_orders_dependencies_and_preserves_consecutive_run_progress(self):
+        self.passing_plan()
+        def configure(checks):
+            checks[0]["dependsOn"] = ["unit"]
+            checks[1]["dependsOn"] = ["build"]
+            checks[2]["runs"] = 2
+            checks[3]["dependsOn"] = ["release"]
+        self.update_checks(configure)
+        before = self.workflow.state_path.read_bytes()
+        self.assertEqual("unit", self.workflow.next()["action"]["name"])
+        self.assertEqual(before, self.workflow.state_path.read_bytes())
+        result = self.workflow.advance(3)
+        self.assertTrue(result["ok"])
+        self.assertEqual(["unit", "unit", "build"], [r["check"] for r in result["attempts"]])
+        self.assertEqual("release", result["next"]["action"]["name"])
+        self.assertEqual("batch-limit", result["stopped"])
+
+    def test_batch_stops_at_failure_and_never_automatically_retries_it(self):
+        self.passing_plan()
+        def configure(checks):
+            checks[0]["command"] = [sys.executable, "-c", "raise SystemExit(7)"]
+            for check in checks[1:]: check["dependsOn"] = ["build"]
+        self.update_checks(configure)
+        result = self.workflow.advance(10)
+        self.assertFalse(result["ok"])
+        self.assertEqual("check-failed", result["stopped"])
+        failure = result["attempts"][0]
+        self.workflow.classify(failure["id"], "infrastructure", "Test subprocess returned 7; investigate before retry")
+        resumed = self.workflow.advance(10)
+        self.assertEqual("repair", resumed["stopped"])
+        self.assertEqual([], resumed["attempts"])
+        self.assertEqual(1, len(self.workflow.load()["attempts"]))
+        self.assertEqual(2, resumed["next"]["checks"][0]["remainingFailures"])
+
+    def test_queue_exposes_budget_exhaustion_across_source_changes(self):
+        self.passing_plan()
+        self.update_checks(lambda checks: checks[0].update(command=[sys.executable, "-c", "raise SystemExit(1)"]))
+        for index in range(3):
+            record = self.workflow.check("build")
+            self.workflow.classify(record["id"], "app-regression", "Reproduced subprocess exit 1")
+            (self.root / "app.txt").write_text(str(index))
+        item = self.workflow.next()["checks"][0]
+        self.assertEqual(0, item["remainingFailures"])
+        self.assertFalse(item["runnable"])
+        self.assertIn("failure-budget-exhausted", item["blockedBy"])
+        self.assertEqual(1, self.workflow.load()["cycle"])
+
+    def test_queue_requires_classification_for_repeated_failures_even_after_source_edit(self):
+        self.passing_plan()
+        self.update_checks(lambda checks: checks[0].update(command=[sys.executable, "-c", "raise SystemExit(1)"]))
+        self.workflow.check("build")
+        last = self.workflow.check("build")
+        (self.root / "app.txt").write_text("repair candidate")
+        self.assertIn("classify-failure:" + last["id"], self.workflow.next()["checks"][0]["blockedBy"])
+
+    def test_batch_requires_matching_declared_device_before_ui(self):
+        self.passing_plan()
+        self.update_checks(lambda checks: checks[3].update(device="emulator-5558"))
+        for name in ("build", "release", "unit"): self.workflow.check(name)
+        for device in (None, "emulator-5554"):
+            with patch("android_ready.check") as readiness:
+                result = self.workflow.advance(10, device)
+                self.assertEqual("prepare-runtime", result["stopped"])
+                self.assertEqual([], result["attempts"])
+                readiness.assert_not_called()
+        self.assertEqual(3, len(self.workflow.load()["attempts"]))
+
+    def test_failed_readiness_does_not_spend_ui_attempt_or_change_source(self):
+        self.passing_plan()
+        self.update_checks(lambda checks: checks[3].update(device="emulator-5558"))
+        for name in ("build", "release", "unit"): self.workflow.check(name)
+        source = snapshot(self.root)
+        with patch("android_ready.check", return_value={"ok": False, "stage": "window"}) as readiness:
+            result = self.workflow.advance(10, "emulator-5558")
+            readiness.assert_called_once_with(self.root, "emulator-5558")
+        self.assertEqual("android-not-ready", result["stopped"])
+        self.assertEqual(source, snapshot(self.root))
+        self.assertEqual(3, len(self.workflow.load()["attempts"]))
+        self.assertEqual(3, result["next"]["checks"][3]["remainingFailures"])
+
+    def test_successful_batch_stops_for_acceptance_and_human_review(self):
+        self.passing_plan()
+        self.update_checks(lambda checks: checks[3].update(device="emulator-5558"))
+        with patch("android_ready.check", return_value={"ok": True}):
+            result = self.workflow.advance(10, "emulator-5558")
+        self.assertEqual("assess", result["stopped"])
+        self.assertEqual(4, len(result["attempts"]))
+        self.assertFalse(result["next"]["localQaReady"])
+        self.workflow.observe(0, result["attempts"][-1]["id"], "Reviewed hard assertion and captured tree")
+        self.assertEqual("review", self.workflow.next()["action"]["kind"])
+        self.workflow.review()
+        self.assertEqual("commit", self.workflow.next()["action"]["kind"])
+        self.git("add", ".")
+        self.git("commit", "-m", "reviewed app")
+        self.assertEqual("human-review", self.workflow.advance()["stopped"])
+
+    def test_batch_bounds_reject_invalid_limits_without_execution(self):
+        for limit in (0, -1, 11, True, "2"):
+            with self.assertRaisesRegex(ValueError, "between 1 and 10"):
+                self.workflow.advance(limit)
+        self.assertEqual([], self.workflow.load()["attempts"])
+
+    def test_queue_separates_missing_failed_and_passed_exact_head_ci(self):
+        self.passing_plan()
+        self.configure_ci()
+        self.pass_checks()
+        self.workflow.review()
+        self.git("add", ".")
+        self.git("commit", "-m", "reviewed app with required CI")
+        self.assertEqual("ci", self.workflow.next()["action"]["kind"])
+        state = self.workflow.load()
+        state["ci"].append({"head": self.git("rev-parse", "HEAD"), "status": "failed"})
+        self.workflow.save(state)
+        self.assertEqual("repair-ci", self.workflow.next()["action"]["kind"])
+        state["ci"].append({"head": self.git("rev-parse", "HEAD"), "status": "passed"})
+        self.workflow.save(state)
+        queue = self.workflow.next()
+        self.assertTrue(queue["validationComplete"])
+        self.assertEqual("human-review", queue["action"]["kind"])
+
+    def test_real_mcp_batch_and_queue_resume_without_approving_acceptance(self):
+        self.passing_plan()
+        client = McpClient([sys.executable, str(SCRIPTS / "mcp_server.py"), "--root", str(self.root)], self.root, 15)
+        try:
+            names = {tool["name"] for tool in client.initialize()["tools"]}
+            self.assertIn("maui_lifecycle_next", names)
+            self.assertIn("maui_lifecycle_advance", names)
+            result = client.data("maui_lifecycle_advance", max_checks=2)
+            self.assertEqual(2, len(result["attempts"]))
+            queue = client.data("maui_lifecycle_next")
+            self.assertEqual("unit", queue["action"]["name"])
+            blocked = client.data("maui_lifecycle_advance", max_checks=10, allow_failure=True)
+            self.assertFalse(blocked["ok"])
+            self.assertEqual("prepare-runtime", blocked["stopped"])
+            self.assertEqual(["unit"], [r["check"] for r in blocked["attempts"]])
+            self.assertEqual([], self.workflow.load().get("observations", []))
+        finally:
+            client.close()
 
     def test_complete_coverage_and_acceptance_make_review_ready(self):
         self.passing_plan()

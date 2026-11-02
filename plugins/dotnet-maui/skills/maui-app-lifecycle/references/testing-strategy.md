@@ -12,10 +12,24 @@ not qualify persistence, native dialogs, navigation or an actual Release build.
 | [Flutter native testing boundary](https://docs.flutter.dev/testing/testing-plugins) | Framework integration tests cannot cover all native dialogs/platform UI. | Pair Debug DevFlow inspection with independent Appium/UIAutomator2 testing of the Release APK. |
 | [Appium UIAutomator2](https://github.com/appium/appium-uiautomator2-driver) | Black-box Android automation through native UI. | The helper verifies the foreground package and the installed APK hash, then tests native controls/dialogs without a DevFlow runtime. |
 | [Android emulator runner source](https://raw.githubusercontent.com/ReactiveCircus/android-emulator-runner/main/src/script-parser.ts) | The action splits multi-line script input into separate shell invocations. | Keep loops/background process lifetimes in one Bash file invoked by the action. |
+| [Playwright retries](https://playwright.dev/docs/test-retries) and [Maestro retry](https://docs.maestro.dev/reference/commands-available/retry) | Preserve initial failures and distinguish recovered flakiness from a clean run; retries can hide intermittent defects. | Bounded batches stop at first failure. Retry budgets survive restarts/source edits; strict quality policy retains unexplained same-source failures even after a later pass. |
 
 These are design lessons, not a claim that Playwright or Flutter drives native
 MAUI controls. Appium is optional tooling with a separate server/driver install;
 the Python adapter itself uses only the standard library.
+
+Current DevFlow also exposes `maui_native_dialog_detect` and
+`maui_native_dialog_respond`. Use detection to inspect framework-external prompts;
+response needs the exact user-confirmed button and a one-time prompt token. Do
+not bypass its confirmation by switching tools. This surface complements native
+tests; it does not replace independent Release evidence or prove permissions
+were exercised. The October 31 upstream revision is pinned in the CI template.
+
+Readiness separately checks AOSP-style screen/keyguard state:
+[`KeyguardServiceDelegate.dump`](https://android.googlesource.com/platform/frameworks/base/+/03664c94aecd84e159f4a23aa6250bdfd4aa9de2/services/core/java/com/android/server/policy/keyguard/KeyguardServiceDelegate.java)
+reports `showing` and `inputRestricted` independently of user-storage unlock.
+Unknown/conflicting policy output blocks readiness; never infer a successful app
+run from `sys.boot_completed=1` or `RUNNING_UNLOCKED` alone.
 
 ## Native Android helper
 

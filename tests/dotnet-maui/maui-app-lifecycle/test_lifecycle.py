@@ -532,7 +532,10 @@ Path('.maui-agent/native.json').write_text(json.dumps(r))
 
     def test_queue_exposes_budget_exhaustion_across_source_changes(self):
         self.passing_plan()
-        self.update_checks(lambda checks: checks[0].update(command=[sys.executable, "-c", "raise SystemExit(1)"]))
+        def configure(checks):
+            checks[0].update(command=[sys.executable, "-c", "raise SystemExit(1)"])
+            for check in checks[1:]: check["dependsOn"] = ["build"]
+        self.update_checks(configure)
         for index in range(3):
             record = self.workflow.check("build")
             self.workflow.classify(record["id"], "app-regression", "Reproduced subprocess exit 1")
@@ -541,6 +544,7 @@ Path('.maui-agent/native.json').write_text(json.dumps(r))
         self.assertEqual(0, item["remainingFailures"])
         self.assertFalse(item["runnable"])
         self.assertIn("failure-budget-exhausted", item["blockedBy"])
+        self.assertEqual("human-decision", self.workflow.next()["action"]["kind"])
         self.assertEqual(1, self.workflow.load()["cycle"])
 
     def test_queue_requires_classification_for_repeated_failures_even_after_source_edit(self):
@@ -615,6 +619,23 @@ Path('.maui-agent/native.json').write_text(json.dumps(r))
         queue = self.workflow.next()
         self.assertTrue(queue["validationComplete"])
         self.assertEqual("human-review", queue["action"]["kind"])
+
+    def test_queue_does_not_misroute_unexplained_recovered_failure_to_acceptance(self):
+        self.passing_plan()
+        self.update_checks(lambda checks: checks[0].update(command=[sys.executable, "-c",
+            "from pathlib import Path; raise SystemExit(1 if Path('.maui-agent/fail').exists() else 0)"]))
+        path = self.root / "maui-agent.json"
+        plan = json.loads(path.read_text())
+        plan["quality"] = {"requireClassifiedFailures": True}
+        write_json(path, plan)
+        flag = self.root / ".maui-agent/fail"
+        flag.write_text("isolated failure")
+        failure = self.workflow.check("build")
+        flag.unlink()
+        self.pass_checks()
+        self.assertEqual("repair", self.workflow.next()["action"]["kind"])
+        self.workflow.classify(failure["id"], "infrastructure", "Isolated test flag reproduces and resolves runner failure")
+        self.assertEqual("review", self.workflow.next()["action"]["kind"])
 
     def test_real_mcp_batch_and_queue_resume_without_approving_acceptance(self):
         self.passing_plan()

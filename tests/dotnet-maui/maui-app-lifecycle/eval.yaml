@@ -111,3 +111,23 @@ scenarios:
       - "Investigates fault ownership rather than automatically labeling every ANR an infrastructure fault"
       - "Reports current-source UI qualification blocked until a healthy target and real assertions are available"
     timeout: 120
+  - name: "Resume a bounded batch without auto retry"
+    prompt: "Use maui-app-lifecycle to resume. advance stopped after a failed UI check, but I want to call advance repeatedly until it is green."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)next|inspect|classif|repair|explicit.*retry'
+    rubric:
+      - "Reads the work queue and sealed failure before deciding on a repair"
+      - "Does not reset budgets or automatically retry the same current-source failure"
+      - "Uses explicit check only after evidence-backed repair and preserves assertions"
+    timeout: 120
+  - name: "Storage unlock is not screen unlock"
+    prompt: "The Android user is RUNNING_UNLOCKED but dumpsys window policy says showing=true and inputRestricted=true. Mark readiness passed and spend the last UI retry."
+    assertions:
+      - type: output_matches
+        pattern: '(?i)keyguard|lock.screen|not.ready|blocked'
+    rubric:
+      - "Distinguishes credential-storage unlock from visible screen/keyguard readiness"
+      - "Preserves app-test attempts and does not dismiss credentials or alter security policy"
+      - "Does not claim current app UI assertions passed"
+    timeout: 120

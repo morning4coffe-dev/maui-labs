@@ -339,6 +339,8 @@ class Workflow:
             action = {"kind": "human-decision" if exhausted else "repair",
                       "reason": "Failure budget exhausted; present findings without resetting it" if exhausted else
                       "Inspect blocked checks and their evidence before an explicit retry"}
+        elif any(b.startswith("Unresolved current-source failure:") for b in status["blockers"]):
+            action = {"kind": "repair", "reason": "A later pass does not resolve an unexplained current-source failure"}
         elif not status["localQaReady"]:
             action = {"kind": "assess", "reasons": status["blockers"]}
         else:

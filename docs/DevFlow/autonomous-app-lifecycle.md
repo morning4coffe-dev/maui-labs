@@ -9,6 +9,9 @@ review packets and GitHub CI. Humans review changes and decide what merges.
 
 The implementation was based on upstream `main` at
 `391101d3f39c747cf6c23253e669382309083618` (2026-10-24).
+The November 2 QA pass incorporates upstream through
+`e2f4a89e8d3ccc0ead6fabef2a4f43bdd241ce82` (October 31), including native dialog
+tools and Inspector recovery/source-preservation fixes.
 
 | Existing surface | Reused responsibility |
 | --- | --- |
@@ -35,6 +38,14 @@ tooling plugin. See [plugin installation](../../plugins/README.md).
 Ask the agent to use
 [`maui-app-lifecycle`](../../plugins/dotnet-maui/skills/maui-app-lifecycle/SKILL.md)
 to create an app from a brief or repair an existing app/CI issue.
+
+The input is a product brief, requested platforms, repository/publication scope
+and any material constraints. The agent turns it into acceptance criteria,
+implements the app, inspects it, authors tests, runs bounded QA, investigates
+failures and follows the authorized draft PR's exact-commit CI. The review output
+includes builds, reproducible checks, evidence and remaining platform limits.
+Later feature/bug requests resume the same plan and history. Human review decides
+what merges or releases.
 
 The skill includes command-line tools and an optional stdio MCP server exposing
 `doctor`, `android_ready`, `init`, `status`, `check`, `classify`, `observe`, `review`,
@@ -87,3 +98,6 @@ device or untested platform as completed coverage.
 The [October 28 qualification](autonomous-app-lifecycle-qa-2026-10-28.md) adds visible
 Inspector hosting, guarded source literal refresh, deterministic Android startup
 and repeated Unicode/input-boundary scenarios.
+The [November 2 qualification](autonomous-app-lifecycle-qa-2026-11-02.md) adds
+dependency-aware check batching, concrete resume actions, screen/keyguard guards
+and an explicit capability/qualification matrix on the updated upstream base.

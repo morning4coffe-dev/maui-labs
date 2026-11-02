@@ -24,7 +24,7 @@ internal sealed class AgentManagementOperations(
 
         var agents = await listAgents(port.Value);
         if (agents is null || agents.Length == 0)
-            return new(port, agents, ScanForProjects());
+            return new(port, agents, ScanForProjects(cancellationToken: cancellationToken));
 
         var check = await EnsureForwardingForAgentsAsync(agents, deviceId, true, cancellationToken, port);
         forwardingChecked(check);
@@ -46,7 +46,7 @@ internal sealed class AgentManagementOperations(
         if (ports.Length > 0 || !string.IsNullOrWhiteSpace(deviceId))
             check = await EnsureForwardingForPortsAsync(ports, true, deviceId, false, cancellationToken, port);
 
-        return new(port, agents, ScanForProjects(), check?.Report);
+        return new(port, agents, ScanForProjects(cancellationToken: cancellationToken), check?.Report);
     }
 
     internal async Task<(bool BrokerAvailable, AgentRegistration? Agent)> WaitAsync(
@@ -144,27 +144,35 @@ internal sealed class AgentManagementOperations(
 
     private static readonly HashSet<string> ScanExcludedDirs = new(StringComparer.OrdinalIgnoreCase)
     {
-        "bin", "obj", "node_modules", ".git", ".vs", ".idea", "packages"
+        "bin", "obj", "node_modules", ".git", ".vs", ".idea", "packages",
+        ".maui-agent", ".maui-tools", ".dotnet", ".nuget", "Library"
     };
 
-    internal static string[] ScanForProjects()
+    // Discovery hints must not traverse an entire home folder or follow link cycles.
+    // This is deliberately a bounded hint scan, not proof that integration is absent.
+    internal static string[] ScanForProjects(string? startDirectory = null,
+        CancellationToken cancellationToken = default, int maxDirectories = 1000, int maxDepth = 6)
     {
-        var cwd = Directory.GetCurrentDirectory();
+        var cwd = startDirectory ?? Directory.GetCurrentDirectory();
         var projects = new List<string>();
+        var elapsed = System.Diagnostics.Stopwatch.StartNew();
+        var visited = 0;
 
         try
         {
-            var pending = new Queue<string>();
-            pending.Enqueue(cwd);
+            var pending = new Queue<(string Path, int Depth)>();
+            pending.Enqueue((cwd, 0));
 
-            while (pending.Count > 0)
+            while (pending.Count > 0 && visited++ < maxDirectories && elapsed.Elapsed < TimeSpan.FromSeconds(2)
+                   && !cancellationToken.IsCancellationRequested)
             {
-                var dir = pending.Dequeue();
+                var (dir, depth) = pending.Dequeue();
 
                 try
                 {
                     foreach (var project in Directory.EnumerateFiles(dir, "*.csproj", SearchOption.TopDirectoryOnly))
                     {
+                        if (cancellationToken.IsCancellationRequested || elapsed.Elapsed >= TimeSpan.FromSeconds(2)) break;
                         try
                         {
                             var content = File.ReadAllText(project);
@@ -190,9 +198,12 @@ internal sealed class AgentManagementOperations(
                 {
                     foreach (var subDir in Directory.EnumerateDirectories(dir, "*", SearchOption.TopDirectoryOnly))
                     {
+                        if (cancellationToken.IsCancellationRequested || elapsed.Elapsed >= TimeSpan.FromSeconds(2)
+                            || pending.Count + visited >= maxDirectories) break;
                         var name = Path.GetFileName(subDir.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                        if (!string.IsNullOrEmpty(name) && !ScanExcludedDirs.Contains(name))
-                            pending.Enqueue(subDir);
+                        if (depth < maxDepth && !string.IsNullOrEmpty(name) && !ScanExcludedDirs.Contains(name)
+                            && (File.GetAttributes(subDir) & FileAttributes.ReparsePoint) == 0)
+                            pending.Enqueue((subDir, depth + 1));
                     }
                 }
                 catch

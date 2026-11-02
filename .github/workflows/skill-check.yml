@@ -1,6 +1,7 @@
 name: skill-check
 
 on:
+  workflow_dispatch:
   pull_request:
     types: [opened, synchronize, reopened, edited]
     paths:
@@ -68,6 +69,22 @@ jobs:
             -- check \
             "${plugin_args[@]}" \
             --allowed-external-deps ../eng/allowed-external-deps.txt
+
+  app-lifecycle-tests:
+    name: App lifecycle acceptance (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Test lifecycle and MCP behavior
+        run: python -m unittest discover -s tests/dotnet-maui/maui-app-lifecycle -p "test_*.py" -v
 
   migration-audit-tests:
     name: Migration acceptance tests (${{ matrix.os }})

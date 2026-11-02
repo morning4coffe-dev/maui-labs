@@ -88,6 +88,17 @@ for MAUI DevFlow product feedback. Do not run it automatically.
 
 ## Critical Anti-patterns
 
+When an explicit agent endpoint works but broker registration does not, use
+`maui devflow inspect --app APP --project APP.csproj --agent-host 127.0.0.1
+--agent-port PORT --listen-port 19225` to keep the shared Inspector visible.
+Verify the selected device and live identity first. The source-built CLI prints
+a loopback URL and stays alive. Keep mutation leases intact.
+
+For live UI iteration and hot reload proof, see
+`../../../dotnet-maui/skills/maui-app-lifecycle/references/live-development.md`.
+An Inspector live property edit is runtime-only until persisted to source;
+neither it nor an editor's save notification proves XAML Hot Reload succeeded.
+
 - Do not treat an empty `maui devflow list` as proof the project is not integrated. `list` is runtime state; project files are source of truth.
 - Do not use arbitrary sleeps after launch. Use `maui devflow wait` to gate on the actual agent connection.
 - Do not kill an async `dotnet build -t:Run` or `dotnet run` shell while you still need the app; that often kills the app.

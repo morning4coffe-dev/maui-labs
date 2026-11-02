@@ -365,7 +365,7 @@ class Workflow:
         if type(max_checks) is not int or not 1 <= max_checks <= 10:
             raise ValueError("max_checks must be between 1 and 10")
         attempts = []
-        readiness = None
+        preflights = []
         for _ in range(max_checks):
             pending = self.next()
             action = pending["action"]
@@ -374,20 +374,23 @@ class Workflow:
             if action["requiresRuntime"]:
                 if action["platform"].lower() != "android" or not device or action["device"] != device:
                     return {"ok": False, "stopped": "prepare-runtime", "attempts": attempts,
+                            "preflights": preflights,
                             "next": pending, "reason": "Select a healthy Android device matching the check's device field and command; run other-platform UI checks explicitly"}
                 from android_ready import check as android_readiness
-                readiness = android_readiness(self.root, device)
+                output = f".maui-agent/readiness/{uuid.uuid4().hex}/report.json"
+                readiness = android_readiness(self.root, device, output=output)
+                preflights.append({"report": output, "device": device, "ok": readiness["ok"]})
                 if not readiness["ok"]:
                     return {"ok": False, "stopped": "android-not-ready", "attempts": attempts,
-                            "readiness": readiness, "next": pending}
+                            "preflights": preflights, "readiness": readiness, "next": pending}
             record = self.check(action["name"])
             attempts.append(record)
             if not record["ok"]:
                 return {"ok": False, "stopped": "check-failed", "attempts": attempts,
-                        "next": self.next()}
+                        "preflights": preflights, "next": self.next()}
         pending = self.next()
         return {"ok": True, "stopped": "batch-limit" if pending["action"]["kind"] == "check" else pending["action"]["kind"],
-                "attempts": attempts, "next": pending}
+                "attempts": attempts, "preflights": preflights, "next": pending}
 
     def verify(self, record):
         try:
@@ -606,12 +609,18 @@ class Workflow:
         repository = config.get("repository", "")
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", repository):
             raise ValueError("Configure github.repository before maintenance intake")
+        metadata = execute(["gh", "repo", "view", repository, "--json", "defaultBranchRef"], self.root)
+        if metadata["exitCode"]:
+            raise ValueError(metadata["output"])
+        default_branch = (json.loads(metadata["output"]).get("defaultBranchRef") or {}).get("name")
+        if not isinstance(default_branch, str) or not default_branch:
+            raise ValueError("Repository has no observable default branch for maintenance")
         commands = {
             "issues": ["gh", "issue", "list", "--repo", repository, "--state", "open", "--limit", "100",
                        "--search", '"MAUI maintenance:" in:title', "--json", "number,title,url,body,updatedAt"],
-            "runs": ["gh", "run", "list", "--repo", repository, "--branch", config.get("base", "main"),
+            "runs": ["gh", "run", "list", "--repo", repository, "--branch", default_branch,
                      "--limit", "20", "--json", "databaseId,headSha,workflowName,status,conclusion,url"]}
-        report = {"at": now(), "repository": repository}
+        report = {"at": now(), "repository": repository, "defaultBranch": default_branch}
         for name, command in commands.items():
             result = execute(command, self.root)
             if result["exitCode"]:

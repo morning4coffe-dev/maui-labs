@@ -574,7 +574,13 @@ Path('.maui-agent/native.json').write_text(json.dumps(r))
         source = snapshot(self.root)
         with patch("android_ready.check", return_value={"ok": False, "stage": "window"}) as readiness:
             result = self.workflow.advance(10, "emulator-5558")
-            readiness.assert_called_once_with(self.root, "emulator-5558")
+            readiness.assert_called_once()
+            self.assertEqual((self.root, "emulator-5558"), readiness.call_args.args)
+            output = readiness.call_args.kwargs["output"]
+            self.assertRegex(output, r"^\.maui-agent/readiness/[a-f0-9]{32}/report.json$")
+            self.assertEqual(output, result["preflights"][0]["report"])
+            repeated = self.workflow.advance(10, "emulator-5558")
+            self.assertNotEqual(output, repeated["preflights"][0]["report"])
         self.assertEqual("android-not-ready", result["stopped"])
         self.assertEqual(source, snapshot(self.root))
         self.assertEqual(3, len(self.workflow.load()["attempts"]))
@@ -587,6 +593,7 @@ Path('.maui-agent/native.json').write_text(json.dumps(r))
             result = self.workflow.advance(10, "emulator-5558")
         self.assertEqual("assess", result["stopped"])
         self.assertEqual(4, len(result["attempts"]))
+        self.assertEqual(1, len(result["preflights"]))
         self.assertFalse(result["next"]["localQaReady"])
         self.workflow.observe(0, result["attempts"][-1]["id"], "Reviewed hard assertion and captured tree")
         self.assertEqual("review", self.workflow.next()["action"]["kind"])
@@ -726,6 +733,33 @@ Path('.maui-agent/native.json').write_text(json.dumps(r))
         plan = json.loads(path.read_text())
         plan["github"] = {"repository": "example/app", "requiredWorkflows": ["App CI"]}
         write_json(path, plan)
+
+    def test_maintenance_uses_observed_default_branch_instead_of_pr_base(self):
+        self.configure_ci()
+        path = self.root / "maui-agent.json"
+        plan = json.loads(path.read_text())
+        plan["github"]["base"] = "release/review-base"
+        write_json(path, plan)
+        source = snapshot(self.root)
+        commands = []
+        def fake(command, root, timeout=120):
+            commands.append(command)
+            data = {"defaultBranchRef": {"name": "trunk"}} if command[:3] == ["gh", "repo", "view"] else []
+            return {"exitCode": 0, "output": json.dumps(data), "timedOut": False}
+        with patch("lifecycle.execute", side_effect=fake):
+            result = self.workflow.maintenance()
+        self.assertEqual("trunk", result["defaultBranch"])
+        runs = next(c for c in commands if c[:3] == ["gh", "run", "list"])
+        self.assertEqual("trunk", runs[runs.index("--branch") + 1])
+        self.assertEqual(3, len(commands))
+        self.assertEqual(source, snapshot(self.root))
+
+    def test_maintenance_does_not_guess_when_default_branch_is_unavailable(self):
+        self.configure_ci()
+        with patch("lifecycle.execute", return_value={"exitCode": 0, "output": '{"defaultBranchRef":null}'}) as command:
+            with self.assertRaisesRegex(ValueError, "no observable default branch"):
+                self.workflow.maintenance()
+            command.assert_called_once()
 
     def fake_gh(self, runs):
         def fake(command, root, timeout=120):

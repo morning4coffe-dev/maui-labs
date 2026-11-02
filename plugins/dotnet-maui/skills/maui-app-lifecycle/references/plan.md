@@ -99,6 +99,9 @@ screen policy. This uses AOSP-style policy fields; unrecognized OEM dumps need
 investigation rather than a guessed pass. The declaration is trusted plan
 configuration, like the command itself; review them together. Existing explicit
 `check` calls retain their behavior. Other-platform UI execution remains explicit.
+Each batch preflight keeps a unique report/screenshot directory under ignored
+`.maui-agent/readiness/`; the response's `preflights` list links them. A later
+device probe cannot overwrite the evidence of an earlier readiness failure.
 
 For independent Android Release validation, use `format: appium`,
 `configuration: Release`, `appPackage` and the exact APK `artifact` on a UI check.

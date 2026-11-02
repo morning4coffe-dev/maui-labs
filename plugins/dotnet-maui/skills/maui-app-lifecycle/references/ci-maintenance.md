@@ -24,6 +24,9 @@ to open/update an issue for failed default-branch validation. It uses only GitHu
 run metadata and never checks out app code or executes evidence. It does not
 assign a paid coding agent automatically. `lifecycle.py maintenance` lists this
 issue queue and recent default-branch runs for the current agent to triage.
+It resolves the actual default branch from GitHub metadata rather than assuming
+the draft PR's configured base is the maintenance branch. An unknown default
+branch blocks intake instead of silently querying `main` or a release branch.
 
 App execution jobs use `contents: read` and checkout with
 `persist-credentials: false`. No write PAT or store credentials belong in jobs
